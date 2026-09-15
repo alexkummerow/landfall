@@ -1,0 +1,1515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05080a" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>SOLACE — Ship's Terminal</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #050806;
+    --phosphor: #8fd7ac;
+    --phosphor-bright: #c9f5da;
+    --phosphor-dim: #4d7a5e;
+    --amber: #cf9f4a;
+    --danger: #b5583f;
+    --rule: rgba(143, 215, 172, 0.14);
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', 'Courier New', monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+  }
+
+  body {
+    font-family: var(--font-mono);
+    color: var(--phosphor);
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+
+  #crt {
+    position: relative;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  #scanlines {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,0,0,0.14) 0px,
+      rgba(0,0,0,0.14) 1px,
+      transparent 2px,
+      transparent 3px
+    );
+    mix-blend-mode: multiply;
+    opacity: 0.35;
+    animation: flicker 7s infinite;
+  }
+
+  @keyframes flicker {
+    0%, 96%, 100% { opacity: 0.35; }
+    97% { opacity: 0.28; }
+    98% { opacity: 0.4; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #scanlines { animation: none; }
+  }
+
+  #topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.9rem 1.1rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    color: var(--phosphor-dim);
+    flex-shrink: 0;
+    gap: 0.6rem;
+  }
+
+  #topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+  }
+
+  #sound-btn {
+    background: none;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid var(--rule);
+    color: var(--phosphor-dim);
+    font-family: inherit;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+  }
+  #sound-btn:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+
+  #output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.2rem 1.2rem 0.4rem;
+    max-width: 640px;
+    width: 100%;
+    margin: 0 auto;
+    text-shadow: 0 0 6px rgba(143,215,172,0.22);
+  }
+
+  .line {
+    margin: 0 0 0.35rem;
+    line-height: 1.55;
+    font-size: 0.95rem;
+  }
+
+  .gap { height: 0.7rem; margin: 0; }
+
+  .heading-label {
+    color: var(--phosphor-bright);
+    letter-spacing: 0.08em;
+  }
+
+  .dim { color: var(--phosphor-dim); }
+  .amber { color: var(--amber); }
+  .danger { color: var(--danger); }
+  .echo { color: var(--phosphor-dim); }
+
+  .entry { margin-bottom: 0.9rem; }
+  .entry-ts {
+    color: var(--phosphor-dim);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.15rem;
+  }
+  .entry-text {
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+
+  #controls {
+    flex-shrink: 0;
+    border-top: 1px solid var(--rule);
+    padding: 0.8rem 1.2rem calc(0.9rem + env(safe-area-inset-bottom));
+    max-width: 640px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  #options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .option {
+    background: none;
+    appearance: none;
+    -webkit-appearance: none;
+    border: none;
+    color: var(--phosphor);
+    font-family: inherit;
+    font-size: 0.92rem;
+    text-align: left;
+    padding: 0.15rem 0;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+  }
+  .option:hover, .option:focus-visible { color: var(--phosphor-bright); }
+  .option:focus-visible { outline: 1px dashed var(--phosphor-dim); outline-offset: 2px; }
+
+  #cmd-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-top: 1px dashed var(--rule);
+    padding-top: 0.6rem;
+  }
+
+  .prompt-glyph { color: var(--phosphor-dim); }
+
+  #cmd-input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--phosphor);
+    font-family: inherit;
+    font-size: 0.95rem;
+    outline: none;
+    caret-color: var(--phosphor);
+  }
+  #cmd-input:focus { outline: none; }
+  #cmd-input::placeholder { color: var(--phosphor-dim); opacity: 0.7; }
+
+  @media (max-width: 480px) {
+    .line, .entry-text, #cmd-input, .option { font-size: 0.98rem; }
+    #output, #controls { padding-left: 0.9rem; padding-right: 0.9rem; }
+  }
+</style>
+</head>
+<body>
+  <div id="crt">
+    <div id="scanlines" aria-hidden="true"></div>
+    <header id="topbar">
+      <span id="vessel-line">S/V SOLACE — AT DOCK</span>
+      <div id="topbar-right">
+        <button id="sound-btn" type="button">SOUND: OFF</button>
+        <span id="clock">—</span>
+      </div>
+    </header>
+
+    <main id="output" aria-live="polite"></main>
+
+    <footer id="controls">
+      <div id="options"></div>
+      <form id="cmd-form" autocomplete="off">
+        <span class="prompt-glyph">&gt;</span>
+        <input id="cmd-input" type="text" enterkeyhint="go" placeholder="type a command…" aria-label="Command input" />
+      </form>
+    </footer>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =====================================================================
+     LANDFALL — prototype vertical slice (Seattle -> Kauaʻi)
+     ---------------------------------------------------------------------
+     Built as a single self-contained file (matches how you usually ship
+     these — no build step, drop straight into Neocities). The sections
+     below mirror the multi-file layout from the brief; split them into
+     separate <script src="..."> files later if you ever want to, nothing
+     here depends on being in one file.
+
+       1. Config & constants
+       2. Game state
+       3. Save / load (localStorage)
+       4. Simulation engine
+       5. Narrative / event checks
+       6. Ambient audio (procedural, WebAudio — no sound files needed)
+       7. Terminal rendering
+       8. Commands
+       9. Boot sequence
+
+     REAL-TIME PRINCIPLE (see PROJECT.md for the full rationale):
+     1 real minute = 1 game minute, always. Nothing in this file may
+     call advanceSimulation() with an arbitrary chosen duration — the
+     only legitimate callers are catchUpFromRealTime() (diffing real
+     timestamps) and the live tick loop (diffing real elapsed ms).
+     REST/SLEEP is a STATE (crew.watchState), not a time-skip action —
+     see beginSleep() / wakeUp() / checkSleepInterrupt() below.
+     ===================================================================== */
+
+  /* ============================================================
+     1. CONFIG & CONSTANTS
+     ============================================================ */
+  var STORAGE_KEY = 'kauaiVoyage_v1';
+  var TICK_MINUTES = 10;              // simulation resolution, in simulated minutes
+  var MAX_CATCHUP_TICKS = 20000;      // safety cap (~139 days) for offline catch-up
+  var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
+
+  var VESSEL_NAME = 'SOLACE';
+  var DEPARTURE_PORT = "Shilshole Bay, Seattle";
+  var DESTINATION_PORT = "Nawiliwili, Kauaʻi";
+  var START_COORDS = { lat: 47.667, lon: -122.408 };
+  var DEST_COORDS  = { lat: 21.954, lon: -159.356 };
+  var ROUTE_DISTANCE_NM = 2850; // the sailed route, not a straight line — real passages dogleg south for the trades
+
+  var GAME = null;
+  var printedCount = 0;
+
+  /* ============================================================
+     2. GAME STATE
+     ============================================================ */
+  function newGameState() {
+    var now = Date.now();
+    var intendedCourse = 197;
+    return {
+      version: 1,
+      meta: {
+        departedAt: now,
+        lastTick: now,
+        leftoverMinutes: 0,
+        voyageMinutes: 0,
+      },
+      nav: {
+        distanceTraveled: 0,
+        crossTrackDeviation: 0,
+        intendedCourse: intendedCourse,
+        headingOffset: 0,          // 0 = on course, +22 = borne away, -22 = come up
+        heading: intendedCourse,
+        positionConfidence: 'good',
+      },
+      weather: {
+        windDirection: 340,
+        windSpeed: 13,
+        seaState: 2,
+        condition: 'overcast',
+        trend: 'steady',
+      },
+      boat: {
+        sailConfig: 'full',        // full | reefed | minimal
+        hull: 100,
+        rigging: 100,
+        sails: 100,
+        electrical: 100,
+        engine: 100,
+      },
+      crew: {
+        fatigue: 8,
+        hoursSinceRest: 3,
+        hoursSinceMeal: 2,
+        foodDays: 24,
+        waterDays: 30,
+        morale: 72,
+        watchState: 'awake',   // 'awake' | 'sleeping' — see REAL-TIME PRINCIPLE note above
+        sleepStartedAt: null,  // voyageMinutes at the moment sleep began, for duration text on waking
+      },
+      flags: {
+        aftLockerTriggerAt: rand(8 * 60, 16 * 60), // guaranteed once, sometime hour 8-16
+        aftLockerTriggered: false,
+        aftLockerResolved: false,
+        aftLockerEscalated: false,
+        aftLockerDeferredAt: null,
+        sailWarningIssued: false,
+        fatigueNarrated: false,
+        lastMilestone: 0,
+      },
+      pendingChoice: null,
+      log: [],
+    };
+  }
+
+  /* ============================================================
+     3. SAVE / LOAD
+     ============================================================ */
+  function loadGameState() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      console.warn('Save file unreadable, starting fresh.', e);
+      return null;
+    }
+  }
+
+  function saveGameState(state) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      console.warn('Could not save game.', e);
+    }
+  }
+
+  /* ============================================================
+     4. SIMULATION ENGINE
+     ============================================================ */
+  function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+  function rand(min, max) { return min + Math.random() * (max - min); }
+  function normalizeDeg(d) { return ((d % 360) + 360) % 360; }
+  function angleDiff(a, b) {
+    var d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+  function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  function driftWeather(w) {
+    // Small random walk so conditions feel alive without being chaotic.
+    w.windDirection = normalizeDeg(w.windDirection + (Math.random() - 0.5) * 6);
+    var delta = (Math.random() - 0.5) * 2.2;
+    if (w.trend === 'building') delta += 0.5;
+    if (w.trend === 'easing') delta -= 0.5;
+    w.windSpeed = clamp(w.windSpeed + delta, 2, 45);
+
+    if (Math.random() < 0.01) {
+      var trends = ['building', 'easing', 'steady'];
+      w.trend = trends[Math.floor(Math.random() * trends.length)];
+    }
+
+    var target = clamp(Math.round(w.windSpeed / 7), 0, 6);
+    if (w.seaState < target && Math.random() < 0.2) w.seaState++;
+    if (w.seaState > target && Math.random() < 0.2) w.seaState--;
+
+    if (Math.random() < 0.006) {
+      var options = w.windSpeed > 25
+        ? ['squall', 'rain', 'overcast']
+        : ['clear', 'overcast', 'rain'];
+      w.condition = options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  function computeHeading(nav) {
+    return normalizeDeg(nav.intendedCourse + nav.headingOffset);
+  }
+
+  function pointOfSailFactor(headingDeg, windFromDeg) {
+    // Angle between the boat's heading and the direction the wind comes FROM.
+    // 0deg = sailing straight into the wind ("in irons" — very slow)
+    // 90deg = wind on the beam (an efficient, fast angle for most boats)
+    // 180deg = sailing dead downwind (comfortable, but not the fastest angle)
+    var diff = angleDiff(headingDeg, windFromDeg);
+    if (diff < 35) return 0.05;
+    if (diff < 50) return 0.55;
+    if (diff < 100) return 1.0;
+    if (diff < 150) return 0.85;
+    return 0.65;
+  }
+
+  function baseSpeedForWind(speedKt) {
+    if (speedKt < 6) return 2.5;
+    if (speedKt < 12) return 4.5;
+    if (speedKt < 20) return 6.3;
+    if (speedKt < 28) return 7.2;
+    return 6.0; // past this, more wind mostly means more danger, not more speed
+  }
+
+  function sailConfigFactor(sailConfig, windSpeed) {
+    if (sailConfig === 'full') return windSpeed > 25 ? 0.7 : 1.0; // overpowered in a full-sail breeze
+    if (sailConfig === 'reefed') return windSpeed < 10 ? 0.75 : 0.92;
+    return 0.45; // minimal / storm canvas — slow, but safe
+  }
+
+  function computeBoatSpeed(state, heading) {
+    var w = state.weather, b = state.boat, c = state.crew;
+    var speed = baseSpeedForWind(w.windSpeed)
+      * pointOfSailFactor(heading, w.windDirection)
+      * sailConfigFactor(b.sailConfig, w.windSpeed)
+      * (0.5 + 0.5 * (b.hull / 100))
+      * (0.6 + 0.4 * (b.sails / 100));
+    if (c.fatigue > 80) speed *= 0.9;              // poor trim, wandering helm
+    if (c.watchState === 'sleeping') speed *= 0.85; // self-steering, unattended
+    return Math.max(0, +speed.toFixed(2));
+  }
+
+  function updateCrew(state) {
+    var c = state.crew;
+    var hrs = TICK_MINUTES / 60;
+
+    if (c.watchState === 'sleeping') {
+      c.fatigue = clamp(c.fatigue - hrs * 9, 0, 100);
+      c.hoursSinceRest = 0;
+    } else {
+      var fatigueRate = 1.6;
+      if (state.weather.seaState >= 4) fatigueRate += 1.0;
+      if (c.hoursSinceMeal > 8) fatigueRate += 0.4;
+      c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
+      c.hoursSinceRest += hrs;
+    }
+
+    c.hoursSinceMeal += hrs;
+    c.foodDays = clamp(c.foodDays - hrs / 24, 0, 999);
+    c.waterDays = clamp(c.waterDays - hrs / 24, 0, 999);
+
+    if (c.hoursSinceMeal > 10) c.morale = clamp(c.morale - 0.3 * hrs, 0, 100);
+    if (state.weather.condition === 'squall') c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
+  }
+
+  function clampState(state) {
+    var b = state.boat, c = state.crew;
+    b.hull = clamp(b.hull, 0, 100);
+    b.rigging = clamp(b.rigging, 0, 100);
+    b.sails = clamp(b.sails, 0, 100);
+    b.electrical = clamp(b.electrical, 0, 100);
+    c.fatigue = clamp(c.fatigue, 0, 100);
+    c.morale = clamp(c.morale, 0, 100);
+    state.nav.positionConfidence = b.electrical < 30 ? 'uncertain' : 'good';
+  }
+
+  function simTick(state) {
+    state.meta.voyageMinutes += TICK_MINUTES;
+
+    var prevCondition = state.weather.condition;
+    driftWeather(state.weather);
+
+    var heading = computeHeading(state.nav);
+    var speed = computeBoatSpeed(state, heading);
+    state.boat.speed = speed;
+    state.nav.heading = heading;
+
+    var nmThisTick = speed * (TICK_MINUTES / 60);
+    var courseEfficiency = 1 - clamp(Math.abs(state.nav.headingOffset) / 90, 0, 0.5);
+    state.nav.distanceTraveled += nmThisTick * courseEfficiency;
+    if (state.nav.headingOffset !== 0) {
+      state.nav.crossTrackDeviation += (Math.abs(state.nav.headingOffset) / 90) * nmThisTick * 0.4;
+    }
+
+    updateCrew(state);
+    checkSailStrain(state);
+    checkAftLocker(state);
+    checkWeatherNarration(state, prevCondition);
+    checkFatigueNarration(state);
+    checkMilestones(state);
+    checkSleepInterrupt(state, prevCondition);
+
+    clampState(state);
+  }
+
+  function advanceSimulation(state, minutes) {
+    var remaining = minutes + (state.meta.leftoverMinutes || 0);
+    var ticks = 0;
+    while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
+      simTick(state);
+      remaining -= TICK_MINUTES;
+      ticks++;
+    }
+    state.meta.leftoverMinutes = remaining;
+    return ticks;
+  }
+
+  function catchUpFromRealTime(state) {
+    var now = Date.now();
+    var elapsedMinutes = (now - state.meta.lastTick) / 60000;
+    if (elapsedMinutes < 1) { state.meta.lastTick = now; return 0; }
+    var ticks = advanceSimulation(state, elapsedMinutes);
+    state.meta.lastTick = now;
+    return ticks;
+  }
+
+  /* ============================================================
+     5. NARRATIVE / EVENT CHECKS
+     ============================================================ */
+  function log(state, text) {
+    var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+    state.log.push({ t: ts, text: text });
+  }
+
+  function checkSailStrain(state) {
+    var w = state.weather, b = state.boat, f = state.flags;
+    if (b.sailConfig === 'full' && w.windSpeed > 24) {
+      if (!f.sailWarningIssued) {
+        f.sailWarningIssued = true;
+        log(state, "Wind's up past what she likes with full sail on her. She's carrying too much.");
+      }
+      if (Math.random() < 0.05) {
+        b.sails = clamp(b.sails - rand(3, 9), 0, 100);
+        b.rigging = clamp(b.rigging - rand(1, 5), 0, 100);
+        log(state, "A gust rounds her up hard. Something aloft strains and holds — for now.");
+      }
+    }
+    if (w.windSpeed <= 20) f.sailWarningIssued = false;
+  }
+
+  function checkAftLocker(state) {
+    var f = state.flags;
+    if (!f.aftLockerTriggered && state.meta.voyageMinutes >= f.aftLockerTriggerAt) {
+      f.aftLockerTriggered = true;
+      log(state, "Something in the aft locker has come loose. A dull, irregular thud with every roll.");
+      state.pendingChoice = {
+        id: 'aft-locker',
+        options: [
+          { label: 'INSPECT NOW', action: 'resolve-aft-locker-now' },
+          { label: 'SECURE IT LATER', action: 'defer-aft-locker' },
+        ],
+      };
+      return;
+    }
+    if (f.aftLockerTriggered && !f.aftLockerResolved && f.aftLockerDeferredAt !== null && !f.aftLockerEscalated) {
+      var hoursSinceDeferred = (state.meta.voyageMinutes - f.aftLockerDeferredAt) / 60;
+      if (hoursSinceDeferred > 5) {
+        f.aftLockerEscalated = true;
+        state.boat.rigging = clamp(state.boat.rigging - rand(2, 6), 0, 100);
+        state.crew.morale = clamp(state.crew.morale - 4, 0, 100);
+        log(state, "The thud from aft has worked something loose against the steering gear. Should have looked sooner.");
+      }
+    }
+  }
+
+  function weatherChangeLine(condition) {
+    var lines = {
+      rain: "Rain starts, fine and steady.",
+      squall: "A squall line closing fast. Everything goes grey.",
+      overcast: "Cloud thickens overhead. The horizon dims.",
+      clear: "The overcast breaks. Stars, briefly, then gone again.",
+    };
+    return lines[condition] || ("Sky shifts to " + condition + ".");
+  }
+
+  function checkWeatherNarration(state, prevCondition) {
+    if (state.weather.condition !== prevCondition) {
+      log(state, weatherChangeLine(state.weather.condition));
+    }
+  }
+
+  function checkFatigueNarration(state) {
+    var f = state.flags;
+    if (state.crew.fatigue > 75 && !f.fatigueNarrated) {
+      f.fatigueNarrated = true;
+      log(state, "Hands feel slow. Everything simple takes an extra beat.");
+    }
+    if (state.crew.fatigue < 50) f.fatigueNarrated = false;
+  }
+
+  function checkMilestones(state) {
+    var milestone = Math.floor(state.nav.distanceTraveled / 300);
+    if (milestone > state.flags.lastMilestone) {
+      state.flags.lastMilestone = milestone;
+      log(state, (milestone * 300) + " nautical miles behind you now.");
+    }
+  }
+
+  function resolveAftLocker(state) {
+    var successChance = clamp(0.92 - state.crew.fatigue / 150, 0.35, 0.92);
+    var success = Math.random() < successChance;
+    state.flags.aftLockerResolved = true;
+    state.crew.fatigue = clamp(state.crew.fatigue + 4, 0, 100);
+    if (success) {
+      log(state, "Found it: a jerry can, worked loose from its strap. Resecured. Quiet again.");
+    } else {
+      state.boat.rigging = clamp(state.boat.rigging - rand(3, 8), 0, 100);
+      log(state, "Fumbled it in the dark — a bruised knuckle, and something aft feels different now, secured or not.");
+    }
+    flushNewLogEntries(state);
+  }
+
+  /* --------------------------------------------------------------
+     Sleep is a STATE the player enters and leaves — never a call
+     that manufactures time. beginSleep() and wakeUp() only ever
+     flip crew.watchState and write a log line; every minute that
+     passes while asleep is the same real-time tick (live loop or
+     catchUpFromRealTime) that would be running anyway.
+     -------------------------------------------------------------- */
+  function sleepNarrative() {
+    var options = [
+      "You go below and let sleep take you. The autopilot holds her course.",
+      "Sleep comes fast below, the hatch closed against the weather.",
+      "You lie down still dressed. The boat keeps sailing without you.",
+    ];
+    return options[Math.floor(Math.random() * options.length)];
+  }
+
+  function describeSleepDuration(minutes) {
+    if (minutes < 20) return "a few minutes";
+    if (minutes < 60) return "under an hour";
+    var rounded = Math.round((minutes / 60) * 2) / 2; // nearest half hour
+    return rounded + (rounded === 1 ? " hour" : " hours");
+  }
+
+  function beginSleep(state) {
+    state.crew.watchState = 'sleeping';
+    state.crew.sleepStartedAt = state.meta.voyageMinutes;
+    log(state, sleepNarrative());
+    flushNewLogEntries(state);
+  }
+
+  function wakeUp(state, baseText, includeDuration) {
+    var start = state.crew.sleepStartedAt;
+    var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
+    state.crew.watchState = 'awake';
+    state.crew.sleepStartedAt = null;
+    var text = baseText;
+    if (includeDuration !== false && minutesAsleep >= 5) {
+      text += ' Roughly ' + describeSleepDuration(minutesAsleep) + ' below.';
+    }
+    log(state, text);
+    flushNewLogEntries(state);
+  }
+
+  function checkSleepInterrupt(state, prevCondition) {
+    if (state.crew.watchState !== 'sleeping') return;
+    // Something demanding attention (e.g. the aft locker) always wins.
+    if (state.pendingChoice) {
+      wakeUp(state, "Something's wrong. You're awake, fast.", false);
+      return;
+    }
+    // A squall breaking is loud and wet enough to end anyone's sleep.
+    if (state.weather.condition === 'squall' && prevCondition !== 'squall') {
+      wakeUp(state, "Cold spray through the hatch — you're awake.", false);
+      return;
+    }
+    // Otherwise, sleep ends on its own once it's done its job.
+    if (state.crew.fatigue <= 5) {
+      wakeUp(state, "You surface on your own, rested.");
+    }
+  }
+
+  /* ============================================================
+     6. AMBIENT AUDIO (procedural, WebAudio — no sound files needed)
+     ------------------------------------------------------------
+     Every layer here is synthesized so the prototype has real,
+     working ambience out of the box. Later, any noise-based layer
+     could be swapped for a recorded sample (AudioBufferSourceNode)
+     without changing the mixing architecture: masterGain feeds the
+     destination, and each layer is just a source -> filter -> gain
+     chain into that master.
+     ============================================================ */
+  var audioCtx = null;
+  var audioUnlocked = false;
+  var masterGain = null;
+  var muted = false;
+  var layers = {};
+
+  function unlockAudio() {
+    if (audioUnlocked) return;
+    audioUnlocked = true;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      buildAudioGraph();
+    } catch (e) {
+      console.warn('Audio unavailable:', e);
+    }
+  }
+
+  function makeNoiseBuffer(ctx, seconds) {
+    var bufferSize = Math.floor(ctx.sampleRate * seconds);
+    var buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    var data = buffer.getChannelData(0);
+    var last = 0;
+    for (var i = 0; i < bufferSize; i++) {
+      var white = Math.random() * 2 - 1;
+      last = (last + 0.02 * white) / 1.02; // lightly filtered ("brown-ish") noise reads as wind/sea, not static
+      data[i] = last * 3.5;
+    }
+    return buffer;
+  }
+
+  function makeNoiseLayer(ctx, seconds, filterType, freq, q) {
+    var source = ctx.createBufferSource();
+    source.buffer = makeNoiseBuffer(ctx, seconds);
+    source.loop = true;
+    var filter = ctx.createBiquadFilter();
+    filter.type = filterType;
+    filter.frequency.value = freq;
+    if (q) filter.Q.value = q;
+    var gainNode = ctx.createGain();
+    gainNode.gain.value = 0;
+    source.connect(filter).connect(gainNode).connect(masterGain);
+    source.start();
+    return { source: source, filter: filter, gain: gainNode, targetGain: 0 };
+  }
+
+  function buildAudioGraph() {
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = muted ? 0 : 0.5;
+    masterGain.connect(audioCtx.destination);
+
+    layers.wind = makeNoiseLayer(audioCtx, 4, 'bandpass', 900, 0.6);
+    layers.waves = makeNoiseLayer(audioCtx, 6, 'lowpass', 220, 0.8);
+    layers.rigging = makeNoiseLayer(audioCtx, 3, 'highpass', 2200, 1.2);
+    layers.rain = makeNoiseLayer(audioCtx, 4, 'highpass', 3500, 0.7);
+
+    var hum = audioCtx.createOscillator();
+    hum.type = 'sine';
+    hum.frequency.value = 55;
+    var humGain = audioCtx.createGain();
+    humGain.gain.value = 0.02;
+    hum.connect(humGain).connect(masterGain);
+    hum.start();
+
+    scheduleWaveSwell();
+    scheduleHullCreaks();
+    if (GAME) updateAudioForState(GAME);
+  }
+
+  function scheduleWaveSwell() {
+    if (!audioCtx || !layers.waves) return;
+    var now = audioCtx.currentTime;
+    var base = layers.waves.targetGain || 0.15;
+    layers.waves.gain.gain.linearRampToValueAtTime(base * (0.7 + Math.random() * 0.6), now + 4 + Math.random() * 4);
+    setTimeout(scheduleWaveSwell, 4000 + Math.random() * 4000);
+  }
+
+  function scheduleHullCreaks() {
+    if (!audioCtx) return;
+    var seaState = GAME ? GAME.weather.seaState : 2;
+    var delay = Math.max(2000, 14000 - seaState * 1800) + Math.random() * 4000;
+    setTimeout(function () {
+      playCreak();
+      scheduleHullCreaks();
+    }, delay);
+  }
+
+  function playCreak() {
+    if (!audioCtx || muted) return;
+    var osc = audioCtx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = 70 + Math.random() * 40;
+    var g = audioCtx.createGain();
+    g.gain.value = 0;
+    osc.connect(g).connect(masterGain);
+    var now = audioCtx.currentTime;
+    g.gain.linearRampToValueAtTime(0.06, now + 0.05);
+    g.gain.linearRampToValueAtTime(0, now + 0.6);
+    osc.start(now);
+    osc.stop(now + 0.7);
+  }
+
+  function updateAudioForState(state) {
+    if (!audioCtx || !layers.wind) return;
+    var w = state.weather;
+    var now = audioCtx.currentTime;
+
+    var windLevel = clamp(w.windSpeed / 40, 0, 1);
+    layers.wind.gain.gain.linearRampToValueAtTime(0.04 + windLevel * 0.22, now + 2);
+    layers.wind.filter.frequency.linearRampToValueAtTime(600 + windLevel * 1400, now + 2);
+
+    var seaLevel = clamp(w.seaState / 6, 0, 1);
+    layers.waves.targetGain = 0.08 + seaLevel * 0.22;
+    layers.waves.gain.gain.linearRampToValueAtTime(layers.waves.targetGain, now + 3);
+
+    layers.rigging.gain.gain.linearRampToValueAtTime(0.02 + windLevel * 0.05, now + 2);
+
+    var rainOn = (w.condition === 'rain' || w.condition === 'squall') ? 1 : 0;
+    layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
+  }
+
+  function toggleMute() {
+    muted = !muted;
+    if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+    updateSoundLabel();
+  }
+
+  function updateSoundLabel() {
+    soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND: OFF' : 'SOUND: ON') : 'SOUND: OFF';
+  }
+
+  /* ============================================================
+     7. TERMINAL RENDERING
+     ============================================================ */
+  var outputEl = document.getElementById('output');
+  var optionsEl = document.getElementById('options');
+  var clockEl = document.getElementById('clock');
+  var vesselLineEl = document.getElementById('vessel-line');
+  var cmdForm = document.getElementById('cmd-form');
+  var cmdInput = document.getElementById('cmd-input');
+  var soundBtn = document.getElementById('sound-btn');
+
+  function printLine(text, cls) {
+    var p = document.createElement('p');
+    p.className = 'line' + (cls ? ' ' + cls : '');
+    p.textContent = text;
+    outputEl.appendChild(p);
+  }
+
+  function printBlank() {
+    var p = document.createElement('p');
+    p.className = 'gap';
+    outputEl.appendChild(p);
+  }
+
+  function printEcho(text) {
+    var p = document.createElement('p');
+    p.className = 'line echo';
+    p.textContent = '> ' + text.toUpperCase();
+    outputEl.appendChild(p);
+  }
+
+  function formatShipTime(ts) {
+    var months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    var d = new Date(ts);
+    var dd = String(d.getDate()).padStart(2, '0');
+    var mon = months[d.getMonth()];
+    var hh = String(d.getHours()).padStart(2, '0');
+    var mm = String(d.getMinutes()).padStart(2, '0');
+    return dd + ' ' + mon + ' ' + hh + ':' + mm;
+  }
+
+  function printLogEntry(entry) {
+    var wrap = document.createElement('div');
+    wrap.className = 'entry';
+    var ts = document.createElement('div');
+    ts.className = 'entry-ts';
+    ts.textContent = formatShipTime(entry.t);
+    var body = document.createElement('div');
+    body.className = 'entry-text';
+    body.textContent = entry.text;
+    wrap.appendChild(ts);
+    wrap.appendChild(body);
+    outputEl.appendChild(wrap);
+  }
+
+  function scrollToBottom() {
+    outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  function flushNewLogEntries(state) {
+    for (; printedCount < state.log.length; printedCount++) {
+      printLogEntry(state.log[printedCount]);
+    }
+    scrollToBottom();
+  }
+
+  function setVesselLine(text) { vesselLineEl.textContent = text; }
+
+  function updateClock() {
+    if (!GAME) { clockEl.textContent = '—'; return; }
+    var now = Date.now();
+    var days = Math.floor((now - GAME.meta.departedAt) / 86400000) + 1;
+    var d = new Date(now);
+    var hh = String(d.getHours()).padStart(2, '0');
+    var mm = String(d.getMinutes()).padStart(2, '0');
+    clockEl.textContent = 'DAY ' + days + ' \u00B7 ' + hh + ':' + mm;
+  }
+
+  function compassPoint(deg) {
+    var pts = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    return pts[Math.round(normalizeDeg(deg) / 22.5) % 16];
+  }
+
+  function describeLevel(value, tiers) {
+    for (var i = 0; i < tiers.length; i++) {
+      if (value <= tiers[i].max) return tiers[i].text;
+    }
+    return tiers[tiers.length - 1].text;
+  }
+
+  function fatiguePhrase(v) {
+    return describeLevel(v, [
+      { max: 20, text: "Fresh. Alert." },
+      { max: 40, text: "Tired, but steady." },
+      { max: 60, text: "Heavy. Simple tasks take longer than they should." },
+      { max: 80, text: "Severe. Concentration is becoming difficult." },
+      { max: 100, text: "Exhausted. You shouldn't be making decisions right now." },
+    ]);
+  }
+
+  function moralePhrase(v) {
+    return describeLevel(v, [
+      { max: 25, text: "Low. The size of the ocean is hard to ignore tonight." },
+      { max: 55, text: "Subdued, but holding." },
+      { max: 100, text: "Steady." },
+    ]);
+  }
+
+  function conditionPhrase(v) {
+    return describeLevel(v, [
+      { max: 20, text: "failing" },
+      { max: 45, text: "badly worn" },
+      { max: 70, text: "worn, nothing urgent" },
+      { max: 100, text: "sound" },
+    ]);
+  }
+
+  function supplyPhrase(days) {
+    return describeLevel(days, [
+      { max: 3, text: "nearly gone — this needs attention" },
+      { max: 8, text: "running low" },
+      { max: 999, text: "adequate" },
+    ]);
+  }
+
+  function describeSeaState(n) {
+    var labels = [
+      "Flat calm.", "Slight ripple.", "Small waves, some whitecaps.",
+      "Moderate seas, frequent whitecaps.", "Rough. Spray coming aboard.",
+      "Very rough. Heavy going.", "High seas.",
+    ];
+    return labels[clamp(n, 0, 6)];
+  }
+
+  function formatLatLon(lat, lon) {
+    var latDeg = Math.floor(Math.abs(lat));
+    var latMin = (Math.abs(lat) - latDeg) * 60;
+    var lonDeg = Math.floor(Math.abs(lon));
+    var lonMin = (Math.abs(lon) - lonDeg) * 60;
+    var ns = lat >= 0 ? 'N' : 'S';
+    var ew = lon >= 0 ? 'E' : 'W';
+    return latDeg + '\u00B0 ' + latMin.toFixed(1) + "' " + ns + ', ' + lonDeg + '\u00B0 ' + lonMin.toFixed(1) + "' " + ew;
+  }
+
+  function currentLatLon(state) {
+    var frac = clamp(state.nav.distanceTraveled / ROUTE_DISTANCE_NM, 0, 1);
+    var lat = START_COORDS.lat + (DEST_COORDS.lat - START_COORDS.lat) * frac;
+    var lon = START_COORDS.lon + (DEST_COORDS.lon - START_COORDS.lon) * frac;
+    lat -= Math.sin(frac * Math.PI) * 2.5; // real passages dip south early to find the trades
+    if (state.nav.positionConfidence === 'uncertain') {
+      lat += (Math.random() - 0.5) * 0.4;
+      lon += (Math.random() - 0.5) * 0.4;
+    }
+    return { lat: lat, lon: lon };
+  }
+
+  function describeGap(minutes) {
+    if (minutes < 90) return Math.round(minutes) + ' minutes';
+    var hours = minutes / 60;
+    if (hours < 48) return hours.toFixed(1) + ' hours';
+    return (hours / 24).toFixed(1) + ' days';
+  }
+
+  function sailConfigLabel(cfg) {
+    return { full: 'full sail', reefed: 'reefed', minimal: 'minimal canvas' }[cfg] || cfg;
+  }
+
+  function sailOptions(state) {
+    var cfg = state.boat.sailConfig;
+    var opts = [];
+    if (cfg !== 'reefed') opts.push({ label: 'REDUCE TO REEFED', action: 'sail-reefed' });
+    if (cfg !== 'minimal') opts.push({ label: 'REDUCE TO MINIMAL', action: 'sail-minimal' });
+    if (cfg !== 'full') opts.push({ label: 'SHAKE OUT REEF (FULL SAIL)', action: 'sail-full' });
+    opts.push({ label: 'LEAVE AS IS', action: 'cancel' });
+    return opts;
+  }
+
+  /* ============================================================
+     8. COMMANDS
+     ============================================================ */
+  function cmdStatus(state) {
+    var rows = [
+      ['FATIGUE', fatiguePhrase(state.crew.fatigue)],
+      ['MORALE', moralePhrase(state.crew.morale)],
+      ['FOOD', capitalize(supplyPhrase(state.crew.foodDays)) + '.'],
+      ['WATER', capitalize(supplyPhrase(state.crew.waterDays)) + '.'],
+      ['HULL', capitalize(conditionPhrase(state.boat.hull)) + '.'],
+      ['RIGGING', capitalize(conditionPhrase(state.boat.rigging)) + '.'],
+      ['SAILS', capitalize(conditionPhrase(state.boat.sails)) + '.'],
+      ['ELECTRICAL', capitalize(conditionPhrase(state.boat.electrical)) + '.'],
+    ];
+    printBlank();
+    rows.forEach(function (row, i) {
+      printLine(row[0], 'heading-label');
+      printLine(row[1]);
+      if (i < rows.length - 1) printBlank();
+    });
+  }
+
+  function cmdPosition(state) {
+    var ll = currentLatLon(state);
+    printBlank();
+    printLine('POSITION', 'heading-label');
+    printLine(formatLatLon(ll.lat, ll.lon));
+    if (state.nav.positionConfidence === 'uncertain') {
+      printLine('(dead reckoning — no recent fix)', 'dim');
+    }
+    printBlank();
+    printLine('HEADING', 'heading-label');
+    printLine(Math.round(state.nav.heading) + '\u00B0  (intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0)');
+    printBlank();
+    printLine('DISTANCE', 'heading-label');
+    printLine(Math.round(state.nav.distanceTraveled) + ' nm sailed \u2014 approximately ' + Math.round(Math.max(0, ROUTE_DISTANCE_NM - state.nav.distanceTraveled)) + ' nm remaining');
+    if (state.nav.crossTrackDeviation > 15) {
+      printLine('Off the intended track by roughly ' + Math.round(state.nav.crossTrackDeviation) + ' nm.', 'amber');
+    }
+  }
+
+  function cmdWeather(state) {
+    var w = state.weather;
+    printBlank();
+    printLine('WEATHER', 'heading-label');
+    printLine('Wind ' + Math.round(w.windSpeed) + ' kt from ' + compassPoint(w.windDirection) + ' (' + Math.round(w.windDirection) + '\u00B0)');
+    printLine(describeSeaState(w.seaState));
+    printLine(capitalize(w.condition) + '.');
+  }
+
+  function cmdForecast(state) {
+    var lines = {
+      building: ["Wind expected to build further through the next watch.", "Pressure easing. Expect more of this before it improves."],
+      easing: ["Conditions should moderate over the coming hours.", "Wind easing, though seas may take longer to settle."],
+      steady: ["No major change expected in the near term.", "Holding steady, for now."],
+    };
+    var opts = lines[state.weather.trend] || lines.steady;
+    printBlank();
+    printLine('FORECAST', 'heading-label');
+    printLine(opts[Math.floor(Math.random() * opts.length)]);
+    printLine('Confidence: limited. No shore forecast out here.', 'dim');
+  }
+
+  function cmdLog(state) {
+    printBlank();
+    printLine("SHIP'S LOG", 'heading-label');
+    if (state.log.length === 0) {
+      printLine('Nothing logged yet.', 'dim');
+    } else {
+      state.log.forEach(printLogEntry);
+    }
+  }
+
+  function cmdSails(state) {
+    printBlank();
+    printLine('SAILS', 'heading-label');
+    printLine('Currently: ' + sailConfigLabel(state.boat.sailConfig) + '.');
+    state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
+  }
+
+  function cmdCourse(state) {
+    printBlank();
+    printLine('COURSE', 'heading-label');
+    printLine('Steering ' + Math.round(state.nav.heading) + '\u00B0, intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0.');
+    state.pendingChoice = {
+      id: 'course-choice',
+      options: [
+        { label: 'HOLD COURSE', action: 'course-hold' },
+        { label: 'BEAR AWAY (easier motion, further off the line)', action: 'course-bear-away' },
+        { label: 'COME UP (back toward the line, harder ride)', action: 'course-come-up' },
+      ],
+    };
+  }
+
+  function cmdRest(state) {
+    printBlank();
+    printLine('REST', 'heading-label');
+    printLine('Go below, or stay on watch?');
+    state.pendingChoice = {
+      id: 'rest-choice',
+      options: [
+        { label: 'GO BELOW / SLEEP', action: 'go-below' },
+        { label: 'STAY ON WATCH', action: 'stay-on-watch' },
+      ],
+    };
+  }
+
+  function cmdWake(state) {
+    if (state.crew.watchState !== 'sleeping') {
+      printBlank();
+      printLine("You're already awake.", 'dim');
+      return;
+    }
+    wakeUp(state, 'You wake and go above.');
+  }
+
+  function cmdEat(state) {
+    printBlank();
+    if (state.crew.foodDays <= 0) {
+      printLine('Nothing left to eat.', 'amber');
+      return;
+    }
+    state.crew.hoursSinceMeal = 0;
+    state.crew.foodDays = clamp(state.crew.foodDays - 0.15, 0, 999);
+    state.crew.fatigue = clamp(state.crew.fatigue - 4, 0, 100);
+    state.crew.morale = clamp(state.crew.morale + 2, 0, 100);
+    printLine('A meal, eaten standing up, watching the horizon out of habit.');
+  }
+
+  function cmdRepair(state) {
+    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
+      resolveAftLocker(state);
+      return;
+    }
+    printBlank();
+    printLine('Nothing aboard is asking to be fixed right now.', 'dim');
+  }
+
+  function cmdHelp() {
+    printBlank();
+    printLine('COMMANDS', 'heading-label');
+    printLine('STATUS    \u2014 fatigue, morale, food, water, condition');
+    printLine('POSITION  \u2014 position, heading, distance');
+    printLine('WEATHER   \u2014 current wind and sea state');
+    printLine('FORECAST  \u2014 a rough outlook, nothing certain');
+    printLine("LOG       \u2014 the ship's log so far");
+    printLine('SAILS     \u2014 adjust sail configuration');
+    printLine('COURSE    \u2014 hold, bear away, or come up');
+    printLine('REST      \u2014 go below and sleep, or stay on watch');
+    printLine('WAKE      \u2014 (while asleep) come back on deck');
+    printLine('EAT       \u2014 take a meal');
+    printLine('REPAIR    \u2014 see to anything that needs it');
+    printLine('RESTART   \u2014 abandon this voyage and start over (asks first)');
+  }
+
+  function cmdRestart(state) {
+    printBlank();
+    printLine('NEW VOYAGE', 'heading-label');
+    printLine('This abandons the current voyage and starts over from Seattle.');
+    state.pendingChoice = {
+      id: 'restart-choice',
+      options: [
+        { label: 'YES \u2014 START OVER', action: 'confirm-restart' },
+        { label: 'NO \u2014 KEEP SAILING', action: 'cancel' },
+      ],
+    };
+  }
+
+  var COMMANDS = {
+    status: cmdStatus, stat: cmdStatus,
+    position: cmdPosition, pos: cmdPosition,
+    weather: cmdWeather, wx: cmdWeather,
+    forecast: cmdForecast, fc: cmdForecast,
+    log: cmdLog,
+    sails: cmdSails, sail: cmdSails,
+    course: cmdCourse, heading: cmdCourse,
+    rest: cmdRest, sleep: cmdRest,
+    wake: cmdWake, wakeup: cmdWake, 'wake up': cmdWake, 'get up': cmdWake,
+    eat: cmdEat, food: cmdEat,
+    repair: cmdRepair, inspect: cmdRepair, fix: cmdRepair,
+    restart: cmdRestart, 'new voyage': cmdRestart, newvoyage: cmdRestart, 'new game': cmdRestart,
+    help: cmdHelp, '?': cmdHelp,
+  };
+
+  var QUERY_COMMANDS = { status:1, stat:1, position:1, pos:1, weather:1, wx:1, forecast:1, fc:1, log:1, help:1, '?':1 };
+  var WAKE_COMMANDS = { wake:1, wakeup:1, 'wake up':1, 'get up':1 };
+  // RESTART is a meta-command: it must reach the player even while asleep or
+  // mid-decision, so it's checked before either of those guards in runCommand().
+  var RESTART_COMMANDS = { restart:1, 'new voyage':1, newvoyage:1, 'new game':1 };
+
+  function runCommand(state, raw) {
+    var word = raw.trim().toLowerCase();
+    if (!word) return;
+
+    if (RESTART_COMMANDS[word]) {
+      cmdRestart(state);
+      renderOptions(state);
+      saveGameState(state);
+      scrollToBottom();
+      return;
+    }
+
+    // Asleep means asleep: no other command can be issued, and — just as
+    // important for the real-time rule — nothing here advances the clock.
+    // WAKE UP only ends the *state*; time already passed for real while it ran.
+    if (state.crew.watchState === 'sleeping' && !WAKE_COMMANDS[word]) {
+      printBlank();
+      printLine("You're asleep. Nothing to do but WAKE UP.", 'dim');
+      renderOptions(state);
+      saveGameState(state);
+      scrollToBottom();
+      return;
+    }
+
+    var fn = COMMANDS[word];
+    if (state.pendingChoice && !QUERY_COMMANDS[word]) {
+      printBlank();
+      printLine('Resolve the matter at hand first.', 'dim');
+    } else if (fn) {
+      fn(state);
+    } else {
+      printBlank();
+      printLine('Unfamiliar command: "' + raw + '"', 'dim');
+      printLine('Try STATUS, POSITION, WEATHER, or LOG.', 'dim');
+    }
+    renderOptions(state);
+    saveGameState(state);
+    scrollToBottom();
+  }
+
+  function getContextualOptions(state) {
+    // pendingChoice always wins — including a restart request while asleep,
+    // which must be answerable even though sleep otherwise locks the menu.
+    if (state.pendingChoice) return state.pendingChoice.options;
+    if (state.crew.watchState === 'sleeping') {
+      return [{ label: 'WAKE UP', action: 'wake-up' }];
+    }
+    var opts = [];
+    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
+      opts.push({ label: 'INSPECT AFT LOCKER', action: 'cmd:repair' });
+    }
+    if (state.weather.windSpeed > 22 && state.boat.sailConfig === 'full') {
+      opts.push({ label: 'REDUCE SAIL', action: 'cmd:sails' });
+    }
+    if (state.crew.fatigue > 55) opts.push({ label: 'GO BELOW / SLEEP', action: 'cmd:rest' });
+    if (state.crew.hoursSinceMeal > 8) opts.push({ label: 'EAT', action: 'cmd:eat' });
+
+    var defaults = [
+      { label: 'CHECK WEATHER', action: 'cmd:weather' },
+      { label: 'CHECK POSITION', action: 'cmd:position' },
+      { label: 'CHECK LOG', action: 'cmd:log' },
+      { label: 'GO BELOW / SLEEP', action: 'cmd:rest' },
+    ];
+    defaults.forEach(function (d) {
+      if (opts.length >= 5) return;
+      var exists = opts.some(function (o) { return o.action === d.action; });
+      if (!exists) opts.push(d);
+    });
+    return opts.slice(0, 5);
+  }
+
+  function renderOptions(state) {
+    optionsEl.innerHTML = '';
+    var opts = getContextualOptions(state);
+    opts.forEach(function (opt) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'option';
+      btn.textContent = '> ' + opt.label;
+      btn.addEventListener('click', function () {
+        if (opt.action.indexOf('cmd:') === 0) {
+          var cmdName = opt.action.slice(4);
+          printEcho(cmdName);
+          runCommand(state, cmdName);
+        } else {
+          handleAction(state, opt.action);
+        }
+      });
+      optionsEl.appendChild(btn);
+    });
+  }
+
+  function handleAction(state, action) {
+    // Restarting discards the current game object entirely, so it can't
+    // flow through the normal switch/tail below (which would re-save and
+    // re-render the very state this just deleted). Handle it and bail out.
+    if (action === 'confirm-restart') {
+      confirmRestart();
+      return;
+    }
+    switch (action) {
+      case 'cancel':
+        printBlank();
+        printLine('Left as it was.', 'dim');
+        break;
+      case 'go-below':
+        printBlank();
+        beginSleep(state);
+        break;
+      case 'stay-on-watch':
+        printBlank();
+        printLine('You stay on watch. The wheel, the dark, the wind.', 'dim');
+        break;
+      case 'wake-up':
+        printBlank();
+        wakeUp(state, 'You wake and go above.');
+        break;
+      case 'sail-full':
+        state.boat.sailConfig = 'full';
+        log(state, "Shook out the reef. Full sail again \u2014 more speed, more motion.");
+        flushNewLogEntries(state);
+        break;
+      case 'sail-reefed':
+        state.boat.sailConfig = 'reefed';
+        log(state, "Put a reef in. Quieter below, a little slower.");
+        flushNewLogEntries(state);
+        break;
+      case 'sail-minimal':
+        state.boat.sailConfig = 'minimal';
+        log(state, "Reduced to minimal canvas. Slow, but she's not fighting the wind anymore.");
+        flushNewLogEntries(state);
+        break;
+      case 'course-hold':
+        state.nav.headingOffset = 0;
+        printBlank();
+        printLine('Holding the intended course.', 'dim');
+        break;
+      case 'course-bear-away':
+        state.nav.headingOffset = 22;
+        log(state, "Bore away to ease the motion. Further off the direct line, but a kinder ride.");
+        flushNewLogEntries(state);
+        break;
+      case 'course-come-up':
+        state.nav.headingOffset = -22;
+        log(state, "Came up toward the rhumb line. She pounds more for it.");
+        flushNewLogEntries(state);
+        break;
+      case 'resolve-aft-locker-now':
+        resolveAftLocker(state);
+        break;
+      case 'defer-aft-locker':
+        state.flags.aftLockerDeferredAt = state.meta.voyageMinutes;
+        printBlank();
+        printLine('It can wait. For now.', 'dim');
+        break;
+      default:
+        break;
+    }
+    state.pendingChoice = null;
+    renderOptions(state);
+    saveGameState(state);
+    updateAudioForState(state);
+    scrollToBottom();
+  }
+
+  /* ============================================================
+     9. BOOT SEQUENCE
+     ============================================================ */
+  var liveTimer = null;
+
+  function startLiveLoop() {
+    if (liveTimer) return;
+    var last = Date.now();
+    liveTimer = setInterval(function () {
+      if (!GAME) return;
+      var now = Date.now();
+      var minutes = (now - last) / 60000;
+      last = now;
+      var ticks = advanceSimulation(GAME, minutes);
+      GAME.meta.lastTick = now;
+      if (ticks > 0) {
+        flushNewLogEntries(GAME);
+        renderOptions(GAME);
+        updateAudioForState(GAME);
+      }
+      saveGameState(GAME);
+    }, LIVE_TICK_SECONDS * 1000);
+  }
+
+  function renderPreDeparture() {
+    printLine(VESSEL_NAME + ' \u2014 ' + DEPARTURE_PORT, 'heading-label');
+    printBlank();
+    printLine('Lines still on the dock. Grey morning, the kind Seattle keeps for departures.');
+    printLine('Ahead: ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles of open Pacific, and ' + DESTINATION_PORT + ', somewhere past the curve of the world.');
+    printBlank();
+    printLine('You are sailing alone.');
+
+    optionsEl.innerHTML = '';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'option';
+    btn.textContent = '> BEGIN VOYAGE';
+    btn.addEventListener('click', function () {
+      GAME = newGameState();
+      unlockAudio();
+      updateAudioForState(GAME); // safe no-op if audio isn't unlocked yet; keeps a restart's ambience in sync immediately
+      updateSoundLabel();
+      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+      renderDeparture(GAME);
+      startLiveLoop();
+      saveGameState(GAME);
+      updateClock();
+    });
+    optionsEl.appendChild(btn);
+  }
+
+  function confirmRestart() {
+    // A restart discards the save and begins a fresh voyage "now" — this is
+    // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
+    // an in-progress voyage, it just starts over exactly like a first visit.
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save.', e); }
+    GAME = null;
+    printedCount = 0;
+    outputEl.innerHTML = '';
+    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
+    renderPreDeparture();
+    updateClock();
+  }
+
+  function renderDeparture(state) {
+    outputEl.innerHTML = '';
+    log(state, 'Lines cast off. Under engine out through the marina, sails up past the breakwater.');
+    log(state, 'Course set for ' + DESTINATION_PORT + '. Wind ' + Math.round(state.weather.windSpeed) + ' kt out of the ' + compassPoint(state.weather.windDirection) + '.');
+    state.log.forEach(printLogEntry);
+    printedCount = state.log.length;
+    printBlank();
+    printLine('Type HELP at any time for the full command list.', 'dim');
+    renderOptions(state);
+    scrollToBottom();
+  }
+
+  function renderReturn(state, ticks) {
+    outputEl.innerHTML = '';
+    printLine('S/V ' + VESSEL_NAME + ' \u2014 underway', 'heading-label');
+    if (ticks > 0) {
+      printBlank();
+      printLine('(' + describeGap(ticks * TICK_MINUTES) + ' since you were last aboard.)', 'dim');
+    }
+    state.log.forEach(printLogEntry);
+    printedCount = state.log.length;
+    renderOptions(state);
+    scrollToBottom();
+  }
+
+  function boot() {
+    var saved = loadGameState();
+    if (!saved) {
+      renderPreDeparture();
+      updateClock();
+      return;
+    }
+    GAME = saved;
+    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+    var ticks = catchUpFromRealTime(GAME);
+    saveGameState(GAME);
+    renderReturn(GAME, ticks);
+    startLiveLoop();
+    updateClock();
+  }
+
+  cmdForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var val = cmdInput.value;
+    cmdInput.value = '';
+    if (!val.trim()) return;
+    if (!GAME) {
+      printBlank();
+      printLine('Cast off first \u2014 tap BEGIN VOYAGE.', 'dim');
+      scrollToBottom();
+      return;
+    }
+    printEcho(val);
+    runCommand(GAME, val);
+  });
+
+  soundBtn.addEventListener('click', function () {
+    if (!audioUnlocked) {
+      unlockAudio();
+      if (GAME) updateAudioForState(GAME);
+    } else {
+      toggleMute();
+    }
+    updateSoundLabel();
+  });
+
+  document.addEventListener('visibilitychange', function () {
+    if (!GAME) return;
+    if (document.visibilityState === 'hidden') {
+      GAME.meta.lastTick = Date.now();
+      saveGameState(GAME);
+    } else if (document.visibilityState === 'visible') {
+      var ticks = catchUpFromRealTime(GAME);
+      if (ticks > 0) {
+        flushNewLogEntries(GAME);
+        renderOptions(GAME);
+        updateAudioForState(GAME);
+      }
+      saveGameState(GAME);
+      updateClock();
+    }
+  });
+
+  window.addEventListener('pagehide', function () {
+    if (!GAME) return;
+    GAME.meta.lastTick = Date.now();
+    saveGameState(GAME);
+  });
+
+  boot();
+  setInterval(updateClock, 30000);
+
+})();
+</script>
+</body>
+</html>
