@@ -200,7 +200,7 @@
       </div>
     </header>
 
-    <main id="output" aria-live="polite"></main>
+    <main id="output" aria-live="polite"><div id="temp-view"></div></main>
 
     <footer id="controls">
       <div id="options"></div>
@@ -295,26 +295,51 @@
         trend: 'steady',
       },
       boat: {
-        sailConfig: 'full',        // full | reefed | minimal
-        sailsUp: false,            // sails aren't hoisted until the RAISE SAILS departure step
+        sailConfig: 'furled',       // full | reefed | minimal | furled — starts furled; nothing raises sails but the player
         engineOn: false,           // running under power (departure motor-out, or engine failure recovery later)
-        fuelHours: 20,             // hours of motoring the fuel tank has left
+        fuelGallons: 20,           // diesel remaining, in gallons — see DIESEL_BURN_RATE_GPH
+        speed: 0,                  // kt — recomputed every tick; POSITION displays a live value regardless
         hull: 100,
         rigging: 100,
         sails: 100,
         electrical: 100,
         engine: 100,
+        floodRate: 0,    // gal/hr currently entering the hull — 0 unless a leak is active
+        bilgeWater: 0,   // gal currently accumulated in the bilge
       },
       crew: {
         fatigue: 8,
         hoursSinceRest: 3,
         hoursSinceMeal: 2,
         hoursSinceWater: 2,
-        foodDays: 24,
-        waterDays: 30,
         morale: 72,
-        watchState: 'awake',   // 'awake' | 'sleeping' — see REAL-TIME PRINCIPLE note above
-        sleepStartedAt: null,  // voyageMinutes at the moment sleep began, for duration text on waking
+        watchState: 'awake',        // 'awake' | 'trying' | 'sleeping' — see SLEEP PRESSURE note below
+        sleepAttemptStartedAt: null, // voyageMinutes when SLEEP was selected, for the "trying" timeout
+        sleepStartedAt: null,        // voyageMinutes at the moment sleep actually began, for duration text on waking
+        lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
+        coffeeCount: 0,
+        inLifeRaft: false,
+      },
+      food: {
+        oatmeal: 18, pasta: 12, rice: 16, soup: 8, chili: 8,
+        tuna: 10, crackers: 12, peanutButter: 10, nuts: 16,
+        driedFruit: 12, energyBars: 12, freshFruit: 8, freshBread: 6,
+        comfort: 6, coffee: 24,
+      },
+      water: {
+        primary: 35,    // gallons
+        emergency: 8,   // gallons — a deliberate reserve, not silently spent
+      },
+      supplies: {
+        propane: 60, // stove uses
+        spares: {
+          oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
+          spareLine: 100, shackles: 6, riggingTape: 2,
+          fuses: 10, wire: 50, connectors: 20, batteries: 2,
+          hose: 10, hoseClamps: 12,
+          sailRepair: 3, epoxy: 2, sealant: 2,
+        },
+        safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
       },
       flags: {
         aftLockerTriggerAt: rand(8 * 60, 16 * 60), // guaranteed once, sometime hour 8-16
@@ -325,7 +350,26 @@
         sailWarningIssued: false,
         fatigueNarrated: false,
         thirstNarrated: false,
+        hungerNarrated: false,
+        freshFruitSpoiled: false,
+        freshBreadSpoiled: false,
         lastMilestone: 0,
+        hullLeakTriggerAt: null, // set lazily by checkHullLeak's own per-tick roll, not a fixed guaranteed time
+        hullLeakTriggered: false,
+        hullLeakResolved: false,
+        bilgeWarned50: false,
+        bilgeWarned100: false,
+      },
+      rescue: {
+        epirbOn: false,
+        activatedAt: null,       // voyageMinutes
+        phase: 'none',           // 'none' | 'traveling' | 'searching' | 'rescued'
+        travelMinutes: 0,        // computed once at activation, from position/conditions
+        nextSearchEventAt: null,
+        encounterActive: false,
+        encounterStartedAt: null,
+        encounterKind: null,     // 'aircraft' | 'vessel'
+        encounterFlareFired: false,
       },
       departure: { stageIndex: 0 }, // walks through DEPARTURE_STEPS before normal gameplay opens up
       pendingChoice: null,
@@ -446,6 +490,7 @@
   ];
   var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
   var WAYPOINT_ARRIVAL_NM = 4; // close enough to call a waypoint "reached" and aim at the next one
+  var OPEN_WATER_WAYPOINT_INDEX = 5; // targeting waypoint 5 ("open water, well offshore") or later = clear of land; below that, course changes are geographically constrained
 
   var TOTAL_ROUTE_NM = 0;
   (function () {
@@ -454,6 +499,192 @@
     }
   })();
   var ROUTE_DISTANCE_NM = Math.round(TOTAL_ROUTE_NM); // departure-screen blurb only — never used to place the boat
+
+  /* --------------------------------------------------------------
+     OBSERVE
+     ------------------------------------------------------------
+     Not primarily informational — it exists to make the voyage feel
+     physical and lonely. Mostly quiet, occasionally something more.
+     -------------------------------------------------------------- */
+  function voyagePhase(state) {
+    var wi = state.nav.waypointIndex;
+    if (wi <= 2) return 'inland';   // Puget Sound / Admiralty Inlet
+    if (wi === 3) return 'strait';  // Juan de Fuca
+    if (wi === 4) return 'coastal'; // approaching / just past Cape Flattery
+    if (wi >= 7) return 'approach'; // final leg toward Kauaʻi
+    if (wi >= 6) return 'tropics';  // trade wind belt
+    return 'offshore';
+  }
+
+  function timeOfDayPhase(state) {
+    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
+    var h = d.getHours();
+    if (h < 5) return 'night';
+    if (h < 7) return 'dawn';
+    if (h < 11) return 'morning';
+    if (h < 15) return 'midday';
+    if (h < 18) return 'afternoon';
+    if (h < 20) return 'dusk';
+    return 'night';
+  }
+
+  var OBSERVATIONS = {
+    inland: {
+      quiet: [
+        'A ferry crosses well astern, lit up like a small town.',
+        'The shoreline slides by, dark hills and scattered lights.',
+        'Gulls work the water off the bow, indifferent to the boat.',
+        'Rain moves over the mainland, visible as a grey smear on the hills.',
+        'Another sailboat, reefed down, passes well to port.',
+        'The smell of the tide flats carries out on the wind.',
+      ],
+      awe: ['The mountains catch the last light, briefly on fire before it fades.'],
+    },
+    strait: {
+      quiet: [
+        'Cliffs rise pale on one side, open water on the other.',
+        'A container ship passes far off, low and enormous.',
+        'Fog sits in patches over the water, thinning and thickening.',
+        'Seabirds ride the swell without apparent effort.',
+      ],
+      awe: ['For a few minutes the strait goes glassy, mountains doubled in the water.'],
+    },
+    coastal: {
+      quiet: [
+        'The coastline is a low grey line, then nothing.',
+        'Swell starts to build under the hull, the first real ocean motion.',
+        'A fishing boat works a line somewhere off to starboard.',
+        'The water changes color, green to a deeper, colder blue.',
+      ],
+      awe: ['The land disappears behind for good. Just water now, in every direction.'],
+    },
+    offshore: {
+      quiet: [
+        'Long swells lift and drop the boat, unhurried.',
+        'A seabird glides past without a single wingbeat.',
+        'Clouds stack on the horizon, building into something or nothing.',
+        'The horizon is empty in every direction.',
+        'A squall passes well clear, visible as a grey curtain of rain.',
+        'The wake trails off pale behind the boat, then is gone.',
+        'Something logs a splash off the beam. Gone before you can look.',
+      ],
+      awe_night: [
+        'The wake glows faintly green — phosphorescence, stirred up by the hull.',
+        'No moon tonight. The stars are absurd, edge to edge, no city to dim them.',
+        'A meteor burns a long line across the sky and is gone.',
+      ],
+      awe_day: [
+        'A pod of dolphins rides the bow wave for a while, then peels off.',
+        'Flying fish scatter ahead of the hull, skimming the wave tops.',
+      ],
+      sunrise: ['The sky goes from black to grey to a slow, deliberate orange.'],
+      sunset: ['The sun goes down into the sea, no clouds to catch it, just gone.'],
+    },
+    tropics: {
+      quiet: [
+        "The air has gone warmer, thicker. Different ocean.",
+        'Trade-wind clouds march by in orderly ranks, small and white.',
+        'Flying fish burst from a wave ahead, silver, then gone.',
+        "The sea is a color it wasn't further north — a hard, deep blue.",
+      ],
+      awe_night: ['The stars are different here. Lower ones you don\'t recognize.'],
+      awe_day: ['A pod of dolphins works the bow for a few minutes, unbothered by the boat.'],
+    },
+    approach: {
+      quiet: [
+        'The cloud pattern ahead looks different — piled up over something solid.',
+        'A land bird, out here, improbably far from anywhere.',
+        'The swell has a shorter, steeper period than the open crossing.',
+      ],
+      awe: ['A smudge on the horizon that might be cloud, might be Kauaʻi. Too early to be sure.'],
+    },
+  };
+
+  // Spontaneous thoughts — not tied to any phase or condition, just what
+  // surfaces during solitude. Deliberately plain: present the thought and
+  // stop, never explain what it means.
+  var PONDERINGS = [
+    "You think of someone you haven't thought of in a long time.",
+    "A room from your childhood comes back to you. You can't remember why.",
+    "You remember the sound of someone's laugh, but not what they were laughing about.",
+    "A name comes to you. It takes a moment to remember who it belonged to.",
+    "You wonder what everyone at home is doing right now.",
+    "You remember an ordinary afternoon from years ago with surprising clarity.",
+    "You try to remember the layout of a house you haven't been inside for years.",
+    "You think about a conversation differently than you did at the time.",
+    "You remember being driven somewhere as a child. You can't remember where you were going.",
+    "You wonder how many things you've done for the last time without realizing it.",
+    "You realize you haven't heard your own name spoken aloud in days.",
+    "For some reason, you wonder what your old neighbor is doing now.",
+    "You remember a shirt you used to own.",
+  ];
+
+  // Picks from `pool`, preferring anything not in `recent` (so the same
+  // line doesn't repeat too soon) — falls back to the full pool once the
+  // "fresh" set is exhausted rather than getting stuck with nothing to pick.
+  function pickFromPoolAvoidingRecent(pool, recent) {
+    var candidates = pool.filter(function (t) { return recent.indexOf(t) === -1; });
+    if (!candidates.length) candidates = pool;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
+  function pickPondering(state) {
+    return pickFromPoolAvoidingRecent(PONDERINGS, state.flags.recentAmbientTexts || []);
+  }
+
+  /* --------------------------------------------------------------
+     HUMAN CONDITION
+     ------------------------------------------------------------
+     Hunger and thirst are four broad qualitative states each, driven
+     by hoursSinceMeal / hoursSinceWater (already tracked). No numeric
+     meter is ever shown — cmdStatus prints the label only.
+     -------------------------------------------------------------- */
+  var HUNGER_LABELS = ['FED', 'GETTING HUNGRY', 'HUNGRY', 'VERY HUNGRY. WEAKENING.'];
+  var THIRST_LABELS = ['HYDRATED', 'GETTING THIRSTY', 'THIRSTY', 'SEVERELY DEHYDRATED.'];
+
+  function hungerLevel(hoursSinceMeal) {
+    if (hoursSinceMeal <= 4) return 0;
+    if (hoursSinceMeal <= 9) return 1;
+    if (hoursSinceMeal <= 16) return 2;
+    return 3;
+  }
+  function thirstLevel(hoursSinceWater) {
+    if (hoursSinceWater <= 4) return 0;
+    if (hoursSinceWater <= 9) return 1;
+    if (hoursSinceWater <= 16) return 2;
+    return 3;
+  }
+
+  // Coffee: a small, temporary, subtle edge — never a fatigue cure. Active
+  // for a few hours after the last cup; recent coffee also makes it a bit
+  // harder to fall asleep (see fallAsleepChance below).
+  function coffeeActive(state) {
+    var last = state.crew.lastCoffeeAt;
+    return last != null && (state.meta.voyageMinutes - last) < 180;
+  }
+
+  // Foods: one unit is one serving. `cooked` items need the stove (propane
+  // + a little fresh water, and calm-enough seas); everything else is
+  // ready to eat as-is. `heavy` meals are more filling and recover more
+  // fatigue; `comfort` food leans on morale instead.
+  var FOOD_ITEMS = [
+    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true },
+    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true },
+    { key: 'rice', name: 'Rice', cooked: true, heavy: true },
+    { key: 'soup', name: 'Soup', cooked: true, heavy: true },
+    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true },
+    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false },
+    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false },
+    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false },
+    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false },
+    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false },
+    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false },
+    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true },
+    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true },
+    { key: 'comfort', name: 'Comfort Food', cooked: false, heavy: false, comfort: true },
+  ];
+  var FOOD_ITEMS_BY_KEY = {};
+  FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
 
   function driftWeather(w) {
     // Small random walk so conditions feel alive without being chaotic.
@@ -518,27 +749,122 @@
   function sailConfigFactor(sailConfig, windSpeed) {
     if (sailConfig === 'full') return windSpeed > 25 ? 0.7 : 1.0; // overpowered in a full-sail breeze
     if (sailConfig === 'reefed') return windSpeed < 10 ? 0.75 : 0.92;
+    if (sailConfig === 'furled') return 0; // no canvas up — computeSailSpeed() already short-circuits before this, kept for safety
     return 0.45; // minimal / storm canvas — slow, but safe
   }
 
-  function computeBoatSpeed(state, heading) {
+  /* --------------------------------------------------------------
+     PROPULSION
+
+     ONE authoritative speed calculation, built from three independent
+     contributors — sails, engine, and a small baseline drift/current —
+     that are always computed, then combined. Nothing else in the
+     simulation is allowed to invent a second speed number: simTick(),
+     the ENGINE menu, and the live POSITION readout all call
+     computeBoatSpeed() below.
+     -------------------------------------------------------------- */
+  var BASE_ENGINE_SPEED_KT = 5.5;    // this size of auxiliary diesel, in calm conditions — see "approximately 5-6 knots"
+  var HULL_SPEED_KT = 7.3;           // ~1.34*sqrt(waterline) for a boat this size — where a displacement hull really starts fighting its own wake
+  var MAX_REALISTIC_SPEED_KT = 8.5;  // absolute ceiling — a ~35ft displacement hull only goes so fast no matter what's pushing it
+  var SAIL_PROPULSION_THRESHOLD_KT = 0.5; // below this, sails aren't usefully contributing (becalmed / in irons / furled / not hoisted)
+  var SECONDARY_ASSIST_FLOOR = 0.15; // even very near hull speed, the weaker propulsion source still helps a little, never nothing
+  var DIESEL_BURN_RATE_GPH = 0.65;   // gallons per hour while running, for a small auxiliary under load
+  var DRIFT_BASE_KT = 0.2;           // ambient current/windage on the hull — present even with sails furled and the engine off
+  var DRIFT_WIND_FACTOR = 0.025;     // more wind pushes an unpowered hull a little faster over the ground
+  var DRIFT_MAX_KT = 1.0;            // this is NOT propulsion — keep it small and capped
+
+  function computeSailSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
-    if (!b.sailsUp) {
-      // Still at the dock, or motoring out before the sails go up — speed
-      // comes from the engine alone, not the wind.
-      if (!b.engineOn) return 0;
-      var engineSpeed = 5.2 * (0.6 + 0.4 * (b.engine / 100));
-      if (c.watchState === 'sleeping') engineSpeed *= 0.5; // shouldn't really happen pre-sail, but keep it sane
-      return +engineSpeed.toFixed(2);
-    }
+    if (b.sailConfig === 'furled') return 0; // furled = no canvas up = no sail propulsion, full stop
     var speed = baseSpeedForWind(w.windSpeed)
       * pointOfSailFactor(heading, w.windDirection)
       * sailConfigFactor(b.sailConfig, w.windSpeed)
       * (0.5 + 0.5 * (b.hull / 100))
       * (0.6 + 0.4 * (b.sails / 100));
-    if (c.fatigue > 80) speed *= 0.9;              // poor trim, wandering helm
-    if (c.watchState === 'sleeping') speed *= 0.85; // self-steering, unattended
-    return Math.max(0, +speed.toFixed(2));
+    if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= 3) speed *= 0.9; // poor trim, wandering helm
+    if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — trying to sleep, or asleep
+    return Math.max(0, speed);
+  }
+
+  function computeEngineSpeed(state, heading) {
+    var w = state.weather, b = state.boat, c = state.crew;
+    if (!b.engineOn) return 0;
+    var speed = BASE_ENGINE_SPEED_KT
+      * (0.6 + 0.4 * (b.engine / 100))  // engine condition
+      * (0.6 + 0.4 * (b.hull / 100));   // hull condition — drag under power too
+    speed *= clamp(1 - w.seaState * 0.05, 0.55, 1); // pounding into a chop costs speed motoring, same as sailing
+    // Wind on the nose costs speed under power; a following wind/sea helps a little.
+    var windAngle = angleDiff(heading, w.windDirection); // 0 = wind dead ahead, 180 = dead astern
+    var windEffect = ((windAngle - 90) / 90) * clamp(w.windSpeed / 30, 0, 1) * 0.15;
+    speed *= (1 + windEffect);
+    if (c.watchState !== 'awake') speed *= 0.85; // unattended — same imprecision penalty as sailing unattended
+    return Math.max(0, speed);
+  }
+
+  function computeDriftSpeed(state) {
+    // A small, ever-present contribution from current and wind acting on
+    // the hull itself, independent of sail or engine — this is what keeps
+    // a furled, unpowered boat from reading a flatly impossible 0.0kt.
+    // Not propulsion: it never meaningfully adds to real sailing or
+    // motoring speed, only fills in when nothing else is pushing.
+    return clamp(DRIFT_BASE_KT + state.weather.windSpeed * DRIFT_WIND_FACTOR, 0.1, DRIFT_MAX_KT);
+  }
+
+  function isSailingUseful(state, heading) {
+    return computeSailSpeed(state, heading) > SAIL_PROPULSION_THRESHOLD_KT;
+  }
+
+  function propulsionState(state, heading) {
+    if (state.crew.inLifeRaft) return 'drifting'; // the boat's abandoned — its sails/engine are no longer relevant
+    var sailing = isSailingUseful(state, heading);
+    var engineOn = state.boat.engineOn;
+    if (sailing && engineOn) return 'motor-sailing';
+    if (sailing) return 'sailing';
+    if (engineOn) return 'motoring';
+    return 'drifting';
+  }
+
+  function propulsionLabel(key) {
+    var labels = { sailing: 'Sailing', 'motor-sailing': 'Motor-sailing', motoring: 'Motoring', drifting: 'Drifting' };
+    return labels[key] || capitalize(key);
+  }
+
+  function computeBoatSpeed(state, heading) {
+    if (state.crew.inLifeRaft) {
+      // Nothing to sail or motor anymore — the raft only goes where the
+      // current and wind take it, same drift term as a furled, engine-off
+      // boat, and nothing more.
+      return +computeDriftSpeed(state).toFixed(2);
+    }
+    var sailSpeed = computeSailSpeed(state, heading);
+    var engineSpeed = computeEngineSpeed(state, heading);
+    var primary = Math.max(sailSpeed, engineSpeed);
+    var secondary = Math.min(sailSpeed, engineSpeed);
+    var propelled;
+    if (secondary <= 0) {
+      propelled = primary;
+    } else {
+      // Motor-sailing: the weaker of the two sources still adds real thrust
+      // on top of the stronger one — it must never get crushed toward
+      // invisibility just because the other source happens to be bigger
+      // (that was the bug: a cube-sum blend let a big engine number swallow
+      // the difference between full and minimal sail almost entirely).
+      // What DOES genuinely diminish the assist is how close the boat
+      // already is to hull speed — pushing a displacement hull past that
+      // point costs disproportionately more the closer you get. That's the
+      // actual physical reason a big engine boost in light air (far from
+      // hull speed) shrinks to a small one in a strong breeze (already near
+      // hull speed) — not an artifact of which number happens to be larger.
+      var headroom = clamp(1 - primary / HULL_SPEED_KT, SECONDARY_ASSIST_FLOOR, 1);
+      propelled = primary + secondary * headroom;
+    }
+    // Drift/current is a small, separate baseline that's always present —
+    // it's what a furled, engine-off boat has left (pure DRIFTING), and it
+    // still nudges the total a little even under sail or power, same as a
+    // real current would.
+    var total = propelled + computeDriftSpeed(state);
+    return +Math.min(total, MAX_REALISTIC_SPEED_KT).toFixed(2);
+
   }
 
   function updateCrew(state) {
@@ -546,23 +872,32 @@
     var hrs = TICK_MINUTES / 60;
 
     if (c.watchState === 'sleeping') {
-      c.fatigue = clamp(c.fatigue - hrs * 9, 0, 100);
+      // Rougher seas make for shallower, less restorative sleep, not just
+      // a higher chance of being woken (see wakeChanceWhileSleeping).
+      var quality = clamp(1 - state.weather.seaState / 10, 0.4, 1);
+      c.fatigue = clamp(c.fatigue - hrs * 9 * quality, 0, 100);
       c.hoursSinceRest = 0;
     } else {
       var fatigueRate = 1.6;
       if (state.weather.seaState >= 4) fatigueRate += 1.0;
-      if (c.hoursSinceMeal > 8) fatigueRate += 0.4;
+      if (hungerLevel(c.hoursSinceMeal) >= 2) fatigueRate += 0.4;
+      if (hungerLevel(c.hoursSinceMeal) >= 3) fatigueRate += 0.6;
+      if (thirstLevel(c.hoursSinceWater) >= 3) fatigueRate += 0.8;
+      if (c.watchState === 'trying') fatigueRate *= 0.5; // lying down helps a little even without real sleep
       c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
-      c.hoursSinceRest += hrs;
+      if (c.watchState !== 'trying') c.hoursSinceRest += hrs;
     }
 
     c.hoursSinceMeal += hrs;
-    c.hoursSinceWater += hrs;
-    c.foodDays = clamp(c.foodDays - hrs / 24, 0, 999);
-    c.waterDays = clamp(c.waterDays - hrs / 24, 0, 999);
+    // Heat (once well into the tropics) and hard physical work (rough seas)
+    // both raise water needs — modeled as thirst simply arriving faster.
+    var waterRate = 1;
+    if (state.nav.waypointIndex >= 6) waterRate += 0.4;
+    if (state.weather.seaState >= 4) waterRate += 0.3;
+    c.hoursSinceWater += hrs * waterRate;
 
-    if (c.hoursSinceMeal > 10) c.morale = clamp(c.morale - 0.3 * hrs, 0, 100);
-    if (c.hoursSinceWater > 8) c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
+    if (hungerLevel(c.hoursSinceMeal) >= 2) c.morale = clamp(c.morale - 0.3 * hrs, 0, 100);
+    if (thirstLevel(c.hoursSinceWater) >= 2) c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
     if (state.weather.condition === 'squall') c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
   }
 
@@ -600,12 +935,18 @@
     checkFuel(state);
     checkSailStrain(state);
     checkAftLocker(state);
+    checkHullLeak(state);
+    checkFlooding(state);
+    checkRescue(state);
     checkWeatherNarration(state, prevCondition);
     checkFatigueNarration(state);
     checkThirstNarration(state);
+    checkHungerNarration(state);
+    checkSpoilage(state);
     checkMilestones(state);
     checkWaypointProgress(state);
-    checkSleepInterrupt(state, prevCondition);
+    checkAmbientEvent(state);
+    processSleepTick(state, prevCondition);
 
     clampState(state);
   }
@@ -613,11 +954,13 @@
   function advanceSimulation(state, minutes) {
     var remaining = minutes + (state.meta.leftoverMinutes || 0);
     var ticks = 0;
+    state._ambientEventsThisPass = 0; // capped inside checkAmbientEvent — never dumps a backlog after a long absence
     while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
       simTick(state);
       remaining -= TICK_MINUTES;
       ticks++;
     }
+    delete state._ambientEventsThisPass; // transient — never persisted
     state.meta.leftoverMinutes = remaining;
     return ticks;
   }
@@ -643,15 +986,15 @@
     var b = state.boat;
     if (!b.engineOn) return;
     var hrs = TICK_MINUTES / 60;
-    b.fuelHours = clamp(b.fuelHours - hrs, 0, 999);
-    if (b.fuelHours <= 0) {
+    b.fuelGallons = clamp(b.fuelGallons - hrs * DIESEL_BURN_RATE_GPH, 0, 999);
+    if (b.fuelGallons <= 0) {
       b.engineOn = false;
       log(state, "The engine coughs and dies. Fuel's gone.");
     }
   }
 
   function checkSailStrain(state) {
-    if (!state.boat.sailsUp) return; // nothing to strain before the sails are hoisted
+    if (state.boat.sailConfig === 'furled') return; // nothing to strain with no canvas up
     var w = state.weather, b = state.boat, f = state.flags;
     if (b.sailConfig === 'full' && w.windSpeed > 24) {
       if (!f.sailWarningIssued) {
@@ -692,6 +1035,156 @@
     }
   }
 
+  /* --------------------------------------------------------------
+     FLOODING
+
+     A rare, weather-correlated event — not guaranteed every voyage.
+     A hull leak (boat.floodRate, gal/hr) either stays within what the
+     bilge pump can clear on its own, or it doesn't — in which case
+     water genuinely accumulates (boat.bilgeWater) until repaired.
+     This is the one path that makes the life raft a meaningful,
+     last-resort option rather than a decoration.
+     -------------------------------------------------------------- */
+  var BILGE_PUMP_CAPACITY_GPH = 60; // the automatic pump clears this much on its own
+  var BILGE_CRITICAL_GALLONS = 150; // past this, the boat is in genuine danger — see DISTRESS's life-raft gate
+
+  function checkHullLeak(state) {
+    var f = state.flags;
+    if (f.hullLeakTriggered || state.crew.inLifeRaft) return;
+    if (state.departure.stageIndex < DEPARTURE_STEPS.length) return;
+    if (voyagePhase(state) === 'inland') return; // not out in real conditions yet
+    var chance = 0.00025; // per 10-minute tick, offshore, in ordinary conditions
+    if (state.weather.seaState >= 5) chance *= 4;
+    else if (state.weather.seaState >= 4) chance *= 2;
+    if (Math.random() < chance) {
+      f.hullLeakTriggered = true;
+      state.boat.floodRate = rand(15, 90);
+      log(state, "Water where there shouldn't be any \u2014 a leak somewhere below the waterline.");
+      flushNewLogEntries(state);
+    }
+  }
+
+  function checkFlooding(state) {
+    var b = state.boat, f = state.flags;
+    if (b.floodRate <= 0 && b.bilgeWater <= 0) return;
+    var hours = TICK_MINUTES / 60;
+    var net = b.floodRate - BILGE_PUMP_CAPACITY_GPH; // negative once the pump is winning
+    b.bilgeWater = clamp(b.bilgeWater + net * hours, 0, 9999);
+    if (b.bilgeWater >= 50 && !f.bilgeWarned50) {
+      f.bilgeWarned50 = true;
+      log(state, "Water sloshing in the bilge now. The pump is working for it.");
+      flushNewLogEntries(state);
+    }
+    if (b.bilgeWater >= 100 && !f.bilgeWarned100) {
+      f.bilgeWarned100 = true;
+      log(state, "The pump can't keep up. Water's rising below.");
+      flushNewLogEntries(state);
+    }
+  }
+
+  /* --------------------------------------------------------------
+     RESCUE
+
+     EPIRB -> real-time travel to the search area -> a SEARCH phase
+     made of discrete, widely-spaced "encounters" (an aircraft or
+     vessel actually searching nearby) each open for a real multi-hour
+     window — long enough that checking Landfall a couple of times a
+     day is enough to catch one and fire a flare. Missing a window
+     never fails the rescue; it just means the next encounter, a few
+     hours later, resolves without the flare's help. This is real
+     time throughout: nothing here is a caller of advanceSimulation(),
+     it only ever reads state.meta.voyageMinutes and reschedules a
+     future timestamp for simTick to notice on some later real tick.
+     -------------------------------------------------------------- */
+  var RESCUE_ENCOUNTER_WINDOW_MINUTES = 180; // how long an encounter stays open for a flare response
+  var RESCUE_ENCOUNTER_MIN_GAP = 180;        // 3-8 real hours between search encounters
+  var RESCUE_ENCOUNTER_MAX_GAP = 480;
+
+  function estimateRescueTravelMinutes(state) {
+    var phase = voyagePhase(state);
+    var baseHours = { inland: 1, strait: 2, coastal: 4, offshore: 20, tropics: 16, approach: 7 }[phase];
+    if (baseHours == null) baseHours = 14;
+    var weatherFactor = (state.weather.seaState >= 5) ? 1.4 : 1.0;
+    return Math.round(baseHours * weatherFactor * 60);
+  }
+
+  function rescueEncounterChance(state) {
+    var r = state.rescue;
+    var chance = 0.4; // aboard the boat, reasonable visibility, baseline
+    if (state.crew.inLifeRaft) chance -= 0.15; // a much smaller target
+    var tod = timeOfDayPhase(state);
+    if (tod === 'night') chance -= 0.15;
+    if (state.weather.condition === 'squall' || state.weather.seaState >= 5) chance -= 0.1;
+    if (r.encounterFlareFired) {
+      var boost = 0.4;
+      if (state.crew.inLifeRaft) boost += 0.1;  // exactly where a flare matters most
+      if (tod === 'night') boost += 0.1;
+      chance += boost;
+    }
+    return clamp(chance, 0.1, 0.95);
+  }
+
+  function beginRescueEncounter(state) {
+    var r = state.rescue;
+    r.encounterActive = true;
+    r.encounterStartedAt = state.meta.voyageMinutes;
+    r.encounterFlareFired = false;
+    r.encounterKind = Math.random() < 0.5 ? 'aircraft' : 'vessel';
+    log(state, r.encounterKind === 'aircraft'
+      ? 'You hear an aircraft. It circles somewhere in the distance.'
+      : 'A vessel is visible, working a search pattern.');
+    log(state, 'Rescuers are searching the area.');
+    flushNewLogEntries(state);
+  }
+
+  function resolveRescueEncounter(state) {
+    var r = state.rescue;
+    var success = Math.random() < rescueEncounterChance(state);
+    r.encounterActive = false;
+    if (success) {
+      r.phase = 'rescued';
+      log(state, r.encounterKind === 'aircraft'
+        ? 'The aircraft circles once more. This time it stays.'
+        : 'The vessel alters course toward you. It keeps coming.');
+      log(state, 'RESCUED');
+      flushNewLogEntries(state);
+    } else {
+      log(state, r.encounterKind === 'aircraft'
+        ? "The aircraft's gone quiet. It could come back."
+        : 'The vessel moves off, still searching elsewhere.');
+      flushNewLogEntries(state);
+      r.nextSearchEventAt = state.meta.voyageMinutes + rand(RESCUE_ENCOUNTER_MIN_GAP, RESCUE_ENCOUNTER_MAX_GAP);
+    }
+  }
+
+  function checkRescue(state) {
+    var r = state.rescue;
+    if (!r.epirbOn || r.phase === 'rescued') return;
+
+    if (r.phase === 'traveling') {
+      if (state.meta.voyageMinutes >= r.activatedAt + r.travelMinutes) {
+        r.phase = 'searching';
+        log(state, "You're in the search area now.");
+        flushNewLogEntries(state);
+        r.nextSearchEventAt = state.meta.voyageMinutes + rand(RESCUE_ENCOUNTER_MIN_GAP, RESCUE_ENCOUNTER_MAX_GAP);
+      }
+      return;
+    }
+
+    if (r.phase !== 'searching') return;
+
+    if (r.encounterActive) {
+      if (state.meta.voyageMinutes >= r.encounterStartedAt + RESCUE_ENCOUNTER_WINDOW_MINUTES) {
+        resolveRescueEncounter(state);
+      }
+      return;
+    }
+
+    if (r.nextSearchEventAt != null && state.meta.voyageMinutes >= r.nextSearchEventAt) {
+      beginRescueEncounter(state);
+    }
+  }
+
   function weatherChangeLine(condition) {
     var lines = {
       rain: "Rain starts, fine and steady.",
@@ -719,11 +1212,100 @@
 
   function checkThirstNarration(state) {
     var f = state.flags;
-    if (state.crew.hoursSinceWater > 8 && !f.thirstNarrated) {
+    if (thirstLevel(state.crew.hoursSinceWater) >= 3 && !f.thirstNarrated) {
       f.thirstNarrated = true;
       log(state, "Your mouth feels like the inside of a sail bag. Water, before anything else.");
     }
-    if (state.crew.hoursSinceWater < 4) f.thirstNarrated = false;
+    if (thirstLevel(state.crew.hoursSinceWater) < 2) f.thirstNarrated = false;
+  }
+
+  function checkHungerNarration(state) {
+    var f = state.flags;
+    if (hungerLevel(state.crew.hoursSinceMeal) >= 3 && !f.hungerNarrated) {
+      f.hungerNarrated = true;
+      log(state, "Stomach's stopped asking and started aching. You need real food.");
+    }
+    if (hungerLevel(state.crew.hoursSinceMeal) < 2) f.hungerNarrated = false;
+  }
+
+  /* --------------------------------------------------------------
+     PASSIVE AMBIENT EVENTS
+
+     Observations ("something the sailor notices outside themselves")
+     and ponderings ("something that surfaces in the sailor's mind")
+     both flow through here — chosen at random, on a single schedule
+     that reschedules itself every time, so the two never label
+     themselves and never compete for airtime by running on separate
+     clocks. Nothing about this touches the voyage clock; it only
+     ever decides whether THIS tick is the one that writes a log line.
+     -------------------------------------------------------------- */
+  var AMBIENT_MIN_GAP_MINUTES = 90;   // at least 1.5h between ambient events
+  var AMBIENT_MAX_GAP_MINUTES = 300;  // at most 5h — "substantial stretches" without one
+  var AMBIENT_CATCHUP_CAP = 2;        // a long absence surfaces at most this many, never a backlog dump
+  var AMBIENT_HISTORY_LENGTH = 6;     // how many recent picks to avoid repeating
+
+  function ambientEventsAllowed(state) {
+    if (state.departure.stageIndex < DEPARTURE_STEPS.length) return false; // mid opening-sequence — no room for musing
+    if (state.crew.inLifeRaft) return false; // pure survival focus — no idle noticing from a raft
+    if (state.crew.watchState !== 'awake') return false;      // asleep or trying to be — not noticing anything
+    if (state.pendingChoice) return false;                    // mid-decision, not the moment for a stray thought
+    if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
+    if (state.weather.seaState >= 5) return false;
+    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) return false; // an active problem aboard
+    if (state.boat.floodRate > 0) return false; // active flooding dominates attention too
+    if (hungerLevel(state.crew.hoursSinceMeal) >= 3) return false;  // severe hunger/thirst — physical concerns dominate
+    if (thirstLevel(state.crew.hoursSinceWater) >= 3) return false;
+    return true;
+  }
+
+  function ponderingChance(state) {
+    var chance = 0.35; // observations are somewhat more common than ponderings overall
+    if (state.meta.voyageMinutes / 1440 > 4) chance += 0.15; // more likely after several days offshore
+    var tod = timeOfDayPhase(state);
+    if (tod === 'night' || tod === 'dawn' || tod === 'dusk') chance += 0.15; // solitude, routine, quiet hours
+    if (state.weather.seaState <= 2 && state.weather.condition !== 'rain') chance += 0.1; // calm sailing
+    var phase = voyagePhase(state);
+    if (phase === 'offshore' || phase === 'tropics') chance += 0.1; // extended solitude, long uneventful stretches
+    return clamp(chance, 0.1, 0.75);
+  }
+
+  function checkAmbientEvent(state) {
+    var f = state.flags;
+    if (f.nextAmbientEventAt == null) {
+      f.nextAmbientEventAt = state.meta.voyageMinutes + rand(AMBIENT_MIN_GAP_MINUTES, AMBIENT_MAX_GAP_MINUTES);
+      return;
+    }
+    if (state.meta.voyageMinutes < f.nextAmbientEventAt) return;
+    // Reschedule unconditionally, whether or not something actually fires —
+    // a suppressed slot (danger, asleep, etc.) doesn't get "saved up" for
+    // later; it just tries again at the next randomized interval.
+    f.nextAmbientEventAt = state.meta.voyageMinutes + rand(AMBIENT_MIN_GAP_MINUTES, AMBIENT_MAX_GAP_MINUTES);
+
+    if (state._ambientEventsThisPass !== undefined && state._ambientEventsThisPass >= AMBIENT_CATCHUP_CAP) return;
+    if (!ambientEventsAllowed(state)) return;
+
+    var text = Math.random() < ponderingChance(state) ? pickPondering(state) : pickObservation(state);
+    if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
+    f.recentAmbientTexts.push(text);
+    if (f.recentAmbientTexts.length > AMBIENT_HISTORY_LENGTH) f.recentAmbientTexts.shift();
+    log(state, text);
+    flushNewLogEntries(state);
+    if (state._ambientEventsThisPass !== undefined) state._ambientEventsThisPass++;
+  }
+
+  function checkSpoilage(state) {
+    var days = state.meta.voyageMinutes / 1440;
+    var f = state.flags, food = state.food;
+    if (!f.freshFruitSpoiled && days > 6 && food.freshFruit > 0) {
+      food.freshFruit = 0;
+      f.freshFruitSpoiled = true;
+      log(state, "The last of the fresh fruit has gone soft and off. Over the side with it.");
+    }
+    if (!f.freshBreadSpoiled && days > 4 && food.freshBread > 0) {
+      food.freshBread = 0;
+      f.freshBreadSpoiled = true;
+      log(state, "The bread has finally gone \u2014 mold, then over the side.");
+    }
   }
 
   function checkMilestones(state) {
@@ -758,12 +1340,25 @@
   }
 
   function resolveAftLocker(state) {
-    var successChance = clamp(0.92 - state.crew.fatigue / 150, 0.35, 0.92);
+    var c = state.crew;
+    var spares = state.supplies.spares;
+    var hasShackle = spares.shackles > 0;
+    var penalty = 0;
+    if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.12;
+    if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.15;
+    if (coffeeActive(state)) penalty -= 0.05;
+    if (!hasShackle) penalty += 0.15; // improvising without the right hardware
+    var successChance = clamp(0.92 - c.fatigue / 150 - penalty, 0.2, 0.92);
     var success = Math.random() < successChance;
     state.flags.aftLockerResolved = true;
-    state.crew.fatigue = clamp(state.crew.fatigue + 4, 0, 100);
+    c.fatigue = clamp(c.fatigue + 4, 0, 100);
     if (success) {
-      log(state, "Found it: a jerry can, worked loose from its strap. Resecured. Quiet again.");
+      if (hasShackle) {
+        spares.shackles -= 1;
+        log(state, "Found it: a jerry can, worked loose from its strap. A new shackle sets it right. Quiet again.");
+      } else {
+        log(state, "Found it: a jerry can, worked loose from its strap. No spare shackle aboard — lashed it down instead. Quiet again, for now.");
+      }
     } else {
       state.boat.rigging = clamp(state.boat.rigging - rand(3, 8), 0, 100);
       log(state, "Fumbled it in the dark — a bruised knuckle, and something aft feels different now, secured or not.");
@@ -772,17 +1367,24 @@
   }
 
   /* --------------------------------------------------------------
-     Sleep is a STATE the player enters and leaves — never a call
-     that manufactures time. beginSleep() and wakeUp() only ever
-     flip crew.watchState and write a log line; every minute that
-     passes while asleep is the same real-time tick (live loop or
-     catchUpFromRealTime) that would be running anyway.
+     SLEEP PRESSURE
+
+     Sleep is still a STATE, never a call that manufactures time — but
+     it's now three states, not two: 'awake' -> 'trying' -> 'sleeping'.
+     Selecting SLEEP only ever starts an attempt; every tick after that
+     (whether the live loop or catchUpFromRealTime) rolls real, condition-
+     driven odds for actually falling asleep, and later for staying that
+     way. A well-rested sailor can select SLEEP and simply lie there,
+     exactly as asked — this is what keeps "close game, tap SLEEP" from
+     ever being a guaranteed free fatigue reset.
      -------------------------------------------------------------- */
-  function sleepNarrative() {
+  var TRYING_TO_SLEEP_GIVE_UP_MINUTES = 120; // give up and get up after 2 hours of not falling asleep
+
+  function tryingToSleepNarrative() {
     var options = [
-      "You go below and let sleep take you. The autopilot holds her course.",
-      "Sleep comes fast below, the hatch closed against the weather.",
-      "You lie down still dressed. The boat keeps sailing without you.",
+      "You go below and try to settle. The autopilot holds her course.",
+      "You lie down, still half dressed, and wait for it to take you.",
+      "Eyes closed. Whether sleep comes is another matter.",
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -794,11 +1396,29 @@
     return rounded + (rounded === 1 ? " hour" : " hours");
   }
 
-  function beginSleep(state) {
-    state.crew.watchState = 'sleeping';
-    state.crew.sleepStartedAt = state.meta.voyageMinutes;
-    log(state, sleepNarrative());
-    flushNewLogEntries(state);
+  // Per-tick chance of actually dropping off while 'trying'. Fatigue does
+  // most of the work; a long stretch already awake nudges it further;
+  // rough seas and recent coffee push back against it.
+  function fallAsleepChance(state) {
+    var c = state.crew;
+    var base = 0.15;
+    var fatigueBoost = clamp(c.fatigue / 100, 0, 1) * 0.55;
+    var awakeBoost = clamp((c.hoursSinceRest - 4) / 20, 0, 0.25);
+    var seaPenalty = state.weather.seaState >= 4 ? 0.15 : (state.weather.seaState >= 3 ? 0.05 : 0);
+    var coffeePenalty = coffeeActive(state) ? 0.18 : 0;
+    return clamp(base + fatigueBoost + awakeBoost - seaPenalty - coffeePenalty, 0.03, 0.9);
+  }
+
+  // Per-tick chance of surfacing again once 'sleeping'. Low remaining
+  // fatigue (already well rested) makes waking likelier; rough seas add
+  // their own chance on top — sleep interrupted by weather, not just
+  // completed by resting enough.
+  function wakeChanceWhileSleeping(state) {
+    var c = state.crew;
+    var restedness = clamp(1 - c.fatigue / 100, 0, 1);
+    var base = 0.02 + restedness * 0.10;
+    var seaBoost = state.weather.seaState >= 5 ? 0.12 : (state.weather.seaState >= 4 ? 0.05 : 0);
+    return clamp(base + seaBoost, 0.01, 0.6);
   }
 
   function wakeUp(state, baseText, includeDuration) {
@@ -814,21 +1434,61 @@
     flushNewLogEntries(state);
   }
 
-  function checkSleepInterrupt(state, prevCondition) {
-    if (state.crew.watchState !== 'sleeping') return;
-    // Something demanding attention (e.g. the aft locker) always wins.
-    if (state.pendingChoice) {
-      wakeUp(state, "Something's wrong. You're awake, fast.", false);
+  // Advances the 'trying' -> 'sleeping' -> 'awake' state machine by one
+  // tick. This is the only place any of those transitions happen, so it
+  // runs identically whether it's the live loop or a multi-day catch-up.
+  function processSleepTick(state, prevCondition) {
+    var c = state.crew;
+
+    if (c.watchState === 'trying') {
+      if (Math.random() < fallAsleepChance(state)) {
+        c.watchState = 'sleeping';
+        // Only stamp this on the FIRST drop-off of the session — a restless
+        // wake-and-resettle (above) deliberately leaves sleepStartedAt alone
+        // so the eventual "roughly X hours below" spans the whole night,
+        // not just the last stretch after the last stir.
+        if (c.sleepStartedAt == null) c.sleepStartedAt = state.meta.voyageMinutes;
+        return;
+      }
+      var elapsed = state.meta.voyageMinutes - c.sleepAttemptStartedAt;
+      if (elapsed >= TRYING_TO_SLEEP_GIVE_UP_MINUTES) {
+        c.watchState = 'awake';
+        c.sleepAttemptStartedAt = null;
+        c.sleepStartedAt = null; // fully awake now — a later session starts its own duration count clean
+        log(state, "The rest wouldn't come. Up again.");
+      }
       return;
     }
-    // A squall breaking is loud and wet enough to end anyone's sleep.
-    if (state.weather.condition === 'squall' && prevCondition !== 'squall') {
-      wakeUp(state, "Cold spray through the hatch — you're awake.", false);
-      return;
-    }
-    // Otherwise, sleep ends on its own once it's done its job.
-    if (state.crew.fatigue <= 5) {
-      wakeUp(state, "You surface on your own, rested.");
+
+    if (c.watchState === 'sleeping') {
+      // Something demanding attention (e.g. the aft locker) always wins.
+      if (state.pendingChoice) {
+        wakeUp(state, "Something's wrong. You're awake, fast.", false);
+        return;
+      }
+      // A squall breaking is loud and wet enough to end anyone's sleep.
+      if (state.weather.condition === 'squall' && prevCondition !== 'squall') {
+        wakeUp(state, "Cold spray through the hatch \u2014 you're awake.", false);
+        return;
+      }
+      if (Math.random() < wakeChanceWhileSleeping(state)) {
+        if (c.fatigue <= 20) {
+          // Actually rested — this is a real end to the sleep, not a blip.
+          wakeUp(state, "You surface on your own, rested.");
+        } else {
+          // Still genuinely exhausted: a real wake would leave them stuck
+          // fully 'awake' and racking up MORE fatigue for the rest of an
+          // unattended absence over one unlucky roll. A still-tired sailor
+          // instead stirs and drifts straight back toward sleep — logged,
+          // but not a full wake (watchState goes to 'trying', where the
+          // normal high fallAsleepChance at this fatigue very quickly
+          // pulls them back under).
+          log(state, "Restless. You surface for a moment, then let it take you again.");
+          flushNewLogEntries(state);
+          c.watchState = 'trying';
+          c.sleepAttemptStartedAt = state.meta.voyageMinutes;
+        }
+      }
     }
   }
 
@@ -976,30 +1636,74 @@
      7. TERMINAL RENDERING
      ============================================================ */
   var outputEl = document.getElementById('output');
+  var tempViewEl = document.getElementById('temp-view');
   var optionsEl = document.getElementById('options');
   var clockEl = document.getElementById('clock');
   var vesselLineEl = document.getElementById('vessel-line');
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
 
+  /* --------------------------------------------------------------
+     TWO SEPARATE RENDER SURFACES, both inside #output:
+
+     PERSISTENT (printPersistentLine/Blank, printLogEntry) — the
+     voyage's actual history. Append-only, never cleared, drives
+     entirely off state.log (plus a handful of one-time scene-setting
+     lines: the pre-departure intro, the short-action "STARTING
+     ENGINE"-style headers, the CAST OFF closing beat, the welcome-
+     back header). Always inserted just BEFORE tempViewEl, so that
+     div stays pinned as the last child no matter how much history
+     accumulates above it.
+
+     TEMPORARY (printLine/Blank/Echo, inside #temp-view) — whatever
+     menu or status screen is currently open: STATUS, POSITION,
+     INVENTORY and its categories, the SAILS/ENGINE/COURSE prompts,
+     confirmation/rejection text like "Left as it was." or "Nothing
+     there." None of this is a voyage event, so none of it touches
+     state.log — and unlike the persistent side, it gets wiped by
+     clearTempView() at the start of every new interaction, so
+     yesterday's menu never lingers behind today's.
+
+     A real ACTION taken from a menu (eating, drinking, starting the
+     engine, changing sail) still calls log()+flushNewLogEntries() to
+     land on the persistent side, exactly like any other voyage event
+     — only the menu's own browsing/status text is temporary.
+     -------------------------------------------------------------- */
   function printLine(text, cls) {
     var p = document.createElement('p');
     p.className = 'line' + (cls ? ' ' + cls : '');
     p.textContent = text;
-    outputEl.appendChild(p);
+    tempViewEl.appendChild(p);
   }
 
   function printBlank() {
     var p = document.createElement('p');
     p.className = 'gap';
-    outputEl.appendChild(p);
+    tempViewEl.appendChild(p);
   }
 
   function printEcho(text) {
     var p = document.createElement('p');
     p.className = 'line echo';
     p.textContent = '> ' + text.toUpperCase();
-    outputEl.appendChild(p);
+    tempViewEl.appendChild(p);
+  }
+
+  function clearTempView() {
+    tempViewEl.innerHTML = '';
+  }
+
+  function printPersistentLine(text, cls) {
+    var p = document.createElement('p');
+    p.className = 'line' + (cls ? ' ' + cls : '');
+    p.textContent = text;
+    outputEl.insertBefore(p, tempViewEl);
+  }
+
+  function printPersistentBlank() {
+    var p = document.createElement('p');
+    p.className = 'gap';
+    outputEl.insertBefore(p, tempViewEl);
   }
 
   function formatShipTime(ts) {
@@ -1023,7 +1727,27 @@
     body.textContent = entry.text;
     wrap.appendChild(ts);
     wrap.appendChild(body);
-    outputEl.appendChild(wrap);
+    outputEl.insertBefore(wrap, tempViewEl);
+  }
+
+  // Same rendering as printLogEntry, but into the temporary view — for the
+  // LOG command's "review what's happened so far" screen. It reads
+  // state.log, but it must never RE-insert those entries into the
+  // permanent area (they're already there, appended once each as they
+  // happened) — doing that would duplicate the whole history into
+  // #output every single time the player opens LOG.
+  function printTempLogEntry(entry) {
+    var wrap = document.createElement('div');
+    wrap.className = 'entry';
+    var ts = document.createElement('div');
+    ts.className = 'entry-ts';
+    ts.textContent = formatShipTime(entry.t);
+    var body = document.createElement('div');
+    body.className = 'entry-text';
+    body.textContent = entry.text;
+    wrap.appendChild(ts);
+    wrap.appendChild(body);
+    tempViewEl.appendChild(wrap);
   }
 
   function scrollToBottom() {
@@ -1035,6 +1759,16 @@
       printLogEntry(state.log[printedCount]);
     }
     scrollToBottom();
+  }
+
+  // outputEl.innerHTML = '' (a full reset, used by confirmRestart and
+  // renderReturn) would delete tempViewEl itself, since it's a child of
+  // outputEl — re-attach the same node right after, so every later
+  // printPersistentLine/printLogEntry call still has a valid insertBefore
+  // target instead of throwing on a detached reference.
+  function resetOutputEl() {
+    outputEl.innerHTML = '';
+    outputEl.appendChild(tempViewEl);
   }
 
   function setVesselLine(text) { vesselLineEl.textContent = text; }
@@ -1088,18 +1822,10 @@
     ]);
   }
 
-  function supplyPhrase(days) {
-    return describeLevel(days, [
-      { max: 3, text: "nearly gone — this needs attention" },
-      { max: 8, text: "running low" },
-      { max: 999, text: "adequate" },
-    ]);
-  }
-
-  function fuelPhrase(hours) {
-    return describeLevel(hours, [
-      { max: 2, text: "almost dry — this needs attention" },
-      { max: 6, text: "running low" },
+  function countPhrase(n, criticalMax, lowMax) {
+    return describeLevel(n, [
+      { max: criticalMax, text: "nearly gone — this needs attention" },
+      { max: lowMax, text: "running low" },
       { max: 999, text: "adequate" },
     ]);
   }
@@ -1143,16 +1869,26 @@
   }
 
   function sailConfigLabel(cfg) {
-    return { full: 'full sail', reefed: 'reefed', minimal: 'minimal canvas' }[cfg] || cfg;
+    return { full: 'full sail', reefed: 'reefed', minimal: 'minimal canvas', furled: 'furled' }[cfg] || cfg;
   }
 
+  // All four states, each named plainly for what it is rather than as a
+  // move relative to wherever the boat happens to be now — with FURLED in
+  // the mix, "reduce to reefed" stops making sense if you're coming FROM
+  // furled (that would be an increase, not a reduction). The current
+  // configuration is left off the list (it's already shown above this in
+  // cmdSails) rather than offered as a do-nothing button.
   function sailOptions(state) {
     var cfg = state.boat.sailConfig;
-    var opts = [];
-    if (cfg !== 'reefed') opts.push({ label: 'REDUCE TO REEFED', action: 'sail-reefed' });
-    if (cfg !== 'minimal') opts.push({ label: 'REDUCE TO MINIMAL', action: 'sail-minimal' });
-    if (cfg !== 'full') opts.push({ label: 'SHAKE OUT REEF (FULL SAIL)', action: 'sail-full' });
-    opts.push({ label: 'LEAVE AS IS', action: 'cancel' });
+    var configs = [
+      { key: 'full', label: 'FULL', action: 'sail-full' },
+      { key: 'reefed', label: 'REEFED', action: 'sail-reefed' },
+      { key: 'minimal', label: 'MINIMAL', action: 'sail-minimal' },
+      { key: 'furled', label: 'FURLED', action: 'sail-furled' },
+    ];
+    var opts = configs.filter(function (c) { return c.key !== cfg; })
+      .map(function (c) { return { label: c.label, action: c.action }; });
+    opts.push({ label: 'BACK', action: 'cancel' });
     return opts;
   }
 
@@ -1160,12 +1896,18 @@
      8. COMMANDS
      ============================================================ */
   function cmdStatus(state) {
+    var c = state.crew, w = state.water, s = state.supplies;
+    var waterNote = w.primary <= 0
+      ? (w.emergency > 0 ? ' Emergency reserve still available.' : ' Emergency reserve also gone.')
+      : '';
     var rows = [
-      ['FATIGUE', fatiguePhrase(state.crew.fatigue)],
-      ['MORALE', moralePhrase(state.crew.morale)],
-      ['FOOD', capitalize(supplyPhrase(state.crew.foodDays)) + '.'],
-      ['WATER', capitalize(supplyPhrase(state.crew.waterDays)) + '.'],
-      ['FUEL', capitalize(fuelPhrase(state.boat.fuelHours)) + '.'],
+      ['FATIGUE', fatiguePhrase(c.fatigue)],
+      ['MORALE', moralePhrase(c.morale)],
+      ['HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]],
+      ['THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]],
+      ['WATER TANKS', capitalize(countPhrase(w.primary, 5, 15)) + '.' + waterNote],
+      ['DIESEL', capitalize(countPhrase(state.boat.fuelGallons, 3, 8)) + '.'],
+      ['PROPANE', capitalize(countPhrase(s.propane, 8, 20)) + '.'],
       ['HULL', capitalize(conditionPhrase(state.boat.hull)) + '.'],
       ['RIGGING', capitalize(conditionPhrase(state.boat.rigging)) + '.'],
       ['SAILS', capitalize(conditionPhrase(state.boat.sails)) + '.'],
@@ -1190,6 +1932,18 @@
     printBlank();
     printLine('HEADING', 'heading-label');
     printLine(Math.round(state.nav.heading) + '\u00B0  (intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0)');
+    printBlank();
+    printLine('PROPULSION', 'heading-label');
+    printLine(propulsionLabel(propulsionState(state, state.nav.heading)));
+    printBlank();
+    printLine('SPEED', 'heading-label');
+    // Computed fresh from current conditions rather than read back from
+    // state.boat.speed, which is only ever written by simTick() and can
+    // otherwise sit uninitialized (or stale) until the next full tick —
+    // up to 10 real minutes after a fresh departure, showing a misleading
+    // 0.0 even when the boat is actually making way.
+    var liveSpeed = computeBoatSpeed(state, state.nav.heading);
+    printLine(liveSpeed.toFixed(1) + ' kt');
     printBlank();
     printLine('DISTANCE', 'heading-label');
     var remaining = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
@@ -1230,7 +1984,7 @@
     if (state.log.length === 0) {
       printLine('Nothing logged yet.', 'dim');
     } else {
-      state.log.forEach(printLogEntry);
+      state.log.forEach(printTempLogEntry);
     }
   }
 
@@ -1241,10 +1995,154 @@
     state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
   }
 
+  /* --------------------------------------------------------------
+     INVENTORY
+     ------------------------------------------------------------
+     What is physically aboard, right now — distinct from the LOG,
+     which is what has happened. Provisions/water/fuel read from the
+     same state.food / state.water / state.boat.fuelGallons that EAT,
+     DRINK, and the ENGINE menu already use — there is no second copy
+     of any of these numbers. The remaining categories live under
+     state.supplies.* alongside the existing propane count.
+     -------------------------------------------------------------- */
+  var SPARES_NAMES = {
+    impellers: 'Impellers', belts: 'Drive belts', fuelFilters: 'Fuel filters', oilFilters: 'Oil filters', oil: 'Engine oil (qt)', coolant: 'Coolant (qt)',
+    fuses: 'Fuses', wire: 'Wire (ft)', connectors: 'Connectors', batteries: 'Spare batteries',
+    hose: 'Hose (ft)', hoseClamps: 'Hose clamps', spareLine: 'Spare line (ft)', shackles: 'Shackles', riggingTape: 'Rigging tape',
+    sailRepair: 'Sail repair kits', epoxy: 'Epoxy', sealant: 'Sealant',
+  };
+
+  function inventoryLine(name, valueText) {
+    var dots = '.'.repeat(Math.max(2, 22 - name.length));
+    return name + ' ' + dots + ' ' + valueText;
+  }
+
+  function printSuppliesCategory(state, catKey, names) {
+    var data = state.supplies[catKey] || {};
+    var keys = Object.keys(names);
+    var any = keys.some(function (k) { return data[k] > 0; });
+    if (!any) {
+      printLine('Nothing left in this category.', 'amber');
+      return;
+    }
+    keys.forEach(function (k) {
+      if (data[k] > 0) printLine(inventoryLine(names[k], String(data[k])));
+    });
+  }
+
+  function showInventoryCategory(state, cat) {
+    printBlank();
+    switch (cat) {
+      case 'provisions':
+        printLine('PROVISIONS', 'heading-label');
+        var anyFood = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; }) || state.food.coffee > 0;
+        if (!anyFood) {
+          printLine('Nothing left aboard to eat.', 'amber');
+        } else {
+          FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key])); });
+          if (state.food.coffee > 0) printLine(foodItemLine({ name: 'Coffee' }, state.food.coffee));
+        }
+        break;
+      case 'water':
+        printLine('WATER', 'heading-label');
+        printLine(inventoryLine('Fresh water', state.water.primary.toFixed(1) + ' gal'));
+        printLine(inventoryLine('Emergency water', state.water.emergency.toFixed(1) + ' gal'));
+        break;
+      case 'fuel':
+        printLine('FUEL', 'heading-label');
+        printLine(inventoryLine('Diesel', state.boat.fuelGallons.toFixed(1) + ' gal'));
+        printLine(inventoryLine('Propane', state.supplies.propane + ' uses'));
+        break;
+      case 'spares':
+        printLine('SPARES', 'heading-label');
+        printSuppliesCategory(state, 'spares', SPARES_NAMES);
+        break;
+      case 'safety':
+        printLine('SAFETY', 'heading-label');
+        printLine(inventoryLine('EPIRB', state.rescue.epirbOn ? 'ACTIVE' : 'READY'));
+        printLine(inventoryLine('Life raft', state.crew.inLifeRaft ? 'DEPLOYED' : 'READY'));
+        printLine(inventoryLine('Flares', String(state.supplies.safety.flares)));
+        break;
+      default:
+        printLine('Nothing there.', 'dim');
+    }
+    state.pendingChoice = { id: 'inventory-category', options: [{ label: 'BACK', action: 'inventory:back' }] };
+  }
+
+  function cmdInventory(state) {
+    printBlank();
+    printLine('INVENTORY', 'heading-label');
+    state.pendingChoice = {
+      id: 'inventory-menu',
+      options: [
+        { label: 'PROVISIONS', action: 'inventory:provisions' },
+        { label: 'WATER', action: 'inventory:water' },
+        { label: 'FUEL', action: 'inventory:fuel' },
+        { label: 'SPARES', action: 'inventory:spares' },
+        { label: 'SAFETY', action: 'inventory:safety' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
+  }
+
+  function rescueStatusLine(state) {
+    var r = state.rescue;
+    if (r.phase === 'traveling') return 'help is on the way.';
+    if (r.phase === 'searching') return r.encounterActive ? 'rescuers searching nearby.' : 'search underway.';
+    if (r.phase === 'rescued') return 'rescued.';
+    return '';
+  }
+
+  // DISTRESS is the one place EPIRB/life-raft/flare actions live — the
+  // SAFETY inventory screen only ever reports what's aboard and its
+  // status, never triggers anything itself.
+  function cmdDistress(state) {
+    printBlank();
+    printLine('DISTRESS', 'heading-label');
+    var r = state.rescue;
+    var opts = [];
+    if (!r.epirbOn) {
+      printLine('EPIRB: READY');
+      opts.push({ label: 'ACTIVATE EPIRB', action: 'activate-epirb' });
+    } else {
+      printLine('EPIRB: ACTIVE \u2014 ' + rescueStatusLine(state));
+    }
+    if (state.boat.bilgeWater > 80 && !state.crew.inLifeRaft) {
+      opts.push({ label: 'DEPLOY LIFE RAFT', action: 'deploy-life-raft' });
+    }
+    if (r.encounterActive && state.supplies.safety.flares > 0) {
+      opts.push({ label: 'FIRE FLARE', action: 'fire-flare' });
+    }
+    opts.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'distress-menu', options: opts };
+  }
+
+  function cmdEngine(state) {
+    printBlank();
+    printLine('ENGINE', 'heading-label');
+    printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
+    printLine('Diesel: ' + state.boat.fuelGallons.toFixed(1) + ' gal');
+    if (!state.boat.engineOn && state.boat.fuelGallons <= 0) {
+      printLine('No diesel left to start it.', 'amber');
+      state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
+    var toggleOption = state.boat.engineOn
+      ? { label: 'STOP ENGINE', action: 'engine-stop' }
+      : { label: 'START ENGINE', action: 'engine-start' };
+    state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { label: 'BACK', action: 'cancel' }] };
+  }
+
   function cmdCourse(state) {
     printBlank();
     printLine('COURSE', 'heading-label');
     printLine('Steering ' + Math.round(state.nav.heading) + '\u00B0, intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0.');
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      printBlank();
+      printLine("CAN'T ALTER COURSE.", 'amber');
+      printLine('TOO CLOSE TO SHORELINE.', 'amber');
+      return;
+    }
     state.pendingChoice = {
       id: 'course-choice',
       options: [
@@ -1255,47 +2153,210 @@
     };
   }
 
-  function cmdRest(state) {
-    printBlank();
-    printLine('REST', 'heading-label');
-    printLine('Go below, or stay on watch?');
-    state.pendingChoice = {
-      id: 'rest-choice',
-      options: [
-        { label: 'GO BELOW / SLEEP', action: 'go-below' },
-        { label: 'STAY ON WATCH', action: 'stay-on-watch' },
-      ],
-    };
+  function cmdSleep(state) {
+    if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
+    state.crew.watchState = 'trying';
+    state.crew.sleepAttemptStartedAt = state.meta.voyageMinutes;
+    log(state, tryingToSleepNarrative());
+    flushNewLogEntries(state);
+  }
+
+  function foodItemLine(item, servings) {
+    var dots = '.'.repeat(Math.max(2, 22 - item.name.length));
+    return item.name + ' ' + dots + ' ' + servings + ' servings';
+  }
+
+  function buildEatOptions(state) {
+    var opts = FOOD_ITEMS.filter(function (f) { return state.food[f.key] > 0; })
+      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+    if (state.food.coffee > 0) opts.push({ label: 'COFFEE (' + state.food.coffee + ')', action: 'eat:coffee' });
+    opts.push({ label: 'NEVER MIND', action: 'cancel' });
+    return opts;
   }
 
   function cmdEat(state) {
     printBlank();
-    if (state.crew.foodDays <= 0) {
-      printLine('Nothing left to eat.', 'amber');
+    printLine('PROVISIONS', 'heading-label');
+    var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; }) || state.food.coffee > 0;
+    if (!any) {
+      printLine('Nothing left aboard to eat.', 'amber');
       return;
     }
-    state.crew.hoursSinceMeal = 0;
-    state.crew.foodDays = clamp(state.crew.foodDays - 0.15, 0, 999);
-    state.crew.fatigue = clamp(state.crew.fatigue - 4, 0, 100);
-    state.crew.morale = clamp(state.crew.morale + 2, 0, 100);
-    printLine('A meal, eaten standing up, watching the horizon out of habit.');
+    FOOD_ITEMS.forEach(function (f) {
+      if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key]));
+    });
+    if (state.food.coffee > 0) printLine(foodItemLine({ name: 'Coffee' }, state.food.coffee));
+    state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+  }
+
+  function eatFlavorLine(state, item) {
+    var rough = state.weather.seaState >= 4;
+    var verb = item.cooked ? 'You make' : 'You eat';
+    var where = rough ? 'below, braced against the motion' : (item.cooked ? 'in the galley' : 'in the cockpit');
+    return verb + ' ' + item.name.toLowerCase() + ' ' + where + '.';
+  }
+
+  function performEat(state, key) {
+    if (key === 'coffee') {
+      performCoffee(state);
+      return;
+    }
+    var item = FOOD_ITEMS_BY_KEY[key];
+    if (!item || state.food[key] <= 0) {
+      printBlank();
+      printLine("That's already gone.", 'dim');
+      return;
+    }
+    if (item.cooked) {
+      if (state.weather.seaState >= 5) {
+        printBlank();
+        printLine('THE BOAT IS MOVING TOO VIOLENTLY', 'amber');
+        printLine('TO COOK SAFELY.', 'amber');
+        state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+        return;
+      }
+      if (state.supplies.propane <= 0) {
+        printBlank();
+        printLine('Out of propane. Nothing left to cook with.', 'amber');
+        state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+        return;
+      }
+    }
+    // Gates passed (or there weren't any) — the actual preparing/eating
+    // takes a few real seconds. Cooking takes longer than grabbing
+    // something ready to eat.
+    var label = (item.cooked ? 'MAKING ' : 'PREPARING ') + item.name.toUpperCase();
+    runShortAction(state, {
+      label: label,
+      duration: item.cooked ? 5 : 2,
+      action: function (s) {
+        if (item.cooked) {
+          s.supplies.propane = clamp(s.supplies.propane - 1, 0, 999);
+          s.water.primary = clamp(s.water.primary - 0.2, 0, 999);
+        }
+        s.food[key] -= 1;
+        s.crew.hoursSinceMeal = 0;
+        var fatigueGain = item.heavy ? 6 : 3;
+        var moraleGain = item.comfort ? 6 : (item.heavy ? 3 : 1);
+        s.crew.fatigue = clamp(s.crew.fatigue - fatigueGain, 0, 100);
+        s.crew.morale = clamp(s.crew.morale + moraleGain, 0, 100);
+        log(s, eatFlavorLine(s, item));
+        flushNewLogEntries(s);
+      },
+    });
+  }
+
+  function performCoffee(state) {
+    if (state.food.coffee <= 0) {
+      printBlank();
+      printLine('No coffee left.', 'amber');
+      return;
+    }
+    runShortAction(state, {
+      label: 'MAKING COFFEE',
+      duration: 3,
+      action: function (s) {
+        s.food.coffee -= 1;
+        s.water.primary = clamp(s.water.primary - 0.1, 0, 999);
+        s.crew.lastCoffeeAt = s.meta.voyageMinutes;
+        s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
+        log(s, 'Coffee, strong and hot. The world sharpens a little.');
+        flushNewLogEntries(s);
+      },
+    });
   }
 
   function cmdDrink(state) {
-    printBlank();
-    if (state.crew.waterDays <= 0) {
-      printLine('Nothing left to drink.', 'amber');
+    if (state.water.primary > 0) {
+      performDrinkFrom(state, 'primary');
       return;
     }
-    state.crew.hoursSinceWater = 0;
-    state.crew.waterDays = clamp(state.crew.waterDays - 0.1, 0, 999);
-    state.crew.fatigue = clamp(state.crew.fatigue - 2, 0, 100);
-    printLine('Water, straight from the jug. Cool enough.');
+    printBlank();
+    if (state.water.emergency > 0) {
+      printLine('Primary tank is empty.', 'amber');
+      state.pendingChoice = {
+        id: 'drink-emergency-choice',
+        options: [
+          { label: 'USE EMERGENCY RESERVE', action: 'drink:emergency' },
+          { label: 'NEVER MIND', action: 'cancel' },
+        ],
+      };
+      return;
+    }
+    printLine('No water left aboard.', 'amber');
+  }
+
+  function performDrinkFrom(state, tank) {
+    if (state.water[tank] <= 0) {
+      printBlank();
+      printLine('Nothing there.', 'dim');
+      return;
+    }
+    runShortAction(state, {
+      label: 'POURING WATER',
+      duration: 2,
+      action: function (s) {
+        s.water[tank] = clamp(s.water[tank] - 0.25, 0, 999);
+        s.crew.hoursSinceWater = 0;
+        s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
+        log(s, tank === 'emergency' ? "Water from the emergency jugs. It'll have to do." : 'Water, straight from the tap. Cool enough.');
+        flushNewLogEntries(s);
+      },
+    });
+  }
+
+  function pickObservation(state) {
+    var phase = voyagePhase(state);
+    var pool = OBSERVATIONS[phase] || OBSERVATIONS.offshore;
+    var tod = timeOfDayPhase(state);
+    var special = [];
+    if (tod === 'night' && pool.awe_night) special = special.concat(pool.awe_night);
+    if (tod !== 'night' && pool.awe_day) special = special.concat(pool.awe_day);
+    if (tod === 'dawn' && pool.sunrise) special = special.concat(pool.sunrise);
+    if (tod === 'dusk' && pool.sunset) special = special.concat(pool.sunset);
+    if (pool.awe) special = special.concat(pool.awe);
+    var recent = state.flags.recentAmbientTexts || [];
+    if (special.length && Math.random() < 0.18) {
+      return pickFromPoolAvoidingRecent(special, recent);
+    }
+    var quiet = pool.quiet || [];
+    if (!quiet.length) return 'The sea, the sky, the boat. Nothing more to report.';
+    return pickFromPoolAvoidingRecent(quiet, recent);
+  }
+
+
+  function attemptLeakRepair(state) {
+    var c = state.crew, spares = state.supplies.spares;
+    var hasSealant = spares.sealant > 0;
+    var hasHoseKit = spares.hose > 0 && spares.hoseClamps > 0;
+    var hasMaterial = hasSealant || hasHoseKit;
+    var penalty = 0;
+    if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.12;
+    if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.15;
+    if (state.weather.seaState >= 4) penalty += 0.15; // hard to work a repair in a seaway
+    if (!hasMaterial) penalty += 0.25; // improvising without the right materials
+    var successChance = clamp(0.75 - c.fatigue / 200 - penalty, 0.15, 0.85);
+    var success = Math.random() < successChance;
+    c.fatigue = clamp(c.fatigue + 6, 0, 100);
+    if (success) {
+      if (hasSealant) spares.sealant -= 1;
+      else if (hasHoseKit) { spares.hose -= 1; spares.hoseClamps -= 1; }
+      state.boat.floodRate = 0;
+      state.flags.hullLeakResolved = true;
+      log(state, hasMaterial ? "Sealant packed into the seam. The flow stops." : "Wedged and lashed with what's on hand. It's holding, for now.");
+    } else {
+      log(state, "Can't get at it properly \u2014 the water keeps coming.");
+    }
+    flushNewLogEntries(state);
   }
 
   function cmdRepair(state) {
     if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
-      resolveAftLocker(state);
+      runShortAction(state, { label: 'CHECKING AFT LOCKER', duration: 6, action: resolveAftLocker });
+      return;
+    }
+    if (state.boat.floodRate > 0) {
+      runShortAction(state, { label: 'WORKING THE LEAK', duration: 6, action: attemptLeakRepair });
       return;
     }
     printBlank();
@@ -1321,9 +2382,12 @@
     weather: cmdWeather,
     forecast: cmdForecast,
     log: cmdLog,
+    inventory: cmdInventory,
+    distress: cmdDistress,
     sails: cmdSails,
+    engine: cmdEngine,
     course: cmdCourse,
-    rest: cmdRest,
+    sleep: cmdSleep,
     eat: cmdEat,
     drink: cmdDrink,
     repair: cmdRepair,
@@ -1339,6 +2403,7 @@
     if (!word) return;
     var fn = COMMANDS[word];
     if (fn) fn(state);
+    if (uiBusy) return; // a short action was kicked off; it owns the render/save/scroll tail when it resolves
     renderOptions(state);
     saveGameState(state);
     scrollToBottom();
@@ -1346,21 +2411,46 @@
 
   function getContextualOptions(state) {
     // A pending decision always wins — including a restart request made
-    // mid-departure or mid-sleep, which must be answerable even though
-    // those states otherwise show just one button.
+    // mid-departure, mid-attempt, or mid-sleep, which must be answerable
+    // even though those states otherwise show just one button.
     if (state.pendingChoice) return state.pendingChoice.options;
 
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) {
       return [{ label: DEPARTURE_STEPS[state.departure.stageIndex].label, action: 'departure-step' }];
     }
 
+    if (state.rescue.phase === 'rescued') {
+      // The voyage is over — nothing left to do but look back at it.
+      return [{ label: 'STATUS', action: 'cmd:status' }, { label: 'LOG', action: 'cmd:log' }];
+    }
+
+    if (state.crew.watchState === 'trying') {
+      return [{ label: 'GET UP', action: 'give-up-trying' }];
+    }
     if (state.crew.watchState === 'sleeping') {
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
 
     var repairLabel = (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)
       ? 'INSPECT AFT LOCKER'
-      : 'REPAIR';
+      : (state.boat.floodRate > 0 ? 'WORK THE LEAK' : 'REPAIR');
+
+    if (state.crew.inLifeRaft) {
+      // Nothing left to sail, motor, steer, or fix — the voyage has
+      // become survival until rescue, full stop.
+      return [
+        { label: 'STATUS', action: 'cmd:status' },
+        { label: 'POSITION', action: 'cmd:position' },
+        { label: 'WEATHER', action: 'cmd:weather' },
+        { label: 'LOG', action: 'cmd:log' },
+        { label: 'INVENTORY', action: 'cmd:inventory' },
+        { divider: true },
+        { label: 'EAT', action: 'cmd:eat' },
+        { label: 'DRINK', action: 'cmd:drink' },
+        { label: 'SLEEP', action: 'cmd:sleep' },
+        { label: 'DISTRESS', action: 'cmd:distress' },
+      ];
+    }
 
     // Every command is a persistent button now — nothing is typed, so
     // nothing can be hidden. A thin divider (added in renderOptions)
@@ -1371,13 +2461,16 @@
       { label: 'WEATHER', action: 'cmd:weather' },
       { label: 'FORECAST', action: 'cmd:forecast' },
       { label: 'LOG', action: 'cmd:log' },
+      { label: 'INVENTORY', action: 'cmd:inventory' },
       { divider: true },
       { label: 'SAILS', action: 'cmd:sails' },
+      { label: 'ENGINE', action: 'cmd:engine' },
       { label: 'COURSE', action: 'cmd:course' },
       { label: 'EAT', action: 'cmd:eat' },
       { label: 'DRINK', action: 'cmd:drink' },
-      { label: 'GO BELOW / SLEEP', action: 'cmd:rest' },
+      { label: 'SLEEP', action: 'cmd:sleep' },
       { label: repairLabel, action: 'cmd:repair' },
+      { label: 'DISTRESS', action: 'cmd:distress' },
     ];
   }
 
@@ -1396,6 +2489,7 @@
       btn.className = 'option';
       btn.textContent = '> ' + opt.label;
       btn.addEventListener('click', function () {
+        clearTempView(); // whatever the last command/menu showed is done being looked at
         if (opt.action.indexOf('cmd:') === 0) {
           var cmdName = opt.action.slice(4);
           printEcho(cmdName);
@@ -1408,46 +2502,230 @@
     });
   }
 
+  /* --------------------------------------------------------------
+     SHORT PHYSICAL ACTIONS
+
+     A reusable working-indicator system for physical tasks that
+     shouldn't resolve instantly — starting the engine, reefing,
+     checking the aft locker, pouring water. NOT a loading spinner:
+     it represents the sailor actually doing something, so it runs
+     on real wall-clock seconds (setTimeout/setInterval), same as a
+     human would take a moment. This is orthogonal to — and never
+     touches — the voyage clock (meta.voyageMinutes): a few seconds
+     of UI pacing is not a time-skip; see PROJECT.md's real-time rule,
+     which governs the SIMULATION clock, not interaction pacing.
+
+     Usage: runShortAction(state, { label, duration, action }).
+     `action(state)` does whatever an instant handler normally would
+     (mutate state, call log()/printLine() itself) — this just wraps
+     it with a label and a few seconds of animated dots first, then
+     runs the normal render/save tail once it resolves. Any future
+     action can opt in with three lines; nothing here is hard-coded
+     to a specific task.
+     -------------------------------------------------------------- */
+  var uiBusy = false; // true while a short action's dots are animating — options are hidden, other actions wait
+  var DOT_FRAME_MS = 700;
+
+  function runShortAction(state, config) {
+    uiBusy = true;
+    var choiceAtStart = state.pendingChoice; // preserved/cleared the same way handleAction's tail would
+
+    optionsEl.innerHTML = '';
+    clearTempView(); // whatever menu was open is done being looked at once an action starts
+    printPersistentBlank();
+    printPersistentLine(config.label, 'heading-label');
+    var dotsLine = document.createElement('p');
+    dotsLine.className = 'line dim';
+    dotsLine.textContent = '.';
+    outputEl.insertBefore(dotsLine, tempViewEl);
+    scrollToBottom();
+
+    var frames = ['.', '..', '...'];
+    var frameIndex = 0;
+    var dotTimer = setInterval(function () {
+      frameIndex = (frameIndex + 1) % frames.length;
+      dotsLine.textContent = frames[frameIndex];
+    }, DOT_FRAME_MS);
+
+    setTimeout(function () {
+      clearInterval(dotTimer);
+      if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+
+      if (config.action) config.action(state);
+
+      if (state.pendingChoice === choiceAtStart) {
+        state.pendingChoice = null;
+      }
+      uiBusy = false;
+      renderOptions(state);
+      saveGameState(state);
+      updateAudioForState(state);
+      scrollToBottom();
+    }, (config.duration || 3) * 1000);
+  }
+
   function handleAction(state, action) {
     // Restarting discards the current game object entirely, so it can't
-    // flow through the normal switch/tail below (which would re-save and
+    // flow through the normal tail below (which would re-save and
     // re-render the very state this just deleted). Handle it and bail out.
     if (action === 'confirm-restart') {
       confirmRestart();
       return;
     }
-    switch (action) {
-      case 'cancel':
-        printBlank();
-        printLine('Left as it was.', 'dim');
-        break;
-      case 'go-below':
-        printBlank();
-        beginSleep(state);
-        break;
-      case 'stay-on-watch':
-        printBlank();
-        printLine('You stay on watch. The wheel, the dark, the wind.', 'dim');
-        break;
-      case 'wake-up':
-        printBlank();
-        wakeUp(state, 'You wake and go above.');
-        break;
-      case 'sail-full':
-        state.boat.sailConfig = 'full';
-        log(state, "Shook out the reef. Full sail again \u2014 more speed, more motion.");
-        flushNewLogEntries(state);
-        break;
-      case 'sail-reefed':
-        state.boat.sailConfig = 'reefed';
-        log(state, "Put a reef in. Quieter below, a little slower.");
-        flushNewLogEntries(state);
-        break;
-      case 'sail-minimal':
-        state.boat.sailConfig = 'minimal';
-        log(state, "Reduced to minimal canvas. Slow, but she's not fighting the wind anymore.");
-        flushNewLogEntries(state);
-        break;
+
+    // performEat() (and in principle other handlers) can legitimately
+    // re-open a pendingChoice itself — e.g. re-showing the food list after
+    // a blocked cooking attempt. Only clear it in the tail below if nothing
+    // during this action set a NEW one; otherwise the blanket reset would
+    // immediately wipe out the very re-prompt we just opened.
+    var choiceBeforeHandling = state.pendingChoice;
+
+    if (action.indexOf('eat:') === 0) {
+      performEat(state, action.slice(4));
+    } else if (action.indexOf('drink:') === 0) {
+      performDrinkFrom(state, action.slice(6));
+    } else if (action.indexOf('inventory:') === 0) {
+      var invCat = action.slice(10);
+      if (invCat === 'back') {
+        cmdInventory(state);
+      } else {
+        showInventoryCategory(state, invCat);
+      }
+    } else {
+      switch (action) {
+        case 'cancel':
+          printBlank();
+          printLine('Left as it was.', 'dim');
+          break;
+        case 'give-up-trying':
+          state.crew.watchState = 'awake';
+          state.crew.sleepAttemptStartedAt = null;
+          state.crew.sleepStartedAt = null; // fully awake now — a later session starts its own duration count clean
+          printBlank();
+          printLine('You give up on it and get up.', 'dim');
+          break;
+        case 'wake-up':
+          printBlank();
+          wakeUp(state, 'You wake and go above.');
+          break;
+        case 'sail-full':
+          runShortAction(state, {
+            label: 'SETTING FULL SAIL',
+            duration: 4,
+            action: function (s) {
+              s.boat.sailConfig = 'full';
+              log(s, "Full sail set. More speed, more motion.");
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'sail-reefed':
+          runShortAction(state, {
+            label: 'PUTTING IN A REEF',
+            duration: 4,
+            action: function (s) {
+              s.boat.sailConfig = 'reefed';
+              log(s, "Put a reef in. Quieter below, a little slower.");
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'sail-minimal':
+          runShortAction(state, {
+            label: 'REDUCING SAIL',
+            duration: 5,
+            action: function (s) {
+              s.boat.sailConfig = 'minimal';
+              log(s, "Reduced to minimal canvas. Slow, but she's not fighting the wind anymore.");
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'sail-furled':
+          runShortAction(state, {
+            label: 'FURLING SAILS',
+            duration: 5,
+            action: function (s) {
+              s.boat.sailConfig = 'furled';
+              log(s, "Sails furled. No canvas up at all.");
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'engine-start':
+          runShortAction(state, {
+            label: 'STARTING ENGINE',
+            duration: 3,
+            action: function (s) {
+              s.boat.engineOn = true;
+              // Recalculate immediately, using the heading as of the last
+              // real tick — never invent a fresh heading here, since
+              // computeHeading() also rolls a per-tick drift wobble that
+              // must only ever happen on an actual simulated tick.
+              s.boat.speed = computeBoatSpeed(s, s.nav.heading);
+              log(s, 'The engine catches.');
+              flushNewLogEntries(s);
+              printBlank();
+              printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
+              printLine(s.boat.speed.toFixed(1) + ' kt', 'dim');
+            },
+          });
+          break;
+        case 'engine-stop':
+          runShortAction(state, {
+            label: 'STOPPING ENGINE',
+            duration: 2,
+            action: function (s) {
+              s.boat.engineOn = false;
+              s.boat.speed = computeBoatSpeed(s, s.nav.heading);
+              log(s, 'Engine stopped.');
+              flushNewLogEntries(s);
+              printBlank();
+              printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
+              printLine(s.boat.speed.toFixed(1) + ' kt', 'dim');
+            },
+          });
+          break;
+        case 'activate-epirb':
+          runShortAction(state, {
+            label: 'ACTIVATING EPIRB',
+            duration: 4,
+            action: function (s) {
+              s.rescue.epirbOn = true;
+              s.rescue.activatedAt = s.meta.voyageMinutes;
+              s.rescue.phase = 'traveling';
+              s.rescue.travelMinutes = estimateRescueTravelMinutes(s);
+              log(s, 'Distress beacon transmitting.');
+              log(s, 'Rescue requested.');
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'deploy-life-raft':
+          runShortAction(state, {
+            label: 'DEPLOYING LIFE RAFT',
+            duration: 6,
+            action: function (s) {
+              s.crew.inLifeRaft = true;
+              log(s, 'The raft inflates alongside.');
+              log(s, 'You climb aboard, and cut away from the boat.');
+              flushNewLogEntries(s);
+            },
+          });
+          break;
+        case 'fire-flare':
+          runShortAction(state, {
+            label: 'FIRING FLARE',
+            duration: 3,
+            action: function (s) {
+              s.supplies.safety.flares = clamp(s.supplies.safety.flares - 1, 0, 999);
+              s.rescue.encounterFlareFired = true;
+              log(s, 'A red flare climbs above the water.');
+              flushNewLogEntries(s);
+              resolveRescueEncounter(s);
+            },
+          });
+          break;
       case 'course-hold':
         state.nav.headingOffset = 0;
         printBlank();
@@ -1474,16 +2752,27 @@
       case 'departure-step':
         var step = DEPARTURE_STEPS[state.departure.stageIndex];
         if (step) {
-          if (step.onEnter) step.onEnter(state);
-          log(state, typeof step.text === 'function' ? step.text(state) : step.text);
-          flushNewLogEntries(state);
-          state.departure.stageIndex++;
+          runShortAction(state, {
+            label: step.workingLabel || step.label,
+            duration: step.duration || 3,
+            action: function (s) {
+              if (step.onEnter) step.onEnter(s);
+              log(s, typeof step.text === 'function' ? step.text(s) : step.text);
+              flushNewLogEntries(s);
+              s.departure.stageIndex++;
+              if (step.afterLog) step.afterLog(s);
+            },
+          });
         }
         break;
       default:
         break;
+      }
     }
-    state.pendingChoice = null;
+    if (uiBusy) return; // a short action was kicked off; it owns the tail (including the pendingChoice check) when it resolves
+    if (state.pendingChoice === choiceBeforeHandling) {
+      state.pendingChoice = null;
+    }
     renderOptions(state);
     saveGameState(state);
     updateAudioForState(state);
@@ -1498,23 +2787,32 @@
   // REPAIR) — it does not touch the clock; real time is passing throughout
   // exactly as it always does (see PROJECT.md).
   var DEPARTURE_STEPS = [
-    { label: 'CAST OFF LINES', text: 'You cast off the dock lines and coil them aboard.' },
-    { label: 'BOARD THE BOAT', text: 'You step aboard. The dock is already a little farther than it looks.' },
+    { label: 'BOARD', workingLabel: 'BOARDING', duration: 2, text: "You step aboard." },
     {
-      label: 'START ENGINE & SET OFF',
-      text: 'The engine turns over. You ease out of the slip, under engine, out through the marina.',
+      label: 'START ENGINE',
+      workingLabel: 'STARTING ENGINE',
+      duration: 3,
+      text: 'The engine catches.',
       onEnter: function (s) { s.boat.engineOn = true; },
     },
-    { label: 'BRING IN FENDERS', text: 'Clear of the pilings now. Fenders come up over the lifelines and stow below.' },
-    { label: 'MOTOR CLEAR OF THE MARINA', text: 'Past the breakwater. Open water ahead.' },
     {
-      label: 'RAISE SAILS',
-      text: function (s) {
-        return 'Halyards run. Sails climb and fill, the engine going quiet. Course set for '
-          + DESTINATION_PORT + '. Wind ' + Math.round(s.weather.windSpeed) + ' kt out of the '
-          + compassPoint(s.weather.windDirection) + '.';
+      label: 'CAST OFF',
+      workingLabel: 'CASTING OFF',
+      duration: 3,
+      text: 'The last dock line comes aboard.',
+      // The scripted sequence ends here — sails stay furled, the engine
+      // stays running, and everything from this point on is a player
+      // decision. The closing beat below isn't a separate button: once
+      // the last line is off, there's nothing left to deliberately DO —
+      // the boat just leaves, on its own, as the direct consequence.
+      afterLog: function (s) {
+        printPersistentBlank();
+        printPersistentLine('You ease away from the dock.', 'dim');
+        printPersistentBlank();
+        printPersistentLine('SHILSHOLE BAY', 'heading-label');
+        log(s, 'The voyage has begun.');
+        flushNewLogEntries(s);
       },
-      onEnter: function (s) { s.boat.sailsUp = true; s.boat.engineOn = false; },
     },
   ];
 
@@ -1532,7 +2830,7 @@
       GAME.meta.lastTick = now;
       if (ticks > 0) {
         flushNewLogEntries(GAME);
-        renderOptions(GAME);
+        if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
         updateAudioForState(GAME);
       }
       saveGameState(GAME);
@@ -1540,12 +2838,12 @@
   }
 
   function renderPreDeparture() {
-    printLine(VESSEL_NAME + ' \u2014 ' + DEPARTURE_PORT, 'heading-label');
-    printBlank();
-    printLine('Lines still on the dock. Grey morning, the kind Seattle keeps for departures.');
-    printLine('Ahead: ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles of open Pacific, and ' + DESTINATION_PORT + ', somewhere past the curve of the world.');
-    printBlank();
-    printLine('You are sailing alone.');
+    printPersistentLine(VESSEL_NAME + ' \u2014 ' + DEPARTURE_PORT, 'heading-label');
+    printPersistentBlank();
+    printPersistentLine('Lines still on the dock. Grey morning, the kind Seattle keeps for departures.');
+    printPersistentLine('Ahead: ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles of open Pacific, and ' + DESTINATION_PORT + ', somewhere past the curve of the world.');
+    printPersistentBlank();
+    printPersistentLine('You are sailing alone.');
 
     optionsEl.innerHTML = '';
     var btn = document.createElement('button');
@@ -1560,6 +2858,7 @@
       setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
       restartBtn.hidden = false;
       startLiveLoop();
+      clearTempView();
       handleAction(GAME, 'departure-step'); // logs, flushes, advances the stage, and renders/saves/scrolls
       updateClock();
     });
@@ -1573,7 +2872,7 @@
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save.', e); }
     GAME = null;
     printedCount = 0;
-    outputEl.innerHTML = '';
+    resetOutputEl();
     restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
     renderPreDeparture();
@@ -1581,11 +2880,11 @@
   }
 
   function renderReturn(state, ticks) {
-    outputEl.innerHTML = '';
-    printLine('S/V ' + VESSEL_NAME + ' \u2014 underway', 'heading-label');
+    resetOutputEl();
+    printPersistentLine('S/V ' + VESSEL_NAME + ' \u2014 underway', 'heading-label');
     if (ticks > 0) {
-      printBlank();
-      printLine('(' + describeGap(ticks * TICK_MINUTES) + ' since you were last aboard.)', 'dim');
+      printPersistentBlank();
+      printPersistentLine('(' + describeGap(ticks * TICK_MINUTES) + ' since you were last aboard.)', 'dim');
     }
     state.log.forEach(printLogEntry);
     printedCount = state.log.length;
@@ -1615,6 +2914,95 @@
     nav.heading = computeHeading(state); // also refreshes nav.intendedCourse so the display isn't stale
   }
 
+  // Earlier saves tracked food/water as abstract "days remaining," had no
+  // propane, and only ever had watchState 'awake'/'sleeping'. Give those
+  // saves a real starting inventory (scaled down by how much of the old
+  // abstract countdown they'd already burned through) and fill in the new
+  // crew fields, then switch to the real systems from here on. New saves
+  // already have state.food and skip this entirely.
+  function migrateProvisionsIfNeeded(state) {
+    var c = state.crew, b = state.boat;
+    if (!state.food) {
+      var foodFrac = clamp((c.foodDays != null ? c.foodDays : 24) / 24, 0, 1);
+      var waterFrac = clamp((c.waterDays != null ? c.waterDays : 30) / 30, 0, 1);
+      state.food = {
+        oatmeal: Math.round(18 * foodFrac), pasta: Math.round(12 * foodFrac), rice: Math.round(16 * foodFrac),
+        soup: Math.round(8 * foodFrac), chili: Math.round(8 * foodFrac), tuna: Math.round(10 * foodFrac),
+        crackers: Math.round(12 * foodFrac), peanutButter: Math.round(10 * foodFrac), nuts: Math.round(16 * foodFrac),
+        driedFruit: Math.round(12 * foodFrac), energyBars: Math.round(12 * foodFrac),
+        freshFruit: Math.round(8 * foodFrac), freshBread: Math.round(6 * foodFrac),
+        comfort: Math.round(6 * foodFrac), coffee: Math.round(24 * foodFrac),
+      };
+      state.water = { primary: +(35 * waterFrac).toFixed(1), emergency: 8 };
+      state.supplies = { propane: Math.round(60 * foodFrac) };
+      delete c.foodDays;
+      delete c.waterDays;
+    }
+    if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
+    if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
+    if (c.coffeeCount === undefined) c.coffeeCount = 0;
+    if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
+    if (state.flags.freshFruitSpoiled === undefined) state.flags.freshFruitSpoiled = false;
+    if (state.flags.freshBreadSpoiled === undefined) state.flags.freshBreadSpoiled = false;
+    // Diesel used to be tracked as "hours of motoring left" — convert any
+    // older save to real gallons at the same burn rate the simulation now
+    // uses, so a save mid-passage doesn't suddenly gain or lose fuel.
+    if (b.fuelGallons === undefined) {
+      var legacyHours = b.fuelHours != null ? b.fuelHours : 20;
+      b.fuelGallons = +(legacyHours * DIESEL_BURN_RATE_GPH).toFixed(1);
+      delete b.fuelHours;
+    }
+    // Consolidate the old 11-category supplies (engine/rigging/electrical/
+    // plumbing/repair/medical/safety/tools) into the simplified shape:
+    // one merged "spares" bucket, and "safety" holding only the flare
+    // count — EPIRB/life-raft are now status derived from state.rescue /
+    // crew.inLifeRaft, not a separate inventory count. Also covers saves
+    // old enough to have had no supplies breakdown beyond propane at all.
+    if (!state.supplies.spares) {
+      var oldCats = ['engine', 'rigging', 'electrical', 'plumbing', 'repair'];
+      var merged = {};
+      oldCats.forEach(function (cat) {
+        var obj = state.supplies[cat];
+        if (obj) Object.keys(obj).forEach(function (k) { merged[k] = obj[k]; });
+      });
+      var spareDefaults = {
+        oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
+        spareLine: 100, shackles: 6, riggingTape: 2,
+        fuses: 10, wire: 50, connectors: 20, batteries: 2,
+        hose: 10, hoseClamps: 12,
+        sailRepair: 3, epoxy: 2, sealant: 2,
+      };
+      Object.keys(spareDefaults).forEach(function (k) {
+        if (merged[k] === undefined) merged[k] = spareDefaults[k];
+      });
+      state.supplies.spares = merged;
+      oldCats.forEach(function (cat) { delete state.supplies[cat]; });
+      delete state.supplies.medical;
+      delete state.supplies.tools;
+      var oldFlares = (state.supplies.safety && state.supplies.safety.flares != null) ? state.supplies.safety.flares : 6;
+      state.supplies.safety = { flares: oldFlares };
+    }
+    // Flooding/life-raft/rescue are new this pass.
+    if (b.floodRate === undefined) b.floodRate = 0;
+    if (b.bilgeWater === undefined) b.bilgeWater = 0;
+    if (c.inLifeRaft === undefined) c.inLifeRaft = false;
+    if (state.flags.hullLeakTriggered === undefined) state.flags.hullLeakTriggered = false;
+    if (state.flags.hullLeakResolved === undefined) state.flags.hullLeakResolved = false;
+    if (state.flags.bilgeWarned50 === undefined) state.flags.bilgeWarned50 = false;
+    if (state.flags.bilgeWarned100 === undefined) state.flags.bilgeWarned100 = false;
+    if (!state.rescue) {
+      state.rescue = {
+        epirbOn: false, activatedAt: null, phase: 'none', travelMinutes: 0,
+        nextSearchEventAt: null, encounterActive: false, encounterStartedAt: null,
+        encounterKind: null, encounterFlareFired: false,
+      };
+    }
+    // Ambient-event scheduling is new too — undefined is exactly the state
+    // checkAmbientEvent() already treats as "not scheduled yet, pick a
+    // first time," so there's nothing to actively backfill here; this line
+    // just documents that omission is intentional, not an oversight.
+  }
+
   function boot() {
     var saved = loadGameState();
     if (!saved) {
@@ -1624,6 +3012,7 @@
     }
     GAME = saved;
     migrateNavIfNeeded(GAME);
+    migrateProvisionsIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
@@ -1634,7 +3023,8 @@
   }
 
   restartBtn.addEventListener('click', function () {
-    if (!GAME) return;
+    if (!GAME || uiBusy) return;
+    clearTempView();
     printEcho('restart');
     runCommand(GAME, 'restart');
   });
@@ -1658,7 +3048,7 @@
       var ticks = catchUpFromRealTime(GAME);
       if (ticks > 0) {
         flushNewLogEntries(GAME);
-        renderOptions(GAME);
+        if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
         updateAudioForState(GAME);
       }
       saveGameState(GAME);
