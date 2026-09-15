@@ -250,9 +250,6 @@
   var VESSEL_NAME = 'SOLACE';
   var DEPARTURE_PORT = "Shilshole Bay, Seattle";
   var DESTINATION_PORT = "Nawiliwili, Kauaʻi";
-  var START_COORDS = { lat: 47.667, lon: -122.408 };
-  var DEST_COORDS  = { lat: 21.954, lon: -159.356 };
-  var ROUTE_DISTANCE_NM = 2850; // the sailed route, not a straight line — real passages dogleg south for the trades
 
   var GAME = null;
   var printedCount = 0;
@@ -262,7 +259,8 @@
      ============================================================ */
   function newGameState() {
     var now = Date.now();
-    var intendedCourse = 197;
+    var start = WAYPOINTS[0];
+    var startBearing = bearingBetween(start.lat, start.lon, WAYPOINTS[1].lat, WAYPOINTS[1].lon);
     return {
       version: 1,
       meta: {
@@ -272,15 +270,25 @@
         voyageMinutes: 0,
       },
       nav: {
-        distanceTraveled: 0,
-        crossTrackDeviation: 0,
-        intendedCourse: intendedCourse,
+        lat: start.lat,
+        lon: start.lon,
+        waypointIndex: 1,          // index into WAYPOINTS currently being steered toward
+        distanceTraveled: 0,       // odometer — actual nm sailed, not progress toward the goal
+        intendedCourse: startBearing, // bearing to the current waypoint; refreshed every tick
         headingOffset: 0,          // 0 = on course, +22 = borne away, -22 = come up
-        heading: intendedCourse,
+        heading: startBearing,
         positionConfidence: 'good',
       },
       weather: {
-        windDirection: 340,
+        // SW — real wind, not routing logic, so it can still drift into a
+        // headwind over time. But the old 340 (NNW) was picked back when
+        // heading was a fake constant unconnected to geography; now that
+        // the first leg genuinely points north out of Shilshole, a due-
+        // north headwind there would leave the boat nearly unsailable
+        // before it even clears the marina. A SW wind gives it a fair
+        // reach instead, which also happens to be a common real Puget
+        // Sound pattern in unsettled weather like this game opens with.
+        windDirection: 225,
         windSpeed: 13,
         seaState: 2,
         condition: 'overcast',
@@ -359,6 +367,94 @@
   }
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+  /* --------------------------------------------------------------
+     NAVIGATION GEOMETRY
+     ------------------------------------------------------------
+     Real spherical-earth math: bearings, distances, and "move from
+     here, on this heading, this far" position updates. The boat's
+     lat/lon is dead reckoning — it only ever changes by physically
+     moving from its last position (see simTick below). Nothing here
+     ever snaps or interpolates the boat toward a waypoint; waypoints
+     are only used to compute a bearing to steer toward.
+     -------------------------------------------------------------- */
+  var EARTH_RADIUS_NM = 3440.065;
+
+  function toRad(deg) { return deg * Math.PI / 180; }
+  function toDeg(rad) { return rad * 180 / Math.PI; }
+  function normalizeLon(lon) { return ((lon + 540) % 360) - 180; }
+
+  function distanceBetween(lat1, lon1, lat2, lon2) {
+    var phi1 = toRad(lat1), phi2 = toRad(lat2);
+    var dPhi = toRad(lat2 - lat1);
+    var dLambda = toRad(lon2 - lon1);
+    var a = Math.sin(dPhi / 2) * Math.sin(dPhi / 2) +
+      Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
+    var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return EARTH_RADIUS_NM * c;
+  }
+
+  function bearingBetween(lat1, lon1, lat2, lon2) {
+    var phi1 = toRad(lat1), phi2 = toRad(lat2);
+    var dLambda = toRad(lon2 - lon1);
+    var y = Math.sin(dLambda) * Math.cos(phi2);
+    var x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+    return normalizeDeg(toDeg(Math.atan2(y, x)));
+  }
+
+  // Given a start point, a true heading, and a distance, return where the
+  // boat physically ends up. This is the ONLY thing that may ever change
+  // state.nav.lat/lon — called once per simulated tick with that tick's
+  // actual heading and actual distance covered.
+  function destinationPoint(lat, lon, headingDeg, distanceNm) {
+    var delta = distanceNm / EARTH_RADIUS_NM;
+    var theta = toRad(headingDeg);
+    var phi1 = toRad(lat), lambda1 = toRad(lon);
+    var phi2 = Math.asin(Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta));
+    var lambda2 = lambda1 + Math.atan2(
+      Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
+      Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2)
+    );
+    return { lat: toDeg(phi2), lon: normalizeLon(toDeg(lambda2)) };
+  }
+
+  // Perpendicular distance (nm) from a point to the great-circle line
+  // running from (lat1,lon1) to (lat2,lon2) — used to tell the player how
+  // far off their intended track they actually are, computed fresh from
+  // real position rather than accumulated as a separate counter.
+  function crossTrackNm(lat, lon, lat1, lon1, lat2, lon2) {
+    var d13 = distanceBetween(lat1, lon1, lat, lon) / EARTH_RADIUS_NM;
+    var brng13 = toRad(bearingBetween(lat1, lon1, lat, lon));
+    var brng12 = toRad(bearingBetween(lat1, lon1, lat2, lon2));
+    var xt = Math.asin(Math.sin(d13) * Math.sin(brng13 - brng12));
+    return Math.abs(xt * EARTH_RADIUS_NM);
+  }
+
+  // Real named waypoints, Shilshole Bay out to Kauaʻi. These are steering
+  // TARGETS — the "intended course" is the bearing toward whichever one is
+  // current. The boat is never moved to them directly; see WAYPOINT_ARRIVAL_NM
+  // and checkWaypointProgress() for how "current" advances, and simTick()
+  // for the only place actual position changes.
+  var WAYPOINTS = [
+    { name: 'Shilshole Bay Marina',       lat: 47.6706, lon: -122.4072 },
+    { name: 'Puget Sound',                lat: 47.95,   lon: -122.45 },
+    { name: 'Admiralty Inlet',            lat: 48.15,   lon: -122.76 },
+    { name: 'the Strait of Juan de Fuca', lat: 48.25,   lon: -123.80 },
+    { name: 'Cape Flattery',              lat: 48.38,   lon: -124.74 },
+    { name: 'open water, well offshore',  lat: 40.0,    lon: -130.0 },
+    { name: 'the trade wind belt',        lat: 28.0,    lon: -145.0 },
+    { name: 'Kauaʻi',                     lat: 21.954,  lon: -159.356 },
+  ];
+  var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
+  var WAYPOINT_ARRIVAL_NM = 4; // close enough to call a waypoint "reached" and aim at the next one
+
+  var TOTAL_ROUTE_NM = 0;
+  (function () {
+    for (var i = 1; i < WAYPOINTS.length; i++) {
+      TOTAL_ROUTE_NM += distanceBetween(WAYPOINTS[i - 1].lat, WAYPOINTS[i - 1].lon, WAYPOINTS[i].lat, WAYPOINTS[i].lon);
+    }
+  })();
+  var ROUTE_DISTANCE_NM = Math.round(TOTAL_ROUTE_NM); // departure-screen blurb only — never used to place the boat
+
   function driftWeather(w) {
     // Small random walk so conditions feel alive without being chaotic.
     w.windDirection = normalizeDeg(w.windDirection + (Math.random() - 0.5) * 6);
@@ -384,8 +480,18 @@
     }
   }
 
-  function computeHeading(nav) {
-    return normalizeDeg(nav.intendedCourse + nav.headingOffset);
+  function computeHeading(state) {
+    var nav = state.nav;
+    var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
+    nav.intendedCourse = bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon);
+    var steered = normalizeDeg(nav.intendedCourse + nav.headingOffset);
+    // Small per-tick heading noise: imperfect helming, wave action, minor
+    // leeway and current. This is the mechanism by which weather actually
+    // shoves the track off line rather than just slowing the boat down —
+    // calm seas barely nudge it, rough ones can walk it a long way over
+    // many ticks, exactly the way a real storm would.
+    var wobble = (Math.random() - 0.5) * (3 + state.weather.seaState * 2);
+    return normalizeDeg(steered + wobble);
   }
 
   function pointOfSailFactor(headingDeg, windFromDeg) {
@@ -477,16 +583,17 @@
     var prevCondition = state.weather.condition;
     driftWeather(state.weather);
 
-    var heading = computeHeading(state.nav);
+    var heading = computeHeading(state); // also refreshes nav.intendedCourse (bearing to the current waypoint)
     var speed = computeBoatSpeed(state, heading);
     state.boat.speed = speed;
     state.nav.heading = heading;
 
     var nmThisTick = speed * (TICK_MINUTES / 60);
-    var courseEfficiency = 1 - clamp(Math.abs(state.nav.headingOffset) / 90, 0, 0.5);
-    state.nav.distanceTraveled += nmThisTick * courseEfficiency;
-    if (state.nav.headingOffset !== 0) {
-      state.nav.crossTrackDeviation += (Math.abs(state.nav.headingOffset) / 90) * nmThisTick * 0.4;
+    if (nmThisTick > 0) {
+      var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmThisTick);
+      state.nav.lat = moved.lat;
+      state.nav.lon = moved.lon;
+      state.nav.distanceTraveled += nmThisTick;
     }
 
     updateCrew(state);
@@ -497,6 +604,7 @@
     checkFatigueNarration(state);
     checkThirstNarration(state);
     checkMilestones(state);
+    checkWaypointProgress(state);
     checkSleepInterrupt(state, prevCondition);
 
     clampState(state);
@@ -623,6 +731,29 @@
     if (milestone > state.flags.lastMilestone) {
       state.flags.lastMilestone = milestone;
       log(state, (milestone * 300) + " nautical miles behind you now.");
+    }
+  }
+
+  function waypointArrivalLine(wp) {
+    var lines = {
+      'Puget Sound': 'Clear of the marina, into open Puget Sound.',
+      'Admiralty Inlet': 'Passing into Admiralty Inlet.',
+      'the Strait of Juan de Fuca': 'Entering the Strait of Juan de Fuca.',
+      'Cape Flattery': 'Rounding Cape Flattery. The Pacific opens up ahead.',
+      'open water, well offshore': 'Well clear of the coast now, turning south to find the trades.',
+      'the trade wind belt': 'Into the trade winds. Turning west for Hawaiʻi.',
+      'Kauaʻi': 'Kauaʻi rises off the bow.',
+    };
+    return lines[wp.name] || (wp.name + ' behind you now.');
+  }
+
+  function checkWaypointProgress(state) {
+    var nav = state.nav;
+    var wp = WAYPOINTS[nav.waypointIndex];
+    if (!wp) return; // already steering for the final waypoint — nothing further to advance to
+    if (distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon) <= WAYPOINT_ARRIVAL_NM) {
+      log(state, waypointArrivalLine(wp));
+      if (nav.waypointIndex < WAYPOINTS.length - 1) nav.waypointIndex++;
     }
   }
 
@@ -993,10 +1124,10 @@
   }
 
   function currentLatLon(state) {
-    var frac = clamp(state.nav.distanceTraveled / ROUTE_DISTANCE_NM, 0, 1);
-    var lat = START_COORDS.lat + (DEST_COORDS.lat - START_COORDS.lat) * frac;
-    var lon = START_COORDS.lon + (DEST_COORDS.lon - START_COORDS.lon) * frac;
-    lat -= Math.sin(frac * Math.PI) * 2.5; // real passages dip south early to find the trades
+    // The stored lat/lon IS the position — this just adds display-only
+    // uncertainty when the electrical system can't be trusted for a fix.
+    // It never feeds back into the real, saved position.
+    var lat = state.nav.lat, lon = state.nav.lon;
     if (state.nav.positionConfidence === 'uncertain') {
       lat += (Math.random() - 0.5) * 0.4;
       lon += (Math.random() - 0.5) * 0.4;
@@ -1061,9 +1192,13 @@
     printLine(Math.round(state.nav.heading) + '\u00B0  (intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0)');
     printBlank();
     printLine('DISTANCE', 'heading-label');
-    printLine(Math.round(state.nav.distanceTraveled) + ' nm sailed \u2014 approximately ' + Math.round(Math.max(0, ROUTE_DISTANCE_NM - state.nav.distanceTraveled)) + ' nm remaining');
-    if (state.nav.crossTrackDeviation > 15) {
-      printLine('Off the intended track by roughly ' + Math.round(state.nav.crossTrackDeviation) + ' nm.', 'amber');
+    var remaining = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    printLine(Math.round(state.nav.distanceTraveled) + ' nm sailed \u2014 approximately ' + Math.round(remaining) + ' nm remaining');
+    var segStart = WAYPOINTS[Math.max(0, state.nav.waypointIndex - 1)];
+    var segEnd = WAYPOINTS[state.nav.waypointIndex] || FINAL_DEST;
+    var xt = crossTrackNm(state.nav.lat, state.nav.lon, segStart.lat, segStart.lon, segEnd.lat, segEnd.lon);
+    if (xt > 15) {
+      printLine('Off the intended track by roughly ' + Math.round(xt) + ' nm.', 'amber');
     }
   }
 
@@ -1458,6 +1593,28 @@
     scrollToBottom();
   }
 
+  // Saves from before real dead reckoning existed have no lat/lon at all —
+  // position used to be interpolated from percent-of-route-traveled. Give
+  // those saves one seeded fix so the switch doesn't teleport anyone; every
+  // tick from here on moves from wherever this lands, same as any other
+  // point in the voyage. New saves already have lat/lon and skip this.
+  function migrateNavIfNeeded(state) {
+    var nav = state.nav;
+    if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
+    var legacyTotal = 2850; // the flat distance old saves' progress was measured against
+    var frac = clamp((nav.distanceTraveled || 0) / legacyTotal, 0, 1);
+    var start = WAYPOINTS[0];
+    nav.lat = start.lat + (FINAL_DEST.lat - start.lat) * frac - Math.sin(frac * Math.PI) * 2.5;
+    nav.lon = start.lon + (FINAL_DEST.lon - start.lon) * frac;
+    nav.waypointIndex = 1;
+    for (var i = 1; i < WAYPOINTS.length; i++) {
+      var covered = distanceBetween(start.lat, start.lon, WAYPOINTS[i].lat, WAYPOINTS[i].lon);
+      if (covered <= (nav.distanceTraveled || 0)) nav.waypointIndex = Math.min(i + 1, WAYPOINTS.length - 1);
+    }
+    delete nav.crossTrackDeviation; // replaced by a value computed fresh from position, not stored
+    nav.heading = computeHeading(state); // also refreshes nav.intendedCourse so the display isn't stale
+  }
+
   function boot() {
     var saved = loadGameState();
     if (!saved) {
@@ -1466,6 +1623,7 @@
       return;
     }
     GAME = saved;
+    migrateNavIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
