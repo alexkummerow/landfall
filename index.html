@@ -86,10 +86,10 @@
   #topbar-right {
     display: flex;
     align-items: center;
-    gap: 0.9rem;
+    gap: 0.7rem;
   }
 
-  #sound-btn {
+  .hdr-btn {
     background: none;
     appearance: none;
     -webkit-appearance: none;
@@ -101,7 +101,8 @@
     padding: 0.25rem 0.6rem;
     cursor: pointer;
   }
-  #sound-btn:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+  .hdr-btn:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+  .hdr-btn[hidden] { display: none; }
 
   #output {
     flex: 1;
@@ -146,7 +147,7 @@
   #controls {
     flex-shrink: 0;
     border-top: 1px solid var(--rule);
-    padding: 0.8rem 1.2rem calc(0.9rem + env(safe-area-inset-bottom));
+    padding: 0.8rem 1.2rem calc(0.7rem + env(safe-area-inset-bottom));
     max-width: 640px;
     width: 100%;
     margin: 0 auto;
@@ -156,7 +157,13 @@
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    margin-bottom: 0.6rem;
+    max-height: 48vh;
+    overflow-y: auto;
+  }
+
+  .option-divider {
+    border-top: 1px dashed var(--rule);
+    margin: 0.35rem 0;
   }
 
   .option {
@@ -175,31 +182,8 @@
   .option:hover, .option:focus-visible { color: var(--phosphor-bright); }
   .option:focus-visible { outline: 1px dashed var(--phosphor-dim); outline-offset: 2px; }
 
-  #cmd-form {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    border-top: 1px dashed var(--rule);
-    padding-top: 0.6rem;
-  }
-
-  .prompt-glyph { color: var(--phosphor-dim); }
-
-  #cmd-input {
-    flex: 1;
-    background: none;
-    border: none;
-    color: var(--phosphor);
-    font-family: inherit;
-    font-size: 0.95rem;
-    outline: none;
-    caret-color: var(--phosphor);
-  }
-  #cmd-input:focus { outline: none; }
-  #cmd-input::placeholder { color: var(--phosphor-dim); opacity: 0.7; }
-
   @media (max-width: 480px) {
-    .line, .entry-text, #cmd-input, .option { font-size: 0.98rem; }
+    .line, .entry-text, .option { font-size: 0.98rem; }
     #output, #controls { padding-left: 0.9rem; padding-right: 0.9rem; }
   }
 </style>
@@ -210,7 +194,8 @@
     <header id="topbar">
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
-        <button id="sound-btn" type="button">SOUND: OFF</button>
+        <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
+        <button id="sound-btn" class="hdr-btn" type="button">SOUND: OFF</button>
         <span id="clock">—</span>
       </div>
     </header>
@@ -219,10 +204,6 @@
 
     <footer id="controls">
       <div id="options"></div>
-      <form id="cmd-form" autocomplete="off">
-        <span class="prompt-glyph">&gt;</span>
-        <input id="cmd-input" type="text" enterkeyhint="go" placeholder="type a command…" aria-label="Command input" />
-      </form>
     </footer>
   </div>
 
@@ -307,6 +288,9 @@
       },
       boat: {
         sailConfig: 'full',        // full | reefed | minimal
+        sailsUp: false,            // sails aren't hoisted until the RAISE SAILS departure step
+        engineOn: false,           // running under power (departure motor-out, or engine failure recovery later)
+        fuelHours: 20,             // hours of motoring the fuel tank has left
         hull: 100,
         rigging: 100,
         sails: 100,
@@ -317,6 +301,7 @@
         fatigue: 8,
         hoursSinceRest: 3,
         hoursSinceMeal: 2,
+        hoursSinceWater: 2,
         foodDays: 24,
         waterDays: 30,
         morale: 72,
@@ -331,8 +316,10 @@
         aftLockerDeferredAt: null,
         sailWarningIssued: false,
         fatigueNarrated: false,
+        thirstNarrated: false,
         lastMilestone: 0,
       },
+      departure: { stageIndex: 0 }, // walks through DEPARTURE_STEPS before normal gameplay opens up
       pendingChoice: null,
       log: [],
     };
@@ -430,6 +417,14 @@
 
   function computeBoatSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
+    if (!b.sailsUp) {
+      // Still at the dock, or motoring out before the sails go up — speed
+      // comes from the engine alone, not the wind.
+      if (!b.engineOn) return 0;
+      var engineSpeed = 5.2 * (0.6 + 0.4 * (b.engine / 100));
+      if (c.watchState === 'sleeping') engineSpeed *= 0.5; // shouldn't really happen pre-sail, but keep it sane
+      return +engineSpeed.toFixed(2);
+    }
     var speed = baseSpeedForWind(w.windSpeed)
       * pointOfSailFactor(heading, w.windDirection)
       * sailConfigFactor(b.sailConfig, w.windSpeed)
@@ -456,10 +451,12 @@
     }
 
     c.hoursSinceMeal += hrs;
+    c.hoursSinceWater += hrs;
     c.foodDays = clamp(c.foodDays - hrs / 24, 0, 999);
     c.waterDays = clamp(c.waterDays - hrs / 24, 0, 999);
 
     if (c.hoursSinceMeal > 10) c.morale = clamp(c.morale - 0.3 * hrs, 0, 100);
+    if (c.hoursSinceWater > 8) c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
     if (state.weather.condition === 'squall') c.morale = clamp(c.morale - 0.4 * hrs, 0, 100);
   }
 
@@ -493,10 +490,12 @@
     }
 
     updateCrew(state);
+    checkFuel(state);
     checkSailStrain(state);
     checkAftLocker(state);
     checkWeatherNarration(state, prevCondition);
     checkFatigueNarration(state);
+    checkThirstNarration(state);
     checkMilestones(state);
     checkSleepInterrupt(state, prevCondition);
 
@@ -532,7 +531,19 @@
     state.log.push({ t: ts, text: text });
   }
 
+  function checkFuel(state) {
+    var b = state.boat;
+    if (!b.engineOn) return;
+    var hrs = TICK_MINUTES / 60;
+    b.fuelHours = clamp(b.fuelHours - hrs, 0, 999);
+    if (b.fuelHours <= 0) {
+      b.engineOn = false;
+      log(state, "The engine coughs and dies. Fuel's gone.");
+    }
+  }
+
   function checkSailStrain(state) {
+    if (!state.boat.sailsUp) return; // nothing to strain before the sails are hoisted
     var w = state.weather, b = state.boat, f = state.flags;
     if (b.sailConfig === 'full' && w.windSpeed > 24) {
       if (!f.sailWarningIssued) {
@@ -596,6 +607,15 @@
       log(state, "Hands feel slow. Everything simple takes an extra beat.");
     }
     if (state.crew.fatigue < 50) f.fatigueNarrated = false;
+  }
+
+  function checkThirstNarration(state) {
+    var f = state.flags;
+    if (state.crew.hoursSinceWater > 8 && !f.thirstNarrated) {
+      f.thirstNarrated = true;
+      log(state, "Your mouth feels like the inside of a sail bag. Water, before anything else.");
+    }
+    if (state.crew.hoursSinceWater < 4) f.thirstNarrated = false;
   }
 
   function checkMilestones(state) {
@@ -828,9 +848,8 @@
   var optionsEl = document.getElementById('options');
   var clockEl = document.getElementById('clock');
   var vesselLineEl = document.getElementById('vessel-line');
-  var cmdForm = document.getElementById('cmd-form');
-  var cmdInput = document.getElementById('cmd-input');
   var soundBtn = document.getElementById('sound-btn');
+  var restartBtn = document.getElementById('restart-btn');
 
   function printLine(text, cls) {
     var p = document.createElement('p');
@@ -946,6 +965,14 @@
     ]);
   }
 
+  function fuelPhrase(hours) {
+    return describeLevel(hours, [
+      { max: 2, text: "almost dry — this needs attention" },
+      { max: 6, text: "running low" },
+      { max: 999, text: "adequate" },
+    ]);
+  }
+
   function describeSeaState(n) {
     var labels = [
       "Flat calm.", "Slight ripple.", "Small waves, some whitecaps.",
@@ -1007,6 +1034,7 @@
       ['MORALE', moralePhrase(state.crew.morale)],
       ['FOOD', capitalize(supplyPhrase(state.crew.foodDays)) + '.'],
       ['WATER', capitalize(supplyPhrase(state.crew.waterDays)) + '.'],
+      ['FUEL', capitalize(fuelPhrase(state.boat.fuelHours)) + '.'],
       ['HULL', capitalize(conditionPhrase(state.boat.hull)) + '.'],
       ['RIGGING', capitalize(conditionPhrase(state.boat.rigging)) + '.'],
       ['SAILS', capitalize(conditionPhrase(state.boat.sails)) + '.'],
@@ -1105,15 +1133,6 @@
     };
   }
 
-  function cmdWake(state) {
-    if (state.crew.watchState !== 'sleeping') {
-      printBlank();
-      printLine("You're already awake.", 'dim');
-      return;
-    }
-    wakeUp(state, 'You wake and go above.');
-  }
-
   function cmdEat(state) {
     printBlank();
     if (state.crew.foodDays <= 0) {
@@ -1127,6 +1146,18 @@
     printLine('A meal, eaten standing up, watching the horizon out of habit.');
   }
 
+  function cmdDrink(state) {
+    printBlank();
+    if (state.crew.waterDays <= 0) {
+      printLine('Nothing left to drink.', 'amber');
+      return;
+    }
+    state.crew.hoursSinceWater = 0;
+    state.crew.waterDays = clamp(state.crew.waterDays - 0.1, 0, 999);
+    state.crew.fatigue = clamp(state.crew.fatigue - 2, 0, 100);
+    printLine('Water, straight from the jug. Cool enough.');
+  }
+
   function cmdRepair(state) {
     if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
       resolveAftLocker(state);
@@ -1134,23 +1165,6 @@
     }
     printBlank();
     printLine('Nothing aboard is asking to be fixed right now.', 'dim');
-  }
-
-  function cmdHelp() {
-    printBlank();
-    printLine('COMMANDS', 'heading-label');
-    printLine('STATUS    \u2014 fatigue, morale, food, water, condition');
-    printLine('POSITION  \u2014 position, heading, distance');
-    printLine('WEATHER   \u2014 current wind and sea state');
-    printLine('FORECAST  \u2014 a rough outlook, nothing certain');
-    printLine("LOG       \u2014 the ship's log so far");
-    printLine('SAILS     \u2014 adjust sail configuration');
-    printLine('COURSE    \u2014 hold, bear away, or come up');
-    printLine('REST      \u2014 go below and sleep, or stay on watch');
-    printLine('WAKE      \u2014 (while asleep) come back on deck');
-    printLine('EAT       \u2014 take a meal');
-    printLine('REPAIR    \u2014 see to anything that needs it');
-    printLine('RESTART   \u2014 abandon this voyage and start over (asks first)');
   }
 
   function cmdRestart(state) {
@@ -1167,102 +1181,81 @@
   }
 
   var COMMANDS = {
-    status: cmdStatus, stat: cmdStatus,
-    position: cmdPosition, pos: cmdPosition,
-    weather: cmdWeather, wx: cmdWeather,
-    forecast: cmdForecast, fc: cmdForecast,
+    status: cmdStatus,
+    position: cmdPosition,
+    weather: cmdWeather,
+    forecast: cmdForecast,
     log: cmdLog,
-    sails: cmdSails, sail: cmdSails,
-    course: cmdCourse, heading: cmdCourse,
-    rest: cmdRest, sleep: cmdRest,
-    wake: cmdWake, wakeup: cmdWake, 'wake up': cmdWake, 'get up': cmdWake,
-    eat: cmdEat, food: cmdEat,
-    repair: cmdRepair, inspect: cmdRepair, fix: cmdRepair,
-    restart: cmdRestart, 'new voyage': cmdRestart, newvoyage: cmdRestart, 'new game': cmdRestart,
-    help: cmdHelp, '?': cmdHelp,
+    sails: cmdSails,
+    course: cmdCourse,
+    rest: cmdRest,
+    eat: cmdEat,
+    drink: cmdDrink,
+    repair: cmdRepair,
+    restart: cmdRestart,
   };
 
-  var QUERY_COMMANDS = { status:1, stat:1, position:1, pos:1, weather:1, wx:1, forecast:1, fc:1, log:1, help:1, '?':1 };
-  var WAKE_COMMANDS = { wake:1, wakeup:1, 'wake up':1, 'get up':1 };
-  // RESTART is a meta-command: it must reach the player even while asleep or
-  // mid-decision, so it's checked before either of those guards in runCommand().
-  var RESTART_COMMANDS = { restart:1, 'new voyage':1, newvoyage:1, 'new game':1 };
-
   function runCommand(state, raw) {
+    // All commands now arrive from a button that getContextualOptions()
+    // itself decided was valid for the current state — no free-text entry
+    // point exists anymore (see the header RESTART button for the one
+    // command that can fire regardless of state). So this just dispatches.
     var word = raw.trim().toLowerCase();
     if (!word) return;
-
-    if (RESTART_COMMANDS[word]) {
-      cmdRestart(state);
-      renderOptions(state);
-      saveGameState(state);
-      scrollToBottom();
-      return;
-    }
-
-    // Asleep means asleep: no other command can be issued, and — just as
-    // important for the real-time rule — nothing here advances the clock.
-    // WAKE UP only ends the *state*; time already passed for real while it ran.
-    if (state.crew.watchState === 'sleeping' && !WAKE_COMMANDS[word]) {
-      printBlank();
-      printLine("You're asleep. Nothing to do but WAKE UP.", 'dim');
-      renderOptions(state);
-      saveGameState(state);
-      scrollToBottom();
-      return;
-    }
-
     var fn = COMMANDS[word];
-    if (state.pendingChoice && !QUERY_COMMANDS[word]) {
-      printBlank();
-      printLine('Resolve the matter at hand first.', 'dim');
-    } else if (fn) {
-      fn(state);
-    } else {
-      printBlank();
-      printLine('Unfamiliar command: "' + raw + '"', 'dim');
-      printLine('Try STATUS, POSITION, WEATHER, or LOG.', 'dim');
-    }
+    if (fn) fn(state);
     renderOptions(state);
     saveGameState(state);
     scrollToBottom();
   }
 
   function getContextualOptions(state) {
-    // pendingChoice always wins — including a restart request while asleep,
-    // which must be answerable even though sleep otherwise locks the menu.
+    // A pending decision always wins — including a restart request made
+    // mid-departure or mid-sleep, which must be answerable even though
+    // those states otherwise show just one button.
     if (state.pendingChoice) return state.pendingChoice.options;
+
+    if (state.departure.stageIndex < DEPARTURE_STEPS.length) {
+      return [{ label: DEPARTURE_STEPS[state.departure.stageIndex].label, action: 'departure-step' }];
+    }
+
     if (state.crew.watchState === 'sleeping') {
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
-    var opts = [];
-    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
-      opts.push({ label: 'INSPECT AFT LOCKER', action: 'cmd:repair' });
-    }
-    if (state.weather.windSpeed > 22 && state.boat.sailConfig === 'full') {
-      opts.push({ label: 'REDUCE SAIL', action: 'cmd:sails' });
-    }
-    if (state.crew.fatigue > 55) opts.push({ label: 'GO BELOW / SLEEP', action: 'cmd:rest' });
-    if (state.crew.hoursSinceMeal > 8) opts.push({ label: 'EAT', action: 'cmd:eat' });
 
-    var defaults = [
-      { label: 'CHECK WEATHER', action: 'cmd:weather' },
-      { label: 'CHECK POSITION', action: 'cmd:position' },
-      { label: 'CHECK LOG', action: 'cmd:log' },
+    var repairLabel = (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)
+      ? 'INSPECT AFT LOCKER'
+      : 'REPAIR';
+
+    // Every command is a persistent button now — nothing is typed, so
+    // nothing can be hidden. A thin divider (added in renderOptions)
+    // separates read-only checks from actions that change something.
+    return [
+      { label: 'STATUS', action: 'cmd:status' },
+      { label: 'POSITION', action: 'cmd:position' },
+      { label: 'WEATHER', action: 'cmd:weather' },
+      { label: 'FORECAST', action: 'cmd:forecast' },
+      { label: 'LOG', action: 'cmd:log' },
+      { divider: true },
+      { label: 'SAILS', action: 'cmd:sails' },
+      { label: 'COURSE', action: 'cmd:course' },
+      { label: 'EAT', action: 'cmd:eat' },
+      { label: 'DRINK', action: 'cmd:drink' },
       { label: 'GO BELOW / SLEEP', action: 'cmd:rest' },
+      { label: repairLabel, action: 'cmd:repair' },
     ];
-    defaults.forEach(function (d) {
-      if (opts.length >= 5) return;
-      var exists = opts.some(function (o) { return o.action === d.action; });
-      if (!exists) opts.push(d);
-    });
-    return opts.slice(0, 5);
   }
 
   function renderOptions(state) {
     optionsEl.innerHTML = '';
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
+      if (opt.divider) {
+        var div = document.createElement('div');
+        div.className = 'option-divider';
+        optionsEl.appendChild(div);
+        return;
+      }
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'option';
@@ -1343,6 +1336,15 @@
         printBlank();
         printLine('It can wait. For now.', 'dim');
         break;
+      case 'departure-step':
+        var step = DEPARTURE_STEPS[state.departure.stageIndex];
+        if (step) {
+          if (step.onEnter) step.onEnter(state);
+          log(state, typeof step.text === 'function' ? step.text(state) : step.text);
+          flushNewLogEntries(state);
+          state.departure.stageIndex++;
+        }
+        break;
       default:
         break;
     }
@@ -1356,6 +1358,31 @@
   /* ============================================================
      9. BOOT SEQUENCE
      ============================================================ */
+  // The departure sequence walks through these one button at a time before
+  // normal gameplay opens up. Each step is a plain state change (like EAT or
+  // REPAIR) — it does not touch the clock; real time is passing throughout
+  // exactly as it always does (see PROJECT.md).
+  var DEPARTURE_STEPS = [
+    { label: 'CAST OFF LINES', text: 'You cast off the dock lines and coil them aboard.' },
+    { label: 'BOARD THE BOAT', text: 'You step aboard. The dock is already a little farther than it looks.' },
+    {
+      label: 'START ENGINE & SET OFF',
+      text: 'The engine turns over. You ease out of the slip, under engine, out through the marina.',
+      onEnter: function (s) { s.boat.engineOn = true; },
+    },
+    { label: 'BRING IN FENDERS', text: 'Clear of the pilings now. Fenders come up over the lifelines and stow below.' },
+    { label: 'MOTOR CLEAR OF THE MARINA', text: 'Past the breakwater. Open water ahead.' },
+    {
+      label: 'RAISE SAILS',
+      text: function (s) {
+        return 'Halyards run. Sails climb and fill, the engine going quiet. Course set for '
+          + DESTINATION_PORT + '. Wind ' + Math.round(s.weather.windSpeed) + ' kt out of the '
+          + compassPoint(s.weather.windDirection) + '.';
+      },
+      onEnter: function (s) { s.boat.sailsUp = true; s.boat.engineOn = false; },
+    },
+  ];
+
   var liveTimer = null;
 
   function startLiveLoop() {
@@ -1389,16 +1416,16 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'option';
-    btn.textContent = '> BEGIN VOYAGE';
+    btn.textContent = '> ' + DEPARTURE_STEPS[0].label;
     btn.addEventListener('click', function () {
       GAME = newGameState();
       unlockAudio();
       updateAudioForState(GAME); // safe no-op if audio isn't unlocked yet; keeps a restart's ambience in sync immediately
       updateSoundLabel();
       setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
-      renderDeparture(GAME);
+      restartBtn.hidden = false;
       startLiveLoop();
-      saveGameState(GAME);
+      handleAction(GAME, 'departure-step'); // logs, flushes, advances the stage, and renders/saves/scrolls
       updateClock();
     });
     optionsEl.appendChild(btn);
@@ -1412,21 +1439,10 @@
     GAME = null;
     printedCount = 0;
     outputEl.innerHTML = '';
+    restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
     renderPreDeparture();
     updateClock();
-  }
-
-  function renderDeparture(state) {
-    outputEl.innerHTML = '';
-    log(state, 'Lines cast off. Under engine out through the marina, sails up past the breakwater.');
-    log(state, 'Course set for ' + DESTINATION_PORT + '. Wind ' + Math.round(state.weather.windSpeed) + ' kt out of the ' + compassPoint(state.weather.windDirection) + '.');
-    state.log.forEach(printLogEntry);
-    printedCount = state.log.length;
-    printBlank();
-    printLine('Type HELP at any time for the full command list.', 'dim');
-    renderOptions(state);
-    scrollToBottom();
   }
 
   function renderReturn(state, ticks) {
@@ -1450,6 +1466,7 @@
       return;
     }
     GAME = saved;
+    restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
     saveGameState(GAME);
@@ -1458,19 +1475,10 @@
     updateClock();
   }
 
-  cmdForm.addEventListener('submit', function (e) {
-    e.preventDefault();
-    var val = cmdInput.value;
-    cmdInput.value = '';
-    if (!val.trim()) return;
-    if (!GAME) {
-      printBlank();
-      printLine('Cast off first \u2014 tap BEGIN VOYAGE.', 'dim');
-      scrollToBottom();
-      return;
-    }
-    printEcho(val);
-    runCommand(GAME, val);
+  restartBtn.addEventListener('click', function () {
+    if (!GAME) return;
+    printEcho('restart');
+    runCommand(GAME, 'restart');
   });
 
   soundBtn.addEventListener('click', function () {
