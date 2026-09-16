@@ -1,1098 +1,1535 @@
-LANDFALL — NEXT DEVELOPMENT VERSION
+# LANDFALL --- PROJECT.md
 
-You are continuing development of an EXISTING working game called Landfall.
+## Source of Truth
 
-Do NOT rebuild Landfall from scratch.
+This document describes the current design and implementation rules for
+**Landfall**.
 
-First inspect the complete current index.html and understand how the existing simulation, real-time clock, navigation, menus, save system, entry sequence, sleep/fatigue systems, and interface work.
+When working on the game:
 
-Preserve all existing working functionality unless this prompt explicitly asks for a change.
+1.  Read this file first.
+2.  Inspect the current `index.html` before making changes.
+3.  Treat the current working code as authoritative for implemented
+    mechanics.
+4.  Treat this document as authoritative for design intent.
+5.  Preserve working systems unless a prompt explicitly asks to change
+    them.
+6.  Do not rebuild the game from scratch to make a small change.
+7.  Do not silently add systems, resources, menus, meters, or simulation
+    layers that are not part of this design.
 
-The goal of this development pass is to deepen Landfall into a persistent real-time sailing simulation built around:
+Landfall is currently a single self-contained browser game in
+`index.html`.
 
-- real-world time
-- navigation
-- human needs
-- inventory
-- maintenance
-- finite resources
-- cascading consequences
-- observation
-- solitude
-- survival
-- eventual landfall or rescue
+------------------------------------------------------------------------
 
-IMPLEMENT THESE SYSTEMS CAREFULLY AND MODULARLY.
+# 1. THE GAME
 
-Do not rewrite unrelated systems simply because you would have designed them differently.
+**Landfall** is a quiet, real-time solo sailing game about taking a
+roughly 35-foot cruising sailboat from **Shilshole Bay, Seattle** to
+**Nawiliwili, Kauaʻi**.
 
-==================================================
-CORE DESIGN PHILOSOPHY
-==================================================
+The player is alone.
 
-Landfall is a real-time solo sailing voyage from Shilshole Bay Marina in Seattle to Kauaʻi aboard a roughly 35-foot offshore cruising sailboat.
+There is no character portrait, animated world, conventional map screen,
+XP system, quest system, or traditional game HUD. The voyage is
+experienced primarily through:
 
-The player is the sailor.
+-   sparse terminal text
+-   the persistent ship's log
+-   boat sounds and weather ambience
+-   real elapsed time
+-   navigation information
+-   resource management
+-   decisions about sails, engine, course, food, water, sleep, repairs,
+    and emergencies
 
-The player should feel as though the boat continues existing while they are away.
+The player's imagination supplies most of the world.
 
-1 REAL MINUTE = 1 GAME MINUTE.
-1 REAL HOUR = 1 GAME HOUR.
+The experience should feel contemplative, physical, lonely, and
+believable rather than gamey.
 
-There is no artificial time acceleration.
+The central fantasy is not "winning a sailing game."
 
-Closing the browser does not pause the voyage.
+It is:
 
-Returning after six hours means six hours have passed aboard the boat.
+**You are sailing alone. The boat continues whether or not you are
+looking at it.**
 
-Landfall should generally be playable by checking the boat thoughtfully a few times per day.
+------------------------------------------------------------------------
 
-A competent player who:
+# 2. CORE DESIGN PRINCIPLES
 
-- checks the boat several times per day
-- reads conditions carefully
-- navigates sensibly
-- eats and drinks reasonably
-- manages sleep
-- maintains the vessel
-- responds to developing problems
+## Quiet interaction
 
-should have a HIGH probability of reaching Kauaʻi safely.
+Keep the interface sparse.
 
-Landfall should NOT manufacture constant emergencies.
+Do not add features merely because a real sailboat would contain them.
 
-Competence should often produce calm.
+A system belongs in Landfall only when it creates a meaningful decision
+for the player.
 
-Long stretches where nothing goes wrong are desirable.
+## Real time
 
-Danger should primarily emerge through accumulated circumstances:
+**1 real minute = 1 game minute.**
 
-poor decisions
-→ delay
-→ resource consumption
-→ fatigue
-→ mistakes
-→ equipment problems
-→ further delay
-→ dwindling margins
+The simulation does not stop when the browser closes.
 
-The drama should emerge from the simulation rather than scripted constant excitement.
+The game catches up from actual elapsed time when the player returns.
 
-==================================================
-DEPARTURE — SHILSHOLE BAY
-==================================================
+Never make ordinary actions artificially advance the simulation clock.
 
-The voyage begins at Shilshole Bay Marina.
+Actions such as:
 
-The opening portion of the voyage should be geographically constrained.
+-   eating
+-   drinking
+-   setting sails
+-   reefing
+-   furling sails
+-   starting/stopping the engine
+-   repairing something
+-   activating the EPIRB
+-   firing a flare
+-   deploying the life raft
 
-The intended opening route is broadly:
+may take a few real presentation seconds, but they do not manufacture
+game time.
 
-Shilshole Bay
-→ Puget Sound
-→ Admiralty Inlet
-→ Strait of Juan de Fuca
-→ Cape Flattery
-→ Pacific Ocean
+## No requirement for constant attention
 
-During this opening section, the player is learning the boat and the interface.
+Landfall should reward checking the boat a few times per day and taking
+care of it, but it should not require the player to stare at the
+browser.
 
-Do not allow arbitrary offshore course changes while geographically constrained by land.
+A player can sleep, work, leave the app, and live their life.
 
-If the player attempts to make an inappropriate course alteration, use restrained language such as:
+The voyage continues.
 
-CAN'T ALTER COURSE.
-TOO CLOSE TO SHORELINE.
+Consequences may develop while they are away, but important systems
+should be designed around broad real-time windows rather than tiny
+moments that require the browser to be open.
 
-The player should gradually learn:
+## Cascading consequences
 
-- checking weather
-- checking position
-- checking boat speed
-- eating
-- drinking
-- sleeping
-- observing surroundings
-- checking inventory
-- inspecting the vessel
+Failure should usually emerge from interacting systems rather than
+arbitrary punishment.
 
-without a conventional tutorial overlay.
+The intended chain is broadly:
 
-Once the boat reaches sufficiently open blue water, unlock meaningful course alteration.
+**weather → fatigue → mistakes → boat problems → repairs → spares
+consumed → delays → food/water/fuel pressure → possible distress →
+rescue**
 
-At that point the player becomes responsible for navigating the offshore passage.
+Not every voyage should follow this chain, and not every problem should
+escalate.
 
-==================================================
-NAVIGATION
-==================================================
+A player who checks in a few times a day, responds sensibly, manages
+supplies, and has some luck should have a reasonable path to a safe
+passage.
 
-Preserve the existing corrected navigation model.
+------------------------------------------------------------------------
 
-The boat's latitude and longitude must result from its ACTUAL movement.
+# 3. PRESENTATION
 
-Never interpolate coordinates between Seattle and Kauaʻi based on voyage progress.
+## Terminal aesthetic
 
-Position should emerge from:
+Landfall uses a dark CRT / phosphor-terminal presentation.
 
-- actual latitude/longitude
-- heading
-- boat speed
-- elapsed real time
-- wind
-- drift/current
-- player decisions
+Current typography is IBM Plex Mono with a monospace fallback stack.
 
-The intended route is guidance only.
+The interface should remain readable in a dark room and on a phone.
 
-The boat must be capable of sailing off course.
+Avoid decorative UI, cards, icons, meters, badges, popups, and
+conventional mobile-game chrome.
 
-Do not automatically snap it back to the route.
+------------------------------------------------------------------------
 
-Two voyages should be capable of producing different tracks.
+# 4. COLOR SYSTEM
 
-==================================================
-BOAT SPEED
-==================================================
+Landfall uses **three green text shades**, with extremely strict roles.
 
-Add boat speed as a meaningful observable value if it is not already properly implemented.
+### BRIGHT GREEN
 
-Speed should be expressed realistically in knots.
-
-Boat speed should result from sailing conditions rather than being a fixed voyage-progress variable.
-
-It should be influenced by:
-
-- wind speed
-- wind direction relative to heading
-- sail configuration
-- sea state
-- boat condition
-- damage
-- current
-- course
-- severe weather
-- calm conditions
-
-Boat speed affects actual distance traveled.
-
-If the boat averages 6 knots for 8 real hours, approximately 48 nautical miles of actual movement should occur, subject to changes in conditions during that period.
-
-==================================================
-OBSERVE
-==================================================
-
-Add an OBSERVE action.
-
-OBSERVE is not primarily informational.
-
-It exists to make the voyage feel physical, beautiful, lonely, and real.
-
-When selected, describe something the sailor notices around the boat.
-
-Observations should be influenced by:
-
-- geographic position
-- distance from land
-- time of day
-- weather
-- sea state
-- latitude
-- phase of voyage
-- recent conditions
-
-Near Puget Sound observations might include:
-
-- shoreline
-- ferries
-- mountains
-- seabirds
-- lights
-- distant vessels
-- rain over land
-
-Offshore observations might include:
-
-- swell
-- cloud formations
-- flying fish
-- seabirds
-- moonlight
-- stars
-- phosphorescence
-- distant ships
-- empty horizon
-- sunrise
-- sunset
-- rain squalls
-- changing color of the sea
-
-Approaching Hawaiʻi might eventually include appropriate signs of land and subtropical conditions.
-
-Do not make every observation extraordinary.
-
-Most should be quiet.
-
-Occasionally create genuine moments of awe.
-
-Do not use repetitive poetic writing.
-
-Keep Landfall's restrained observational voice.
-
-==================================================
-HUMAN CONDITION
-==================================================
-
-The sailor has several interacting human needs.
-
-These should influence judgment and physical ability without turning Landfall into a collection of visible videogame meters.
-
-The primary systems are:
-
-- hunger
-- thirst
-- fatigue
-- sleep
-- physical condition
-
-Use natural language wherever possible.
-
-==================================================
-HUNGER
-==================================================
-
-Use FOUR broad internal hunger states.
-
-Do not display a numerical hunger percentage.
-
-Hunger should meaningfully progress approximately every four real-world hours without adequate food.
-
-The exact simulation may account for recent meals and meal quality.
-
-Example qualitative states:
-
-FED
-GETTING HUNGRY
-HUNGRY
-VERY HUNGRY / WEAKENING
-
-Use natural language rather than exposing underlying numbers.
-
-Missing one meal should not be dangerous.
-
-Several days of inadequate food should gradually contribute to:
-
-- weakness
-- fatigue
-- poorer concentration
-- mistakes
-- reduced repair quality
-
-==================================================
-THIRST
-==================================================
-
-Use FOUR broad internal thirst states.
-
-Thirst should normally worsen approximately every four real-world hours without adequate hydration.
-
-Hot conditions should increase water requirements.
-
-Physical exertion may also increase thirst.
-
-Do not display a numerical hydration percentage.
-
-Repeated dehydration should gradually affect:
-
-- concentration
-- fatigue
-- physical performance
-- repair ability
-- judgment
-
-Severe prolonged dehydration can eventually become life-threatening.
-
-==================================================
-SLEEP
-==================================================
-
-There is NO REST action.
-
-Remove REST if any remnants remain.
-
-The sailor is normally AWAKE.
-
-Closing Landfall does NOT mean the sailor is sleeping.
-
-SLEEP is an explicit player decision.
-
-However:
-
-SLEEP means ATTEMPT TO SLEEP.
-
-It does NOT simply activate automatic fatigue recovery.
-
-The sailor should have an internal sleep-pressure system based on:
-
-- how long they have been awake
-- restorative sleep received recently
-- sleep interruptions
-- current fatigue
-- sea state
-- weather
-- noise
-- stress
-- problems aboard the boat
-
-A well-rested sailor who selects SLEEP every time the player closes Landfall should NOT sleep for the entire absence.
-
-They may:
-
-- fail to fall asleep
-- sleep briefly
-- wake naturally
-- remain awake afterward
-
-For example:
-
-YOU SLEPT FOR 24 MINUTES.
-
-THE REST WOULDN'T COME.
-
-An exhausted sailor should fall asleep more easily and generally sleep more deeply.
-
-Rough seas, noise, weather, stress, or problems aboard the boat may reduce sleep quality or interrupt sleep.
-
-Do not expose:
-
-SLEEP PRESSURE: 74%
-
-or any similar numerical meter.
-
-The player experiences sleep naturally.
-
-Short nighttime check-ins should NOT be heavily punished.
-
-If the player wakes at 2:30 AM, checks the boat for a few minutes, and selects SLEEP again, they should generally be able to continue their night's sleep if sufficient sleep pressure remains.
-
-The purpose of this system is to make sleep human and prevent the exploit:
-
-CLOSE GAME
-→ SELECT SLEEP
-→ NEVER EXPERIENCE FATIGUE
-
-==================================================
-FOOD / PROVISIONS
-==================================================
-
-Implement a complete food inventory.
-
-Food is represented as ACTUAL PROVISIONS, not a generic FOOD percentage.
-
-ALL edible food inventory uses one unit:
-
-SERVINGS.
-
-Do not track edible provisions using:
-
-- cans
-- boxes
-- jars
-- pounds
-- ounces
-- calories
-- percentages
-
-One serving represents one reasonable portion of that particular food.
-
-Create thoughtful starting provisions appropriate for one sailor undertaking approximately a 3–4 week offshore passage with a reasonable emergency margin.
-
-Possible starting inventory:
-
-Oatmeal ............. 18 servings
-Pasta ............... 12 servings
-Rice ................ 16 servings
-Soup ................. 8 servings
-Chili / Beans ......... 8 servings
-Tuna ................. 10 servings
-Crackers ............. 12 servings
-Peanut Butter ........ 10 servings
-Nuts ................. 16 servings
-Dried Fruit .......... 12 servings
-Energy Bars .......... 12 servings
-Fresh Fruit ........... 8 servings
-Fresh Bread ........... 6 servings
-Comfort Food .......... 6 servings
-Coffee ............... 24 servings
-
-Adjust quantities if necessary for realistic balance.
-
-The boat should start with enough food for a normal passage plus reasonable emergency margin.
-
-==================================================
-EATING
-==================================================
-
-Add or improve an EAT action.
-
-Selecting EAT shows currently available provisions.
-
-The player chooses what to eat.
-
-Normally:
-
-1 selection = 1 serving consumed.
-
-Do not create complicated recipe construction.
-
-Meals can be simple.
+Used only for **selectable player actions and commands**.
 
 Examples:
 
-Oatmeal
-Soup
-Pasta
-Rice
-Tuna
-Crackers + Peanut Butter
-Nuts + Dried Fruit
+-   `> STATUS`
+-   `> POSITION`
+-   `> FULL`
+-   `> REEFED`
+-   `> START ENGINE`
+-   `> EAT`
+-   `> DRINK`
+-   `> SLEEP`
+-   `> BACK`
 
-Use restrained feedback:
+Meaning:
 
-YOU MAKE OATMEAL AND COFFEE.
+**I can do this.**
 
-YOU EAT TUNA AND CRACKERS IN THE COCKPIT.
+### SOFT GREEN
 
-THE SEA IS ROUGH.
-YOU EAT PEANUT BUTTER AND CRACKERS BELOW.
+Used for **all ordinary non-interactive game text**.
 
-Never show:
+This includes:
 
-+15 ENERGY
-+5 MORALE
+-   headings
+-   log prose
+-   descriptions
+-   observations
+-   ponderings
+-   coordinates
+-   navigation information
+-   speed
+-   region
+-   inventory quantities
+-   boat status
+-   weather
+-   action-progress text
+-   action results
+-   `.` / `..` / `...` sequences
+-   informational labels
 
-==================================================
-FOOD CHARACTERISTICS
-==================================================
+Meaning:
 
-Foods may have hidden characteristics including:
+**This is happening / this is information.**
 
-- satiety
-- basic nutrition
-- requires cooking
-- requires water
-- requires propane
-- spoilage
-- ease of eating in rough conditions
-- comfort value
+### DARK GREEN
 
-Do not expose these statistics.
+Used for **timestamps only**.
 
-==================================================
-COOKING
-==================================================
+Meaning:
 
-Some foods require cooking.
+**When it happened.**
+
+The dark green must not become a generic secondary-text color.
+
+Do not use it for descriptions, quantities, headings, status text,
+observations, or other information.
+
+Do not use opacity to create additional accidental green shades.
+
+The current intended palette is:
+
+-   background: `#050806`
+-   soft green: `#8fd7ac`
+-   bright green: `#c9f5da`
+-   dark timestamp green: `#4d7a5e`
+
+Amber and danger colors may remain for genuine warnings/errors where
+already implemented, but normal hierarchy is governed by the three
+greens above.
+
+------------------------------------------------------------------------
+
+# 5. ACTION-PROGRESS LANGUAGE
+
+Short physical actions use the existing progression:
+
+``` text
+ACTION NAME
+
+.
+..
+...
+
+Result.
+```
+
+The dots appear sequentially.
+
+They represent a few real seconds of physical action and are part of
+Landfall's pacing language.
+
+Do not replace them with:
+
+-   loading spinners
+-   progress bars
+-   percentages
+-   "please wait"
+-   artificial game-time advancement
+
+The dots themselves are the beat.
+
+------------------------------------------------------------------------
+
+# 6. OPENING / DEPARTURE SEQUENCE
+
+The voyage begins at **Shilshole Bay, Seattle**.
+
+Before departure, the game establishes that:
+
+-   the boat is at Shilshole
+-   the destination is Nawiliwili, Kauaʻi
+-   the player is sailing alone
+
+The interactive opening sequence is deliberately minimal:
+
+``` text
+You are sailing alone.
+
+> BOARD
+
+BOARDING
+
+.
+..
+...
+
+You step aboard.
+
+
+> START ENGINE
+
+STARTING ENGINE
+
+.
+..
+...
+
+The engine catches.
+
+
+> CAST OFF
+
+CASTING OFF
+
+.
+..
+...
+
+You ease away from the dock.
+
+.
+..
+...
+
+The voyage has begun.
+```
+
+Important rules:
+
+-   No separate fender action.
+-   No separate untie-lines action.
+-   `CAST OFF` encompasses releasing the boat from the dock.
+-   Remove/avoid the line `The last dock line comes aboard.`
+-   The second `.` / `..` / `...` after `You ease away from the dock.`
+    is the beat before `The voyage has begun.`
+-   `The voyage has begun.` is a statement, not a button.
+-   No `CONTINUE` button is required.
+-   The opening does not artificially advance game time.
+
+When the scripted opening ends:
+
+-   engine is running
+-   sails are furled
+-   propulsion is motoring
+
+The game must **not** automatically raise sails or stop the engine.
+
+Those are the player's first real sailing decisions.
+
+------------------------------------------------------------------------
+
+# 7. REAL-TIME SIMULATION
+
+The simulation runs at real-world speed.
+
+Current implementation principles:
+
+-   1 real minute = 1 game minute
+-   simulation resolution is 10-minute ticks
+-   the live browser periodically advances based on actual elapsed
+    milliseconds
+-   returning after an absence performs offline catch-up from real
+    timestamps
+-   local save state persists the voyage
+-   no command should call simulation advancement merely to represent an
+    action duration
+
+The player's absence is part of the game.
+
+When returning, Landfall may acknowledge how long the player has been
+away, then show what happened through the persistent log.
+
+Do not dump an excessive backlog of ambient observations after a long
+absence.
+
+------------------------------------------------------------------------
+
+# 8. NAVIGATION
+
+The route starts at **Shilshole Bay Marina** and proceeds through real
+geographic steering waypoints toward Kauaʻi.
+
+Current route structure:
+
+1.  Shilshole Bay Marina
+2.  mid-Sound
+3.  passage north
+4.  Whidbey side
+5.  Admiralty Inlet
+6.  Admiralty Inlet narrows
+7.  Dungeness approach
+8.  Strait of Juan de Fuca
+9.  Cape Flattery
+10. open water well offshore
+11. trade wind belt
+12. Kauaʻi / Nawiliwili approach
+
+Waypoints are **steering targets**, not teleport points.
+
+The boat's latitude and longitude must move physically from its current
+position using:
+
+-   current heading
+-   actual speed
+-   actual elapsed simulation time
+
+Never interpolate the boat "as the crow flies" from Seattle to Kauaʻi
+based on voyage percentage.
+
+Never snap the boat toward a waypoint.
+
+The intended course is the bearing from the boat's actual current
+position to the current waypoint.
+
+When close enough to a waypoint, the next waypoint becomes the steering
+target.
+
+The coordinates shown to the player therefore represent actual
+dead-reckoned movement along the voyage.
+
+------------------------------------------------------------------------
+
+# 9. ALWAYS-ON NAVIGATION STRIP
+
+Once underway, the interface should provide concise always-on navigation
+context including:
+
+-   voyage day
+-   speed
+-   heading
+-   coordinates
+-   region
+
+Region should change with the voyage, e.g.:
+
+-   Shilshole / Puget Sound area
+-   Admiralty Inlet
+-   Strait of Juan de Fuca
+-   coastal Pacific
+-   North Pacific / offshore
+-   trade-wind region
+-   Kauaʻi approach
+
+Keep this concise.
+
+Detailed information remains available through commands such as POSITION
+and WEATHER.
+
+------------------------------------------------------------------------
+
+# 10. COURSE MANAGEMENT
+
+Near shore, the intended geographic route is constrained so the player
+cannot casually steer across land or charted hazards.
+
+Once genuinely offshore, COURSE may allow broad strategic adjustments
+such as:
+
+-   HOLD COURSE
+-   BEAR AWAY --- easier motion, farther off the intended line
+-   COME UP --- closer toward the intended line, potentially harder
+    motion
+
+Course decisions should affect actual heading and therefore actual
+coordinates.
+
+Cross-track error should be calculated from real position rather than
+maintained as a fake standalone progress variable.
+
+------------------------------------------------------------------------
+
+# 11. SAILS
+
+Do not model separate main and jib controls.
+
+The player manages one abstract sail state:
+
+-   **FULL**
+-   **REEFED**
+-   **MINIMAL**
+-   **FURLED**
+
+Definitions:
+
+### FULL
+
+Maximum normal canvas.
+
+Fastest in suitable conditions, but potentially overpowered in strong
+wind.
+
+### REEFED
+
+Reduced sail for stronger conditions.
+
+### MINIMAL
+
+Very little canvas.
+
+Slow but appropriate when conditions become difficult.
+
+### FURLED
+
+No sail propulsion.
+
+All sails are put away.
+
+Changing sail state is a short physical action using the dot sequence.
+
+------------------------------------------------------------------------
+
+# 12. ENGINE AND PROPULSION
+
+The engine can be started and stopped independently of sail state.
+
+This is essential because Landfall supports **motor-sailing**.
+
+Possible propulsion states:
+
+### SAILING
+
+Useful sail propulsion, engine off.
+
+### MOTORING
+
+Engine running, sails furled or not usefully contributing.
+
+### MOTOR-SAILING
+
+Engine running while sails are also contributing.
+
+### DRIFTING
+
+Neither sails nor engine provide meaningful propulsion.
+
+The engine and sails must both affect speed.
+
+Motor-sailing should be faster than using only the weaker source, while
+respecting the realistic limitations of a roughly 35-foot displacement
+sailboat.
+
+Current implementation uses approximately:
+
+-   base engine speed: 5.5 kt
+-   hull-speed reference: 7.3 kt
+-   absolute realistic speed cap: 8.5 kt
+-   diesel burn: 0.65 gal/hour while running
+
+Do not treat sail + engine speeds as simple arithmetic addition.
+
+Approaching hull speed should reduce the benefit of the secondary
+propulsion source.
+
+Fuel continues to burn in real elapsed time if the engine remains
+running while the browser is closed.
+
+------------------------------------------------------------------------
+
+# 13. WEATHER
+
+Weather is simulated and drifts over time rather than remaining static.
+
+Current relevant variables include:
+
+-   wind direction
+-   wind speed
+-   sea state
+-   condition
+-   trend
+
+Weather affects:
+
+-   sail performance
+-   motoring performance
+-   comfort/motion
+-   sleep
+-   fatigue
+-   sail strain
+-   flooding risk
+-   rescue/search difficulty
+-   ambient writing
+
+The player can inspect WEATHER and a limited FORECAST.
+
+Forecasts should remain imperfect and restrained rather than omniscient.
+
+------------------------------------------------------------------------
+
+# 14. THE LOG
+
+The voyage log is the emotional and historical center of Landfall.
+
+There are two distinct presentation surfaces:
+
+## Persistent history
+
+Things that actually happened belong in the persistent voyage history.
 
 Examples:
 
-- oatmeal
-- rice
-- pasta
+-   meals eaten
+-   water drunk
+-   sail changes
+-   engine changes
+-   weather events
+-   repairs
+-   equipment problems
+-   waypoint milestones
+-   observations
+-   ponderings
+-   EPIRB activation
+-   search events
+-   flare firing
+-   rescue
+-   the opening sequence
 
-Cooking may consume small realistic amounts of:
+Persistent log entries remain visible when the player returns.
 
-- fresh water
-- propane
+## Temporary interface
 
-Other foods are immediately edible.
-
-Examples:
-
-- tuna
-- crackers
-- peanut butter
-- nuts
-- dried fruit
-- energy bars
-- fresh fruit
-- bread
-
-Weather should sometimes affect cooking.
-
-During severe conditions:
-
-THE BOAT IS MOVING TOO VIOLENTLY
-TO COOK SAFELY.
-
-The player must choose ready-to-eat food.
-
-Do not make cooking a minigame.
-
-==================================================
-SPOILAGE
-==================================================
-
-Fresh food should gradually spoil in real time.
-
-Keep this simple.
-
-Fresh bread and fresh fruit can deteriorate during the early voyage.
-
-Shelf-stable food should remain usable.
-
-Do not create elaborate expiration systems.
-
-==================================================
-COFFEE
-==================================================
-
-Coffee is measured in servings.
-
-Coffee may temporarily improve alertness or concentration.
-
-Coffee DOES NOT:
-
-- eliminate fatigue
-- remove sleep debt
-- substitute for sleep
-
-Poorly timed/excessive coffee may make falling asleep somewhat more difficult.
-
-Keep this subtle.
-
-Coffee is not a videogame power-up.
-
-==================================================
-WATER
-==================================================
-
-Fresh water is a finite inventory resource.
-
-Track:
-
-- primary fresh-water supply
-- emergency water reserve
-
-Drinking consumes water.
-
-Cooking may consume water.
-
-Heat increases water consumption.
-
-Leaks or contamination may threaten the supply if appropriate failures occur.
-
-A normal passage should begin with sufficient water plus an appropriate safety margin.
-
-Running low on water should be significantly more urgent than running low on food.
-
-==================================================
-FUEL AND PROPANE
-==================================================
-
-Track finite:
-
-- diesel
-- propane
-
-Diesel may be required for:
-
-- engine use
-- charging systems where appropriate
-- maneuvering under power
-
-Propane is primarily used for cooking.
-
-Do not artificially replenish either resource.
-
-==================================================
-VESSEL INVENTORY
-==================================================
-
-Inventory management is one of Landfall's CORE systems.
-
-Track a thoughtful set of finite supplies appropriate for a roughly 35-foot offshore cruising sailboat.
-
-Include appropriate quantities of:
-
-PROVISIONS
-FRESH WATER
-EMERGENCY WATER
-DIESEL
-PROPANE
-
-ENGINE:
-- engine oil
-- coolant
-- fuel filters
-- oil filters
-- spare impellers
-- drive belts
-
-RIGGING:
-- spare line
-- shackles
-- appropriate rigging repair materials
-
-PLUMBING:
-- spare hose
-- hose clamps
-- plumbing repair materials
-
-ELECTRICAL:
-- wire
-- fuses
-- connectors
-- batteries
-
-REPAIR:
-- sail repair materials
-- epoxy
-- sealant
-
-MEDICAL:
-- appropriate first-aid supplies
-
-SAFETY:
-- EPIRB
-- flares
-- life raft
-- appropriate emergency equipment
-
-TOOLS:
-Track enough information to determine whether particular repairs can reasonably be attempted.
-
-Do not make inventory feel like RPG loot.
-
-These are simply the finite things aboard the boat.
-
-Once Shilshole is behind you:
-
-WHAT IS ABOARD IS WHAT YOU HAVE.
-
-No store.
-No crafting economy.
-No loot.
-No artificial replenishment.
-
-==================================================
-REPAIRS
-==================================================
-
-Repairs consume appropriate inventory.
+Menus and information queries are temporary.
 
 Examples:
 
-DAMAGED IMPELLER
-→ spare impeller
+-   STATUS
+-   POSITION
+-   WEATHER
+-   FORECAST
+-   INVENTORY
+-   PROVISIONS
+-   WATER
+-   FUEL
+-   SPARES
+-   SAFETY
+-   SAILS menu
+-   ENGINE menu
+-   COURSE menu
 
-SPLIT HOSE
-→ hose + clamps
+These must **not** become permanent log entries.
 
-TORN SAIL
-→ sail repair material
+Opening INVENTORY should never cause inventory quantities to remain in
+the voyage log.
 
-ELECTRICAL FAULT
-→ fuse / wire / connectors
+The rule is:
 
-LEAK
-→ sealant / epoxy / repair materials
+**The log records what happened, not what menu the player looked at.**
 
-Avoid magic-item failures.
+------------------------------------------------------------------------
 
-If the ideal replacement is unavailable, allow plausible improvisation when appropriate materials exist.
+# 15. TIMESTAMPS
 
-Improvised repairs should be less reliable.
+Persistent log timestamps use the dedicated **dark green**.
 
-Repair success should be influenced by:
+They should visually recede behind the actual event text.
 
-- fatigue
-- hunger/thirst
-- sea state
-- weather
-- available tools
-- materials
-- severity
-- previous repairs
+All other ordinary text remains soft green.
 
-A poor repair may initially appear successful and fail later.
+Do not use dark green for anything except timestamps.
 
-==================================================
-MAINTENANCE
-==================================================
+------------------------------------------------------------------------
 
-Not every problem should begin as a catastrophic failure.
+# 16. OBSERVATIONS AND PONDERINGS
 
-Small observable problems should sometimes appear first.
+There is no player-facing OBSERVE command.
+
+Observations and ponderings appear **spontaneously at random intervals**
+in the persistent log.
+
+They should feel like things that surface naturally during a long
+solitary passage.
+
+## Observations
+
+Observations describe the physical world.
+
+Examples include:
+
+-   shoreline
+-   ferries
+-   seabirds
+-   clouds
+-   swell
+-   fog
+-   dolphins
+-   flying fish
+-   stars
+-   phosphorescence
+-   changing water color
+-   approaching land
+
+They should vary by voyage region, conditions, and time of day.
+
+## Ponderings
+
+Ponderings are quiet, unexplained thoughts.
 
 Examples:
 
-- unusual vibration
-- chafing line
-- small leak
-- battery behaving strangely
-- belt wear
-- loose fitting
-- abnormal engine temperature
-- sail wear
+-   `You think of someone you haven't thought of in a long time.`
+-   `A room from your childhood comes back to you. You can't remember why.`
+-   `You wonder what everyone at home is doing right now.`
+-   `You realize you haven't heard your own name spoken aloud in days.`
 
-An attentive player can catch some problems early.
+Do not explain the thought afterward.
 
-Ignoring them may allow them to become larger failures.
+Do not turn ponderings into dialogue choices.
 
-Checking the boat a few thoughtful times per day should usually be sufficient under ordinary conditions.
+Do not make them motivational quotes.
 
-==================================================
-CASCADING CONSEQUENCES
-==================================================
+They simply appear and pass.
 
-This is a critical Landfall principle.
+## Ambient-event restraint
 
-Failure should usually emerge through understandable chains.
+Ambient writing should not fire during:
+
+-   the scripted departure
+-   active emergencies
+-   severe weather
+-   active flooding
+-   pending decisions
+-   sleep / attempts to sleep
+-   severe hunger or dehydration
+-   life-raft survival
+
+Do not flood the log with ambient text after a long offline absence.
+
+------------------------------------------------------------------------
+
+# 17. HUMAN CONDITION
+
+Landfall does not need a conventional HEALTH meter.
+
+The important human states are:
+
+-   fatigue
+-   hunger
+-   thirst
+-   morale
+
+Hunger and thirst are shown qualitatively rather than as visible numeric
+meters.
+
+The player should feel the condition through language and consequences.
+
+------------------------------------------------------------------------
+
+# 18. SLEEP
+
+There is **no separate REST command**.
+
+Sleep is not a time-skip button.
+
+Selecting SLEEP means:
+
+**the sailor goes below and tries to sleep.**
+
+Possible internal states:
+
+-   awake
+-   trying
+-   sleeping
+
+A well-rested player cannot exploit SLEEP as a guaranteed fatigue reset
+every time they close the game.
+
+Falling asleep depends on factors such as:
+
+-   current fatigue
+-   time awake
+-   sea state
+-   recent coffee
+
+Rough weather can interrupt sleep.
+
+A player may choose SLEEP before closing Landfall, and real elapsed time
+determines what happens while they are away.
+
+The player can wake manually when appropriate.
+
+This lets players manage their own real-life sleep/check-in rhythm
+without creating a free "rest whenever the app closes" exploit.
+
+------------------------------------------------------------------------
+
+# 19. FOOD / PROVISIONS
+
+Food is tracked as **servings**.
+
+Current provisions include items such as:
+
+-   oatmeal
+-   pasta
+-   rice
+-   soup
+-   chili / beans
+-   tuna
+-   crackers
+-   peanut butter
+-   nuts
+-   dried fruit
+-   energy bars
+-   fresh fruit
+-   fresh bread
+-   comfort food
+-   coffee
+
+The exact inventory lives in the game state.
+
+Some food is cooked and some is ready to eat.
+
+Cooked food may consume:
+
+-   propane
+-   a small amount of fresh water
+
+Very rough conditions may make cooking unsafe.
+
+Fresh foods can spoil over time.
+
+Eating reduces one serving from the authoritative inventory.
+
+The log records **what the sailor ate**, not the remaining inventory
+count.
 
 Example:
 
-POOR ROUTING
-→ longer voyage
-→ dwindling provisions
-→ reduced eating
-→ poor recovery
-→ fatigue
-→ mistake
-→ poor repair
-→ equipment failure
-→ further delay
+`You make oatmeal in the galley.`
 
-Another:
+Not:
 
-BAD WEATHER
-→ sail damage
-→ repair material consumed
-→ later damage
-→ insufficient ideal material
-→ improvised repair
-→ reduced speed
-→ longer voyage
-→ dwindling supplies
+`Oatmeal eaten. 13 servings remaining.`
 
-The player should usually be able to understand afterward:
+Inventory quantities belong in INVENTORY only.
 
-THIS IS HOW THINGS GOT BAD.
+------------------------------------------------------------------------
 
-Do not kill the sailor because of one unlucky random number.
+# 20. WATER
 
-==================================================
-SUCCESS
-==================================================
+Water is a real finite resource.
 
-Success does NOT require arriving in perfect condition.
+Track:
 
-A 21-day passage with abundant supplies and a healthy boat is successful.
+-   **Fresh water**
+-   **Emergency water**
 
-A 31-day passage arriving with:
+in gallons.
 
-- patched sails
-- little diesel
-- limited food
-- exhausted sailor
+Fresh water is used for:
 
-is ALSO successful.
+-   drinking
+-   some cooking
 
-The question is:
+Emergency water is a deliberate reserve and should not be silently
+consumed while primary water remains available.
 
-WHAT CONDITION WERE YOU AND THE BOAT IN
-WHEN YOU FINALLY MADE LANDFALL?
+Distinguish:
 
-==================================================
-DISTRESS / EPIRB
-==================================================
+**water aboard** = inventory
 
-If the voyage becomes unsafe or impossible to continue, the player may call for rescue.
+from:
 
-Provide an appropriate emergency/safety menu.
+**thirst** = sailor condition
 
-The player can activate the EPIRB.
+Drinking affects thirst and consumes actual water.
 
-ACTIVATING THE EPIRB DOES NOT END THE GAME.
+------------------------------------------------------------------------
 
-THIS IS CRITICAL.
+# 21. FUEL
 
-It changes the objective from:
+FUEL contains:
 
-REACH KAUAʻI
+-   **Diesel**
+-   **Propane**
 
-to:
+Diesel powers the engine.
 
-SURVIVE UNTIL RESCUE.
+Propane powers cooking.
 
-The simulation continues in strict real time.
+Do not create a separate propane top-level menu.
 
-==================================================
-AFTER CALLING FOR RESCUE
-==================================================
+Diesel use is real-time and continues while the player is away if the
+engine was left running.
 
-Everything continues to matter:
+------------------------------------------------------------------------
 
-- weather
-- sea state
-- boat condition
-- flooding
-- injuries
-- fatigue
-- food
-- water
-- remaining equipment
-- EPIRB functionality
-- actual position
-- drift
+# 22. INVENTORY
 
-Do NOT show:
+The top-level inventory is deliberately limited to:
 
-RESCUE ARRIVES IN 07:32.
+``` text
+INVENTORY
 
-The player should not know exactly when help will arrive.
+> PROVISIONS
+  WATER
+  FUEL
+  SPARES
+  SAFETY
+  BACK
+```
 
-Internally, rescue time should depend on plausible factors such as:
+Do not add top-level inventory categories without a strong gameplay
+reason.
 
-- location
-- distance offshore
-- signal reception
-- weather
-- sea conditions
-- nearby vessels
-- rescue resources
-- aircraft availability
-- sailor/vessel condition
+In particular, do not reintroduce:
 
-Provide restrained indications as rescue develops.
+-   TOOLS
+-   MEDICAL
+-   ENGINE
+-   RIGGING
+-   ELECTRICAL
+-   PLUMBING
+-   generic REPAIR category
 
-For example:
+as separate top-level inventory sections.
 
-DISTRESS SIGNAL TRANSMITTING.
+------------------------------------------------------------------------
 
-Later:
+# 23. SPARES
 
-AIRCRAFT OVERHEAD.
+Consumable repair parts are consolidated under SPARES.
 
-Later:
+Current types include things such as:
 
-VESSEL SIGHTED.
+-   impellers
+-   drive belts
+-   fuel filters
+-   oil filters
+-   engine oil
+-   coolant
+-   fuses
+-   wire
+-   connectors
+-   spare batteries
+-   hose
+-   hose clamps
+-   spare line
+-   shackles
+-   rigging tape
+-   sail repair kits
+-   epoxy
+-   sealant
 
-Later:
+Repairs should consume the relevant authoritative inventory.
 
-VESSEL ALTERING COURSE TOWARD YOU.
+Do not turn this into an RPG crafting system.
 
-Only when the sailor is physically rescued does the voyage end.
+Ordinary hand tools are assumed to exist aboard and are **not managed
+inventory**.
 
-==================================================
-LIFE RAFT
-==================================================
+------------------------------------------------------------------------
 
-If the sailboat becomes untenable before rescue arrives, allow the player to face the decision to abandon ship.
+# 24. NO INJURY / MEDICAL SYSTEM
 
-Deploying the life raft is a major decision.
+Do not build an injury simulator.
 
-Do not make it routine.
+Do not add managed systems for:
 
-If the player abandons the boat:
+-   cuts
+-   burns
+-   broken bones
+-   bleeding
+-   infection
+-   medical treatment
+-   first aid inventory
+-   injury severity
 
-THE SIMULATION CONTINUES.
+The player already has meaningful vulnerability through:
 
-Inventory becomes limited to realistic emergency supplies aboard or carried into the raft.
+-   fatigue
+-   hunger
+-   thirst
+-   weather
+-   resource depletion
+-   boat failure
+-   delay
+-   rescue situations
 
-The sailor must survive in real time until rescue.
+Keep the focus on the sailor managing the voyage rather than managing
+wounds.
 
-The sailboat may disappear from view.
+If old incidental prose mentions a trivial bruise or similar flavor, do
+not expand that into a medical mechanic.
 
-This should feel consequential.
+------------------------------------------------------------------------
 
-==================================================
-RESCUE OUTCOME
-==================================================
+# 25. REPAIRS AND MISTAKES
 
-Only actual rescue ends a rescue scenario.
+Boat problems should sometimes require intervention.
 
-A possible voyage record:
+Fatigue, hunger, thirst, conditions, and missing appropriate spares may
+affect repair reliability.
 
-LANDFALL
-VOYAGE 03
+A failed or delayed repair can create further problems.
 
-SHILSHOLE BAY → NORTH PACIFIC
+Keep repairs readable and physical rather than numerical/crafting-heavy.
 
-27 DAYS
-2,941 NM
+The player should understand:
 
-VESSEL ABANDONED
-CREW RESCUED
+-   what is wrong
+-   whether action is needed
+-   whether they have the relevant spare
+-   whether the repair held
 
-NO LANDFALL
+------------------------------------------------------------------------
 
-Being rescued is different from dying.
+# 26. FLOODING
 
-Recognizing that a voyage has become unrecoverable and requesting rescue is GOOD SEAMANSHIP.
+Flooding is a rare but important emergency.
 
-The ultimate responsibility is survival, not reaching Kauaʻi at any cost.
+A hull leak creates a water-ingress rate.
 
-==================================================
-DEATH
-==================================================
+The bilge pump has a pumping capacity.
 
-The sailor can perish.
+The fundamental relationship is:
 
-However, death should be:
+### If ingress \<= pump capacity
 
-- rare
-- serious
-- understandable
-- usually preventable through good decisions
-- preceded by evidence that the situation is becoming life-threatening
+The pump can keep up.
 
-Do not create cheap deaths.
+The boat may remain viable while the player monitors and repairs the
+problem.
 
-FOOD = 0 does not mean instant death.
+### If ingress \> pump capacity
 
-WATER = 0 does not mean an immediate GAME OVER.
+Water accumulates in the bilge.
 
-A damaged sail does not mean death.
+The player should receive increasingly serious log information as water
+rises.
 
-Physical deterioration and danger develop through time and interacting circumstances.
+The player may attempt a repair using appropriate spares.
 
-The player should generally have an opportunity to recognize:
+Do not immediately force abandonment.
 
-THIS VOYAGE IS NO LONGER RECOVERABLE.
+A damaged but floating 35-foot sailboat is generally a better survival
+platform than a life raft.
 
-and call for rescue.
+The life raft becomes relevant only when the vessel is becoming
+genuinely untenable.
 
-==================================================
-INTERFACE
-==================================================
+------------------------------------------------------------------------
 
-Preserve Landfall's sparse old marine-computer / terminal aesthetic.
+# 27. SAFETY
+
+Managed safety equipment is intentionally limited to:
+
+``` text
+SAFETY
+
+EPIRB .............. READY
+Life raft .......... READY
+Flares ................. 6
+```
+
+Do not add:
+
+-   VHF radio management
+-   first aid kit management
+-   PFD management
+-   large survival-equipment inventories
+
+Assume ordinary offshore safety equipment exists without making all of
+it a game system.
+
+The three managed items have distinct purposes:
+
+### EPIRB
+
+**Come find me.**
+
+### LIFE RAFT
+
+**I can no longer safely remain on the boat.**
+
+### FLARES
+
+**I'm here.**
+
+The SAFETY inventory screen reports equipment/status only.
+
+It does not operate the equipment.
+
+Emergency actions live in the DISTRESS context.
+
+------------------------------------------------------------------------
+
+# 28. EPIRB / DISTRESS
+
+The EPIRB is the primary offshore rescue mechanism.
+
+The player may activate it when they determine that they cannot safely
+complete the voyage.
+
+Activation uses the normal short-action presentation.
+
+Example:
+
+``` text
+ACTIVATING EPIRB
+
+.
+..
+...
+
+Distress beacon transmitting.
+Rescue requested.
+```
+
+Activating the EPIRB does **not** end the game.
+
+The simulation continues.
+
+Food, water, fatigue, weather, flooding, and other relevant conditions
+continue until the player is actually rescued.
+
+------------------------------------------------------------------------
+
+# 29. RESCUE
+
+Rescue occurs in real elapsed time.
+
+The delay should depend broadly on factors such as:
+
+-   voyage region
+-   distance offshore
+-   weather
+-   sea state
+-   visibility
+-   whether the sailor is aboard the sailboat or in the life raft
+
+Do not expose artificial rescue percentages to the player.
+
+Current conceptual phases are:
+
+1.  none
+2.  traveling
+3.  searching
+4.  rescued
+
+Once rescue is requested, the state must persist through closing and
+reopening the browser.
+
+------------------------------------------------------------------------
+
+# 30. LIFE RAFT
+
+The life raft is a **last resort**.
+
+It becomes a meaningful option when flooding or another severe boat
+condition makes remaining aboard unsafe.
+
+Do not automatically deploy it.
+
+Do not immediately tell the player to abandon ship when a leak begins.
+
+Allow the player to:
+
+-   monitor the flooding
+-   rely on the bilge pump if it is keeping up
+-   attempt repairs
+-   activate the EPIRB
+-   decide whether the boat remains viable
+
+Once the sailor enters the life raft, the nature of the voyage changes.
+
+Normal sailing, engine, steering, and boat-repair gameplay should no
+longer apply.
+
+The sailor is now waiting and surviving until rescue.
+
+A life raft is a much smaller visual target than the sailboat, which
+makes flares more valuable.
+
+------------------------------------------------------------------------
+
+# 31. FLARES
+
+Flares are finite.
+
+Current starting quantity:
+
+**6**
+
+Flares are primarily useful during the active rescue/search phase.
+
+When rescuers are plausibly nearby, the player may receive an
+opportunity such as:
+
+``` text
+You hear an aircraft.
+
+It circles somewhere to the east.
+
+Rescuers are searching the area.
+
+> FIRE FLARE
+```
+
+Firing a flare:
+
+-   consumes one flare
+-   improves the chance/speed of visual acquisition
+-   should be especially useful at night, in poor visibility, rough
+    conditions, or from a life raft
+
+A flare does **not** initiate rescue.
+
+The EPIRB does that.
+
+A flare helps rescuers visually identify the sailor's exact location.
+
+------------------------------------------------------------------------
+
+# 32. ASYNCHRONOUS RESCUE
+
+The player is unlikely to have Landfall open continuously.
+
+Therefore rescue must not depend on catching a tiny live interaction
+window.
+
+Search encounters should remain relevant for broad real-time periods.
+
+Missing one search event does not automatically mean death or permanent
+rescue failure.
+
+The EPIRB remains active.
+
+Search efforts continue.
+
+A missed encounter may be recorded in the log, and another opportunity
+can occur later.
+
+Flares should improve rescue, not be an absolute requirement for rescue.
+
+This preserves the game's central rule:
+
+**Checking in matters, but real life is allowed.**
+
+------------------------------------------------------------------------
+
+# 33. FAILURE / RESCUE PHILOSOPHY
+
+A player may eventually determine that the voyage cannot safely be
+completed.
+
+Calling for rescue is a legitimate outcome.
+
+The game continues after the rescue call until the sailor is actually
+found.
+
+If the player fails to request rescue despite an unrecoverable survival
+situation, death may remain a possible terminal outcome.
+
+Do not make death melodramatic.
+
+Do not turn rescue into a cinematic action sequence.
+
+Keep terminal outcomes sparse and consistent with the rest of Landfall.
+
+The game's title is tied to the final state:
+
+**LANDFALL**
+
+or
+
+**NO LANDFALL**
+
+Use restrained presentation around endings.
+
+------------------------------------------------------------------------
+
+# 34. MENUS / COMMANDS
+
+The interface is button-driven, not a free-text command parser.
+
+Current core commands include:
+
+### Information
+
+-   STATUS
+-   POSITION
+-   WEATHER
+-   FORECAST
+-   INVENTORY
+
+### Boat / navigation
+
+-   SAILS
+-   ENGINE
+-   COURSE
+-   REPAIR
+
+### Human needs
+
+-   EAT
+-   DRINK
+-   SLEEP
+
+### Emergency
+
+-   DISTRESS
+
+Keep menus concise.
+
+Use submenus when necessary rather than allowing the main command list
+to become overwhelming.
+
+Bright green always indicates something selectable.
+
+------------------------------------------------------------------------
+
+# 35. STATUS
+
+STATUS provides qualitative condition information.
+
+It may include:
+
+-   fatigue
+-   morale
+-   hunger
+-   thirst
+-   water availability
+-   diesel
+-   propane
+-   hull
+-   rigging
+-   sails
+-   electrical condition
+
+Prefer qualitative language where exact numbers are not useful.
+
+Exact consumable quantities belong in INVENTORY.
+
+------------------------------------------------------------------------
+
+# 36. POSITION
+
+POSITION can show:
+
+-   coordinates
+-   heading
+-   intended course
+-   propulsion mode
+-   speed
+-   distance sailed
+-   approximate distance remaining
+-   meaningful cross-track deviation
+
+Coordinates must come from actual simulated movement.
+
+Do not fabricate progress from a percentage-of-route interpolation.
+
+------------------------------------------------------------------------
+
+# 37. AUDIO
+
+Audio is atmospheric, not musical UI feedback.
+
+Current procedural ambience includes elements such as:
+
+-   wind
+-   waves
+-   rigging
+-   rain
+
+Audio should react subtly to conditions.
+
+The player can turn sound on/off.
+
+Future recorded audio may replace or supplement procedural sounds, but
+audio should continue telling the physical story of the boat rather than
+becoming a soundtrack-heavy game.
+
+------------------------------------------------------------------------
+
+# 38. SAVE SYSTEM
+
+The current voyage is stored locally in the browser.
+
+Save state should preserve all important ongoing conditions, including:
+
+-   real-time timestamps
+-   voyage minutes
+-   actual latitude/longitude
+-   current waypoint
+-   heading/course offset
+-   weather
+-   sail state
+-   engine state
+-   diesel
+-   boat condition
+-   fatigue/hunger/thirst/morale
+-   sleep state
+-   food
+-   water
+-   propane
+-   spares
+-   safety equipment
+-   flooding
+-   rescue state
+-   life raft state
+-   flare count
+-   departure stage
+-   persistent log
+
+When adding new state fields, preserve compatibility with existing saves
+where practical.
+
+Use migration/default logic instead of casually breaking active voyages.
+
+------------------------------------------------------------------------
+
+# 39. RESTART
+
+RESTART begins a genuinely new voyage from Seattle at the current real
+time.
+
+It discards the old save.
+
+Restarting is not a time-skip mechanic.
+
+Require confirmation before destroying the current voyage.
+
+------------------------------------------------------------------------
+
+# 40. THINGS LANDFALL IS NOT
+
+Landfall is not:
+
+-   an RPG
+-   a crafting game
+-   a medical simulator
+-   a sailing-school exam
+-   a detailed marine-electronics simulator
+-   a conventional survival meter game
+-   a map-following game
+-   an idle game where the optimal strategy is never to open it
+-   a game that demands constant notifications or check-ins
+-   a menu-heavy management sim
+
+Avoid feature creep toward those forms.
+
+------------------------------------------------------------------------
+
+# 41. WRITING STYLE
+
+Writing should be:
+
+-   concise
+-   concrete
+-   restrained
+-   sensory when useful
+-   slightly literary without becoming purple
+-   comfortable with silence
 
 Avoid:
 
-- modern cards
-- progress bars
-- colorful meters
-- icons
-- RPG statistics
-- conventional HUD design
+-   exposition dumps
+-   tutorials disguised as prose
+-   excessive nautical jargon
+-   jokes that break the atmosphere
+-   motivational language
+-   melodrama
+-   constant danger
+-   explaining the meaning of ponderings
 
-Inventory might simply appear:
+Good Landfall writing often stops one sentence earlier than another game
+would.
 
-PROVISIONS
+------------------------------------------------------------------------
 
-Oatmeal ............. 12 servings
-Rice ................ 14 servings
-Soup ................. 6 servings
-Tuna .................. 8 servings
-Crackers ............. 10 servings
-Peanut Butter ......... 7 servings
-Nuts ................. 13 servings
-Dried Fruit ........... 9 servings
-Coffee ............... 18 servings
+# 42. DEVELOPMENT WORKFLOW
 
-> EAT
-> BACK
+For each meaningful development pass:
 
-The interface should communicate through words and quantities.
+1.  Read `PROJECT.md`.
+2.  Inspect the current `index.html`.
+3.  Identify the smallest set of code paths that need to change.
+4.  Preserve unrelated working systems.
+5.  Make the change.
+6.  Test the affected flow.
+7.  Test save/load behavior if state changed.
+8.  Test mobile layout if UI changed.
+9.  Return the complete updated `index.html`.
+10. If the design itself changed, update `PROJECT.md` afterward so it
+    remains the source of truth.
 
-==================================================
-SAVE SYSTEM
-==================================================
+Prefer focused prompts and focused changes over repeatedly rebuilding
+the whole application.
 
-ALL new systems must persist correctly.
+Large prompts are appropriate when defining a coherent new system. Small
+prompts are preferable for visual tweaks, copy changes, bug fixes, and
+isolated behavior changes.
 
-Persist at minimum:
+------------------------------------------------------------------------
 
-- actual boat position
-- heading
-- boat speed
-- navigation state
-- inventory quantities
-- food quantities
-- hunger
-- thirst
-- water
-- fuel
-- propane
-- sleep history
-- sleep pressure
-- fatigue
-- coffee consumption
-- spoilage
-- equipment condition
-- repairs
-- repair quality
-- maintenance state
-- distress state
-- EPIRB state
-- life raft state if applicable
-- sailor condition
-- relevant event history
+# 43. CURRENT CANONICAL SUMMARY
 
-Everything must reconcile correctly against REAL ELAPSED TIME when the player returns.
+Landfall begins in **Shilshole Bay**.
 
-==================================================
-IMPLEMENTATION STRATEGY
-==================================================
+You board.
 
-DO NOT attempt to recklessly rewrite the entire game in one pass.
+You start the engine.
 
-First inspect the existing code.
+You cast off.
 
-Then:
+You ease away from the dock.
 
-1. Explain briefly which requested systems already exist.
-2. Identify which systems need modification.
-3. Identify which systems are new.
-4. Identify any conflicts with the existing implementation.
-5. Create a sensible implementation order.
-6. Implement the systems incrementally while preserving existing functionality.
-7. Keep the architecture understandable and maintainable.
-8. Test interactions between systems.
-9. Do not remove existing functionality unless explicitly instructed.
-10. Preserve the current working entry sequence and menu behavior.
+The voyage has begun.
 
-If implementing every system safely in one response would risk destabilizing the current build, prioritize a stable foundation and clearly tell me which portions should be implemented in the following development pass.
+From there, nothing important is automated for the player.
 
-DO NOT fake systems merely so they appear in the interface.
+They decide when to:
 
-A system should either genuinely participate in the simulation or wait for the next implementation pass.
+-   raise or reduce sail
+-   furl the sails
+-   motor
+-   motor-sail
+-   stop the engine
+-   eat
+-   drink
+-   sleep
+-   inspect the boat
+-   repair problems
+-   alter course offshore
+-   conserve resources
+-   call for rescue
 
-==================================================
-FINAL TESTING
-==================================================
+Meanwhile:
 
-Before returning the updated build, test conceptually for:
+-   the boat keeps moving
+-   the weather keeps changing
+-   fuel keeps burning if the engine is running
+-   hunger and thirst develop
+-   sleep happens in real time
+-   supplies are consumed
+-   problems may develop
+-   observations appear
+-   thoughts surface
+-   the coordinates change
+-   the log grows
 
-- returning after several real hours
-- hunger progression
-- thirst progression
-- eating
-- drinking
-- food consumption
-- cooking resource consumption
-- spoilage
-- sleeping while tired
-- attempting sleep while well rested
-- interrupted sleep
-- coffee and sleep interaction
-- inventory persistence
-- equipment damage
-- repairs consuming inventory
-- fatigue affecting repairs
-- long passage causing resource pressure
-- boat speed affecting actual coordinates
-- Puget Sound course restrictions
-- open-ocean course changes
-- distress activation
-- continued simulation after EPIRB activation
-- life raft transition
-- rescue ending the voyage
-- save/reload during all major states
+The player does not control time.
 
-Do not introduce artificial time advancement to test these systems in normal gameplay.
+They only decide what to do with the time that passes.
 
-Preserve Landfall's strict real-time premise.
+The voyage ends in:
 
-Return the complete updated index.html when finished.
+**LANDFALL**
+
+or
+
+**NO LANDFALL**.
