@@ -216,8 +216,7 @@
     </header>
     <div id="navstrip" hidden>
       <span id="nav-day"></span>
-      <span id="nav-speed-heading"></span>
-      <span id="nav-coords"></span>
+      <span id="nav-speed"></span>
       <span id="nav-region"></span>
     </div>
 
@@ -1681,8 +1680,7 @@
   var vesselLineEl = document.getElementById('vessel-line');
   var navStripEl = document.getElementById('navstrip');
   var navDayEl = document.getElementById('nav-day');
-  var navSpeedHeadingEl = document.getElementById('nav-speed-heading');
-  var navCoordsEl = document.getElementById('nav-coords');
+  var navSpeedEl = document.getElementById('nav-speed');
   var navRegionEl = document.getElementById('nav-region');
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
@@ -1830,8 +1828,7 @@
     var day = Math.floor(state.meta.voyageMinutes / 1440) + 1;
     var speed = computeBoatSpeed(state, state.nav.heading);
     navDayEl.textContent = 'DAY ' + day;
-    navSpeedHeadingEl.textContent = speed.toFixed(1) + ' KT \u00B7 ' + Math.round(state.nav.heading) + '\u00B0';
-    navCoordsEl.textContent = formatLatLon(state.nav.lat, state.nav.lon);
+    navSpeedEl.textContent = speed.toFixed(1) + ' KT';
     navRegionEl.textContent = regionName(state);
   }
 
@@ -2516,6 +2513,13 @@
     ];
   }
 
+  // Which of the read-only "information" categories (if any) currently
+  // occupies the temp view. Tracked separately from state.pendingChoice
+  // because it's pure UI/interaction convenience — not part of the
+  // simulation, not persisted, not something a reload should remember.
+  var INFO_COMMANDS = { status: true, position: true, weather: true, forecast: true, inventory: true };
+  var openInfoPanel = null;
+
   function renderOptions(state) {
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
@@ -2532,12 +2536,31 @@
       btn.className = 'option';
       btn.textContent = '> ' + opt.label;
       btn.addEventListener('click', function () {
-        clearTempView(); // whatever the last command/menu showed is done being looked at
         if (opt.action.indexOf('cmd:') === 0) {
           var cmdName = opt.action.slice(4);
+          clearTempView(); // whatever the last command/menu showed is done being looked at
+          if (INFO_COMMANDS[cmdName] && openInfoPanel === cmdName) {
+            // Same info category clicked again while it's already open:
+            // collapse it and return to the plain log view instead of
+            // reopening it.
+            openInfoPanel = null;
+            renderOptions(state);
+            saveGameState(state);
+            scrollToBottom();
+            return;
+          }
+          openInfoPanel = INFO_COMMANDS[cmdName] ? cmdName : null;
           printEcho(cmdName);
           runCommand(state, cmdName);
         } else {
+          clearTempView();
+          // Inventory's own category/back sub-choices stay "inside" the
+          // inventory panel for toggle purposes; any other action (a sail
+          // choice, an eat/drink pick, a generic cancel out of a prompt,
+          // etc.) leaves the info-panel system entirely.
+          if (opt.action.indexOf('inventory:') !== 0) {
+            openInfoPanel = null;
+          }
           handleAction(state, opt.action);
         }
       });
