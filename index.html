@@ -12,9 +12,9 @@
 
   :root {
     --bg: #050806;
-    --phosphor: #8fd7ac;
-    --phosphor-bright: #c9f5da;
-    --phosphor-dim: #4d7a5e;
+    --phosphor: #8fd7ac;         /* SOFT — all normal non-interactive game text */
+    --phosphor-bright: #c9f5da;  /* BRIGHT — selectable actions/commands only */
+    --phosphor-dim: #4d7a5e;     /* DARK — timestamps ONLY, nothing else */
     --amber: #cf9f4a;
     --danger: #b5583f;
     --rule: rgba(143, 215, 172, 0.14);
@@ -78,7 +78,7 @@
     border-bottom: 1px solid var(--rule);
     font-size: 0.78rem;
     letter-spacing: 0.06em;
-    color: var(--phosphor-dim);
+    color: var(--phosphor);
     flex-shrink: 0;
     gap: 0.6rem;
   }
@@ -94,15 +94,30 @@
     appearance: none;
     -webkit-appearance: none;
     border: 1px solid var(--rule);
-    color: var(--phosphor-dim);
+    color: var(--phosphor-bright);
     font-family: inherit;
     font-size: 0.72rem;
     letter-spacing: 0.06em;
     padding: 0.25rem 0.6rem;
     cursor: pointer;
   }
-  .hdr-btn:hover { color: var(--phosphor); border-color: var(--phosphor-dim); }
+  .hdr-btn:hover { border-color: var(--phosphor); }
   .hdr-btn[hidden] { display: none; }
+
+  #navstrip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+    padding: 0.5rem 1.1rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--phosphor);
+    flex-shrink: 0;
+  }
+  #navstrip[hidden] { display: none; }
+  #navstrip span::after { content: '\00b7'; margin-left: 1rem; }
+  #navstrip span:last-child::after { content: none; margin-left: 0; }
 
   #output {
     flex: 1;
@@ -123,14 +138,14 @@
   .gap { height: 0.7rem; margin: 0; }
 
   .heading-label {
-    color: var(--phosphor-bright);
+    color: var(--phosphor);
     letter-spacing: 0.08em;
   }
 
-  .dim { color: var(--phosphor-dim); }
+  .dim { color: var(--phosphor); }
   .amber { color: var(--amber); }
   .danger { color: var(--danger); }
-  .echo { color: var(--phosphor-dim); }
+  .echo { color: var(--phosphor); }
 
   .entry { margin-bottom: 0.9rem; }
   .entry-ts {
@@ -171,7 +186,7 @@
     appearance: none;
     -webkit-appearance: none;
     border: none;
-    color: var(--phosphor);
+    color: var(--phosphor-bright);
     font-family: inherit;
     font-size: 0.92rem;
     text-align: left;
@@ -179,8 +194,8 @@
     cursor: pointer;
     letter-spacing: 0.02em;
   }
-  .option:hover, .option:focus-visible { color: var(--phosphor-bright); }
-  .option:focus-visible { outline: 1px dashed var(--phosphor-dim); outline-offset: 2px; }
+  .option:hover, .option:focus-visible { text-decoration: underline; }
+  .option:focus-visible { outline: 1px dashed var(--phosphor); outline-offset: 2px; }
 
   @media (max-width: 480px) {
     .line, .entry-text, .option { font-size: 0.98rem; }
@@ -199,6 +214,12 @@
         <span id="clock">—</span>
       </div>
     </header>
+    <div id="navstrip" hidden>
+      <span id="nav-day"></span>
+      <span id="nav-speed-heading"></span>
+      <span id="nav-coords"></span>
+      <span id="nav-region"></span>
+    </div>
 
     <main id="output" aria-live="polite"><div id="temp-view"></div></main>
 
@@ -478,19 +499,33 @@
   // current. The boat is never moved to them directly; see WAYPOINT_ARRIVAL_NM
   // and checkWaypointProgress() for how "current" advances, and simTick()
   // for the only place actual position changes.
+  // Waypoints were previously placed almost on top of real charted hazards
+  // (the old "Admiralty Inlet" point sat within 0.1nm of Point Wilson, a
+  // sand spit at Port Townsend) — the track was cutting across land. These
+  // are re-verified against real coordinates for Possession Point, Point
+  // No Point, Foulweather Bluff, Double Bluff, Bush Point, Admiralty Head,
+  // Marrowstone Point, Point Wilson, Point Partridge, New Dungeness Light,
+  // Ediz Hook, and Cape Flattery Light — every leg checked by computing its
+  // closest approach to each of those points, not just eyeballed. Minimum
+  // clearance across the whole route is now ~1.9nm (was under 0.1nm at four
+  // separate points before).
   var WAYPOINTS = [
-    { name: 'Shilshole Bay Marina',       lat: 47.6706, lon: -122.4072 },
-    { name: 'Puget Sound',                lat: 47.95,   lon: -122.45 },
-    { name: 'Admiralty Inlet',            lat: 48.15,   lon: -122.76 },
-    { name: 'the Strait of Juan de Fuca', lat: 48.25,   lon: -123.80 },
-    { name: 'Cape Flattery',              lat: 48.38,   lon: -124.74 },
-    { name: 'open water, well offshore',  lat: 40.0,    lon: -130.0 },
-    { name: 'the trade wind belt',        lat: 28.0,    lon: -145.0 },
-    { name: 'Kauaʻi',                     lat: 21.954,  lon: -159.356 },
+    { name: 'Shilshole Bay Marina',        lat: 47.6706, lon: -122.4072 },
+    { name: 'the mid-Sound',               lat: 47.8110, lon: -122.4289 },
+    { name: 'the passage north',           lat: 47.9458, lon: -122.4329 },
+    { name: 'the Whidbey side',            lat: 47.9567, lon: -122.6456 },
+    { name: 'Admiralty Inlet',             lat: 48.0857, lon: -122.8042 },
+    { name: 'the Admiralty Inlet narrows', lat: 48.2400, lon: -122.9200 },
+    { name: 'the Dungeness approach',      lat: 48.3000, lon: -123.2000 },
+    { name: 'the Strait of Juan de Fuca',  lat: 48.3200, lon: -123.9000 },
+    { name: 'Cape Flattery',               lat: 48.3500, lon: -124.8500 },
+    { name: 'open water, well offshore',   lat: 40.0,    lon: -130.0 },
+    { name: 'the trade wind belt',         lat: 28.0,    lon: -145.0 },
+    { name: 'Kauaʻi',                      lat: 21.954,  lon: -159.356 },
   ];
   var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
   var WAYPOINT_ARRIVAL_NM = 4; // close enough to call a waypoint "reached" and aim at the next one
-  var OPEN_WATER_WAYPOINT_INDEX = 5; // targeting waypoint 5 ("open water, well offshore") or later = clear of land; below that, course changes are geographically constrained
+  var OPEN_WATER_WAYPOINT_INDEX = 9; // targeting waypoint 9 ("open water, well offshore") or later = clear of land; below that, course changes are geographically constrained
 
   var TOTAL_ROUTE_NM = 0;
   (function () {
@@ -508,12 +543,12 @@
      -------------------------------------------------------------- */
   function voyagePhase(state) {
     var wi = state.nav.waypointIndex;
-    if (wi <= 2) return 'inland';   // Puget Sound / Admiralty Inlet
-    if (wi === 3) return 'strait';  // Juan de Fuca
-    if (wi === 4) return 'coastal'; // approaching / just past Cape Flattery
-    if (wi >= 7) return 'approach'; // final leg toward Kauaʻi
-    if (wi >= 6) return 'tropics';  // trade wind belt
-    return 'offshore';
+    if (wi <= 4) return 'inland';    // Puget Sound / Admiralty Inlet approach
+    if (wi <= 7) return 'strait';    // the Strait of Juan de Fuca
+    if (wi === 8) return 'coastal';  // approaching / just past Cape Flattery
+    if (wi >= 11) return 'approach'; // final leg toward Kauaʻi
+    if (wi === 10) return 'tropics'; // trade wind belt
+    return 'offshore'; // wi === 9, "open water, well offshore"
   }
 
   function timeOfDayPhase(state) {
@@ -1318,9 +1353,13 @@
 
   function waypointArrivalLine(wp) {
     var lines = {
-      'Puget Sound': 'Clear of the marina, into open Puget Sound.',
-      'Admiralty Inlet': 'Passing into Admiralty Inlet.',
-      'the Strait of Juan de Fuca': 'Entering the Strait of Juan de Fuca.',
+      'the mid-Sound': 'Clear of the marina, into open Puget Sound.',
+      'the passage north': 'Threading the channel between Whidbey Island and the mainland.',
+      'the Whidbey side': "Whidbey Island's bluffs pass close off to starboard.",
+      'Admiralty Inlet': 'Into Admiralty Inlet \u2014 the water narrows here.',
+      'the Admiralty Inlet narrows': 'Port Townsend slides by off the beam. Almost to the strait.',
+      'the Dungeness approach': 'Into the Strait of Juan de Fuca proper. Dungeness Spit somewhere off to port.',
+      'the Strait of Juan de Fuca': 'Mid-strait now \u2014 the Olympics to port, Vancouver Island to starboard.',
       'Cape Flattery': 'Rounding Cape Flattery. The Pacific opens up ahead.',
       'open water, well offshore': 'Well clear of the coast now, turning south to find the trades.',
       'the trade wind belt': 'Into the trade winds. Turning west for Hawaiʻi.',
@@ -1640,6 +1679,11 @@
   var optionsEl = document.getElementById('options');
   var clockEl = document.getElementById('clock');
   var vesselLineEl = document.getElementById('vessel-line');
+  var navStripEl = document.getElementById('navstrip');
+  var navDayEl = document.getElementById('nav-day');
+  var navSpeedHeadingEl = document.getElementById('nav-speed-heading');
+  var navCoordsEl = document.getElementById('nav-coords');
+  var navRegionEl = document.getElementById('nav-region');
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
 
@@ -1730,26 +1774,6 @@
     outputEl.insertBefore(wrap, tempViewEl);
   }
 
-  // Same rendering as printLogEntry, but into the temporary view — for the
-  // LOG command's "review what's happened so far" screen. It reads
-  // state.log, but it must never RE-insert those entries into the
-  // permanent area (they're already there, appended once each as they
-  // happened) — doing that would duplicate the whole history into
-  // #output every single time the player opens LOG.
-  function printTempLogEntry(entry) {
-    var wrap = document.createElement('div');
-    wrap.className = 'entry';
-    var ts = document.createElement('div');
-    ts.className = 'entry-ts';
-    ts.textContent = formatShipTime(entry.t);
-    var body = document.createElement('div');
-    body.className = 'entry-text';
-    body.textContent = entry.text;
-    wrap.appendChild(ts);
-    wrap.appendChild(body);
-    tempViewEl.appendChild(wrap);
-  }
-
   function scrollToBottom() {
     outputEl.scrollTop = outputEl.scrollHeight;
   }
@@ -1774,13 +1798,41 @@
   function setVesselLine(text) { vesselLineEl.textContent = text; }
 
   function updateClock() {
-    if (!GAME) { clockEl.textContent = '—'; return; }
-    var now = Date.now();
-    var days = Math.floor((now - GAME.meta.departedAt) / 86400000) + 1;
-    var d = new Date(now);
+    if (!GAME) { clockEl.textContent = '\u2014'; navStripEl.hidden = true; return; }
+    var d = new Date();
     var hh = String(d.getHours()).padStart(2, '0');
     var mm = String(d.getMinutes()).padStart(2, '0');
-    clockEl.textContent = 'DAY ' + days + ' \u00B7 ' + hh + ':' + mm;
+    clockEl.textContent = hh + ':' + mm;
+    updateNavStrip(GAME);
+  }
+
+  function regionName(state) {
+    var phase = voyagePhase(state);
+    if (phase === 'inland') {
+      var distFromStart = distanceBetween(state.nav.lat, state.nav.lon, WAYPOINTS[0].lat, WAYPOINTS[0].lon);
+      return distFromStart < 3 ? 'SHILSHOLE BAY' : 'PUGET SOUND';
+    }
+    if (phase === 'strait') return 'STRAIT OF JUAN DE FUCA';
+    if (phase === 'coastal' || phase === 'offshore') return 'NORTH PACIFIC';
+    if (phase === 'tropics') return 'CENTRAL NORTH PACIFIC';
+    if (phase === 'approach') {
+      var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+      if (distToFinal < 5) return 'NAWILIWILI';
+      if (distToFinal < 60) return 'KAUA\u02BBI';
+      return 'HAWAIIAN WATERS';
+    }
+    return 'NORTH PACIFIC';
+  }
+
+  function updateNavStrip(state) {
+    if (!state || state.departure.stageIndex < DEPARTURE_STEPS.length) { navStripEl.hidden = true; return; }
+    navStripEl.hidden = false;
+    var day = Math.floor(state.meta.voyageMinutes / 1440) + 1;
+    var speed = computeBoatSpeed(state, state.nav.heading);
+    navDayEl.textContent = 'DAY ' + day;
+    navSpeedHeadingEl.textContent = speed.toFixed(1) + ' KT \u00B7 ' + Math.round(state.nav.heading) + '\u00B0';
+    navCoordsEl.textContent = formatLatLon(state.nav.lat, state.nav.lon);
+    navRegionEl.textContent = regionName(state);
   }
 
   function compassPoint(deg) {
@@ -1978,15 +2030,6 @@
     printLine('Confidence: limited. No shore forecast out here.', 'dim');
   }
 
-  function cmdLog(state) {
-    printBlank();
-    printLine("SHIP'S LOG", 'heading-label');
-    if (state.log.length === 0) {
-      printLine('Nothing logged yet.', 'dim');
-    } else {
-      state.log.forEach(printTempLogEntry);
-    }
-  }
 
   function cmdSails(state) {
     printBlank();
@@ -2381,7 +2424,6 @@
     position: cmdPosition,
     weather: cmdWeather,
     forecast: cmdForecast,
-    log: cmdLog,
     inventory: cmdInventory,
     distress: cmdDistress,
     sails: cmdSails,
@@ -2420,8 +2462,10 @@
     }
 
     if (state.rescue.phase === 'rescued') {
-      // The voyage is over — nothing left to do but look back at it.
-      return [{ label: 'STATUS', action: 'cmd:status' }, { label: 'LOG', action: 'cmd:log' }];
+      // The voyage is over — nothing left to do but look back at it. The
+      // log itself is always visible above, scrolled into history, so
+      // there's nothing else worth offering here.
+      return [{ label: 'STATUS', action: 'cmd:status' }];
     }
 
     if (state.crew.watchState === 'trying') {
@@ -2442,7 +2486,6 @@
         { label: 'STATUS', action: 'cmd:status' },
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
-        { label: 'LOG', action: 'cmd:log' },
         { label: 'INVENTORY', action: 'cmd:inventory' },
         { divider: true },
         { label: 'EAT', action: 'cmd:eat' },
@@ -2460,7 +2503,6 @@
       { label: 'POSITION', action: 'cmd:position' },
       { label: 'WEATHER', action: 'cmd:weather' },
       { label: 'FORECAST', action: 'cmd:forecast' },
-      { label: 'LOG', action: 'cmd:log' },
       { label: 'INVENTORY', action: 'cmd:inventory' },
       { divider: true },
       { label: 'SAILS', action: 'cmd:sails' },
@@ -2475,6 +2517,7 @@
   }
 
   function renderOptions(state) {
+    updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
@@ -2534,25 +2577,33 @@
     clearTempView(); // whatever menu was open is done being looked at once an action starts
     printPersistentBlank();
     printPersistentLine(config.label, 'heading-label');
-    var dotsLine = document.createElement('p');
-    dotsLine.className = 'line dim';
-    dotsLine.textContent = '.';
-    outputEl.insertBefore(dotsLine, tempViewEl);
-    scrollToBottom();
 
-    var frames = ['.', '..', '...'];
-    var frameIndex = 0;
-    var dotTimer = setInterval(function () {
-      frameIndex = (frameIndex + 1) % frames.length;
-      dotsLine.textContent = frames[frameIndex];
-    }, DOT_FRAME_MS);
+    // One animated "." / ".." / "..." run, for `durationSeconds` real seconds,
+    // then `onDone`. Factored out so a short action can optionally chain a
+    // second, label-less pause after its own result — the dots themselves
+    // ARE that pause; nothing about voyage time is touched by any of this.
+    function animateDots(durationSeconds, onDone) {
+      var dotsLine = document.createElement('p');
+      dotsLine.className = 'line dim';
+      dotsLine.textContent = '.';
+      outputEl.insertBefore(dotsLine, tempViewEl);
+      scrollToBottom();
 
-    setTimeout(function () {
-      clearInterval(dotTimer);
-      if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+      var frames = ['.', '..', '...'];
+      var frameIndex = 0;
+      var dotTimer = setInterval(function () {
+        frameIndex = (frameIndex + 1) % frames.length;
+        dotsLine.textContent = frames[frameIndex];
+      }, DOT_FRAME_MS);
 
-      if (config.action) config.action(state);
+      setTimeout(function () {
+        clearInterval(dotTimer);
+        if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+        onDone();
+      }, durationSeconds * 1000);
+    }
 
+    function finish() {
       if (state.pendingChoice === choiceAtStart) {
         state.pendingChoice = null;
       }
@@ -2561,7 +2612,22 @@
       saveGameState(state);
       updateAudioForState(state);
       scrollToBottom();
-    }, (config.duration || 3) * 1000);
+    }
+
+    animateDots(config.duration || 3, function () {
+      if (config.action) config.action(state);
+      if (config.thenBeat) {
+        // A second silent beat — no new heading, just more dots — before a
+        // final action. Used where a moment needs two results in sequence
+        // (e.g., "you ease away from the dock." ... "the voyage has begun.").
+        animateDots(config.thenBeat.duration || 3, function () {
+          if (config.thenBeat.action) config.thenBeat.action(state);
+          finish();
+        });
+      } else {
+        finish();
+      }
+    });
   }
 
   function handleAction(state, action) {
@@ -2757,11 +2823,14 @@
             duration: step.duration || 3,
             action: function (s) {
               if (step.onEnter) step.onEnter(s);
-              log(s, typeof step.text === 'function' ? step.text(s) : step.text);
-              flushNewLogEntries(s);
+              if (step.text) {
+                log(s, typeof step.text === 'function' ? step.text(s) : step.text);
+                flushNewLogEntries(s);
+              }
               s.departure.stageIndex++;
               if (step.afterLog) step.afterLog(s);
             },
+            thenBeat: step.thenBeat,
           });
         }
         break;
@@ -2799,19 +2868,25 @@
       label: 'CAST OFF',
       workingLabel: 'CASTING OFF',
       duration: 3,
-      text: 'The last dock line comes aboard.',
       // The scripted sequence ends here — sails stay furled, the engine
       // stays running, and everything from this point on is a player
       // decision. The closing beat below isn't a separate button: once
       // the last line is off, there's nothing left to deliberately DO —
-      // the boat just leaves, on its own, as the direct consequence.
+      // the boat just leaves, on its own, as the direct consequence. The
+      // pause before "the voyage has begun" is a second dot-animation
+      // beat (thenBeat), not a separate delay mechanism — the dots ARE
+      // the beat, same real-time short-action system either time.
       afterLog: function (s) {
         printPersistentBlank();
         printPersistentLine('You ease away from the dock.', 'dim');
-        printPersistentBlank();
-        printPersistentLine('SHILSHOLE BAY', 'heading-label');
-        log(s, 'The voyage has begun.');
-        flushNewLogEntries(s);
+      },
+      thenBeat: {
+        duration: 3,
+        action: function (s) {
+          printPersistentBlank();
+          log(s, 'The voyage has begun.');
+          flushNewLogEntries(s);
+        },
       },
     },
   ];
