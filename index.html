@@ -216,6 +216,7 @@
     <div id="navstrip" hidden>
       <span id="nav-day"></span>
       <span id="nav-speed"></span>
+      <span id="nav-heading"></span>
       <span id="nav-region"></span>
     </div>
 
@@ -297,6 +298,9 @@
         headingOffset: 0,          // 0 = on course, +22 = borne away, -22 = come up
         heading: startBearing,
         positionConfidence: 'good',
+        coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
+        tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking to windward; see resolveAutoTack()
+        tackDistanceNm: 0,         // nm covered on the current tack, for deciding when to come about
       },
       weather: {
         // SW — real wind, not routing logic, so it can still drift into a
@@ -500,37 +504,37 @@
   }
 
   // Real named waypoints, Shilshole Bay out to Kauaʻi. These are steering
-  // TARGETS — the "intended course" is the bearing toward whichever one is
-  // current. The boat is never moved to them directly; see WAYPOINT_ARRIVAL_NM
-  // and checkWaypointProgress() for how "current" advances, and simTick()
-  // for the only place actual position changes.
-  // Waypoints were previously placed almost on top of real charted hazards
-  // (the old "Admiralty Inlet" point sat within 0.1nm of Point Wilson, a
-  // sand spit at Port Townsend) — the track was cutting across land. These
-  // are re-verified against real coordinates for Possession Point, Point
-  // No Point, Foulweather Bluff, Double Bluff, Bush Point, Admiralty Head,
-  // Marrowstone Point, Point Wilson, Point Partridge, New Dungeness Light,
-  // Ediz Hook, and Cape Flattery Light — every leg checked by computing its
-  // closest approach to each of those points, not just eyeballed. Minimum
-  // clearance across the whole route is now ~1.9nm (was under 0.1nm at four
-  // separate points before).
+  // TARGETS — the "intended course" is the bearing toward whichever one
+  // is current. The boat is never moved to them directly; see simTick()
+  // for the only place actual position changes, and for how the current
+  // target advances when the boat's per-tick movement budget reaches it.
+  //
+  // The coastal leg (Shilshole through Cape Flattery) below is an exact,
+  // manually-selected chain supplied directly and is not to be modified,
+  // reordered, averaged, or have points inserted between them — see
+  // simTick() for how a single simulation tick correctly crosses one or
+  // more of these closely-spaced points without overshooting along a
+  // stale bearing, which is what this exact chain depends on for safe
+  // routing rather than the waypoint coordinates having built-in margin.
   var WAYPOINTS = [
-    { name: 'Shilshole Bay Marina',        lat: 47.6706, lon: -122.4072 },
-    { name: 'the mid-Sound',               lat: 47.8110, lon: -122.4289 },
-    { name: 'the passage north',           lat: 47.9458, lon: -122.4329 },
-    { name: 'the Whidbey side',            lat: 47.9567, lon: -122.6456 },
-    { name: 'Admiralty Inlet',             lat: 48.0857, lon: -122.8042 },
-    { name: 'the Admiralty Inlet narrows', lat: 48.2400, lon: -122.9200 },
-    { name: 'the Dungeness approach',      lat: 48.3000, lon: -123.2000 },
-    { name: 'the Strait of Juan de Fuca',  lat: 48.3200, lon: -123.9000 },
-    { name: 'Cape Flattery',               lat: 48.3500, lon: -124.8500 },
-    { name: 'open water, well offshore',   lat: 40.0,    lon: -130.0 },
-    { name: 'the trade wind belt',         lat: 28.0,    lon: -145.0 },
-    { name: 'Kauaʻi',                      lat: 21.954,  lon: -159.356 },
+    { name: 'Shilshole Bay Marina', lat: 47.682726, lon: -122.407350 },
+    { name: 'Shilshole Exit',       lat: 47.693946, lon: -122.410738 },
+    { name: 'Puget Sound',          lat: 47.942709, lon: -122.505301 },
+    { name: 'Admiralty South',      lat: 47.973161, lon: -122.626334 },
+    { name: 'Admiralty North',      lat: 48.124463, lon: -122.657525 },
+    { name: 'Point Wilson',         lat: 48.153816, lon: -122.731903 },
+    { name: 'Strait East',          lat: 48.211898, lon: -122.953640 },
+    { name: 'Strait East 2',        lat: 48.211882, lon: -123.105442 },
+    { name: 'Strait Mid',           lat: 48.221306, lon: -124.018222 },
+    { name: 'Strait West',          lat: 48.384889, lon: -124.455780 },
+    { name: 'Cape Approach',        lat: 48.421859, lon: -124.693376 },
+    { name: 'Cape Flattery',        lat: 48.401734, lon: -124.827023 },
+    { name: 'open water, well offshore', lat: 40.0,   lon: -130.0 },
+    { name: 'the trade wind belt',       lat: 28.0,   lon: -145.0 },
+    { name: 'Kauaʻi',                    lat: 21.954, lon: -159.356 },
   ];
   var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
-  var WAYPOINT_ARRIVAL_NM = 4; // close enough to call a waypoint "reached" and aim at the next one
-  var OPEN_WATER_WAYPOINT_INDEX = 9; // targeting waypoint 9 ("open water, well offshore") or later = clear of land; below that, course changes are geographically constrained
+  var OPEN_WATER_WAYPOINT_INDEX = 12; // targeting waypoint 12 ("open water, well offshore") or later = clear of Cape Flattery and coastal hazards; below that, course changes are geographically constrained
 
   var TOTAL_ROUTE_NM = 0;
   (function () {
@@ -548,12 +552,12 @@
      -------------------------------------------------------------- */
   function voyagePhase(state) {
     var wi = state.nav.waypointIndex;
-    if (wi <= 4) return 'inland';    // Puget Sound / Admiralty Inlet approach
-    if (wi <= 7) return 'strait';    // the Strait of Juan de Fuca
-    if (wi === 8) return 'coastal';  // approaching / just past Cape Flattery
-    if (wi >= 11) return 'approach'; // final leg toward Kauaʻi
-    if (wi === 10) return 'tropics'; // trade wind belt
-    return 'offshore'; // wi === 9, "open water, well offshore"
+    if (wi <= 5) return 'inland';    // Shilshole through clearing Point Wilson
+    if (wi <= 9) return 'strait';    // the Strait of Juan de Fuca
+    if (wi <= 11) return 'coastal';  // approaching / just past Cape Flattery
+    if (wi >= 14) return 'approach'; // final leg toward Kauaʻi
+    if (wi === 13) return 'tropics'; // trade wind belt
+    return 'offshore'; // wi === 12 ("open water, well offshore")
   }
 
   function timeOfDayPhase(state) {
@@ -751,11 +755,102 @@
     }
   }
 
+  // AUTO-TACKING — a sailing-simulation detail underneath the existing
+  // navigation system, not a new navigation feature. CHANGE COURSE, the
+  // route, waypoints, and when course changes are available are all
+  // completely untouched: this only decides, given whatever heading the
+  // existing systems currently want (waypoint bearing + the player's
+  // headingOffset from CHANGE COURSE), whether that heading is sailable
+  // right now, and if not, what the boat physically does about it
+  // instead of luffing in place. nav.intendedCourse keeps its existing
+  // meaning (bearing to the current waypoint) throughout; it's nav.heading
+  // — the boat's actual steered heading — that reflects the tack.
+  var NOGO_ZONE_DEG = 35;          // matches pointOfSailFactor's own no-go threshold, so this is the exact same zone that already tanks sail speed
+  var CLOSE_HAULED_ANGLE_DEG = 42; // realistic close-hauled angle for a cruising sailboat — lands in pointOfSailFactor's 35-50deg tier, a real reduced-but-genuine speed, not a crawl
+  // Tack legs are long in the open ocean (realistic cruising behavior,
+  // and keeps the log from filling up with routine tacks) but short
+  // through the coastal corridor, where the route can run within well
+  // under a mile of real charted shoreline (see WAYPOINTS' own notes on
+  // the Marrowstone/Whidbey passage) and a wide zigzag could carry the
+  // boat off that verified-safe line. Reuses the same constrained-waters
+  // boundary COURSE already uses (OPEN_WATER_WAYPOINT_INDEX), rather
+  // than inventing a second one.
+  var OPEN_WATER_MAX_TACK_LEG_NM = 8;
+  var COASTAL_MAX_TACK_LEG_NM = 0.6;
+  var TACK_LEG_WAYPOINT_FRACTION = 0.3; // ...or this fraction of the remaining distance to the current waypoint, whichever is smaller — shrinks tacks further approaching any mark
+
+  function signedAngleDiff(a, b) {
+    // Signed angle FROM b TO a, in (-180, 180]: positive = a is clockwise
+    // of b, negative = counterclockwise. Used to tell which side of the
+    // true wind a heading falls on (which tack it is).
+    var d = normalizeDeg(a - b);
+    return d > 180 ? d - 360 : d;
+  }
+
+  function closeHauledHeading(windDirection, tack) {
+    return normalizeDeg(windDirection + (tack === 'port' ? CLOSE_HAULED_ANGLE_DEG : -CLOSE_HAULED_ANGLE_DEG));
+  }
+
+  // Given the heading the existing navigation system currently wants
+  // (desired), decide what the boat actually steers: that heading
+  // directly if it's sailable, or a close-hauled tack if it isn't.
+  // Reads/writes nav.tack and nav.tackDistanceNm; simTick() is what
+  // accumulates tackDistanceNm as the boat actually moves.
+  function resolveAutoTack(state, desired, wp) {
+    var nav = state.nav, w = state.weather, b = state.boat;
+
+    // Nothing to beat with — no canvas up, or nothing left to sail at
+    // all. Steer the existing direct course exactly as before.
+    if (b.sailConfig === 'furled' || state.crew.inLifeRaft) {
+      if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
+      return desired;
+    }
+
+    var inNoGo = angleDiff(desired, w.windDirection) < NOGO_ZONE_DEG;
+
+    if (!inNoGo) {
+      if (nav.tack) {
+        log(state, 'Wind angle improved. Resuming direct sailing.');
+        nav.tack = null;
+        nav.tackDistanceNm = 0;
+      }
+      return desired;
+    }
+
+    var sideForDesired = signedAngleDiff(w.windDirection, desired) < 0 ? 'port' : 'starboard';
+
+    if (!nav.tack) {
+      nav.tack = sideForDesired;
+      nav.tackDistanceNm = 0;
+      log(state, 'Wind moved onto the bow. Beating to windward.');
+    } else {
+      var remaining = distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon);
+      var maxLeg = nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX ? COASTAL_MAX_TACK_LEG_NM : OPEN_WATER_MAX_TACK_LEG_NM;
+      var legLimit = Math.min(maxLeg, Math.max(0.2, remaining * TACK_LEG_WAYPOINT_FRACTION));
+      // Come about either on schedule, or immediately if the desired
+      // course (waypoint progress, or the player using CHANGE COURSE)
+      // has moved to the other side of the wind since — continuing the
+      // current tack would then just be sailing away from the goal.
+      // Flipping to the opposite of the current tack is correct either
+      // way: on a scheduled tack sideForDesired still matches the old
+      // tack, so the opposite is the new one; on a course-driven switch
+      // sideForDesired IS the opposite already (only two tacks exist).
+      if (nav.tack !== sideForDesired || nav.tackDistanceNm >= legLimit) {
+        nav.tack = nav.tack === 'port' ? 'starboard' : 'port';
+        nav.tackDistanceNm = 0;
+        log(state, 'Automatic tack. Now on ' + nav.tack + ' tack.');
+      }
+    }
+
+    return closeHauledHeading(w.windDirection, nav.tack);
+  }
+
   function computeHeading(state) {
     var nav = state.nav;
     var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
     nav.intendedCourse = bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon);
-    var steered = normalizeDeg(nav.intendedCourse + nav.headingOffset);
+    var desired = normalizeDeg(nav.intendedCourse + nav.headingOffset);
+    var steered = resolveAutoTack(state, desired, wp);
     // Small per-tick heading noise: imperfect helming, wave action, minor
     // leeway and current. This is the mechanism by which weather actually
     // shoves the track off line rather than just slowing the boat down —
@@ -971,17 +1066,52 @@
     var prevCondition = state.weather.condition;
     driftWeather(state.weather);
 
-    var heading = computeHeading(state); // also refreshes nav.intendedCourse (bearing to the current waypoint)
+    // Real dead-reckoning movement: the boat covers ground along a bearing
+    // toward WAYPOINTS[nav.waypointIndex], for real elapsed time at the
+    // current speed. Speed is computed once for the tick (as before) and
+    // that's the total distance budget spent below — but if that budget
+    // is enough to actually reach the current waypoint, the boat arrives
+    // there exactly, spends only that much of the budget, advances to the
+    // next waypoint, and covers the REST of the budget along the new
+    // bearing — rather than sailing straight past it on the old one.
+    // Several of the coastal steering waypoints are closer together than
+    // one tick's worth of travel at speed, so this matters; it applies
+    // identically whether this tick is live or part of a multi-tick
+    // offline catch-up, since both just call simTick.
+    var heading = computeHeading(state); // bearing to the CURRENT waypoint, with wobble
     var speed = computeBoatSpeed(state, heading);
     state.boat.speed = speed;
     state.nav.heading = heading;
 
-    var nmThisTick = speed * (TICK_MINUTES / 60);
-    if (nmThisTick > 0) {
-      var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmThisTick);
-      state.nav.lat = moved.lat;
-      state.nav.lon = moved.lon;
-      state.nav.distanceTraveled += nmThisTick;
+    var nmRemaining = speed * (TICK_MINUTES / 60);
+    var crossingGuard = 0;
+    while (nmRemaining > 0 && crossingGuard < WAYPOINTS.length + 2) {
+      crossingGuard++;
+      var wp = WAYPOINTS[state.nav.waypointIndex];
+      if (!wp) break; // nothing left to steer toward
+      var distToWp = distanceBetween(state.nav.lat, state.nav.lon, wp.lat, wp.lon);
+      if (distToWp <= nmRemaining) {
+        state.nav.lat = wp.lat;
+        state.nav.lon = wp.lon;
+        state.nav.distanceTraveled += distToWp;
+        if (state.nav.tack) state.nav.tackDistanceNm += distToWp;
+        nmRemaining -= distToWp;
+        log(state, waypointArrivalLine(wp));
+        if (state.nav.waypointIndex < WAYPOINTS.length - 1) {
+          state.nav.waypointIndex++;
+          heading = computeHeading(state); // fresh bearing (and fresh wobble) for the next leg
+          state.nav.heading = heading;
+        } else {
+          break; // reached the final waypoint — nothing further to aim at
+        }
+      } else {
+        var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+        state.nav.lat = moved.lat;
+        state.nav.lon = moved.lon;
+        state.nav.distanceTraveled += nmRemaining;
+        if (state.nav.tack) state.nav.tackDistanceNm += nmRemaining;
+        nmRemaining = 0;
+      }
     }
 
     updateCrew(state);
@@ -998,7 +1128,6 @@
     checkHungerNarration(state);
     checkSpoilage(state);
     checkMilestones(state);
-    checkWaypointProgress(state);
     checkAmbientEvent(state);
     processSleepTick(state, prevCondition);
 
@@ -1414,29 +1543,22 @@
 
   function waypointArrivalLine(wp) {
     var lines = {
-      'the mid-Sound': 'Clear of the marina, into open Puget Sound.',
-      'the passage north': 'Threading the channel between Whidbey Island and the mainland.',
-      'the Whidbey side': "Whidbey Island's bluffs pass close off to starboard.",
-      'Admiralty Inlet': 'Into Admiralty Inlet \u2014 the water narrows here.',
-      'the Admiralty Inlet narrows': 'Port Townsend slides by off the beam. Almost to the strait.',
-      'the Dungeness approach': 'Into the Strait of Juan de Fuca proper. Dungeness Spit somewhere off to port.',
-      'the Strait of Juan de Fuca': 'Mid-strait now \u2014 the Olympics to port, Vancouver Island to starboard.',
-      'Cape Flattery': 'Rounding Cape Flattery. The Pacific opens up ahead.',
+      'Shilshole Exit': 'Clear of the marina, into open Puget Sound.',
+      'Puget Sound': 'Threading the channel toward Admiralty Inlet.',
+      'Admiralty South': 'Into Admiralty Inlet \u2014 the water narrows here.',
+      'Admiralty North': 'Clear of Marrowstone Island. Turning toward Port Townsend.',
+      'Point Wilson': 'Port Townsend slides by off the beam. Almost to the strait.',
+      'Strait East': 'Into the Strait of Juan de Fuca proper.',
+      'Strait East 2': 'Dungeness Spit somewhere off to port, well clear.',
+      'Strait Mid': 'Mid-strait now \u2014 the Olympics to port, Vancouver Island to starboard.',
+      'Strait West': "Nearing the strait's mouth. Cape Flattery ahead.",
+      'Cape Approach': 'Rounding toward Cape Flattery.',
+      'Cape Flattery': 'Clear of Cape Flattery. The Pacific opens up ahead.',
       'open water, well offshore': 'Well clear of the coast now, turning south to find the trades.',
       'the trade wind belt': 'Into the trade winds. Turning west for Hawaiʻi.',
       'Kauaʻi': 'Kauaʻi rises off the bow.',
     };
     return lines[wp.name] || (wp.name + ' behind you now.');
-  }
-
-  function checkWaypointProgress(state) {
-    var nav = state.nav;
-    var wp = WAYPOINTS[nav.waypointIndex];
-    if (!wp) return; // already steering for the final waypoint — nothing further to advance to
-    if (distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon) <= WAYPOINT_ARRIVAL_NM) {
-      log(state, waypointArrivalLine(wp));
-      if (nav.waypointIndex < WAYPOINTS.length - 1) nav.waypointIndex++;
-    }
   }
 
   function resolveAftLocker(state) {
@@ -1744,6 +1866,7 @@
   var navStripEl = document.getElementById('navstrip');
   var navDayEl = document.getElementById('nav-day');
   var navSpeedEl = document.getElementById('nav-speed');
+  var navHeadingEl = document.getElementById('nav-heading');
   var navRegionEl = document.getElementById('nav-region');
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
@@ -1885,13 +2008,30 @@
     return 'NORTH PACIFIC';
   }
 
+  // Day 1 is the calendar date the voyage departed on; Day 2 begins at
+  // the following local midnight, not 24 elapsed hours after departure
+  // (a 4pm departure should read DAY 2 at midnight that same night, a
+  // few hours in, not at 4pm the next day).
+  function voyageDayNumber(state) {
+    var departure = new Date(state.meta.departedAt);
+    var current = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
+    var departureMidnight = new Date(departure.getFullYear(), departure.getMonth(), departure.getDate());
+    var currentMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+    var daysSince = Math.round((currentMidnight - departureMidnight) / 86400000);
+    return daysSince + 1;
+  }
+
   function updateNavStrip(state) {
-    if (!state || state.departure.stageIndex < DEPARTURE_STEPS.length) { navStripEl.hidden = true; return; }
+    if (!state || state.departure.stageIndex < DEPARTURE_STEPS.length) {
+      navStripEl.hidden = true;
+      return;
+    }
     navStripEl.hidden = false;
-    var day = Math.floor(state.meta.voyageMinutes / 1440) + 1;
+    var day = voyageDayNumber(state);
     var speed = computeBoatSpeed(state, state.nav.heading);
     navDayEl.textContent = 'DAY ' + day;
     navSpeedEl.textContent = speed.toFixed(1) + ' KT';
+    navHeadingEl.textContent = Math.round(state.nav.heading) + '\u00B0';
     navRegionEl.textContent = regionName(state);
   }
 
@@ -2067,6 +2207,9 @@
     printBlank();
     printLine('HEADING', 'heading-label');
     printLine(Math.round(state.nav.heading) + '\u00B0  (intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0)');
+    if (state.nav.tack) {
+      printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + state.nav.tack.toUpperCase() + ' TACK)', 'dim');
+    }
     printBlank();
     printLine('PROPULSION', 'heading-label');
     printLine(propulsionLabel(propulsionState(state, state.nav.heading)));
@@ -3368,6 +3511,8 @@
   // point in the voyage. New saves already have lat/lon and skip this.
   function migrateNavIfNeeded(state) {
     var nav = state.nav;
+    if (nav.tack === undefined) nav.tack = null;
+    if (nav.tackDistanceNm === undefined) nav.tackDistanceNm = 0;
     if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
     var legacyTotal = 2850; // the flat distance old saves' progress was measured against
     var frac = clamp((nav.distanceTraveled || 0) / legacyTotal, 0, 1);
@@ -3380,6 +3525,74 @@
       if (covered <= (nav.distanceTraveled || 0)) nav.waypointIndex = Math.min(i + 1, WAYPOINTS.length - 1);
     }
     delete nav.crossTrackDeviation; // replaced by a value computed fresh from position, not stored
+    nav.heading = computeHeading(state); // also refreshes nav.intendedCourse so the display isn't stale
+  }
+
+  // The closest point lying ON the current WAYPOINTS route (projected
+  // onto whichever leg is nearest) to an arbitrary lat/lon, plus the
+  // index of that leg's "ahead" waypoint (i.e. the one a boat there
+  // should be steering toward). Flat local projection, not full
+  // spherical geometry — plenty accurate at the few-mile scale this is
+  // ever used at.
+  function nearestPointOnRoute(lat, lon) {
+    var best = null, bestDist = Infinity;
+    for (var i = 0; i < WAYPOINTS.length - 1; i++) {
+      var a = WAYPOINTS[i], b = WAYPOINTS[i + 1];
+      var mlat = toRad((a.lat + b.lat) / 2);
+      var ax = a.lon * Math.cos(mlat), ay = a.lat;
+      var bx = b.lon * Math.cos(mlat), by = b.lat;
+      var px = lon * Math.cos(mlat), py = lat;
+      var abx = bx - ax, aby = by - ay;
+      var apx = px - ax, apy = py - ay;
+      var ab2 = abx * abx + aby * aby;
+      var t = ab2 === 0 ? 0 : clamp((apx * abx + apy * aby) / ab2, 0, 1);
+      var cLat = a.lat + t * (b.lat - a.lat);
+      var cLon = a.lon + t * (b.lon - a.lon);
+      var d = distanceBetween(lat, lon, cLat, cLon);
+      if (d < bestDist) { bestDist = d; best = { lat: cLat, lon: cLon, aheadIndex: i + 1 }; }
+    }
+    return best;
+  }
+
+  // Recovery for one specific, known bug: an earlier version of the
+  // coastal route crossed straight over the southern end of Marrowstone
+  // Island, so a save made during that window could have a position
+  // that's physically on the island. The box below is a little larger
+  // than the island itself to catch anything that old bug could have
+  // produced crossing it. This is NOT a general "keep the boat on the
+  // route" snap — a position outside this specific box, however far
+  // from any waypoint, is left completely untouched.
+  function recoverPositionIfOnLand(state) {
+    var nav = state.nav;
+    if (typeof nav.lat !== 'number' || typeof nav.lon !== 'number') return;
+    var onMarrowstone = nav.lat >= 47.995 && nav.lat <= 48.115 && nav.lon >= -122.71 && nav.lon <= -122.655;
+    if (!onMarrowstone) return;
+    var recovered = nearestPointOnRoute(nav.lat, nav.lon);
+    if (!recovered) return;
+    nav.lat = recovered.lat;
+    nav.lon = recovered.lon;
+    nav.heading = computeHeading(state);
+  }
+
+  // One-time migration for the coastal waypoint chain being replaced
+  // wholesale with an exact, externally-supplied set of points (a
+  // different count and numbering than whatever a save was using
+  // before). This does NOT move the boat — its actual lat/lon, the
+  // ground truth, is untouched — it only re-points nav.waypointIndex at
+  // whichever new waypoint the boat should now be steering toward,
+  // found by projecting its current position onto the new route. Runs
+  // once per save (guarded by nav.coastalRouteMigrated) rather than
+  // every load, since repeatedly re-deriving the target from position
+  // could in principle walk it backward a step if wobble ever puts the
+  // boat fractionally closer to the previous leg's line.
+  function migrateCoastalWaypointIndexIfNeeded(state) {
+    var nav = state.nav;
+    if (nav.coastalRouteMigrated) return;
+    nav.coastalRouteMigrated = true;
+    if (typeof nav.lat !== 'number' || typeof nav.lon !== 'number') return; // migrateNavIfNeeded handles this case
+    var found = nearestPointOnRoute(nav.lat, nav.lon);
+    if (!found) return;
+    nav.waypointIndex = found.aheadIndex;
     nav.heading = computeHeading(state); // also refreshes nav.intendedCourse so the display isn't stale
   }
 
@@ -3491,6 +3704,8 @@
     }
     GAME = saved;
     migrateNavIfNeeded(GAME);
+    recoverPositionIfOnLand(GAME);
+    migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
