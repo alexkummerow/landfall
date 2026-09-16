@@ -177,8 +177,7 @@
   }
 
   .option-divider {
-    border-top: 1px dashed var(--rule);
-    margin: 0.35rem 0;
+    margin: 0.7rem 0;
   }
 
   .option {
@@ -339,6 +338,7 @@
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
         coffeeCount: 0,
         inLifeRaft: false,
+        location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
       },
       food: {
         oatmeal: 18, pasta: 12, rice: 16, soup: 8, chili: 8,
@@ -2391,11 +2391,19 @@
   }
 
   function cmdRepair(state) {
-    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
+    // Same two problems as ever, same resolution logic (resolveAftLocker,
+    // attemptLeakRepair) — this just gates each by whether it's physically
+    // reachable from here. The aft locker is topside deck stowage; the
+    // leak is bilge/hull work belowdecks. No new repair system, no new
+    // problem types — just which of the existing ones this location can
+    // actually reach right now.
+    var aftLockerActive = state.flags.aftLockerTriggered && !state.flags.aftLockerResolved;
+    var leakActive = state.boat.floodRate > 0;
+    if (state.crew.location === 'above' && aftLockerActive) {
       runShortAction(state, { label: 'CHECKING AFT LOCKER', duration: 6, action: resolveAftLocker });
       return;
     }
-    if (state.boat.floodRate > 0) {
+    if (state.crew.location === 'below' && leakActive) {
       runShortAction(state, { label: 'WORKING THE LEAK', duration: 6, action: attemptLeakRepair });
       return;
     }
@@ -2448,10 +2456,29 @@
     scrollToBottom();
   }
 
+  // Builds an options array from ordered groups, inserting a divider
+  // between any two non-empty groups and simply omitting a group (and
+  // its divider) when it has nothing in it — e.g. REPAIR when there's
+  // nothing to fix. Keeps the ABOVE/BELOW menus below free of
+  // hand-counted divider bookkeeping as conditional items come and go.
+  function groupedOptions(groups) {
+    var result = [];
+    groups.forEach(function (group) {
+      if (!group || group.length === 0) return;
+      if (result.length > 0) result.push({ divider: true });
+      result = result.concat(group);
+    });
+    return result;
+  }
+
   function getContextualOptions(state) {
     // A pending decision always wins — including a restart request made
     // mid-departure, mid-attempt, or mid-sleep, which must be answerable
-    // even though those states otherwise show just one button.
+    // even though those states otherwise show just one button. Pending
+    // choices (SAILS' FULL/REEFED/etc, DISTRESS' ACTIVATE EPIRB/DEPLOY
+    // LIFE RAFT/FIRE FLARE, and so on) are unaffected by physical
+    // location — a rescue interaction started below can still surface
+    // FIRE FLARE regardless of where the sailor is standing.
     if (state.pendingChoice) return state.pendingChoice.options;
 
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) {
@@ -2461,8 +2488,10 @@
     if (state.rescue.phase === 'rescued') {
       // The voyage is over — nothing left to do but look back at it. The
       // log itself is always visible above, scrolled into history, so
-      // there's nothing else worth offering here.
-      return [{ label: 'STATUS', action: 'cmd:status' }];
+      // there's nothing else worth offering here. (STATUS used to be
+      // the one thing left to press; it's no longer player-facing, and
+      // nothing replaces it — there's genuinely nothing left to do.)
+      return [];
     }
 
     if (state.crew.watchState === 'trying') {
@@ -2472,15 +2501,12 @@
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
 
-    var repairLabel = (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)
-      ? 'INSPECT AFT LOCKER'
-      : (state.boat.floodRate > 0 ? 'WORK THE LEAK' : 'REPAIR');
-
     if (state.crew.inLifeRaft) {
       // Nothing left to sail, motor, steer, or fix — the voyage has
-      // become survival until rescue, full stop.
+      // become survival until rescue, full stop. There's no boat left
+      // to be above or below on, so this stays the one flat list it
+      // always was (minus STATUS, which is gone everywhere now).
       return [
-        { label: 'STATUS', action: 'cmd:status' },
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
         { label: 'INVENTORY', action: 'cmd:inventory' },
@@ -2492,32 +2518,55 @@
       ];
     }
 
-    // Every command is a persistent button now — nothing is typed, so
-    // nothing can be hidden. A thin divider (added in renderOptions)
-    // separates read-only checks from actions that change something.
-    return [
-      { label: 'STATUS', action: 'cmd:status' },
-      { label: 'POSITION', action: 'cmd:position' },
-      { label: 'WEATHER', action: 'cmd:weather' },
-      { label: 'FORECAST', action: 'cmd:forecast' },
-      { label: 'INVENTORY', action: 'cmd:inventory' },
-      { divider: true },
-      { label: 'SAILS', action: 'cmd:sails' },
-      { label: 'ENGINE', action: 'cmd:engine' },
-      { label: 'COURSE', action: 'cmd:course' },
-      { label: 'EAT', action: 'cmd:eat' },
-      { label: 'DRINK', action: 'cmd:drink' },
-      { label: 'SLEEP', action: 'cmd:sleep' },
-      { label: repairLabel, action: 'cmd:repair' },
-      { label: 'DISTRESS', action: 'cmd:distress' },
-    ];
+    // Same two problems cmdRepair already knows how to handle. REPAIR
+    // itself is always offered in both locations now — it's cmdRepair
+    // (called just above) that decides, by location, whether there's
+    // anything it can actually reach; this only picks the label that
+    // previews that outcome, using the same two conditions.
+    var aftLockerActive = state.flags.aftLockerTriggered && !state.flags.aftLockerResolved;
+    var leakActive = state.boat.floodRate > 0;
+    var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
+
+    if (state.crew.location === 'below') {
+      return groupedOptions([
+        [
+          { label: 'EAT', action: 'cmd:eat' },
+          { label: 'DRINK', action: 'cmd:drink' },
+          { label: 'SLEEP', action: 'cmd:sleep' },
+        ],
+        [
+          { label: 'POSITION', action: 'cmd:position' },
+          { label: 'FORECAST', action: 'cmd:forecast' },
+          { label: 'INVENTORY', action: 'cmd:inventory' },
+        ],
+        [
+          { label: leakActive ? 'WORK THE LEAK' : 'REPAIR', action: 'cmd:repair' },
+          { label: 'DISTRESS', action: 'cmd:distress' },
+        ],
+        [{ label: goLabel, action: 'go-above-below' }],
+      ]);
+    }
+
+    // ABOVE (the default/starting location).
+    return groupedOptions([
+      [
+        { label: 'SAILS', action: 'cmd:sails' },
+        { label: 'ENGINE', action: 'cmd:engine' },
+      ],
+      [
+        { label: 'WEATHER', action: 'cmd:weather' },
+        { label: 'COURSE', action: 'cmd:course' },
+      ],
+      [{ label: aftLockerActive ? 'INSPECT AFT LOCKER' : 'REPAIR', action: 'cmd:repair' }],
+      [{ label: goLabel, action: 'go-above-below' }],
+    ]);
   }
 
   // Which of the read-only "information" categories (if any) currently
   // occupies the temp view. Tracked separately from state.pendingChoice
   // because it's pure UI/interaction convenience — not part of the
   // simulation, not persisted, not something a reload should remember.
-  var INFO_COMMANDS = { status: true, position: true, weather: true, forecast: true, inventory: true };
+  var INFO_COMMANDS = { position: true, weather: true, forecast: true, inventory: true };
   var openInfoPanel = null;
 
   function renderOptions(state) {
@@ -2599,7 +2648,22 @@
     optionsEl.innerHTML = '';
     clearTempView(); // whatever menu was open is done being looked at once an action starts
     printPersistentBlank();
-    printPersistentLine(config.label, 'heading-label');
+
+    // Normally the label (e.g. "STARTING ENGINE") is printed permanently,
+    // same as everything else in the scrollback. config.transientLabel
+    // opts a specific action out of that: the label shows only while the
+    // dots are running and is gone once resolved, leaving just the
+    // result line behind — for actions minor enough that only the
+    // outcome, not the doing, belongs in the permanent record.
+    var labelEl = null;
+    if (config.transientLabel) {
+      labelEl = document.createElement('p');
+      labelEl.className = 'line heading-label';
+      labelEl.textContent = config.label;
+      outputEl.insertBefore(labelEl, tempViewEl);
+    } else {
+      printPersistentLine(config.label, 'heading-label');
+    }
 
     // One animated "." / ".." / "..." run, for `durationSeconds` real seconds,
     // then `onDone`. Factored out so a short action can optionally chain a
@@ -2622,6 +2686,7 @@
       setTimeout(function () {
         clearInterval(dotTimer);
         if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+        if (labelEl && labelEl.parentNode) { labelEl.parentNode.removeChild(labelEl); labelEl = null; }
         onDone();
       }, durationSeconds * 1000);
     }
@@ -2696,6 +2761,26 @@
         case 'wake-up':
           printBlank();
           wakeUp(state, 'You wake and go above.');
+          break;
+        case 'go-above-below':
+          // A physical place, tracked independently of any menu — the
+          // label the player just clicked already told them which way
+          // they're headed, so this just carries it out. "GOING BELOW"/
+          // "GOING ABOVE" is only shown while the dots run (transientLabel)
+          // and doesn't stick around — just the result, "You go below."/
+          // "You go above.", stays in the scrollback, and even that isn't
+          // a timestamped voyage-log entry — too minor and too frequent
+          // to be worth a permanent log line every time.
+          var goingBelow = state.crew.location !== 'below';
+          runShortAction(state, {
+            label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
+            transientLabel: true,
+            duration: 2,
+            action: function (s) {
+              s.crew.location = goingBelow ? 'below' : 'above';
+              printPersistentLine(goingBelow ? 'You go below.' : 'You go above.', 'dim');
+            },
+          });
           break;
         case 'sail-full':
           runShortAction(state, {
@@ -3039,6 +3124,7 @@
     if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
+    if (c.location === undefined) c.location = 'above';
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.freshFruitSpoiled === undefined) state.flags.freshFruitSpoiled = false;
     if (state.flags.freshBreadSpoiled === undefined) state.flags.freshBreadSpoiled = false;
