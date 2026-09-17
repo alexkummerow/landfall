@@ -294,15 +294,18 @@
       nav: {
         lat: start.lat,
         lon: start.lon,
-        waypointIndex: 1,          // index into WAYPOINTS currently being steered toward
+        waypointIndex: 1,          // index into WAYPOINTS currently being steered toward, while in the coastal corridor (< OPEN_WATER_WAYPOINT_INDEX); frozen at OPEN_WATER_WAYPOINT_INDEX once free-heading navigation takes over
         distanceTraveled: 0,       // odometer — actual nm sailed, not progress toward the goal
-        intendedCourse: startBearing, // bearing to the current waypoint; refreshed every tick
-        headingOffset: 0,          // 0 = on course, +22 = borne away, -22 = come up
+        intendedCourse: startBearing, // coastal phase: bearing to the current waypoint. Open-ocean phase: live direct bearing to Nāwiliwili (for the BEARING TO NĀWILIWILI display) — NOT necessarily what the boat is actually steering; see setCourse for that. Refreshed every tick either way.
+        setCourse: null,           // the player's manually chosen open-ocean compass heading (0-359), via CHANGE COURSE or SET FOR NĀWILIWILI — null until the coastal corridor is cleared, at which point computeHeading() initializes it toward Nāwiliwili if still unset
+        courseDraft: null,         // in-progress heading value while the CHANGE COURSE picker is open; null when not in use
+        landWarningLevel: 'none',  // 'none' | 'ahead' | 'close' | 'danger' — escalating land-proximity state, so each level only logs once on the way up (and clears silently once the danger passes)
+        groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
+        tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveCoastalAutoTack(). Never set in open ocean.
+        tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
-        tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking to windward; see resolveAutoTack()
-        tackDistanceNm: 0,         // nm covered on the current tack, for deciding when to come about
       },
       weather: {
         // SW — real wind, not routing logic, so it can still drift into a
@@ -408,6 +411,7 @@
         hullLeakResolved: false,
         bilgeWarned50: false,
         bilgeWarned100: false,
+        arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
       },
       rescue: {
         epirbOn: false,
@@ -555,6 +559,114 @@
   var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
   var OPEN_WATER_WAYPOINT_INDEX = 12; // targeting waypoint 12 ("open water, well offshore") or later = clear of Cape Flattery and coastal hazards; below that, course changes are geographically constrained
 
+  /* --------------------------------------------------------------
+     LAND — open-ocean hazard checking only. The coastal corridor
+     (waypoints 0-11) is a verified-safe authored route the boat
+     already follows automatically; none of this applies there. Once
+     free-heading navigation takes over, the player can point the boat
+     anywhere, so these are the only things standing between a bad
+     heading and the boat sailing straight through an island.
+
+     Kaua'i/Nāwiliwili (FINAL_DEST) is deliberately NOT in this list —
+     approaching the destination is the goal, not a hazard, and arrival
+     there is handled separately in simTick's movement step. Radii are
+     rough circles approximating each island's real footprint — this is
+     a terminal-simple simulation, not a chart.
+     -------------------------------------------------------------- */
+  var LAND_MASSES = [
+    { name: 'Ni\u02BBihau',    lat: 21.90, lon: -160.17, radiusNm: 8 },
+    { name: 'O\u02BBahu',      lat: 21.47, lon: -157.98, radiusNm: 20 },
+    { name: 'Moloka\u02BBi',   lat: 21.13, lon: -157.02, radiusNm: 13 },
+    { name: 'L\u0101na\u02BBi', lat: 20.83, lon: -156.92, radiusNm: 9 },
+    { name: 'Maui',            lat: 20.80, lon: -156.33, radiusNm: 20 },
+    { name: 'Kaho\u02BBolawe', lat: 20.55, lon: -156.60, radiusNm: 6 },
+    { name: 'Hawai\u02BBi',    lat: 19.60, lon: -155.50, radiusNm: 45 },
+  ];
+
+  var LAND_AHEAD_NM = 25;      // edge-distance (to a landmass's coastline, not its center) that first triggers a warning
+  var CLOSE_TO_SHORE_NM = 8;
+  var DANGER_GROUNDING_NM = 2;
+  var LAND_LOOKAHEAD_NM = 60;  // how far along the current heading to look for trouble
+  var LAND_SAMPLE_STEP_NM = 4; // sampling the projected path rather than exact line-to-circle geometry — reuses the same destinationPoint/distanceBetween math as everything else, and a few-mile step is plenty precise at these distances
+
+  // Closest approach of the boat's PROJECTED path (straight out along
+  // its current heading) to any landmass's coastline, out to the
+  // lookahead distance. Returns null if nothing is within warning range
+  // anywhere along that stretch.
+  function nearestLandAhead(lat, lon, heading) {
+    var best = null;
+    for (var d = 0; d <= LAND_LOOKAHEAD_NM; d += LAND_SAMPLE_STEP_NM) {
+      var pt = d === 0 ? { lat: lat, lon: lon } : destinationPoint(lat, lon, heading, d);
+      for (var i = 0; i < LAND_MASSES.length; i++) {
+        var lm = LAND_MASSES[i];
+        var edgeDist = distanceBetween(pt.lat, pt.lon, lm.lat, lm.lon) - lm.radiusNm;
+        if (best === null || edgeDist < best.edgeDist) best = { landmass: lm, edgeDist: edgeDist };
+      }
+    }
+    return best;
+  }
+
+  function landWarningLevelFor(edgeDist) {
+    if (edgeDist <= DANGER_GROUNDING_NM) return 'danger';
+    if (edgeDist <= CLOSE_TO_SHORE_NM) return 'close';
+    if (edgeDist <= LAND_AHEAD_NM) return 'ahead';
+    return 'none';
+  }
+
+  var LAND_WARNING_RANK = { none: 0, ahead: 1, close: 2, danger: 3 };
+  var LAND_WARNING_TEXT = { ahead: 'LAND AHEAD', close: 'CLOSE TO SHORE', danger: 'DANGER OF GROUNDING' };
+
+  // Escalating only — logs when the level goes UP, stays quiet on the
+  // way back down (COURSE reflects the current level continuously; see
+  // cmdCourse), and never runs at all inside the coastal corridor.
+  function checkLandProximity(state) {
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      state.nav.landWarningLevel = 'none';
+      return;
+    }
+    // Projects along setCourse (the player's steady intent), not the
+    // wobbled actual heading — using the noisy value here would make
+    // the warning level flicker tick to tick as wobble nudges which
+    // landmass is nearest, spamming the log with re-escalations for
+    // what's really the same ongoing situation.
+    var nearest = nearestLandAhead(state.nav.lat, state.nav.lon, state.nav.setCourse);
+    var level = nearest ? landWarningLevelFor(nearest.edgeDist) : 'none';
+    if (LAND_WARNING_RANK[level] > LAND_WARNING_RANK[state.nav.landWarningLevel]) {
+      var line = LAND_WARNING_TEXT[level];
+      if (nearest) {
+        line += ' \u2014 ' + nearest.landmass.name.toUpperCase() + ', ' + Math.max(0, Math.round(nearest.edgeDist)) + ' NM';
+      }
+      log(state, line);
+    }
+    state.nav.landWarningLevel = level;
+  }
+
+  var GROUNDING_HULL_DAMAGE = 22;
+
+  // Called with where the boat's open-ocean movement would land this
+  // tick. If that point falls inside a landmass, the movement is
+  // rejected (caller does not apply it) rather than letting the boat's
+  // position pass through — this is what "do not allow the simulation
+  // to pass through islands" actually means mechanically. Only damages
+  // and logs once per grounding episode (tracked by name), not every
+  // tick the player leaves the boat pointed at the beach; clears
+  // silently the moment a tick's projected position no longer hits land.
+  function applyGroundingIfNeeded(state, projectedLat, projectedLon) {
+    for (var i = 0; i < LAND_MASSES.length; i++) {
+      var lm = LAND_MASSES[i];
+      if (distanceBetween(projectedLat, projectedLon, lm.lat, lm.lon) < lm.radiusNm) {
+        if (state.nav.groundedOn !== lm.name) {
+          state.nav.groundedOn = lm.name;
+          state.boat.hull = clamp(state.boat.hull - GROUNDING_HULL_DAMAGE, 0, 100);
+          log(state, 'The hull grinds onto rock and coral \u2014 aground on ' + lm.name + '. Change course to work free.');
+        }
+        return true;
+      }
+    }
+    if (state.nav.groundedOn) state.nav.groundedOn = null;
+    return false;
+  }
+
   var TOTAL_ROUTE_NM = 0;
   (function () {
     for (var i = 1; i < WAYPOINTS.length; i++) {
@@ -574,9 +686,18 @@
     if (wi <= 5) return 'inland';    // Shilshole through clearing Point Wilson
     if (wi <= 9) return 'strait';    // the Strait of Juan de Fuca
     if (wi <= 11) return 'coastal';  // approaching / just past Cape Flattery
-    if (wi >= 14) return 'approach'; // final leg toward Kauaʻi
-    if (wi === 13) return 'tropics'; // trade wind belt
-    return 'offshore'; // wi === 12 ("open water, well offshore")
+    // Past Cape Flattery, waypointIndex freezes at OPEN_WATER_WAYPOINT_INDEX
+    // — free-heading navigation has taken over (see computeHeading), and
+    // the player can steer anywhere, so phase from here on reads live
+    // distance to Nāwiliwili instead of a fixed waypoint target. These
+    // thresholds reproduce the old waypoint-based boundaries (distance
+    // from Nāwiliwili to the former "open water"/"trade wind belt"
+    // waypoints) so region names and pacing feel the same regardless of
+    // the actual path taken.
+    var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    if (distToFinal > 1845) return 'offshore';
+    if (distToFinal > 861) return 'tropics';
+    return 'approach';
   }
 
   // External links (POSITION's OPEN MAP, WEATHER's DETAILED MARINE
@@ -1057,52 +1178,45 @@
     }
   }
 
-  // AUTO-TACKING — a sailing-simulation detail underneath the existing
-  // navigation system, not a new navigation feature. CHANGE COURSE, the
-  // route, waypoints, and when course changes are available are all
-  // completely untouched: this only decides, given whatever heading the
-  // existing systems currently want (waypoint bearing + the player's
-  // headingOffset from CHANGE COURSE), whether that heading is sailable
-  // right now, and if not, what the boat physically does about it
-  // instead of luffing in place. nav.intendedCourse keeps its existing
-  // meaning (bearing to the current waypoint) throughout; it's nav.heading
-  // — the boat's actual steered heading — that reflects the tack.
-  var NOGO_ZONE_DEG = 35;          // matches pointOfSailFactor's own no-go threshold, so this is the exact same zone that already tanks sail speed
-  var CLOSE_HAULED_ANGLE_DEG = 42; // realistic close-hauled angle for a cruising sailboat — lands in pointOfSailFactor's 35-50deg tier, a real reduced-but-genuine speed, not a crawl
-  // Tack legs are long in the open ocean (realistic cruising behavior,
-  // and keeps the log from filling up with routine tacks) but short
-  // through the coastal corridor, where the route can run within well
-  // under a mile of real charted shoreline (see WAYPOINTS' own notes on
-  // the Marrowstone/Whidbey passage) and a wide zigzag could carry the
-  // boat off that verified-safe line. Reuses the same constrained-waters
-  // boundary COURSE already uses (OPEN_WATER_WAYPOINT_INDEX), rather
-  // than inventing a second one.
-  var OPEN_WATER_MAX_TACK_LEG_NM = 8;
-  var COASTAL_MAX_TACK_LEG_NM = 0.6;
-  var TACK_LEG_WAYPOINT_FRACTION = 0.3; // ...or this fraction of the remaining distance to the current waypoint, whichever is smaller — shrinks tacks further approaching any mark
-
   function signedAngleDiff(a, b) {
     // Signed angle FROM b TO a, in (-180, 180]: positive = a is clockwise
-    // of b, negative = counterclockwise. Used to tell which side of the
-    // true wind a heading falls on (which tack it is).
+    // of b, negative = counterclockwise. Used both by auto-tack below
+    // (which side of the wind a heading falls on) and by the
+    // real-weather blend (closing the gap the short way around the
+    // compass).
     var d = normalizeDeg(a - b);
     return d > 180 ? d - 360 : d;
   }
+
+  // AUTO-TACK — active throughout the whole voyage; see computeHeading.
+  // The player controls SET COURSE (the intended track: the current
+  // waypoint's bearing while coastal, or the player's own chosen
+  // heading once in open ocean); this decides what the boat actually
+  // steers tick to tick (ACTUAL HEADING) to make that course good. If
+  // SET COURSE is too close to the wind to sail directly, the boat
+  // beats to windward instead of luffing indefinitely — short legs
+  // through the coastal corridor (tight enough to stay inside the
+  // verified-safe route), longer legs once in open water, both shrinking
+  // further as the boat nears whatever it's currently aiming for. The
+  // player never manually tacks; changing SET COURSE (via CHANGE COURSE
+  // or SET FOR NĀWILIWILI) is the only navigation input there is.
+  var NOGO_ZONE_DEG = 35;          // matches pointOfSailFactor's own no-go threshold
+  var CLOSE_HAULED_ANGLE_DEG = 42; // realistic close-hauled angle — lands in pointOfSailFactor's 35-50deg tier, a real reduced-but-genuine speed, not a crawl
+  var COASTAL_MAX_TACK_LEG_NM = 0.6; // short legs — the corridor can run within under a mile of real charted shoreline
+  var OPEN_WATER_MAX_TACK_LEG_NM = 8; // longer, realistic offshore tacks once clear of the corridor
+  var TACK_LEG_WAYPOINT_FRACTION = 0.3; // ...or this fraction of the remaining distance to the current target (waypoint, or Nāwiliwili in open water), whichever is smaller — shrinks tacks further approaching any mark
 
   function closeHauledHeading(windDirection, tack) {
     return normalizeDeg(windDirection + (tack === 'port' ? CLOSE_HAULED_ANGLE_DEG : -CLOSE_HAULED_ANGLE_DEG));
   }
 
-  // Given the heading the existing navigation system currently wants
-  // (desired), decide what the boat actually steers: that heading
-  // directly if it's sailable, or a close-hauled tack if it isn't.
-  // Reads/writes nav.tack and nav.tackDistanceNm; simTick() is what
-  // accumulates tackDistanceNm as the boat actually moves.
-  function resolveAutoTack(state, desired, wp) {
+  // targetPoint is only used for the tack-leg-length "shrink near a
+  // mark" calculation — the current waypoint while coastal, Nāwiliwili
+  // itself in open water — never for steering; steering is entirely
+  // desired (SET COURSE) vs. the wind.
+  function resolveAutoTack(state, desired, targetPoint) {
     var nav = state.nav, w = state.weather, b = state.boat;
 
-    // Nothing to beat with — no canvas up, or nothing left to sail at
-    // all. Steer the existing direct course exactly as before.
     if (b.sailConfig === 'furled' || state.crew.inLifeRaft) {
       if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
       return desired;
@@ -1126,17 +1240,17 @@
       nav.tackDistanceNm = 0;
       log(state, 'Wind moved onto the bow. Beating to windward.');
     } else {
-      var remaining = distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon);
+      var remaining = distanceBetween(nav.lat, nav.lon, targetPoint.lat, targetPoint.lon);
       var maxLeg = nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX ? COASTAL_MAX_TACK_LEG_NM : OPEN_WATER_MAX_TACK_LEG_NM;
       var legLimit = Math.min(maxLeg, Math.max(0.2, remaining * TACK_LEG_WAYPOINT_FRACTION));
       // Come about either on schedule, or immediately if the desired
-      // course (waypoint progress, or the player using CHANGE COURSE)
-      // has moved to the other side of the wind since — continuing the
-      // current tack would then just be sailing away from the goal.
-      // Flipping to the opposite of the current tack is correct either
-      // way: on a scheduled tack sideForDesired still matches the old
-      // tack, so the opposite is the new one; on a course-driven switch
-      // sideForDesired IS the opposite already (only two tacks exist).
+      // course (a new waypoint, or the player changing SET COURSE) has
+      // moved to the other side of the wind since — continuing the
+      // current tack would then just sail away from the goal. Flipping
+      // to the opposite of the current tack is correct either way: on a
+      // scheduled tack sideForDesired still matches the old tack, so the
+      // opposite is the new one; on a course-driven switch sideForDesired
+      // IS the opposite already (only two tacks exist).
       if (nav.tack !== sideForDesired || nav.tackDistanceNm >= legLimit) {
         nav.tack = nav.tack === 'port' ? 'starboard' : 'port';
         nav.tackDistanceNm = 0;
@@ -1147,12 +1261,41 @@
     return closeHauledHeading(w.windDirection, nav.tack);
   }
 
+  // NAVIGATION — two phases, split at OPEN_WATER_WAYPOINT_INDEX, but
+  // auto-tacking applies throughout both; the only thing that changes
+  // is where SET COURSE (desired) comes from:
+  //
+  // Coastal corridor (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): SET
+  // COURSE is the bearing to WAYPOINTS[waypointIndex], recalculated
+  // every tick; simTick() advances waypointIndex on arrival — the
+  // player is never asked to navigate confined water.
+  //
+  // Open ocean (waypointIndex >= OPEN_WATER_WAYPOINT_INDEX): SET COURSE
+  // is whatever compass heading is in nav.setCourse — set by the player
+  // via CHANGE COURSE or SET FOR NĀWILIWILI, or, if the player was away
+  // when the corridor cleared, initialized automatically to the direct
+  // bearing toward Nāwiliwili so the voyage keeps moving. nav.intendedCourse
+  // is repurposed here to the LIVE direct bearing to Nāwiliwili (BEARING
+  // TO NĀWILIWILI) — informational only, never what's actually steered.
+  //
+  // Either way, resolveAutoTack() decides what the boat actually steers
+  // (ACTUAL HEADING) tick to tick to make SET COURSE good.
   function computeHeading(state) {
     var nav = state.nav;
-    var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
-    nav.intendedCourse = bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon);
-    var desired = normalizeDeg(nav.intendedCourse + nav.headingOffset);
-    var steered = resolveAutoTack(state, desired, wp);
+    var desired, targetPoint;
+    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      targetPoint = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
+      nav.intendedCourse = bearingBetween(nav.lat, nav.lon, targetPoint.lat, targetPoint.lon);
+      desired = nav.intendedCourse;
+    } else {
+      nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+      if (nav.setCourse == null) {
+        nav.setCourse = Math.round(nav.intendedCourse);
+      }
+      desired = nav.setCourse;
+      targetPoint = FINAL_DEST;
+    }
+    var steered = resolveAutoTack(state, desired, targetPoint);
     // Small per-tick heading noise: imperfect helming, wave action, minor
     // leeway and current. This is the mechanism by which weather actually
     // shoves the track off line rather than just slowing the boat down —
@@ -1373,53 +1516,90 @@
     blendTowardRealAnchor(state.weather, TICK_MINUTES / 60);
     maybeRefreshRealWeather(state);
 
-    // Real dead-reckoning movement: the boat covers ground along a bearing
-    // toward WAYPOINTS[nav.waypointIndex], for real elapsed time at the
-    // current speed. Speed is computed once for the tick (as before) and
-    // that's the total distance budget spent below — but if that budget
-    // is enough to actually reach the current waypoint, the boat arrives
-    // there exactly, spends only that much of the budget, advances to the
-    // next waypoint, and covers the REST of the budget along the new
-    // bearing — rather than sailing straight past it on the old one.
-    // Several of the coastal steering waypoints are closer together than
-    // one tick's worth of travel at speed, so this matters; it applies
-    // identically whether this tick is live or part of a multi-tick
-    // offline catch-up, since both just call simTick.
-    var heading = computeHeading(state); // bearing to the CURRENT waypoint, with wobble
+    // Real dead-reckoning movement: the boat covers ground along its
+    // ACTUAL heading (which may differ from the intended leg while
+    // coastal auto-tacking, or simply be the player's own manually set
+    // open-ocean course) for real elapsed time at the current speed.
+    // Speed is computed once for the tick and that's the total distance
+    // budget spent below.
+    //
+    // COASTAL (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): steps through
+    // WAYPOINTS exactly as before — if the budget is enough to reach the
+    // current waypoint, the boat arrives there exactly, spends only that
+    // much of the budget, advances, and covers the REST of the budget
+    // along the new leg's (possibly freshly tacking) heading, rather
+    // than sailing straight past it. Several coastal waypoints are
+    // closer together than one tick's travel at speed, so this matters.
+    //
+    // OPEN OCEAN: once the loop below clears the corridor (or the tick
+    // started already clear of it), any remaining budget moves in a
+    // straight line along the player's set course — checked against
+    // Nāwiliwili (arrival) and against LAND_MASSES (grounding) rather
+    // than against any further waypoint.
+    //
+    // Applies identically whether this tick is live or part of a
+    // multi-tick offline catch-up, since both just call simTick.
+    var heading = computeHeading(state);
     var speed = computeBoatSpeed(state, heading);
     state.boat.speed = speed;
     state.nav.heading = heading;
 
     var nmRemaining = speed * (TICK_MINUTES / 60);
-    var crossingGuard = 0;
-    while (nmRemaining > 0 && crossingGuard < WAYPOINTS.length + 2) {
-      crossingGuard++;
-      var wp = WAYPOINTS[state.nav.waypointIndex];
-      if (!wp) break; // nothing left to steer toward
-      var distToWp = distanceBetween(state.nav.lat, state.nav.lon, wp.lat, wp.lon);
-      if (distToWp <= nmRemaining) {
-        state.nav.lat = wp.lat;
-        state.nav.lon = wp.lon;
-        state.nav.distanceTraveled += distToWp;
-        if (state.nav.tack) state.nav.tackDistanceNm += distToWp;
-        nmRemaining -= distToWp;
-        log(state, waypointArrivalLine(wp));
-        if (state.nav.waypointIndex < WAYPOINTS.length - 1) {
+
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      var crossingGuard = 0;
+      while (nmRemaining > 0 && state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX && crossingGuard < WAYPOINTS.length + 2) {
+        crossingGuard++;
+        var wp = WAYPOINTS[state.nav.waypointIndex];
+        var distToWp = distanceBetween(state.nav.lat, state.nav.lon, wp.lat, wp.lon);
+        if (distToWp <= nmRemaining) {
+          state.nav.lat = wp.lat;
+          state.nav.lon = wp.lon;
+          state.nav.distanceTraveled += distToWp;
+          if (state.nav.tack) state.nav.tackDistanceNm += distToWp;
+          nmRemaining -= distToWp;
+          log(state, waypointArrivalLine(wp));
           state.nav.waypointIndex++;
-          heading = computeHeading(state); // fresh bearing (and fresh wobble) for the next leg
+          heading = computeHeading(state); // fresh bearing (and fresh wobble/tack) for the next leg — or, once past OPEN_WATER_WAYPOINT_INDEX, the initial open-ocean course toward Nāwiliwili
           state.nav.heading = heading;
         } else {
-          break; // reached the final waypoint — nothing further to aim at
+          var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+          state.nav.lat = moved.lat;
+          state.nav.lon = moved.lon;
+          state.nav.distanceTraveled += nmRemaining;
+          if (state.nav.tack) state.nav.tackDistanceNm += nmRemaining;
+          nmRemaining = 0;
         }
-      } else {
-        var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
-        state.nav.lat = moved.lat;
-        state.nav.lon = moved.lon;
-        state.nav.distanceTraveled += nmRemaining;
-        if (state.nav.tack) state.nav.tackDistanceNm += nmRemaining;
-        nmRemaining = 0;
       }
     }
+
+    if (nmRemaining > 0) {
+      // OPEN OCEAN: free-heading movement (possibly tacking — heading
+      // here is whatever resolveAutoTack chose, not necessarily
+      // setCourse directly). distanceTraveled still tracks actual nm
+      // sailed even though nothing is being "arrived at" along the way
+      // — only Nāwiliwili itself, and land, matter now.
+      var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+      if (distToFinal <= nmRemaining) {
+        state.nav.lat = FINAL_DEST.lat;
+        state.nav.lon = FINAL_DEST.lon;
+        state.nav.distanceTraveled += distToFinal;
+        if (!state.flags.arrivedAtDestination) {
+          state.flags.arrivedAtDestination = true;
+          log(state, waypointArrivalLine(FINAL_DEST));
+        }
+      } else {
+        var projected = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+        if (!applyGroundingIfNeeded(state, projected.lat, projected.lon)) {
+          state.nav.lat = projected.lat;
+          state.nav.lon = projected.lon;
+          state.nav.distanceTraveled += nmRemaining;
+          if (state.nav.tack) state.nav.tackDistanceNm += nmRemaining;
+        }
+      }
+    }
+
+    checkLandProximity(state);
 
     updateCrew(state);
     checkFuel(state);
@@ -2220,7 +2400,7 @@
   function printEcho(text) {
     var p = document.createElement('p');
     p.className = 'line echo';
-    p.textContent = '> ' + text.toUpperCase();
+    p.textContent = '> ' + text.replace(/-/g, ' ').toUpperCase();
     tempViewEl.appendChild(p);
   }
 
@@ -2533,11 +2713,13 @@
     printLine('DISTANCE', 'heading-label');
     var remaining = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
     printLine(Math.round(state.nav.distanceTraveled) + ' nm sailed \u2014 approximately ' + Math.round(remaining) + ' nm remaining');
-    var segStart = WAYPOINTS[Math.max(0, state.nav.waypointIndex - 1)];
-    var segEnd = WAYPOINTS[state.nav.waypointIndex] || FINAL_DEST;
-    var xt = crossTrackNm(state.nav.lat, state.nav.lon, segStart.lat, segStart.lon, segEnd.lat, segEnd.lon);
-    if (xt > 15) {
-      printLine('Off the intended track by roughly ' + Math.round(xt) + ' nm.', 'amber');
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      var segStart = WAYPOINTS[Math.max(0, state.nav.waypointIndex - 1)];
+      var segEnd = WAYPOINTS[state.nav.waypointIndex] || FINAL_DEST;
+      var xt = crossTrackNm(state.nav.lat, state.nav.lon, segStart.lat, segStart.lon, segEnd.lat, segEnd.lon);
+      if (xt > 15) {
+        printLine('Off the intended track by roughly ' + Math.round(xt) + ' nm.', 'amber');
+      }
     }
     state.pendingChoice = {
       id: 'position-menu',
@@ -2712,23 +2894,79 @@
   }
 
   function cmdCourse(state) {
+    var nav = state.nav;
     printBlank();
     printLine('COURSE', 'heading-label');
-    printLine('Steering ' + Math.round(state.nav.heading) + '\u00B0, intended course ' + Math.round(state.nav.intendedCourse) + '\u00B0.');
-    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+
+    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      // COASTAL: fully automatic. SET COURSE is the current leg's
+      // bearing (auto-updates as the boat clears each waypoint);
+      // ACTUAL HEADING reflects whatever the coastal auto-tack is doing
+      // right now, which can differ from it. No manual control here —
+      // the corridor is authored-safe and the player isn't required to
+      // navigate it. Bearing/distance are computed fresh here rather
+      // than read from nav.intendedCourse, which only updates once per
+      // simTick and can be a stale tick behind when just viewed.
+      var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
+      printLine('SET COURSE ' + Math.round(bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon)) + '\u00B0');
+      printLine('ACTUAL HEADING ' + Math.round(nav.heading) + '\u00B0');
+      if (nav.tack) {
+        printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
+      }
+      printLine('NEXT ' + wp.name);
+      printLine('DISTANCE ' + Math.round(distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon)).toLocaleString() + ' NM');
       printBlank();
-      printLine("CAN'T ALTER COURSE.", 'amber');
-      printLine('TOO CLOSE TO SHORELINE.', 'amber');
+      printLine('Automatic through the coastal passage \u2014 course control unlocks in open water.', 'dim');
+      state.pendingChoice = { id: 'course-menu', options: [{ label: 'BACK', action: 'cancel' }] };
       return;
     }
+
+    // OPEN OCEAN: full manual course control, automatic steering. Bearing/
+    // distance to Nāwiliwili computed fresh for the same reason as above —
+    // this must reflect the boat's actual current position the instant
+    // the screen is viewed, e.g. right after SET FOR NĀWILIWILI, not
+    // whatever nav.intendedCourse happened to hold as of the last tick.
+    var liveBearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    printLine('SET COURSE ' + Math.round(nav.setCourse) + '\u00B0');
+    printLine('ACTUAL HEADING ' + Math.round(nav.heading) + '\u00B0');
+    if (nav.tack) {
+      printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
+    }
+    printLine('BEARING TO N\u0100WILIWILI ' + Math.round(liveBearingToDest) + '\u00B0');
+    printLine('DISTANCE TO N\u0100WILIWILI ' + Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM');
+    if (nav.landWarningLevel !== 'none') {
+      printBlank();
+      printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
+    }
     state.pendingChoice = {
-      id: 'course-choice',
+      id: 'course-menu',
       options: [
-        { label: 'HOLD COURSE', action: 'course-hold' },
-        { label: 'BEAR AWAY (easier motion, further off the line)', action: 'course-bear-away' },
-        { label: 'COME UP (back toward the line, harder ride)', action: 'course-come-up' },
+        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
+        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+        { label: 'BACK', action: 'cancel' },
       ],
     };
+  }
+
+  var COURSE_DIAL_STEPS = [-10, -1, 1, 10];
+
+  // The player's way of picking any of 000-359 through a button-only
+  // interface: dial a draft value up or down from the current course,
+  // then confirm. Only ever reachable once open ocean unlocks it (the
+  // COURSE screen doesn't offer CHANGE COURSE before then).
+  function cmdChangeCourse(state) {
+    var nav = state.nav;
+    if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
+    printBlank();
+    printLine('CHANGE COURSE', 'heading-label');
+    printLine('CURRENT COURSE ' + Math.round(nav.setCourse) + '\u00B0');
+    printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
+    var opts = COURSE_DIAL_STEPS.map(function (step) {
+      return { label: (step > 0 ? '+' : '') + step + '\u00B0', action: 'course-draft:' + step };
+    });
+    opts.push({ label: 'SET ' + nav.courseDraft + '\u00B0', action: 'course-draft-confirm' });
+    opts.push({ label: 'BACK', action: 'course-draft-cancel' });
+    state.pendingChoice = { id: 'change-course-menu', options: opts };
   }
 
   function cmdSleep(state) {
@@ -3161,6 +3399,7 @@
     sails: cmdSails,
     engine: cmdEngine,
     course: cmdCourse,
+    'change-course': cmdChangeCourse,
     routine: cmdRoutine,
     sleep: cmdSleep,
     eat: cmdEat,
@@ -3497,6 +3736,14 @@
           action: function (s) { attemptSystemRepair(s, repairKey); },
         });
       }
+    } else if (action.indexOf('course-draft:') === 0) {
+      // The CHANGE COURSE dial: nudge the draft value and redraw the
+      // same picker so the player sees where they've landed before
+      // confirming — this is the button-only way to reach any of
+      // 000-359 without a free-text field.
+      var step = parseInt(action.slice(13), 10);
+      state.nav.courseDraft = normalizeDeg(state.nav.courseDraft + step);
+      cmdChangeCourse(state);
     } else {
       switch (action) {
         case 'cancel':
@@ -3652,20 +3899,22 @@
             },
           });
           break;
-      case 'course-hold':
-        state.nav.headingOffset = 0;
+      case 'course-draft-confirm':
+        state.nav.setCourse = state.nav.courseDraft;
+        state.nav.courseDraft = null;
         printBlank();
-        printLine('Holding the intended course.', 'dim');
+        printLine('New course set: ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
+        cmdCourse(state);
         break;
-      case 'course-bear-away':
-        state.nav.headingOffset = 22;
-        log(state, "Bore away to ease the motion. Further off the direct line, but a kinder ride.");
-        flushNewLogEntries(state);
+      case 'course-draft-cancel':
+        state.nav.courseDraft = null;
+        cmdCourse(state);
         break;
-      case 'course-come-up':
-        state.nav.headingOffset = -22;
-        log(state, "Came up toward the rhumb line. She pounds more for it.");
-        flushNewLogEntries(state);
+      case 'set-for-nawiliwili':
+        state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
+        printBlank();
+        printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
+        cmdCourse(state);
         break;
       case 'resolve-aft-locker-now':
         resolveAftLocker(state);
@@ -3836,6 +4085,11 @@
     var nav = state.nav;
     if (nav.tack === undefined) nav.tack = null;
     if (nav.tackDistanceNm === undefined) nav.tackDistanceNm = 0;
+    if (nav.setCourse === undefined) nav.setCourse = null; // computeHeading() lazily sets this toward Nāwiliwili on first open-ocean use if still null
+    if (nav.courseDraft === undefined) nav.courseDraft = null;
+    if (nav.landWarningLevel === undefined) nav.landWarningLevel = 'none';
+    if (nav.groundedOn === undefined) nav.groundedOn = null;
+    if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
     if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
     var legacyTotal = 2850; // the flat distance old saves' progress was measured against
     var frac = clamp((nav.distanceTraveled || 0) / legacyTotal, 0, 1);
