@@ -318,6 +318,23 @@
         seaState: 2,
         condition: 'overcast',
         trend: 'steady',
+        temperatureF: 56, // a plausible Shilshole-in-fall reading; see estimateTemperatureF for the offline fallback as the boat moves
+        // Cache of the last successful REAL-WORLD observation for the
+        // boat's own position (see fetchRealWeather/maybeRefreshRealWeather).
+        // Purely a cache the simulation reads when deciding whether/how to
+        // nudge toward reality — nothing here is required for Landfall to
+        // run, and a save with all of this null just means "no real data
+        // yet," which behaves identically to never having connectivity.
+        realWx: {
+          fetchedRealMs: null,   // Date.now() at the successful fetch -- drives both the refresh cadence and "how stale is this" (real time, not sim time, so a long offline gap can't be mistaken for dozens of due refreshes)
+          lat: null,
+          lon: null,
+          windSpeedKt: null,
+          windDirectionDeg: null,
+          temperatureF: null,
+          condition: null,
+          forecastLine: null,    // pre-summarized 1-2 line FORECAST text, or null to fall back to the existing simulated forecast lines
+        },
       },
       boat: {
         sailConfig: 'furled',       // full | reefed | minimal | furled — starts furled; nothing raises sails but the player
@@ -802,7 +819,16 @@
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
 
-  function driftWeather(w) {
+  // Fallback temperature from latitude alone, when no real-world reading
+  // is available (or ever arrives) — cool in the mid-40s near Shilshole,
+  // warming to tropical as the boat approaches Kaua'i, so temperature
+  // still tracks the boat's own progress with zero connectivity.
+  function estimateTemperatureF(lat) {
+    var t = clamp((47.7 - lat) / (47.7 - 22.0), 0, 1); // 0 at Shilshole's latitude, 1 at Kaua'i's
+    return 56 + t * 26; // ~56F at the dock, ~82F approaching Kaua'i
+  }
+
+  function driftWeather(w, lat) {
     // Small random walk so conditions feel alive without being chaotic.
     w.windDirection = normalizeDeg(w.windDirection + (Math.random() - 0.5) * 6);
     var delta = (Math.random() - 0.5) * 2.2;
@@ -824,6 +850,179 @@
         ? ['squall', 'rain', 'overcast']
         : ['clear', 'overcast', 'rain'];
       w.condition = options[Math.floor(Math.random() * options.length)];
+    }
+
+    // Temperature: gentle pull toward what the boat's own latitude would
+    // suggest, plus a small wobble — this is only the fallback used when
+    // there's no fresh real-world reading. blendTowardRealAnchor (called
+    // right after this in simTick) takes over, the same way it does for
+    // wind, whenever real data is actually available.
+    var tempTarget = estimateTemperatureF(lat);
+    w.temperatureF = w.temperatureF + (tempTarget - w.temperatureF) * 0.02 + (Math.random() - 0.5) * 0.6;
+  }
+
+  /* --------------------------------------------------------------
+     REAL-WORLD WEATHER
+     ------------------------------------------------------------
+     boat coordinates -> weather provider -> normalized Landfall
+     weather -> existing weather/sailing simulation. Everything below
+     this comment is the only place that knows Open-Meteo exists; the
+     rest of Landfall just reads state.weather.windSpeed/windDirection/
+     temperatureF/condition, same fields driftWeather has always
+     written, and has no idea whether the last write came from the
+     random walk or a real observation.
+
+     Provider: Open-Meteo (api.open-meteo.com). No API key — nothing to
+     leak from a public, static GitHub Pages file — CORS-enabled for a
+     direct browser fetch, and backed by global weather MODELS (ECMWF/
+     NOAA/etc.), not station reports, so open-ocean coordinates hundreds
+     of miles from land return real numbers rather than nothing. Sea
+     state is deliberately left alone: it already derives from wind
+     speed (below), so grounding wind in reality grounds sea state too
+     without a second, separate marine-data integration.
+     -------------------------------------------------------------- */
+  function wmoCodeToCondition(code, windSpeedKt) {
+    if (code === 95 || code === 96 || code === 99) return 'squall'; // thunderstorm
+    if (windSpeedKt != null && windSpeedKt > 30 && code >= 51) return 'squall'; // heavy wind plus any precipitation reads as a squall in Landfall's four-condition model
+    if (code === 0 || code === 1) return 'clear';
+    if (code === 2 || code === 3 || code === 45 || code === 48) return 'overcast';
+    if (code >= 51) return 'rain'; // covers drizzle, rain, showers, and snow — Landfall has no separate category for any of these
+    return 'overcast';
+  }
+
+  // A short, Landfall-toned summary of the next ~12 hours — never the
+  // raw hourly table. Looks at wind trend and precipitation odds only.
+  function summarizeForecast(hourly, currentIso) {
+    if (!hourly || !hourly.time || !hourly.wind_speed_10m) return null;
+    var startIdx = hourly.time.indexOf(currentIso);
+    if (startIdx < 0) startIdx = 0;
+    var endIdx = Math.min(hourly.time.length, startIdx + 13);
+    if (endIdx - startIdx < 2) return null;
+    var windNow = hourly.wind_speed_10m[startIdx];
+    var windLater = hourly.wind_speed_10m[endIdx - 1];
+    var maxPrecipProb = 0;
+    var sawStorm = false;
+    for (var i = startIdx; i < endIdx; i++) {
+      var p = hourly.precipitation_probability ? hourly.precipitation_probability[i] : null;
+      if (typeof p === 'number') maxPrecipProb = Math.max(maxPrecipProb, p);
+      var code = hourly.weather_code ? hourly.weather_code[i] : null;
+      if (code === 95 || code === 96 || code === 99) sawStorm = true;
+    }
+
+    var lines = [];
+    if (typeof windNow === 'number' && typeof windLater === 'number') {
+      if (windLater - windNow >= 6) lines.push('Winds strengthening over the next several hours.');
+      else if (windNow - windLater >= 6) lines.push('Winds easing over the next several hours.');
+      else lines.push('Little change expected in wind over the next several hours.');
+    }
+    if (sawStorm) lines.push('Thunderstorms possible.');
+    else if (maxPrecipProb >= 60) lines.push('Rain likely.');
+    else if (maxPrecipProb >= 30) lines.push('A chance of rain.');
+
+    return lines.length ? lines.join(' ') : null;
+  }
+
+  function normalizeRealWeather(raw) {
+    if (!raw || !raw.current) return null;
+    var cur = raw.current;
+    if (typeof cur.wind_speed_10m !== 'number' || typeof cur.temperature_2m !== 'number') return null;
+    return {
+      windSpeedKt: cur.wind_speed_10m,
+      windDirectionDeg: typeof cur.wind_direction_10m === 'number' ? cur.wind_direction_10m : null,
+      temperatureF: cur.temperature_2m,
+      condition: wmoCodeToCondition(cur.weather_code, cur.wind_speed_10m),
+      forecastLine: summarizeForecast(raw.hourly, cur.time),
+    };
+  }
+
+  // Provider-specific fetch, isolated so a different/backup source could
+  // slot in later without touching anything above. Any failure at all —
+  // offline, timeout, an outage, a malformed response, a coordinate the
+  // provider can't cover — resolves to null; callers already treat null
+  // as "no fresh data this time" and fall back to the simulation.
+  async function fetchRealWeather(lat, lon) {
+    var url = 'https://api.open-meteo.com/v1/forecast'
+      + '?latitude=' + encodeURIComponent(lat.toFixed(2))
+      + '&longitude=' + encodeURIComponent(lon.toFixed(2))
+      + '&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code'
+      + '&hourly=wind_speed_10m,weather_code,precipitation_probability'
+      + '&forecast_days=2&wind_speed_unit=kn&temperature_unit=fahrenheit&timezone=UTC';
+    var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
+    try {
+      var res = await fetch(url, controller ? { signal: controller.signal } : undefined);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (!res || !res.ok) return null;
+      var data = await res.json();
+      return normalizeRealWeather(data);
+    } catch (err) {
+      if (timeoutId) clearTimeout(timeoutId);
+      return null;
+    }
+  }
+
+  var WEATHER_REFRESH_MS = 45 * 60 * 1000;  // ~45 real minutes between lookups
+  var WEATHER_REFRESH_DISTANCE_NM = 60;     // ...or sooner once the boat has moved this far from the last successful lookup's position
+  var weatherFetchInFlight = false;         // module-level, not saved — only exists to stop overlapping requests during a fast catch-up burst
+
+  // Checked once per tick; only actually calls out to the network when a
+  // refresh is genuinely due. During a long offline catch-up this still
+  // fires at most once — the loop runs many simulated ticks in a
+  // fraction of a real second, so "real ms since the last fetch" and
+  // "a fetch is already in flight" both stay true for the rest of that
+  // burst, which is exactly what keeps this from turning into dozens of
+  // historical API calls.
+  function maybeRefreshRealWeather(state) {
+    if (weatherFetchInFlight) return;
+    var anchor = state.weather.realWx;
+    var now = Date.now();
+    var dueByTime = anchor.fetchedRealMs == null || (now - anchor.fetchedRealMs) >= WEATHER_REFRESH_MS;
+    var dueByDistance = !dueByTime && anchor.lat != null
+      && distanceBetween(state.nav.lat, state.nav.lon, anchor.lat, anchor.lon) >= WEATHER_REFRESH_DISTANCE_NM;
+    if (!dueByTime && !dueByDistance) return;
+
+    weatherFetchInFlight = true;
+    var lat = state.nav.lat, lon = state.nav.lon;
+    fetchRealWeather(lat, lon).then(function (result) {
+      weatherFetchInFlight = false;
+      if (!result || !GAME) return; // failed, or the state has moved on (e.g. RESTART) since this was kicked off — leave everything exactly as it is
+      GAME.weather.realWx = {
+        fetchedRealMs: Date.now(),
+        lat: lat, lon: lon,
+        windSpeedKt: result.windSpeedKt,
+        windDirectionDeg: result.windDirectionDeg,
+        temperatureF: result.temperatureF,
+        condition: result.condition,
+        forecastLine: result.forecastLine,
+      };
+      saveGameState(GAME);
+    }).catch(function () {
+      weatherFetchInFlight = false;
+    });
+  }
+
+  var WEATHER_BLEND_PER_HOUR = 0.5; // how quickly simulated wind/temperature closes the gap toward the latest real-world anchor — gradual, never an instant jump between ticks
+
+  // Nudges the SAME fields driftWeather writes toward the last successful
+  // real observation, rather than snapping to it — see the module
+  // header above for why the sailing model needs no separate wiring to
+  // "use" real weather: it already reads these exact fields.
+  function blendTowardRealAnchor(w, hrs) {
+    var anchor = w.realWx;
+    if (!anchor || anchor.fetchedRealMs == null) return; // no real observation yet — pure simulation
+    var factor = clamp(WEATHER_BLEND_PER_HOUR * hrs, 0, 1);
+    if (typeof anchor.windSpeedKt === 'number') {
+      w.windSpeed = clamp(w.windSpeed + (anchor.windSpeedKt - w.windSpeed) * factor, 2, 45);
+    }
+    if (typeof anchor.windDirectionDeg === 'number') {
+      var diff = signedAngleDiff(anchor.windDirectionDeg, w.windDirection);
+      w.windDirection = normalizeDeg(w.windDirection + diff * factor);
+    }
+    if (typeof anchor.temperatureF === 'number') {
+      w.temperatureF = w.temperatureF + (anchor.temperatureF - w.temperatureF) * factor;
+    }
+    if (anchor.condition && anchor.condition !== w.condition) {
+      w.condition = anchor.condition; // a discrete observation, adopted outright rather than interpolated
     }
   }
 
@@ -1139,7 +1338,9 @@
     state.meta.voyageMinutes += TICK_MINUTES;
 
     var prevCondition = state.weather.condition;
-    driftWeather(state.weather);
+    driftWeather(state.weather, state.nav.lat);
+    blendTowardRealAnchor(state.weather, TICK_MINUTES / 60);
+    maybeRefreshRealWeather(state);
 
     // Real dead-reckoning movement: the boat covers ground along a bearing
     // toward WAYPOINTS[nav.waypointIndex], for real elapsed time at the
@@ -2315,20 +2516,27 @@
     printLine('WEATHER', 'heading-label');
     printLine('Wind ' + Math.round(w.windSpeed) + ' kt from ' + compassPoint(w.windDirection) + ' (' + Math.round(w.windDirection) + '\u00B0)');
     printLine(describeSeaState(w.seaState));
+    printLine('Temperature ' + Math.round(w.temperatureF) + '\u00B0F.');
     printLine(capitalize(w.condition) + '.');
   }
 
   function cmdForecast(state) {
-    var lines = {
-      building: ["Wind expected to build further through the next watch.", "Pressure easing. Expect more of this before it improves."],
-      easing: ["Conditions should moderate over the coming hours.", "Wind easing, though seas may take longer to settle."],
-      steady: ["No major change expected in the near term.", "Holding steady, for now."],
-    };
-    var opts = lines[state.weather.trend] || lines.steady;
+    var real = state.weather.realWx;
     printBlank();
     printLine('FORECAST', 'heading-label');
-    printLine(opts[Math.floor(Math.random() * opts.length)]);
-    printLine('Confidence: limited. No shore forecast out here.', 'dim');
+    if (real && real.forecastLine) {
+      printLine(real.forecastLine);
+      printLine('Based on the latest weather data for this position.', 'dim');
+    } else {
+      var lines = {
+        building: ["Wind expected to build further through the next watch.", "Pressure easing. Expect more of this before it improves."],
+        easing: ["Conditions should moderate over the coming hours.", "Wind easing, though seas may take longer to settle."],
+        steady: ["No major change expected in the near term.", "Holding steady, for now."],
+      };
+      var opts = lines[state.weather.trend] || lines.steady;
+      printLine(opts[Math.floor(Math.random() * opts.length)]);
+      printLine('Confidence: limited. No shore forecast out here.', 'dim');
+    }
   }
 
 
@@ -3767,6 +3975,19 @@
     }
     if (!c.lastRoutineAt) {
       c.lastRoutineAt = { wash: null, dress: null, dishes: null, read: null };
+    }
+    // Real-world weather anchor and displayed temperature are new too. A
+    // save that predates them just means "no real data yet" — identical
+    // to never having connectivity, which the whole system already has
+    // to handle gracefully.
+    var w = state.weather;
+    if (w.temperatureF === undefined) w.temperatureF = estimateTemperatureF(state.nav.lat);
+    if (!w.realWx) {
+      w.realWx = {
+        fetchedRealMs: null, lat: null, lon: null,
+        windSpeedKt: null, windDirectionDeg: null, temperatureF: null,
+        condition: null, forecastLine: null,
+      };
     }
   }
 
