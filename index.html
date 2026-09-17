@@ -579,6 +579,37 @@
     return 'offshore'; // wi === 12 ("open water, well offshore")
   }
 
+  // External links (POSITION's OPEN MAP, WEATHER's DETAILED MARINE
+  // FORECAST) — always built fresh from the boat's current simulated
+  // coordinates, never cached. These are read-only conveniences opened
+  // in a new tab; nothing about the game reads their result.
+  function googleMapsUrl(lat, lon) {
+    return 'https://www.google.com/maps/search/?api=1&query=' + lat.toFixed(5) + ',' + lon.toFixed(5);
+  }
+
+  // NOAA's marine point-forecast (marine.weather.gov) draws on National
+  // Weather Service marine zones, which give real, detailed wind/seas/
+  // swell-period forecasts near the US coast (including Hawaiian
+  // waters) but thin out far from any Weather Forecast Office's area of
+  // responsibility — deep in the North Pacific, NOAA's own high-seas
+  // product is a text bulletin, not something with a useful per-
+  // coordinate page. Reuses voyagePhase() rather than inventing a
+  // second geographic classification: the same phases already used
+  // elsewhere for what counts as "near the coast" (inland/strait/
+  // coastal/approach) vs. the open-ocean crossing (offshore/tropics).
+  function marineForecastUrl(state) {
+    var lat = state.nav.lat, lon = state.nav.lon;
+    var phase = voyagePhase(state);
+    var nearCoast = (phase === 'inland' || phase === 'strait' || phase === 'coastal' || phase === 'approach');
+    if (nearCoast) {
+      return 'https://marine.weather.gov/MapClick.php?lat=' + lat.toFixed(4) + '&lon=' + lon.toFixed(4);
+    }
+    // Deep offshore: Windy gives genuinely global wind/gust/wave/swell/
+    // pressure coverage with a simple coordinate URL, and is a standard
+    // reference among cruising sailors for exactly this situation.
+    return 'https://www.windy.com/?wind,' + lat.toFixed(4) + ',' + lon.toFixed(4) + ',6';
+  }
+
   function timeOfDayPhase(state) {
     var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
     var h = d.getHours();
@@ -2508,6 +2539,13 @@
     if (xt > 15) {
       printLine('Off the intended track by roughly ' + Math.round(xt) + ' nm.', 'amber');
     }
+    state.pendingChoice = {
+      id: 'position-menu',
+      options: [
+        { label: 'OPEN MAP', action: 'open-map' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
   }
 
   function cmdWeather(state) {
@@ -2518,25 +2556,13 @@
     printLine(describeSeaState(w.seaState));
     printLine('Temperature ' + Math.round(w.temperatureF) + '\u00B0F.');
     printLine(capitalize(w.condition) + '.');
-  }
-
-  function cmdForecast(state) {
-    var real = state.weather.realWx;
-    printBlank();
-    printLine('FORECAST', 'heading-label');
-    if (real && real.forecastLine) {
-      printLine(real.forecastLine);
-      printLine('Based on the latest weather data for this position.', 'dim');
-    } else {
-      var lines = {
-        building: ["Wind expected to build further through the next watch.", "Pressure easing. Expect more of this before it improves."],
-        easing: ["Conditions should moderate over the coming hours.", "Wind easing, though seas may take longer to settle."],
-        steady: ["No major change expected in the near term.", "Holding steady, for now."],
-      };
-      var opts = lines[state.weather.trend] || lines.steady;
-      printLine(opts[Math.floor(Math.random() * opts.length)]);
-      printLine('Confidence: limited. No shore forecast out here.', 'dim');
-    }
+    state.pendingChoice = {
+      id: 'weather-menu',
+      options: [
+        { label: 'DETAILED MARINE FORECAST', action: 'open-marine-forecast' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
   }
 
 
@@ -3130,7 +3156,6 @@
     status: cmdStatus,
     position: cmdPosition,
     weather: cmdWeather,
-    forecast: cmdForecast,
     inventory: cmdInventory,
     distress: cmdDistress,
     sails: cmdSails,
@@ -3236,7 +3261,7 @@
         [{ label: 'ROUTINE', action: 'cmd:routine' }],
         [
           { label: 'POSITION', action: 'cmd:position' },
-          { label: 'FORECAST', action: 'cmd:forecast' },
+          { label: 'WEATHER', action: 'cmd:weather' },
           { label: 'INVENTORY', action: 'cmd:inventory' },
         ],
         [
@@ -3254,7 +3279,6 @@
         { label: 'SAILS', action: 'cmd:sails' },
         { label: 'ENGINE', action: 'cmd:engine' },
         { label: 'COURSE', action: 'cmd:course' },
-        { label: 'WEATHER', action: 'cmd:weather' },
       ],
       [{ label: 'REPAIR', action: 'cmd:repair' }],
       [{ label: goLabel, action: 'go-above-below' }],
@@ -3265,7 +3289,14 @@
   // occupies the temp view. Tracked separately from state.pendingChoice
   // because it's pure UI/interaction convenience — not part of the
   // simulation, not persisted, not something a reload should remember.
-  var INFO_COMMANDS = { position: true, weather: true, forecast: true, inventory: true };
+  // POSITION, WEATHER, and ROUTINE are deliberately NOT here: they each
+  // drive their own focused submenu via pendingChoice instead — no
+  // click-again-to-collapse shortcut, BACK is the one way out, and the
+  // main BELOW menu is fully hidden while any of them is open rather
+  // than staying visible underneath. FORECAST no longer exists as a
+  // separate command; its DETAILED MARINE FORECAST option now lives
+  // inside WEATHER's own pendingChoice.
+  var INFO_COMMANDS = { inventory: true };
   var openInfoPanel = null;
 
   function renderOptions(state) {
@@ -3284,6 +3315,15 @@
       btn.className = 'option';
       btn.textContent = '> ' + opt.label;
       btn.addEventListener('click', function () {
+        if (opt.action === 'open-map' || opt.action === 'open-marine-forecast') {
+          // Pure external side effect: opens a new tab and changes
+          // nothing about the current Landfall view, so the panel that
+          // offered this (POSITION or WEATHER) stays exactly as it was
+          // — no clearTempView, no touching openInfoPanel, no re-render.
+          var url = opt.action === 'open-map' ? googleMapsUrl(state.nav.lat, state.nav.lon) : marineForecastUrl(state);
+          window.open(url, '_blank');
+          return;
+        }
         if (opt.action.indexOf('cmd:') === 0) {
           var cmdName = opt.action.slice(4);
           clearTempView(); // whatever the last command/menu showed is done being looked at
