@@ -338,6 +338,21 @@
           condition: null,
           forecastLine: null,    // pre-summarized 1-2 line FORECAST text, or null to fall back to the existing simulated forecast lines
         },
+        // Same caching pattern as realWx, separate provider (Open-Meteo's
+        // marine API, not the atmospheric one) and separate cadence — see
+        // fetchOceanCurrent/maybeRefreshOceanCurrent. speedKt/directionDeg
+        // null means "no current data for this position" and the whole
+        // current system just goes quiet (no correction, no WEATHER line,
+        // no forecast observation) rather than inventing a reading.
+        oceanCurrent: {
+          fetchedRealMs: null,
+          lat: null,
+          lon: null,
+          speedKt: null,
+          directionDeg: null,    // direction the current flows TOWARD (oceanographic convention — the opposite sense from wind, which is FROM)
+          northSample: null,     // { speedKt, directionDeg } roughly CURRENT_SAMPLE_OFFSET_NM north of the boat, or null — see maybeRefreshOceanCurrent/currentStrategicNote
+          southSample: null,     // same, to the south
+        },
       },
       boat: {
         sailConfig: 'furled',       // full | reefed | minimal | furled — starts furled; nothing raises sails but the player
@@ -433,13 +448,31 @@
   /* ============================================================
      3. SAVE / LOAD
      ============================================================ */
+  // Never pass a raw caught error/exception object to console.warn —
+  // some console/devtools environments (remote-debugging-protocol
+  // relays in particular, common in automated or embedded testing
+  // setups) serialize console arguments through structured-clone-like
+  // logic, and not every thrown value is guaranteed cloneable there (a
+  // DOMException, e.g. AbortError from a fetch timeout, is a known
+  // case). This is the actual, confirmed source of "DataCloneError:
+  // The object can not be cloned" showing up alongside otherwise
+  // ordinary warnings: logging the error was itself throwing a SECOND,
+  // unrelated error, in whichever of these call sites happened to fire.
+  // Always extract a plain string description instead.
+  function describeError(err) {
+    if (!err) return 'unknown error';
+    var name = err.name ? String(err.name) : 'Error';
+    var message = err.message ? String(err.message) : '';
+    return message ? (name + ' \u2014 ' + message) : name;
+  }
+
   function loadGameState() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return null;
       return JSON.parse(raw);
     } catch (e) {
-      console.warn('Save file unreadable, starting fresh.', e);
+      console.warn('Save file unreadable, starting fresh:', describeError(e));
       return null;
     }
   }
@@ -448,7 +481,7 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
-      console.warn('Could not save game.', e);
+      console.warn('Could not save game:', describeError(e));
     }
   }
 
@@ -700,37 +733,22 @@
     return 'approach';
   }
 
-  // External links (POSITION's OPEN MAP, WEATHER's DETAILED MARINE
-  // FORECAST) — always built fresh from the boat's current simulated
-  // coordinates, never cached. These are read-only conveniences opened
-  // in a new tab; nothing about the game reads their result.
+  // External links (POSITION's OPEN MAP, FORECAST's OPEN IN WINDY) —
+  // always built fresh from the boat's current simulated coordinates,
+  // never cached. Read-only conveniences opened in a new tab; nothing
+  // about the game reads their result.
   function googleMapsUrl(lat, lon) {
     return 'https://www.google.com/maps/search/?api=1&query=' + lat.toFixed(5) + ',' + lon.toFixed(5);
   }
 
-  // NOAA's marine point-forecast (marine.weather.gov) draws on National
-  // Weather Service marine zones, which give real, detailed wind/seas/
-  // swell-period forecasts near the US coast (including Hawaiian
-  // waters) but thin out far from any Weather Forecast Office's area of
-  // responsibility — deep in the North Pacific, NOAA's own high-seas
-  // product is a text bulletin, not something with a useful per-
-  // coordinate page. Reuses voyagePhase() rather than inventing a
-  // second geographic classification: the same phases already used
-  // elsewhere for what counts as "near the coast" (inland/strait/
-  // coastal/approach) vs. the open-ocean crossing (offshore/tropics).
-  function marineForecastUrl(state) {
-    var lat = state.nav.lat, lon = state.nav.lon;
-    var phase = voyagePhase(state);
-    var nearCoast = (phase === 'inland' || phase === 'strait' || phase === 'coastal' || phase === 'approach');
-    if (nearCoast) {
-      return 'https://marine.weather.gov/MapClick.php?lat=' + lat.toFixed(4) + '&lon=' + lon.toFixed(4);
-    }
-    // Deep offshore: Windy gives genuinely global wind/gust/wave/swell/
-    // pressure coverage with a simple coordinate URL, and is a standard
-    // reference among cruising sailors for exactly this situation.
-    // d:picker opens Windy's location picker AT these exact coordinates
-    // (a visible marker plus the detail panel for that point) rather
-    // than just centering the map there with nothing marking the spot.
+  // Windy gives genuinely global wind/gust/wave/swell/pressure coverage
+  // with a simple coordinate URL, and is a standard reference among
+  // cruising sailors — always Windy, never NOAA, since the command is
+  // named OPEN IN WINDY and has to be accurate every time it's used.
+  // d:picker opens Windy's location picker AT these exact coordinates
+  // (a visible marker plus the detail panel for that point) rather
+  // than just centering the map there with nothing marking the spot.
+  function windyUrl(lat, lon) {
     return 'https://www.windy.com/?wind,' + lat.toFixed(4) + ',' + lon.toFixed(4) + ',6,d:picker';
   }
 
@@ -1158,6 +1176,231 @@
 
   var WEATHER_BLEND_PER_HOUR = 0.5; // how quickly simulated wind/temperature closes the gap toward the latest real-world anchor — gradual, never an instant jump between ticks
 
+  /* --------------------------------------------------------------
+     OCEAN CURRENT — a second, independent real-world data source
+     (Open-Meteo's Marine API, not the atmospheric one used above),
+     cached and refreshed the same way real weather is: a background
+     fetch on its own cadence, never blocking simTick, silently
+     unavailable rather than invented when the provider has nothing
+     for a given point. Feeds two things: a small heading correction so
+     automatic steering still makes good the player's chosen course
+     through a cross-current (see computeHeading/currentCorrectionDeg),
+     and the true vector sum of boat-through-water + current that
+     actually moves the boat and sets the displayed speed (see
+     combineWithCurrent, used in simTick). Never used to choose a
+     course on its own — only to keep what the player already chose
+     honest against real current, and to inform the player's own
+     decision via WEATHER and FORECAST.
+     -------------------------------------------------------------- */
+  function normalizeOceanCurrent(raw) {
+    if (!raw || !raw.current) return null;
+    var cur = raw.current;
+    if (typeof cur.ocean_current_velocity !== 'number' || typeof cur.ocean_current_direction !== 'number') return null;
+    return {
+      speedKt: cur.ocean_current_velocity / 1.852, // Open-Meteo's marine API reports this in km/h by default
+      directionDeg: cur.ocean_current_direction,    // TOWARD, per oceanographic convention — not FROM, unlike wind
+    };
+  }
+
+  async function fetchOceanCurrent(lat, lon) {
+    var url = 'https://marine-api.open-meteo.com/v1/marine'
+      + '?latitude=' + encodeURIComponent(lat.toFixed(2))
+      + '&longitude=' + encodeURIComponent(lon.toFixed(2))
+      + '&current=ocean_current_velocity,ocean_current_direction'
+      + '&forecast_days=1&timezone=UTC';
+    var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
+    try {
+      var res = await fetch(url, controller ? { signal: controller.signal } : undefined);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (!res || !res.ok) {
+        if (typeof console !== 'undefined') console.warn('[Landfall current] request returned', res ? res.status : 'no response', 'for', lat.toFixed(2) + ',' + lon.toFixed(2));
+        return null;
+      }
+      var data = await res.json();
+      var normalized = normalizeOceanCurrent(data);
+      // The marine API's automatic model selection can return a 200 with
+      // the requested fields present but null — usually meaning no
+      // current model has reliable coverage for this point (narrow/
+      // complex coastal water is the most common case). That's a real,
+      // expected "no data here" outcome, not a bug, but worth being able
+      // to tell apart from an actual failure.
+      if (!normalized && typeof console !== 'undefined') {
+        // data is already the plain result of res.json(), so this is
+        // safe on its own merits -- stringified anyway, purely so this
+        // line can never be a source of doubt the way the raw-error
+        // logging above turned out to be.
+        var safeData;
+        try { safeData = JSON.stringify(data); } catch (e) { safeData = '(unprintable)'; }
+        console.warn('[Landfall current] response had no usable current data for', lat.toFixed(2) + ',' + lon.toFixed(2), '— likely no model coverage at this point.', safeData);
+      }
+      return normalized;
+    } catch (err) {
+      if (timeoutId) clearTimeout(timeoutId);
+      // Log a plain, always-cloneable description of the failure —
+      // never the raw error/exception object itself. Some console/
+      // devtools environments relay console arguments through a
+      // structured-clone-like serialization step, and not every thrown
+      // value is guaranteed cloneable there (a DOMException, which is
+      // exactly what the AbortController timeout below throws, is a
+      // known case) — passing one straight to console.warn was itself
+      // throwing a SEPARATE DataCloneError on top of the original
+      // failure in at least some setups, which is what was actually
+      // showing up in the console. err.name/err.message are always
+      // plain strings, so this can't recreate that problem.
+      if (typeof console !== 'undefined') {
+        var errName = (err && err.name) ? String(err.name) : 'Error';
+        var errMessage = (err && err.message) ? String(err.message) : '';
+        if (errName === 'AbortError') {
+          console.warn('[Landfall current] request timed out for', lat.toFixed(2) + ',' + lon.toFixed(2));
+        } else {
+          console.warn('[Landfall current] fetch failed for', lat.toFixed(2) + ',' + lon.toFixed(2) + ':', errName + (errMessage ? ' — ' + errMessage : ''), '(if this page was opened directly from disk via file://, that is almost always the cause — browsers block cross-origin fetch from file:// pages)');
+        }
+      }
+      return null;
+    }
+  }
+
+  var CURRENT_REFRESH_MS = 90 * 60 * 1000;   // currents shift far more slowly than wind — a lighter cadence than weather's own refresh is plenty
+  var CURRENT_REFRESH_DISTANCE_NM = 80;
+  var currentFetchInFlight = false;
+  // Tracks the last ATTEMPT (success or failure), separately from
+  // oceanCurrent.fetchedRealMs (last SUCCESS). Without this, a fetch
+  // that keeps failing — no coverage, offline, a genuine CORS block —
+  // would look "due" again on literally the very next tick, since
+  // fetchedRealMs never advances on failure. This is what actually
+  // stops a persistent failure from retrying every simulated tick.
+  var currentLastAttemptMs = null;
+  var CURRENT_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+
+  var CURRENT_SAMPLE_OFFSET_NM = 60; // how far north/south of the boat's own position to sample for a strategic gradient — see currentStrategicNote
+
+  function maybeRefreshOceanCurrent(state) {
+    if (currentFetchInFlight) return;
+    var now = Date.now();
+    if (currentLastAttemptMs != null && (now - currentLastAttemptMs) < CURRENT_RETRY_COOLDOWN_MS) return;
+    var anchor = state.weather.oceanCurrent;
+    var dueByTime = anchor.fetchedRealMs == null || (now - anchor.fetchedRealMs) >= CURRENT_REFRESH_MS;
+    var dueByDistance = !dueByTime && anchor.lat != null
+      && distanceBetween(state.nav.lat, state.nav.lon, anchor.lat, anchor.lon) >= CURRENT_REFRESH_DISTANCE_NM;
+    if (!dueByTime && !dueByDistance) return;
+
+    currentFetchInFlight = true;
+    currentLastAttemptMs = now;
+    var lat = state.nav.lat, lon = state.nav.lon;
+    var northPt = destinationPoint(lat, lon, 0, CURRENT_SAMPLE_OFFSET_NM);
+    var southPt = destinationPoint(lat, lon, 180, CURRENT_SAMPLE_OFFSET_NM);
+    // Three requests per refresh cycle (roughly hourly-ish, or on ~80nm
+    // of progress) — the boat's own reading plus two strategic samples,
+    // run in parallel rather than sequentially so this doesn't add
+    // noticeable latency. Not excessive: this is the SAME cadence as a
+    // single weather refresh, just three small requests instead of one.
+    Promise.all([
+      fetchOceanCurrent(lat, lon),
+      fetchOceanCurrent(northPt.lat, northPt.lon),
+      fetchOceanCurrent(southPt.lat, southPt.lon),
+    ]).then(function (results) {
+      currentFetchInFlight = false;
+      var here = results[0], north = results[1], south = results[2];
+      if (!here || !GAME) return; // the boat's own reading is required to anchor anything; a sample failing on its own just means no gradient note for now — the existing simulated/last-known state (see combineWithCurrent's own null-current fallback) carries the voyage forward either way
+      GAME.weather.oceanCurrent = {
+        fetchedRealMs: Date.now(),
+        lat: lat, lon: lon,
+        speedKt: here.speedKt,
+        directionDeg: here.directionDeg,
+        northSample: north,
+        southSample: south,
+      };
+      if (typeof console !== 'undefined') console.log('[Landfall current] observation received for', lat.toFixed(2) + ',' + lon.toFixed(2) + ':', here.speedKt.toFixed(2) + 'kt toward ' + here.directionDeg + 'deg', '| north sample:', north ? north.speedKt.toFixed(2) + 'kt' : 'none', '| south sample:', south ? south.speedKt.toFixed(2) + 'kt' : 'none');
+      saveGameState(GAME);
+    }).catch(function () {
+      currentFetchInFlight = false;
+    });
+  }
+
+  // Standard current-triangle correction: given a desired course and a
+  // known current, how many degrees to turn the heading (through water)
+  // toward the side the current is coming from, so the two vectors sum
+  // back to roughly the desired course over ground. Returns 0 with no
+  // current data, or if the cross-component would exceed what the boat
+  // can counter at its own speed (an unresolvable set — direct sailing
+  // is left to just be pushed off, same as it would be for a real boat
+  // in a current stronger than it can make way across).
+  function currentCorrectionDeg(desiredDeg, boatSpeedKt, current) {
+    if (!current || current.speedKt == null || boatSpeedKt <= 0) return 0;
+    var relBearingRad = signedAngleDiff(current.directionDeg, desiredDeg) * Math.PI / 180;
+    var crossComponent = current.speedKt * Math.sin(relBearingRad);
+    var ratio = clamp(crossComponent / boatSpeedKt, -1, 1);
+    return -(Math.asin(ratio) * 180 / Math.PI);
+  }
+
+  // The actual vector sum of the boat's motion through the water and
+  // the current moving that water across the Earth — this is what
+  // simTick uses for real geographic movement and what boat.speed
+  // displays (speed over GROUND, matching what a GPS would show),
+  // while nav.heading stays the through-water heading wind/sails care
+  // about. With no current data, this is just a pass-through.
+  function combineWithCurrent(headingDeg, speedThroughWaterKt, current) {
+    if (!current || current.speedKt == null) {
+      return { courseOverGround: headingDeg, speedOverGround: speedThroughWaterKt };
+    }
+    var hRad = headingDeg * Math.PI / 180;
+    var cRad = current.directionDeg * Math.PI / 180;
+    var vx = speedThroughWaterKt * Math.sin(hRad) + current.speedKt * Math.sin(cRad);
+    var vy = speedThroughWaterKt * Math.cos(hRad) + current.speedKt * Math.cos(cRad);
+    var speedOverGround = Math.sqrt(vx * vx + vy * vy);
+    var courseOverGround = normalizeDeg(Math.atan2(vx, vy) * 180 / Math.PI);
+    return { courseOverGround: courseOverGround, speedOverGround: speedOverGround };
+  }
+
+  var CURRENT_GRADIENT_THRESHOLD_KT = 0.4; // how much a sample's along-course component has to beat the boat's own before it's worth mentioning at all
+
+  // How much a current vector helps (positive) or hurts (negative)
+  // progress along a given course — the current's own speed projected
+  // onto that course direction.
+  function alongCourseComponent(current, courseDeg) {
+    if (!current || current.speedKt == null) return null;
+    var relRad = signedAngleDiff(current.directionDeg, courseDeg) * Math.PI / 180;
+    return current.speedKt * Math.cos(relRad);
+  }
+
+  // A brief, purely observational note about nearby current for
+  // FORECAST — never a recommendation, and never weighed against
+  // weather to declare an overall "better" option; that judgment is
+  // left entirely to the player. Compares the boat's own along-course
+  // current component against the cached north/south samples (see
+  // maybeRefreshOceanCurrent) and only speaks up once the difference is
+  // large enough to matter; small gradients stay silent background
+  // simulation. Returns null when there's nothing meaningful to say or
+  // the samples aren't cached yet — FORECAST's own trend line and the
+  // OPEN IN WINDY link are unaffected either way.
+  function currentStrategicNote(state) {
+    var oc = state.weather.oceanCurrent;
+    if (oc.fetchedRealMs == null) return null;
+    var courseDeg = state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX ? state.nav.intendedCourse : state.nav.setCourse;
+    var here = alongCourseComponent(oc, courseDeg);
+    if (here == null) return null;
+
+    var north = oc.northSample ? alongCourseComponent(oc.northSample, courseDeg) : null;
+    var south = oc.southSample ? alongCourseComponent(oc.southSample, courseDeg) : null;
+
+    var bestSide = null, bestSample = null, bestGain = CURRENT_GRADIENT_THRESHOLD_KT;
+    if (north != null && (north - here) >= bestGain) {
+      bestSide = 'north'; bestSample = oc.northSample; bestGain = north - here;
+    }
+    if (south != null && (south - here) >= bestGain) {
+      bestSide = 'south'; bestSample = oc.southSample; bestGain = south - here;
+    }
+
+    if (bestSide) {
+      return 'A stronger ' + compassPoint(bestSample.directionDeg) + '-setting current develops ' + bestSide + ' of your position.';
+    }
+    if (here <= -CURRENT_GRADIENT_THRESHOLD_KT) {
+      return 'Adverse current persists along the present track.';
+    }
+    return null;
+  }
+
   // Nudges the SAME fields driftWeather writes toward the last successful
   // real observation, rather than snapping to it — see the module
   // header above for why the sailing model needs no separate wiring to
@@ -1297,6 +1540,22 @@
       }
       desired = nav.setCourse;
       targetPoint = FINAL_DEST;
+
+      // Current correction — open water only; the coastal corridor's
+      // own automatic navigation already handles getting through
+      // safely (see the module notes above). This adjusts the LOCAL
+      // desired bearing fed into auto-tack, never nav.setCourse itself
+      // (the player's own chosen course is never touched) and never
+      // nav.intendedCourse (BEARING TO NĀWILIWILI stays the plain
+      // geographic bearing). The order matches real seamanship: work
+      // out what heading through the water actually makes the chosen
+      // course good against the current FIRST, then decide whether
+      // that heading is sailable or needs a tack.
+      var currentAnchor = state.weather.oceanCurrent;
+      if (currentAnchor.fetchedRealMs != null) {
+        var estSpeed = computeBoatSpeed(state, desired);
+        desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
+      }
     }
     var steered = resolveAutoTack(state, desired, targetPoint);
     // Small per-tick heading noise: imperfect helming, wave action, minor
@@ -1537,13 +1796,20 @@
     driftWeather(state.weather, state.nav.lat);
     blendTowardRealAnchor(state.weather, TICK_MINUTES / 60);
     maybeRefreshRealWeather(state);
+    maybeRefreshOceanCurrent(state);
 
     // Real dead-reckoning movement: the boat covers ground along its
     // ACTUAL heading (which may differ from the intended leg while
     // coastal auto-tacking, or simply be the player's own manually set
-    // open-ocean course) for real elapsed time at the current speed.
-    // Speed is computed once for the tick and that's the total distance
-    // budget spent below.
+    // open-ocean course, itself already corrected for current — see
+    // computeHeading) for real elapsed time. nav.heading stays the
+    // through-water heading the whole way — what sails/wind care about
+    // — but actual geographic movement and the displayed speed use the
+    // vector sum of that motion through the water and whatever current
+    // is moving the water itself (combineWithCurrent), the same
+    // distinction a real GPS-vs-knotmeter reading would show. Speed is
+    // computed once for the tick and that (speed over ground) is the
+    // total distance budget spent below.
     //
     // COASTAL (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): steps through
     // WAYPOINTS exactly as before — if the budget is enough to reach the
@@ -1555,18 +1821,19 @@
     //
     // OPEN OCEAN: once the loop below clears the corridor (or the tick
     // started already clear of it), any remaining budget moves in a
-    // straight line along the player's set course — checked against
-    // Nāwiliwili (arrival) and against LAND_MASSES (grounding) rather
-    // than against any further waypoint.
+    // straight line along the resulting course over ground — checked
+    // against Nāwiliwili (arrival) and against LAND_MASSES (grounding)
+    // rather than against any further waypoint.
     //
     // Applies identically whether this tick is live or part of a
     // multi-tick offline catch-up, since both just call simTick.
     var heading = computeHeading(state);
-    var speed = computeBoatSpeed(state, heading);
-    state.boat.speed = speed;
+    var speedThroughWater = computeBoatSpeed(state, heading);
+    var cog = combineWithCurrent(heading, speedThroughWater, state.weather.oceanCurrent);
+    state.boat.speed = cog.speedOverGround;
     state.nav.heading = heading;
 
-    var nmRemaining = speed * (TICK_MINUTES / 60);
+    var nmRemaining = cog.speedOverGround * (TICK_MINUTES / 60);
 
     if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
       var crossingGuard = 0;
@@ -1583,9 +1850,12 @@
           log(state, waypointArrivalLine(wp));
           state.nav.waypointIndex++;
           heading = computeHeading(state); // fresh bearing (and fresh wobble/tack) for the next leg — or, once past OPEN_WATER_WAYPOINT_INDEX, the initial open-ocean course toward Nāwiliwili
+          speedThroughWater = computeBoatSpeed(state, heading);
+          cog = combineWithCurrent(heading, speedThroughWater, state.weather.oceanCurrent);
           state.nav.heading = heading;
+          state.boat.speed = cog.speedOverGround;
         } else {
-          var moved = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+          var moved = destinationPoint(state.nav.lat, state.nav.lon, cog.courseOverGround, nmRemaining);
           state.nav.lat = moved.lat;
           state.nav.lon = moved.lon;
           state.nav.distanceTraveled += nmRemaining;
@@ -1598,9 +1868,11 @@
     if (nmRemaining > 0) {
       // OPEN OCEAN: free-heading movement (possibly tacking — heading
       // here is whatever resolveAutoTack chose, not necessarily
-      // setCourse directly). distanceTraveled still tracks actual nm
-      // sailed even though nothing is being "arrived at" along the way
-      // — only Nāwiliwili itself, and land, matter now.
+      // setCourse directly, and the actual track (cog.courseOverGround)
+      // can differ further still once current is added). distanceTraveled
+      // still tracks actual nm sailed even though nothing is being
+      // "arrived at" along the way — only Nāwiliwili itself, and land,
+      // matter now.
       var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
       if (distToFinal <= nmRemaining) {
         state.nav.lat = FINAL_DEST.lat;
@@ -1611,7 +1883,7 @@
           log(state, waypointArrivalLine(FINAL_DEST));
         }
       } else {
-        var projected = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+        var projected = destinationPoint(state.nav.lat, state.nav.lon, cog.courseOverGround, nmRemaining);
         if (!applyGroundingIfNeeded(state, projected.lat, projected.lon)) {
           state.nav.lat = projected.lat;
           state.nav.lon = projected.lon;
@@ -2247,7 +2519,7 @@
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       buildAudioGraph();
     } catch (e) {
-      console.warn('Audio unavailable:', e);
+      console.warn('Audio unavailable:', describeError(e));
     }
   }
 
@@ -2549,6 +2821,30 @@
     return pts[Math.round(normalizeDeg(deg) / 22.5) % 16];
   }
 
+  // LABEL column padded to a fixed width so every instrument line in
+  // WEATHER lines up — this only works because the font is monospace;
+  // manual space-padding would NOT align in a proportional font.
+  function instrumentLine(label, value) {
+    return label.padEnd(14) + value;
+  }
+
+  var SEA_STATE_SHORT_LABELS = ['CALM', 'SLIGHT', 'LIGHT', 'MODERATE', 'ROUGH', 'VERY ROUGH', 'HIGH'];
+  function seaStateShortLabel(n) {
+    return SEA_STATE_SHORT_LABELS[clamp(n, 0, 6)];
+  }
+
+  // Representative wave height in feet per sea-state tier, for the
+  // compact SEAS line in WEATHER. Tied to the SAME w.seaState tier that
+  // already drives the descriptive label above (and boat speed, fatigue,
+  // etc. elsewhere) so the two always correspond — deriving this from a
+  // separate real-world wave data source risked the label and the
+  // height disagreeing with each other, or with what the simulation is
+  // actually doing to the boat.
+  var SEA_STATE_WAVE_HEIGHT_FT = [1, 2, 3, 4, 8, 10, 12];
+  function seaStateWaveHeightFt(n) {
+    return SEA_STATE_WAVE_HEIGHT_FT[clamp(n, 0, 6)];
+  }
+
   function describeLevel(value, tiers) {
     for (var i = 0; i < tiers.length; i++) {
       if (value <= tiers[i].max) return tiers[i].text;
@@ -2756,18 +3052,75 @@
     var w = state.weather;
     printBlank();
     printLine('WEATHER', 'heading-label');
-    printLine('Wind ' + Math.round(w.windSpeed) + ' kt from ' + compassPoint(w.windDirection) + ' (' + Math.round(w.windDirection) + '\u00B0)');
-    printLine(describeSeaState(w.seaState));
-    printLine('Temperature ' + Math.round(w.temperatureF) + '\u00B0F.');
-    printLine(capitalize(w.condition) + '.');
+    printLine(instrumentLine('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT'));
+    printLine(instrumentLine('SEAS', seaStateShortLabel(w.seaState) + ' \u00B7 ' + seaStateWaveHeightFt(w.seaState) + ' FT'));
+    printLine(instrumentLine('TEMP', Math.round(w.temperatureF) + '\u00B0F'));
+    printLine(instrumentLine('SKY', w.condition.toUpperCase()));
+    if (w.oceanCurrent.speedKt == null) {
+      printLine(instrumentLine('CURRENT', 'NO DATA'));
+    } else if (w.oceanCurrent.speedKt < 0.2) {
+      printLine(instrumentLine('CURRENT', 'NEGLIGIBLE'));
+    } else {
+      printLine(instrumentLine('CURRENT', compassPoint(w.oceanCurrent.directionDeg) + ' ' + w.oceanCurrent.speedKt.toFixed(1) + ' KT'));
+    }
     state.pendingChoice = {
       id: 'weather-menu',
       options: [
-        { label: 'DETAILED MARINE FORECAST', action: 'open-marine-forecast' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
   }
+
+  // Fallback trend lines when no real forecastLine is cached — two
+  // lines (wind, then seas), both derived from the SAME underlying
+  // state.weather.trend, matching the two-strand NEXT 12 HOURS
+  // structure. real.forecastLine, when available, is already
+  // summarized from actual forecast data and is used as-is instead.
+  var WIND_TREND_LINES = {
+    building: 'Wind expected to build further.',
+    easing: 'Wind easing over the next several hours.',
+    steady: 'No significant wind change expected.',
+  };
+  var SEA_TREND_LINES = {
+    building: 'Seas building to match.',
+    easing: 'Seas gradually subsiding.',
+    steady: 'Seas holding at their present state.',
+  };
+
+  // FORECAST — what's coming, distinct from WEATHER's what's-happening-
+  // now: a forward-looking trend (the real API-derived forecastLine
+  // when available, otherwise the wind/sea trend lines above — either
+  // way driven by actual simulation state, never hardcoded per call),
+  // plus a strategically meaningful current observation when one
+  // exists (see currentStrategicNote — never a recommendation, purely
+  // what the data shows), then the external OPEN IN WINDY link.
+  function cmdForecast(state) {
+    var real = state.weather.realWx;
+    printBlank();
+    printLine('FORECAST', 'heading-label');
+    printBlank();
+    printLine('NEXT 12 HOURS', 'heading-label');
+    if (real && real.forecastLine) {
+      printLine(real.forecastLine);
+    } else {
+      var trend = state.weather.trend;
+      printLine(WIND_TREND_LINES[trend] || WIND_TREND_LINES.steady);
+      printLine(SEA_TREND_LINES[trend] || SEA_TREND_LINES.steady);
+    }
+    var currentNote = currentStrategicNote(state);
+    if (currentNote) {
+      printBlank();
+      printLine(currentNote);
+    }
+    state.pendingChoice = {
+      id: 'forecast-menu',
+      options: [
+        { label: 'OPEN IN WINDY', action: 'open-in-windy' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
+  }
+
 
 
   function cmdSails(state) {
@@ -3416,6 +3769,7 @@
     status: cmdStatus,
     position: cmdPosition,
     weather: cmdWeather,
+    forecast: cmdForecast,
     inventory: cmdInventory,
     distress: cmdDistress,
     sails: cmdSails,
@@ -3523,6 +3877,7 @@
         [
           { label: 'POSITION', action: 'cmd:position' },
           { label: 'WEATHER', action: 'cmd:weather' },
+          { label: 'FORECAST', action: 'cmd:forecast' },
           { label: 'INVENTORY', action: 'cmd:inventory' },
         ],
         [
@@ -3554,9 +3909,8 @@
   // drive their own focused submenu via pendingChoice instead — no
   // click-again-to-collapse shortcut, BACK is the one way out, and the
   // main BELOW menu is fully hidden while any of them is open rather
-  // than staying visible underneath. FORECAST no longer exists as a
-  // separate command; its DETAILED MARINE FORECAST option now lives
-  // inside WEATHER's own pendingChoice.
+  // than staying visible underneath. FORECAST is not here either, for
+  // the same reason — it drives its own pendingChoice too.
   var INFO_COMMANDS = { inventory: true };
   var openInfoPanel = null;
 
@@ -3576,12 +3930,12 @@
       btn.className = 'option';
       btn.textContent = '> ' + opt.label;
       btn.addEventListener('click', function () {
-        if (opt.action === 'open-map' || opt.action === 'open-marine-forecast') {
+        if (opt.action === 'open-map' || opt.action === 'open-in-windy') {
           // Pure external side effect: opens a new tab and changes
           // nothing about the current Landfall view, so the panel that
-          // offered this (POSITION or WEATHER) stays exactly as it was
+          // offered this (POSITION or FORECAST) stays exactly as it was
           // — no clearTempView, no touching openInfoPanel, no re-render.
-          var url = opt.action === 'open-map' ? googleMapsUrl(state.nav.lat, state.nav.lon) : marineForecastUrl(state);
+          var url = opt.action === 'open-map' ? googleMapsUrl(state.nav.lat, state.nav.lon) : windyUrl(state.nav.lat, state.nav.lon);
           window.open(url, '_blank');
           return;
         }
@@ -4077,7 +4431,7 @@
     // A restart discards the save and begins a fresh voyage "now" — this is
     // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
     // an in-progress voyage, it just starts over exactly like a first visit.
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save.', e); }
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save:', describeError(e)); }
     GAME = null;
     printedCount = 0;
     resetOutputEl();
@@ -4307,6 +4661,11 @@
         condition: null, forecastLine: null,
       };
     }
+    if (!w.oceanCurrent) {
+      w.oceanCurrent = { fetchedRealMs: null, lat: null, lon: null, speedKt: null, directionDeg: null, northSample: null, southSample: null };
+    }
+    if (w.oceanCurrent.northSample === undefined) w.oceanCurrent.northSample = null;
+    if (w.oceanCurrent.southSample === undefined) w.oceanCurrent.southSample = null;
   }
 
   function boot() {
