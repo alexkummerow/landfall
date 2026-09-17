@@ -701,44 +701,74 @@
     return 3;
   }
 
-  // How hard unmet physical needs pull morale down, per hour, at the
-  // CURRENT hoursSinceMeal/hoursSinceWater/fatigue — not a separate
-  // accumulated debt. That's deliberate: the moment the sailor eats,
-  // drinks, or rests, hungerLevel/thirstLevel/fatigue drop and this
-  // pressure drops with them on the very next tick, with no separate
-  // "penalty" bookkeeping to clear. Reuses the same hunger/thirst
-  // thresholds and fatigue bands (fatiguePhrase, checkFatigueNarration)
-  // already used elsewhere — no new/duplicate condition states.
+  // MORALE is a settling value, not a pool: every tick it drifts toward
+  // computeMoraleTarget()'s answer for "how should the sailor's spirits
+  // read right now, given current conditions" — it does not just sit at
+  // whatever it last was until some explicit event nudges it. That target
+  // is recomputed fresh from hoursSinceMeal/hoursSinceWater/fatigue/
+  // self-care recency/weather every time, so it responds immediately as
+  // those change (including entirely offline, since it's evaluated inside
+  // simTick same as everything else) — no separate "penalty" bookkeeping
+  // to accumulate or clear. EAT/DRINK/WASH/DRESS/DISHES/READ/sleep's
+  // existing one-time bonuses (below, unchanged) still apply on top of
+  // this and still feel good in the moment, but they're no longer what's
+  // *sustaining* a level — if the underlying conditions don't also
+  // improve, the drift pulls back down toward whatever they actually
+  // justify.
   //
-  // A LITTLE hungry/thirsty costs nothing; HUNGRY/THIRSTY is a mild,
-  // steady drain; VERY HUNGRY/SEVERELY DEHYDRATED starts significant and
-  // keeps climbing the longer it's left untreated — so morale doesn't
-  // just take one hit and plateau, it keeps eroding the longer someone
-  // goes unfed. Thirst is weighted a bit heavier than hunger throughout,
-  // since dehydration is the more immediately distressing of the two.
-  function hungerMoralePressurePerHour(hoursSinceMeal) {
-    var level = hungerLevel(hoursSinceMeal);
-    if (level <= 1) return 0;
-    if (level === 2) return 0.5;
-    var hoursIntoSevere = hoursSinceMeal - 16;
-    return clamp(1.2 + hoursIntoSevere * 0.05, 1.2, 2.4);
+  // BASELINE is deliberately mid-GOOD, not HIGH: an ordinary day with
+  // adequate food, water, and rest should read as solidly GOOD, and HIGH
+  // should need real, combined positive conditions to reach — not just
+  // the default resting state of "nothing has gone wrong yet." Hunger
+  // and thirst reuse their own existing four-level thresholds (no
+  // duplicate states); thirst is weighted a bit heavier throughout, per
+  // its own existing pressure. Both keep climbing the longer their
+  // severe tier is left untreated, same as before.
+  var MORALE_BASELINE = 55;
+  var MORALE_DRIFT_PER_HOUR = 0.35; // how quickly morale closes the gap to its target — inertia, not instant snapping, but real movement within a single day
+
+  function hoursSinceAnySelfCare(state) {
+    var last = state.crew.lastRoutineAt || {};
+    var keys = ['wash', 'dress', 'dishes', 'read'];
+    var mostRecent = null;
+    for (var i = 0; i < keys.length; i++) {
+      var t = last[keys[i]];
+      if (t != null && (mostRecent === null || t > mostRecent)) mostRecent = t;
+    }
+    if (mostRecent === null) return state.meta.voyageMinutes / 60; // never yet — read as "since the voyage began," not infinite
+    return (state.meta.voyageMinutes - mostRecent) / 60;
   }
-  function thirstMoralePressurePerHour(hoursSinceWater) {
-    var level = thirstLevel(hoursSinceWater);
-    if (level <= 1) return 0;
-    if (level === 2) return 0.7;
-    var hoursIntoSevere = hoursSinceWater - 16;
-    return clamp(1.6 + hoursIntoSevere * 0.06, 1.6, 3.0);
-  }
-  // Bands match fatiguePhrase()'s own tiers: fresh/steady tiredness (up
-  // to 40) is normal enough aboard a small boat to cost nothing; heavy
-  // fatigue (40-60) is a mild drag; severe (60-80) and exhausted (80+)
-  // apply real, escalating pressure.
-  function fatigueMoralePressurePerHour(fatigue) {
-    if (fatigue <= 40) return 0;
-    if (fatigue <= 60) return 0.3;
-    if (fatigue <= 80) return 0.7;
-    return 1.3;
+
+  function computeMoraleTarget(state) {
+    var c = state.crew;
+    var target = MORALE_BASELINE;
+
+    var hLevel = hungerLevel(c.hoursSinceMeal);
+    if (hLevel === 0) target += 8;
+    else if (hLevel === 1) target -= 4;
+    else if (hLevel === 2) target -= 10;
+    else target -= clamp(20 + (c.hoursSinceMeal - 16) * 0.8, 20, 35);
+
+    var tLevel = thirstLevel(c.hoursSinceWater);
+    if (tLevel === 0) target += 8;
+    else if (tLevel === 1) target -= 5;
+    else if (tLevel === 2) target -= 13;
+    else target -= clamp(24 + (c.hoursSinceWater - 16) * 1.0, 24, 42);
+
+    if (c.fatigue <= 20) target += 6;
+    else if (c.fatigue <= 40) target += 0;
+    else if (c.fatigue <= 60) target -= 8;
+    else if (c.fatigue <= 80) target -= 16;
+    else target -= 26;
+
+    var selfCareHours = hoursSinceAnySelfCare(state);
+    if (selfCareHours <= 8) target += 5;
+    else if (selfCareHours <= 20) target += 0;
+    else target -= 8;
+
+    if (state.weather.condition === 'squall') target -= 10;
+
+    return clamp(target, 0, 100);
   }
 
   // Coffee: a small, temporary, subtle edge — never a fatigue cure. Active
@@ -1084,17 +1114,12 @@
     if (state.weather.seaState >= 4) waterRate += 0.3;
     c.hoursSinceWater += hrs * waterRate;
 
-    // Unmet physical needs pull morale down — progressively, and it
-    // keeps climbing the longer severe hunger/thirst/fatigue is left
-    // unaddressed, rather than one flat rate regardless of how bad
-    // things have gotten. Combines with (doesn't replace) whatever
-    // ROUTINE/EAT/DRINK/SLEEP add on the positive side, and with the
-    // existing squall pressure below.
-    var moralePressure = hungerMoralePressurePerHour(c.hoursSinceMeal)
-      + thirstMoralePressurePerHour(c.hoursSinceWater)
-      + fatigueMoralePressurePerHour(c.fatigue);
-    if (state.weather.condition === 'squall') moralePressure += 0.4;
-    if (moralePressure > 0) c.morale = clamp(c.morale - moralePressure * hrs, 0, 100);
+    // Morale drifts toward whatever current conditions actually justify
+    // (see computeMoraleTarget) rather than sitting still until some
+    // explicit event nudges it — this is what makes neglect visible over
+    // a normal day even without any single dramatic moment causing it.
+    var moraleTarget = computeMoraleTarget(state);
+    c.morale = clamp(c.morale + (moraleTarget - c.morale) * MORALE_DRIFT_PER_HOUR * hrs, 0, 100);
   }
 
   function clampState(state) {
