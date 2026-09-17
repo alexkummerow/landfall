@@ -1452,6 +1452,25 @@
 
   }
 
+  // nav.heading and boat.speed are otherwise only written inside
+  // simTick() — real, instantaneous quantities that just happen to be
+  // cached in state rather than recomputed on every read. That's fine
+  // as long as something calls this the moment anything upstream of
+  // them actually changes; without it, a course change updates
+  // nav.setCourse immediately but leaves heading/tack/speed sitting at
+  // whatever they were until the next tick runs, which can be minutes
+  // away in live play. Call this right after any state change that
+  // should make the boat respond NOW rather than waiting for that —
+  // currently, only the two places nav.setCourse itself changes. Does
+  // not advance voyageMinutes or move the boat; it only recomputes what
+  // the boat would be doing at the CURRENT moment, the same computation
+  // simTick would make anyway, just not deferred until the next one.
+  function refreshHeadingAndSpeed(state) {
+    var heading = computeHeading(state);
+    state.nav.heading = heading;
+    state.boat.speed = computeBoatSpeed(state, heading);
+  }
+
   function updateCrew(state) {
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
@@ -3902,6 +3921,7 @@
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
         state.nav.courseDraft = null;
+        refreshHeadingAndSpeed(state);
         printBlank();
         printLine('New course set: ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
         cmdCourse(state);
@@ -3912,6 +3932,7 @@
         break;
       case 'set-for-nawiliwili':
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
+        refreshHeadingAndSpeed(state);
         printBlank();
         printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
         cmdCourse(state);
