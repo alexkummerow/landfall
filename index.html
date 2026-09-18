@@ -290,6 +290,7 @@
         lastTick: now,
         leftoverMinutes: 0,
         voyageMinutes: 0,
+        foodInventoryVersion: 2, // current canonical FOOD_ITEMS quantities — see migrateProvisionsIfNeeded; a fresh voyage is already at the current version and must never be rebased
       },
       nav: {
         lat: start.lat,
@@ -391,9 +392,9 @@
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
       },
       food: {
-        oatmeal: 12, pasta: 8, rice: 11, soup: 5, chili: 5,
-        tuna: 7, crackers: 8, peanutButter: 7, nuts: 11,
-        driedFruit: 8, energyBars: 8, freshFruit: 5, freshBread: 4,
+        oatmeal: 12, pasta: 8, rice: 12, soup: 6, chili: 6,
+        tuna: 8, crackers: 8, peanutButter: 8, nuts: 12,
+        driedFruit: 8, energyBars: 8, freshFruit: 6, freshBread: 4,
         chocolate: 4,
       },
       drinks: {
@@ -1017,23 +1018,42 @@
   // monotony (see performEat/snackMealRatio), and — for chocolate only —
   // an entirely separate path with no hunger/energy effect at all.
   var FOOD_ITEMS = [
-    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial' },
-    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true, waterGal: 0.125, category: 'substantial' },
-    { key: 'rice', name: 'Rice', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial' },
-    { key: 'soup', name: 'Soup', cooked: true, heavy: true, category: 'substantial' },
-    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true, category: 'substantial' },
-    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false, category: 'roughWeather' },
-    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false, category: 'roughWeather' },
-    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false, category: 'roughWeather' },
-    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false, category: 'quick' },
-    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false, category: 'quick' },
-    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false, category: 'quick' },
-    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true, category: 'fresh' },
-    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true, category: 'fresh' },
-    { key: 'chocolate', name: 'Chocolate', cooked: false, heavy: false, category: 'chocolate' },
+    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial', original: 12 },
+    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true, waterGal: 0.125, category: 'substantial', original: 8 },
+    { key: 'rice', name: 'Rice', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial', original: 12 },
+    { key: 'soup', name: 'Soup', cooked: true, heavy: true, category: 'substantial', original: 6 },
+    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true, category: 'substantial', original: 6 },
+    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
+    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
+    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
+    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false, category: 'quick', original: 12 },
+    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false, category: 'quick', original: 8 },
+    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false, category: 'quick', original: 8 },
+    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 6 },
+    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 4 },
+    { key: 'chocolate', name: 'Chocolate', cooked: false, heavy: false, category: 'chocolate', original: 4 },
   ];
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
+
+  // Current canonical food schema version — bump this whenever
+  // FOOD_ITEMS' `original` quantities change again, so an existing
+  // voyage rebases exactly once (see migrateProvisionsIfNeeded) rather
+  // than every time it loads. newGameState() sets meta.foodInventoryVersion
+  // to this same value up front, so a fresh voyage is already current
+  // and never gets rebased.
+  var FOOD_INVENTORY_VERSION = 2;
+  // The canonical departure quantities food actually shipped with
+  // before the two rounds of reduction that led to today's FOOD_ITEMS —
+  // i.e. what a save with no foodInventoryVersion marker at all actually
+  // started its voyage with, however far it's since been consumed down
+  // or however many later reductions have already applied to it.
+  var OLD_FOOD_ORIGINAL = {
+    oatmeal: 18, pasta: 12, rice: 16, soup: 8, chili: 8,
+    tuna: 10, crackers: 12, peanutButter: 10, nuts: 16,
+    driedFruit: 12, energyBars: 12, freshFruit: 8, freshBread: 6,
+    chocolate: 6,
+  };
 
   // Fallback temperature from latitude alone, when no real-world reading
   // is available (or ever arrives) — cool in the mid-40s near Shilshole,
@@ -1654,11 +1674,42 @@
   var SAIL_PROPULSION_THRESHOLD_KT = 0.5; // below this, sails aren't usefully contributing (becalmed / in irons / furled / not hoisted)
   var SECONDARY_ASSIST_FLOOR = 0.15; // even very near hull speed, the weaker propulsion source still helps a little, never nothing
   var DIESEL_BURN_RATE_GPH = 0.65;   // gallons per hour while running, for a small auxiliary under load
-  // Reference points for STATUS's FUEL/WATER percentages — "how much of
-  // what I left the dock with is left," not a refillable tank capacity
-  // (there's no way to take on more of either mid-voyage).
+  // Canonical departure quantities — the stable ORIGINAL half of every
+  // CURRENT / ORIGINAL supply display throughout INVENTORY, EAT, DRINK,
+  // and ENGINE. These are plain constants, not part of saved state:
+  // every voyage (new or old) departs with the same current-build
+  // amounts, so there's nothing to migrate and no way for the
+  // denominator to drift — see ORIGINAL QUANTITY MUST BE STABLE in
+  // PROJECT.md. FOOD_ITEMS carries its own `original` per item above.
   var FUEL_STARTING_GALLONS = 20;
   var WATER_STARTING_GALLONS = 50.0;
+  var ORIGINAL_COFFEE = 24;
+  var ORIGINAL_TEA = 24;
+  var ORIGINAL_PROPANE = 60;
+  var ORIGINAL_FLARES = 6;
+  var ORIGINAL_SPARES = {
+    oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
+    spareLine: 100, shackles: 6, riggingTape: 2,
+    fuses: 10, wire: 50, connectors: 20, batteries: 2,
+    hose: 10, hoseClamps: 12,
+    sailRepair: 3, epoxy: 2, sealant: 2,
+  };
+
+  // Shared CURRENT / ORIGINAL formatting. Gallons keep one decimal place
+  // only when the value actually has one — "50" not "50.0", but "42.3"
+  // stays "42.3" — matching the existing water/fuel precision. Countable
+  // items (food servings, coffee, tea, spares, flares) are always whole
+  // numbers already; String() is enough.
+  function formatGal(n) {
+    var s = n.toFixed(1);
+    return (s.slice(-2) === '.0') ? s.slice(0, -2) : s;
+  }
+  function galCurrentOriginal(current, original) {
+    return formatGal(current) + ' / ' + formatGal(original) + ' gal';
+  }
+  function countCurrentOriginal(current, original) {
+    return current + ' / ' + original;
+  }
 
   // Fixed per-action water amounts (all exact binary fractions of a
   // gallon — 1/8, 3/32, 1/4, 1/16 — so repeated subtraction never drifts
@@ -3085,9 +3136,6 @@
     printLine(statusLine('BATTERIES', boatConditionLevel(b.electrical)));
     printLine(statusLine('BILGE', bilgeConditionLevel(b.bilgeWater)));
     printLine(statusLine('STEERING', boatConditionLevel(b.steering)));
-    printBlank();
-    printLine(statusLine('FUEL', Math.round(clamp(b.fuelGallons / FUEL_STARTING_GALLONS, 0, 1) * 100) + '%'));
-    printLine(statusLine('WATER', Math.round(clamp(state.water.gallons / WATER_STARTING_GALLONS, 0, 1) * 100) + '%'));
     state.pendingChoice = { id: 'status-view', options: [{ label: 'BACK', action: 'cancel' }] };
   }
 
@@ -3242,7 +3290,7 @@
     return name + ' ' + dots + ' ' + valueText;
   }
 
-  function printSuppliesCategory(state, catKey, names) {
+  function printSuppliesCategory(state, catKey, names, originals) {
     var data = state.supplies[catKey] || {};
     var keys = Object.keys(names);
     var any = keys.some(function (k) { return data[k] > 0; });
@@ -3251,7 +3299,7 @@
       return;
     }
     keys.forEach(function (k) {
-      if (data[k] > 0) printLine(inventoryLine(names[k], String(data[k])));
+      if (data[k] > 0) printLine(inventoryLine(names[k], countCurrentOriginal(data[k], originals[k])));
     });
   }
 
@@ -3269,24 +3317,24 @@
         break;
       case 'water':
         printLine('WATER', 'heading-label');
-        printLine(inventoryLine('Water', state.water.gallons.toFixed(1) + ' gal'));
-        printLine(inventoryLine('Coffee', String(state.drinks.coffee)));
-        printLine(inventoryLine('Tea', String(state.drinks.tea)));
+        printLine(inventoryLine('Water', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS)));
+        printLine(inventoryLine('Coffee', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE)));
+        printLine(inventoryLine('Tea', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA)));
         break;
       case 'fuel':
         printLine('FUEL', 'heading-label');
-        printLine(inventoryLine('Diesel', state.boat.fuelGallons.toFixed(1) + ' gal'));
-        printLine(inventoryLine('Propane', state.supplies.propane + ' uses'));
+        printLine(inventoryLine('Diesel', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS)));
+        printLine(inventoryLine('Propane', countCurrentOriginal(state.supplies.propane, ORIGINAL_PROPANE) + ' uses'));
         break;
       case 'spares':
         printLine('SPARES', 'heading-label');
-        printSuppliesCategory(state, 'spares', SPARES_NAMES);
+        printSuppliesCategory(state, 'spares', SPARES_NAMES, ORIGINAL_SPARES);
         break;
       case 'safety':
         printLine('SAFETY', 'heading-label');
         printLine(inventoryLine('EPIRB', state.rescue.epirbOn ? 'ACTIVE' : 'READY'));
         printLine(inventoryLine('Life raft', state.crew.inLifeRaft ? 'DEPLOYED' : 'READY'));
-        printLine(inventoryLine('Flares', String(state.supplies.safety.flares)));
+        printLine(inventoryLine('Flares', countCurrentOriginal(state.supplies.safety.flares, ORIGINAL_FLARES)));
         break;
       default:
         printLine('Nothing there.', 'dim');
@@ -3346,7 +3394,7 @@
     printBlank();
     printLine('ENGINE', 'heading-label');
     printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
-    printLine('Diesel: ' + state.boat.fuelGallons.toFixed(1) + ' gal');
+    printLine('Diesel: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS));
     if (!state.boat.engineOn && state.boat.fuelGallons <= 0) {
       printLine('No diesel left to start it.', 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
@@ -3548,12 +3596,12 @@
 
   function foodItemLine(item, servings) {
     var dots = '.'.repeat(Math.max(2, 22 - item.name.length));
-    return item.name + ' ' + dots + ' ' + servings + ' servings';
+    return item.name + ' ' + dots + ' ' + countCurrentOriginal(servings, item.original) + ' servings';
   }
 
   function buildEatOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return state.food[f.key] > 0; })
-      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + countCurrentOriginal(state.food[f.key], f.original) + ')', action: 'eat:' + f.key }; });
     opts.push({ label: 'NEVER MIND', action: 'cancel' });
     return opts;
   }
@@ -3566,9 +3614,6 @@
       printLine('Nothing left aboard to eat.', 'amber');
       return;
     }
-    FOOD_ITEMS.forEach(function (f) {
-      if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key]));
-    });
     state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
   }
 
@@ -3711,9 +3756,9 @@
   // made with.
   function drinkMenuOptions(state) {
     return [
-      { label: instrumentLine('WATER', state.water.gallons.toFixed(1) + ' GAL'), action: 'drink:water' },
-      { label: instrumentLine('COFFEE', String(state.drinks.coffee)), action: 'drink:coffee' },
-      { label: instrumentLine('TEA', String(state.drinks.tea)), action: 'drink:tea' },
+      { label: instrumentLine('WATER', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS).toUpperCase()), action: 'drink:water' },
+      { label: instrumentLine('COFFEE', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE)), action: 'drink:coffee' },
+      { label: instrumentLine('TEA', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA)), action: 'drink:tea' },
       { label: 'BACK', action: 'cancel' },
     ];
   }
@@ -4821,6 +4866,27 @@
       delete state.food.comfort;
     }
     if (state.food.chocolate === undefined) state.food.chocolate = 4;
+    // Rebase an existing voyage's food onto the CURRENT canonical
+    // departure quantities while preserving exactly how much has
+    // already been eaten — never resetting to full, never just
+    // swapping the denominator underneath the same remaining count,
+    // and never letting CURRENT end up above the new ORIGINAL. Runs at
+    // most once per save: newGameState() already stamps
+    // meta.foodInventoryVersion at FOOD_INVENTORY_VERSION up front, so
+    // a fresh voyage never touches this at all, and once an existing
+    // save has been rebased here its version marker prevents it from
+    // ever happening again on a later load.
+    if (state.meta.foodInventoryVersion === undefined) state.meta.foodInventoryVersion = 0;
+    if (state.meta.foodInventoryVersion < FOOD_INVENTORY_VERSION) {
+      FOOD_ITEMS.forEach(function (f) {
+        var oldStarting = OLD_FOOD_ORIGINAL[f.key];
+        if (oldStarting != null && state.food[f.key] != null) {
+          var consumed = oldStarting - state.food[f.key];
+          state.food[f.key] = Math.max(0, f.original - consumed);
+        }
+      });
+      state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
+    }
     if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
