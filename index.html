@@ -2600,30 +2600,10 @@
   var layers = {};
 
   function unlockAudio() {
-    if (audioUnlocked) {
-      // Already unlocked once, but a browser (iOS Safari especially) can
-      // suspend an existing context later — any subsequent legitimate
-      // user gesture is a valid opportunity to resume it defensively.
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume().then(function () {
-          console.log('[Landfall engine audio] AudioContext resumed');
-        }).catch(function (err) {
-          console.warn('[Landfall engine audio] AudioContext resume failed:', describeError(err));
-        });
-      }
-      return;
-    }
+    if (audioUnlocked) return;
     audioUnlocked = true;
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      console.log('[Landfall engine audio] AudioContext created, state:', audioCtx.state);
-      if (audioCtx.state === 'suspended') {
-        audioCtx.resume().then(function () {
-          console.log('[Landfall engine audio] AudioContext resumed');
-        }).catch(function (err) {
-          console.warn('[Landfall engine audio] AudioContext resume failed:', describeError(err));
-        });
-      }
       buildAudioGraph();
     } catch (e) {
       console.warn('Audio unavailable:', describeError(e));
@@ -2681,173 +2661,6 @@
     if (GAME) updateAudioForState(GAME);
   }
 
-  /* --------------------------------------------------------------
-     ENGINE AUDIO
-     ------------------------------------------------------------
-     Deliberately NOT part of the Web Audio API graph above: three
-     plain HTMLAudioElements, created once, played/paused directly.
-     This is the second, simpler implementation after the Web Audio
-     API buffer/decodeAudioData version proved unreliable — no
-     fetch()/decodeAudioData, no AudioBufferSourceNode, no dependency
-     on audioCtx existing at all. Completely independent of, and never
-     touches, the ambient wind/wave/rigging/rain/hum layers above.
-
-     THE CRITICAL RULE: on iOS Safari, an audio .play() call only
-     counts as a direct result of a user gesture if it happens
-     SYNCHRONOUSLY inside that gesture's own event handler — not inside
-     a setTimeout it schedules, even one that setTimeout schedules for
-     0ms. runShortAction's own action callback (where the previous
-     implementation called into this) only fires after animateDots'
-     multi-second setTimeout, which is exactly why audio stayed silent
-     there. So triggerEngineStart/triggerEngineStop are called directly
-     from the click handlers themselves, BEFORE runShortAction is even
-     invoked — see the 'engine-start'/'engine-stop' cases and
-     DEPARTURE_STEPS' onGestureImmediate below.
-     -------------------------------------------------------------- */
-  var engineStartAudio = new Audio('audio/engine/engine_start.wav');
-  var engineUnderwayAudio = new Audio('audio/engine/engine_underway_loop.wav');
-  var engineStopAudio = new Audio('audio/engine/engine_stop.wav');
-  engineUnderwayAudio.loop = true;
-
-  var ENGINE_VOLUME = 0.55;       // restrained relative to the ambient wind/waves
-  var ENGINE_CROSSFADE_MS = 200;  // start<->underway<->stop overlap
-  var ENGINE_FADE_MS = 100;       // technical anti-click fade for a lone start/end
-
-  var engineKnownOn = null;         // last boat.engineOn this controller has synced to; null = not yet synced (nothing has happened since page load)
-  var engineCrossfadeTimer = null;  // pending start->underway handoff, so a quick STOP can cancel it
-
-  function engineVolume() {
-    return muted ? 0 : ENGINE_VOLUME;
-  }
-
-  // HTMLAudioElement has no native gain automation — this steps
-  // `el.volume` by hand in small increments, the plain-audio equivalent
-  // of a linear ramp. Always cancels any ramp already in progress on
-  // the same element first, so overlapping calls can never fight.
-  function rampVolume(el, target, ms, onDone) {
-    if (el._rampTimer) { clearInterval(el._rampTimer); el._rampTimer = null; }
-    var steps = Math.max(1, Math.round(ms / 30));
-    var start = el.volume;
-    var i = 0;
-    el._rampTimer = setInterval(function () {
-      i++;
-      el.volume = clamp(start + (target - start) * (i / steps), 0, 1);
-      if (i >= steps) {
-        clearInterval(el._rampTimer);
-        el._rampTimer = null;
-        if (onDone) onDone();
-      }
-    }, Math.max(1, ms / steps));
-  }
-
-  function safePlayEngine(el, label) {
-    console.log('[Landfall engine] playing', label);
-    var p = el.play();
-    if (p && typeof p.catch === 'function') {
-      p.catch(function (err) {
-        console.error('[Landfall engine]', label, 'play failed', err);
-      });
-    }
-  }
-
-  function playEngineStart() {
-    if (engineCrossfadeTimer) { clearTimeout(engineCrossfadeTimer); engineCrossfadeTimer = null; }
-    engineStartAudio.pause();
-    engineStartAudio.currentTime = 0;
-    engineStartAudio.volume = engineVolume();
-    safePlayEngine(engineStartAudio, 'start');
-
-    // engine_start.wav's real duration isn't known until its metadata
-    // loads; fall back to a reasonable default if that hasn't happened
-    // yet (harmless either way — this only governs the crossfade timing,
-    // never whether playback itself happens).
-    var dur = (isFinite(engineStartAudio.duration) && engineStartAudio.duration > 0) ? engineStartAudio.duration : 3;
-    var overlapSec = ENGINE_CROSSFADE_MS / 1000;
-    var delayMs = Math.max(0, dur - overlapSec) * 1000;
-    engineCrossfadeTimer = setTimeout(function () {
-      engineCrossfadeTimer = null;
-      playEngineUnderway();
-      rampVolume(engineStartAudio, 0, ENGINE_CROSSFADE_MS, function () { engineStartAudio.pause(); });
-    }, delayMs);
-  }
-
-  function playEngineUnderway() {
-    if (engineUnderwayAudio.paused) {
-      engineUnderwayAudio.currentTime = 0;
-      engineUnderwayAudio.volume = 0;
-      safePlayEngine(engineUnderwayAudio, 'underway');
-      console.log('[Landfall engine] underway started');
-    }
-    rampVolume(engineUnderwayAudio, engineVolume(), ENGINE_FADE_MS);
-  }
-
-  function playEngineStop() {
-    console.log('[Landfall engine] stop requested');
-    if (engineCrossfadeTimer) { clearTimeout(engineCrossfadeTimer); engineCrossfadeTimer = null; }
-    rampVolume(engineUnderwayAudio, 0, ENGINE_CROSSFADE_MS, function () {
-      engineUnderwayAudio.pause();
-      engineUnderwayAudio.currentTime = 0;
-    });
-    // A very-quick STOP right after START could still have the start
-    // recording mid-fade — bring it down too, same window.
-    if (!engineStartAudio.paused) {
-      rampVolume(engineStartAudio, 0, ENGINE_FADE_MS, function () { engineStartAudio.pause(); });
-    }
-    engineStopAudio.pause();
-    engineStopAudio.currentTime = 0;
-    engineStopAudio.volume = engineVolume();
-    safePlayEngine(engineStopAudio, 'stop');
-  }
-
-  // Player-initiated START/STOP — called directly and SYNCHRONOUSLY from
-  // the click handlers themselves (see the big comment above), never
-  // deferred behind runShortAction's dots animation. This is what makes
-  // playback actually reliable on iPhone Safari.
-  function triggerEngineStart() {
-    console.log('[Landfall engine] START requested');
-    engineKnownOn = true;
-    playEngineStart();
-  }
-  function triggerEngineStop() {
-    console.log('[Landfall engine] STOP requested');
-    engineKnownOn = false;
-    playEngineStop();
-  }
-
-  // Restores audio to match existing state on page load/resume (engine
-  // already running, or already off), and catches the one engine change
-  // that isn't a button click: running out of fuel mid-voyage
-  // (checkFuel, inside simTick). Called from updateAudioForState, itself
-  // already invoked whenever state changes; never writes back to
-  // boat.engineOn. engineKnownOn === null means nothing has synced yet
-  // since page load — that case jumps directly to whatever the engine
-  // already is, never replaying the startup recording for a voyage
-  // already underway. Once synced (by either this or the direct
-  // triggers above), a no-op on every call where engineOn hasn't
-  // actually changed — menus, ticks, and re-renders can never retrigger
-  // anything.
-  function syncEngineAudio(state) {
-    var on = state.boat.engineOn;
-    if (engineKnownOn === null) {
-      engineKnownOn = on;
-      if (on) playEngineUnderway();
-      return;
-    }
-    if (on === engineKnownOn) return;
-    engineKnownOn = on;
-    if (on) playEngineStart();
-    else playEngineStop();
-  }
-
-  // Re-levels whatever engine audio is currently audible when SOUND is
-  // toggled, without restarting or replaying anything — the underway
-  // loop, if already running (even silently), just gets louder/quieter.
-  function updateEngineAudioVolume() {
-    if (!engineStartAudio.paused) engineStartAudio.volume = engineVolume();
-    if (!engineUnderwayAudio.paused) engineUnderwayAudio.volume = engineVolume();
-    if (!engineStopAudio.paused) engineStopAudio.volume = engineVolume();
-  }
-
   function scheduleWaveSwell() {
     if (!audioCtx || !layers.waves) return;
     var now = audioCtx.currentTime;
@@ -2882,7 +2695,6 @@
   }
 
   function updateAudioForState(state) {
-    syncEngineAudio(state);
     if (!audioCtx || !layers.wind) return;
     var w = state.weather;
     var now = audioCtx.currentTime;
@@ -2904,7 +2716,6 @@
   function toggleMute() {
     muted = !muted;
     if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
-    updateEngineAudioVolume();
     updateSoundLabel();
   }
 
@@ -4608,7 +4419,6 @@
           });
           break;
         case 'engine-start':
-          triggerEngineStart(); // must run synchronously in this click, before runShortAction's setTimeout-driven dots — see the big comment above the engine audio functions
           runShortAction(state, {
             label: 'STARTING ENGINE',
             duration: 3,
@@ -4628,7 +4438,6 @@
           });
           break;
         case 'engine-stop':
-          triggerEngineStop(); // same reasoning — synchronous, before runShortAction
           runShortAction(state, {
             label: 'STOPPING ENGINE',
             duration: 2,
@@ -4713,7 +4522,6 @@
       case 'departure-step':
         var step = DEPARTURE_STEPS[state.departure.stageIndex];
         if (step) {
-          if (step.onGestureImmediate) step.onGestureImmediate(state); // must run synchronously in this click, before runShortAction's setTimeout-driven dots — see the engine audio comment above
           runShortAction(state, {
             label: step.workingLabel || step.label,
             duration: step.duration || 3,
@@ -4758,7 +4566,6 @@
       workingLabel: 'STARTING ENGINE',
       duration: 3,
       text: 'The engine catches.',
-      onGestureImmediate: function () { triggerEngineStart(); },
       onEnter: function (s) { s.boat.engineOn = true; },
     },
     {
