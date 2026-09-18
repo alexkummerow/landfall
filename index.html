@@ -386,16 +386,21 @@
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         lastRoutineAt: { wash: null, dress: null, dishes: null, read: null }, // voyageMinutes of last use, for gentle diminishing returns
+        snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
+        dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
+        lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
       },
       food: {
-        oatmeal: 18, pasta: 12, rice: 16, soup: 8, chili: 8,
-        tuna: 10, crackers: 12, peanutButter: 10, nuts: 16,
-        driedFruit: 12, energyBars: 12, freshFruit: 8, freshBread: 6,
-        comfort: 6, coffee: 24,
+        oatmeal: 12, pasta: 8, rice: 11, soup: 5, chili: 5,
+        tuna: 7, crackers: 8, peanutButter: 7, nuts: 11,
+        driedFruit: 8, energyBars: 8, freshFruit: 5, freshBread: 4,
+        chocolate: 4,
+      },
+      drinks: {
+        coffee: 24, tea: 24,
       },
       water: {
-        primary: 35,    // gallons
-        emergency: 8,   // gallons — a deliberate reserve, not silently spent
+        gallons: 50.0, // ONE authoritative potable-water supply for the whole boat -- drinking, coffee, tea, washing, dishes, and cooking all draw from this same value. See WATER_* constants and hasEnoughWater/consumeWater.
       },
       supplies: {
         propane: 60, // stove uses
@@ -418,6 +423,8 @@
         fatigueNarrated: false,
         thirstNarrated: false,
         hungerNarrated: false,
+        cleanlinessNarrated: false,
+        galleyNarrated: false,
         freshFruitSpoiled: false,
         freshBreadSpoiled: false,
         lastMilestone: 0,
@@ -875,20 +882,33 @@
      by hoursSinceMeal / hoursSinceWater (already tracked). No numeric
      meter is ever shown — cmdStatus prints the label only.
      -------------------------------------------------------------- */
-  var HUNGER_LABELS = ['FED', 'GETTING HUNGRY', 'HUNGRY', 'VERY HUNGRY. WEAKENING.'];
-  var THIRST_LABELS = ['HYDRATED', 'GETTING THIRSTY', 'THIRSTY', 'SEVERELY DEHYDRATED.'];
+  var HUNGER_LABELS = ['FULL', 'SATISFIED', 'HUNGRY', 'VERY HUNGRY', 'STARVING'];
+  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'THIRSTY', 'VERY THIRSTY', 'SEVERELY THIRSTY'];
+  var ENERGY_LABELS = ['DEPLETED', 'EXHAUSTED', 'TIRED', 'GOOD', 'RESTED'];
 
   function hungerLevel(hoursSinceMeal) {
-    if (hoursSinceMeal <= 4) return 0;
-    if (hoursSinceMeal <= 9) return 1;
-    if (hoursSinceMeal <= 16) return 2;
-    return 3;
+    if (hoursSinceMeal <= 3) return 0;
+    if (hoursSinceMeal <= 7) return 1;
+    if (hoursSinceMeal <= 13) return 2;
+    if (hoursSinceMeal <= 20) return 3;
+    return 4;
   }
   function thirstLevel(hoursSinceWater) {
-    if (hoursSinceWater <= 4) return 0;
-    if (hoursSinceWater <= 9) return 1;
-    if (hoursSinceWater <= 16) return 2;
-    return 3;
+    if (hoursSinceWater <= 3) return 0;
+    if (hoursSinceWater <= 7) return 1;
+    if (hoursSinceWater <= 13) return 2;
+    if (hoursSinceWater <= 20) return 3;
+    return 4;
+  }
+  // Same breakpoints computeMoraleTarget already uses for fatigue (below)
+  // — ENERGY is just fatigue read the other way round (high fatigue =
+  // low energy), not a second tracked number.
+  function energyLevel(fatigue) {
+    if (fatigue > 80) return 0;  // DEPLETED
+    if (fatigue > 60) return 1;  // EXHAUSTED
+    if (fatigue > 40) return 2;  // TIRED
+    if (fatigue > 20) return 3;  // GOOD
+    return 4;                     // RESTED
   }
 
   // MORALE is a settling value, not a pool: every tick it drifts toward
@@ -917,16 +937,19 @@
   var MORALE_BASELINE = 55;
   var MORALE_DRIFT_PER_HOUR = 0.35; // how quickly morale closes the gap to its target — inertia, not instant snapping, but real movement within a single day
 
-  function hoursSinceAnySelfCare(state) {
-    var last = state.crew.lastRoutineAt || {};
-    var keys = ['wash', 'dress', 'dishes', 'read'];
-    var mostRecent = null;
-    for (var i = 0; i < keys.length; i++) {
-      var t = last[keys[i]];
-      if (t != null && (mostRecent === null || t > mostRecent)) mostRecent = t;
-    }
-    if (mostRecent === null) return state.meta.voyageMinutes / 60; // never yet — read as "since the voyage began," not infinite
-    return (state.meta.voyageMinutes - mostRecent) / 60;
+  // Cleanliness and the galley state are each their own hidden pressure
+  // source now (never lumped together) — wash and dishes are tracked
+  // separately so one doesn't mask the other, and neither creates any
+  // real consequence until it's been genuinely neglected for a while.
+  function hoursSinceWash(state) {
+    var last = state.crew.lastRoutineAt.wash;
+    if (last == null) return state.meta.voyageMinutes / 60;
+    return (state.meta.voyageMinutes - last) / 60;
+  }
+  function dishesDirtyHours(state) {
+    var since = state.crew.dishesDirtySinceMinutes;
+    if (since == null) return 0;
+    return (state.meta.voyageMinutes - since) / 60;
   }
 
   function computeMoraleTarget(state) {
@@ -935,15 +958,17 @@
 
     var hLevel = hungerLevel(c.hoursSinceMeal);
     if (hLevel === 0) target += 8;
-    else if (hLevel === 1) target -= 4;
-    else if (hLevel === 2) target -= 10;
-    else target -= clamp(20 + (c.hoursSinceMeal - 16) * 0.8, 20, 35);
+    else if (hLevel === 1) target += 3;
+    else if (hLevel === 2) target -= 6;
+    else if (hLevel === 3) target -= 14;
+    else target -= clamp(24 + (c.hoursSinceMeal - 20) * 0.8, 24, 38);
 
     var tLevel = thirstLevel(c.hoursSinceWater);
     if (tLevel === 0) target += 8;
-    else if (tLevel === 1) target -= 5;
-    else if (tLevel === 2) target -= 13;
-    else target -= clamp(24 + (c.hoursSinceWater - 16) * 1.0, 24, 42);
+    else if (tLevel === 1) target += 3;
+    else if (tLevel === 2) target -= 8;
+    else if (tLevel === 3) target -= 18;
+    else target -= clamp(28 + (c.hoursSinceWater - 20) * 1.0, 28, 45);
 
     if (c.fatigue <= 20) target += 6;
     else if (c.fatigue <= 40) target += 0;
@@ -951,11 +976,27 @@
     else if (c.fatigue <= 80) target -= 16;
     else target -= 26;
 
-    var selfCareHours = hoursSinceAnySelfCare(state);
-    if (selfCareHours <= 8) target += 5;
-    else if (selfCareHours <= 20) target += 0;
-    else target -= 8;
+    // Skipping one wash: no meaningful consequence. Several days without
+    // one: a small, capped drag, never a crisis.
+    var washHours = hoursSinceWash(state);
+    if (washHours > 48) target -= clamp((washHours - 48) * 0.15, 0, 10);
 
+    // Same shape for a galley left dirty a long time.
+    var dishHours = dishesDirtyHours(state);
+    if (dishHours > 30) target -= clamp((dishHours - 30) * 0.15, 0, 8);
+
+    // Meal monotony: a snack instead of a real meal is nothing on its
+    // own — this only engages once recent eating has genuinely skewed
+    // toward quick/snack food for a stretch (see performEat).
+    if (c.snackMealRatio > 0.55) target -= (c.snackMealRatio - 0.55) * 20;
+
+    // Sustained rough seas: because morale only ever drifts toward this
+    // target rather than snapping to it, a single rough tick barely
+    // moves anything — it's genuinely PROLONGED rough weather that pulls
+    // morale down, exactly as intended, with no separate duration
+    // counter needed.
+    if (state.weather.seaState >= 5) target -= 8;
+    else if (state.weather.seaState >= 4) target -= 3;
     if (state.weather.condition === 'squall') target -= 10;
 
     return clamp(target, 0, 100);
@@ -970,24 +1011,26 @@
   }
 
   // Foods: one unit is one serving. `cooked` items need the stove (propane
-  // + a little fresh water, and calm-enough seas); everything else is
-  // ready to eat as-is. `heavy` meals are more filling and recover more
-  // fatigue; `comfort` food leans on morale instead.
+  // + water per waterGal, and calm-enough seas); everything else is ready
+  // to eat as-is. `category` drives how much hunger-relief time a meal
+  // buys (see HUNGER_RESET_OFFSET_HOURS), how it weighs into recent-meal
+  // monotony (see performEat/snackMealRatio), and — for chocolate only —
+  // an entirely separate path with no hunger/energy effect at all.
   var FOOD_ITEMS = [
-    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true },
-    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true },
-    { key: 'rice', name: 'Rice', cooked: true, heavy: true },
-    { key: 'soup', name: 'Soup', cooked: true, heavy: true },
-    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true },
-    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false },
-    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false },
-    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false },
-    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false },
-    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false },
-    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false },
-    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true },
-    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true },
-    { key: 'comfort', name: 'Comfort Food', cooked: false, heavy: false, comfort: true },
+    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial' },
+    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true, waterGal: 0.125, category: 'substantial' },
+    { key: 'rice', name: 'Rice', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial' },
+    { key: 'soup', name: 'Soup', cooked: true, heavy: true, category: 'substantial' },
+    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true, category: 'substantial' },
+    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false, category: 'roughWeather' },
+    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false, category: 'roughWeather' },
+    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false, category: 'roughWeather' },
+    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false, category: 'quick' },
+    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false, category: 'quick' },
+    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false, category: 'quick' },
+    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true, category: 'fresh' },
+    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true, category: 'fresh' },
+    { key: 'chocolate', name: 'Chocolate', cooked: false, heavy: false, category: 'chocolate' },
   ];
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
@@ -1615,7 +1658,26 @@
   // what I left the dock with is left," not a refillable tank capacity
   // (there's no way to take on more of either mid-voyage).
   var FUEL_STARTING_GALLONS = 20;
-  var WATER_STARTING_GALLONS = 35;
+  var WATER_STARTING_GALLONS = 50.0;
+
+  // Fixed per-action water amounts (all exact binary fractions of a
+  // gallon — 1/8, 3/32, 1/4, 1/16 — so repeated subtraction never drifts
+  // from floating-point rounding). The single source of truth for how
+  // much each routine action draws from state.water.gallons, the ONE
+  // authoritative potable-water supply for the whole boat.
+  var WATER_DRINK_GAL = 0.125;     // 16 fl oz
+  var WATER_COFFEE_GAL = 0.09375;  // 12 fl oz
+  var WATER_TEA_GAL = 0.09375;     // 12 fl oz
+  var WATER_WASH_GAL = 0.25;       // 32 fl oz
+  var WATER_DISHES_GAL = 0.125;    // 16 fl oz
+
+  function hasEnoughWater(state, amountGal) {
+    return state.water.gallons >= amountGal - 1e-9; // tiny epsilon guards against a false negative right at an exact boundary
+  }
+  function consumeWater(state, amountGal) {
+    state.water.gallons = Math.max(0, state.water.gallons - amountGal);
+  }
+
   var DRIFT_BASE_KT = 0.2;           // ambient current/windage on the hull — present even with sails furled and the engine off
   var DRIFT_WIND_FACTOR = 0.025;     // more wind pushes an unpowered hull a little faster over the ground
   var DRIFT_MAX_KT = 1.0;            // this is NOT propulsion — keep it small and capped
@@ -1761,10 +1823,13 @@
     }
 
     c.hoursSinceMeal += hrs;
-    // Heat (once well into the tropics) and hard physical work (rough seas)
-    // both raise water needs — modeled as thirst simply arriving faster.
+    // Real heat and hard physical work (rough seas) both raise water
+    // needs — modeled as thirst simply arriving faster. Uses the boat's
+    // actual current temperature reading rather than a coastal/tropics
+    // proxy, since Landfall already tracks that directly.
     var waterRate = 1;
-    if (state.nav.waypointIndex >= 6) waterRate += 0.4;
+    if (state.weather.temperatureF >= 82) waterRate += 0.5;
+    else if (state.weather.temperatureF >= 72) waterRate += 0.2;
     if (state.weather.seaState >= 4) waterRate += 0.3;
     c.hoursSinceWater += hrs * waterRate;
 
@@ -1907,6 +1972,8 @@
     checkFatigueNarration(state);
     checkThirstNarration(state);
     checkHungerNarration(state);
+    checkCleanlinessNarration(state);
+    checkGalleyNarration(state);
     checkSpoilage(state);
     checkMilestones(state);
     checkAmbientEvent(state);
@@ -2232,6 +2299,26 @@
       log(state, "Stomach's stopped asking and started aching. You need real food.");
     }
     if (hungerLevel(state.crew.hoursSinceMeal) < 2) f.hungerNarrated = false;
+  }
+
+  function checkCleanlinessNarration(state) {
+    var f = state.flags;
+    var hours = hoursSinceWash(state);
+    if (hours > 60 && !f.cleanlinessNarrated) {
+      f.cleanlinessNarrated = true;
+      log(state, 'You could use a wash.');
+    }
+    if (hours < 24) f.cleanlinessNarrated = false;
+  }
+
+  function checkGalleyNarration(state) {
+    var f = state.flags;
+    var hours = dishesDirtyHours(state);
+    if (hours > 36 && !f.galleyNarrated) {
+      f.galleyNarrated = true;
+      log(state, 'The galley could use some attention.');
+    }
+    if (hours < 12) f.galleyNarrated = false;
   }
 
   /* --------------------------------------------------------------
@@ -2869,9 +2956,9 @@
     return describeLevel(v, [
       { max: 19, text: 'DEPLETED' },
       { max: 39, text: 'LOW' },
-      { max: 59, text: 'STEADY' },
+      { max: 59, text: 'CONTENT' },
       { max: 79, text: 'GOOD' },
-      { max: 100, text: 'HIGH' },
+      { max: 100, text: 'UPBEAT' },
     ]);
   }
 
@@ -2977,7 +3064,7 @@
      8. COMMANDS
      ============================================================ */
   function cmdStatus(state) {
-    var b = state.boat;
+    var b = state.boat, c = state.crew;
     // Space-padded columns, not inventoryLine's dot-fill — STATUS reads as
     // a short instrument panel, not a supply list.
     function statusLine(label, value) {
@@ -2986,7 +3073,10 @@
     printBlank();
     printLine('STATUS', 'heading-label');
     printBlank();
-    printLine(statusLine('MORALE', moraleLevel(state.crew.morale)));
+    printLine(statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
+    printLine(statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
+    printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
+    printLine(statusLine('MORALE', moraleLevel(c.morale)));
     printBlank();
     printLine(statusLine('HULL', boatConditionLevel(b.hull)));
     printLine(statusLine('RIGGING', boatConditionLevel(b.rigging)));
@@ -2997,7 +3087,7 @@
     printLine(statusLine('STEERING', boatConditionLevel(b.steering)));
     printBlank();
     printLine(statusLine('FUEL', Math.round(clamp(b.fuelGallons / FUEL_STARTING_GALLONS, 0, 1) * 100) + '%'));
-    printLine(statusLine('WATER', Math.round(clamp(state.water.primary / WATER_STARTING_GALLONS, 0, 1) * 100) + '%'));
+    printLine(statusLine('WATER', Math.round(clamp(state.water.gallons / WATER_STARTING_GALLONS, 0, 1) * 100) + '%'));
     state.pendingChoice = { id: 'status-view', options: [{ label: 'BACK', action: 'cancel' }] };
   }
 
@@ -3170,18 +3260,18 @@
     switch (cat) {
       case 'provisions':
         printLine('PROVISIONS', 'heading-label');
-        var anyFood = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; }) || state.food.coffee > 0;
+        var anyFood = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
         if (!anyFood) {
           printLine('Nothing left aboard to eat.', 'amber');
         } else {
           FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key])); });
-          if (state.food.coffee > 0) printLine(foodItemLine({ name: 'Coffee' }, state.food.coffee));
         }
         break;
       case 'water':
         printLine('WATER', 'heading-label');
-        printLine(inventoryLine('Fresh water', state.water.primary.toFixed(1) + ' gal'));
-        printLine(inventoryLine('Emergency water', state.water.emergency.toFixed(1) + ' gal'));
+        printLine(inventoryLine('Water', state.water.gallons.toFixed(1) + ' gal'));
+        printLine(inventoryLine('Coffee', String(state.drinks.coffee)));
+        printLine(inventoryLine('Tea', String(state.drinks.tea)));
         break;
       case 'fuel':
         printLine('FUEL', 'heading-label');
@@ -3386,17 +3476,19 @@
   }
 
   function cmdWash(state) {
+    if (!hasEnoughWater(state, WATER_WASH_GAL)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      return;
+    }
     runShortAction(state, {
       label: 'WASHING UP',
       duration: 3,
       action: function (s) {
-        var hadFreshWater = s.water.primary > 0;
-        if (hadFreshWater) s.water.primary = clamp(s.water.primary - 0.15, 0, 999);
+        consumeWater(s, WATER_WASH_GAL);
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, hadFreshWater
-          ? 'A wash-up with fresh water. Small thing, helps anyway.'
-          : "A rinse with what's at hand \u2014 not the same, but it helps.");
+        log(s, 'A wash-up with fresh water. Small thing, helps anyway.');
         flushNewLogEntries(s);
       },
     });
@@ -3416,13 +3508,25 @@
   }
 
   function cmdDishes(state) {
+    if (!hasEnoughWater(state, WATER_DISHES_GAL)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      return;
+    }
+    var wasDirty = state.crew.dishesDirtySinceMinutes != null;
     runShortAction(state, {
       label: 'CLEANING UP',
       duration: 3,
       action: function (s) {
-        var gain = routineMoraleGain(s, 'dishes', 3);
-        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'Galley squared away. One less thing underfoot.');
+        consumeWater(s, WATER_DISHES_GAL);
+        s.crew.dishesDirtySinceMinutes = null;
+        if (wasDirty) {
+          var gain = routineMoraleGain(s, 'dishes', 3);
+          s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+          log(s, 'Galley squared away. One less thing underfoot.');
+        } else {
+          log(s, 'Nothing much to clean, but you tidy up anyway.');
+        }
         flushNewLogEntries(s);
       },
     });
@@ -3450,7 +3554,6 @@
   function buildEatOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
-    if (state.food.coffee > 0) opts.push({ label: 'COFFEE (' + state.food.coffee + ')', action: 'eat:coffee' });
     opts.push({ label: 'NEVER MIND', action: 'cancel' });
     return opts;
   }
@@ -3458,7 +3561,7 @@
   function cmdEat(state) {
     printBlank();
     printLine('PROVISIONS', 'heading-label');
-    var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; }) || state.food.coffee > 0;
+    var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
     if (!any) {
       printLine('Nothing left aboard to eat.', 'amber');
       return;
@@ -3466,7 +3569,6 @@
     FOOD_ITEMS.forEach(function (f) {
       if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key]));
     });
-    if (state.food.coffee > 0) printLine(foodItemLine({ name: 'Coffee' }, state.food.coffee));
     state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
   }
 
@@ -3477,17 +3579,56 @@
     return verb + ' ' + item.name.toLowerCase() + ' ' + where + '.';
   }
 
+  // How much hunger-relief TIME each meal category buys, applied as the
+  // value hoursSinceMeal resets to (often negative — "buys a few extra
+  // hours before hunger starts building again") rather than always
+  // snapping to a flat zero. Chocolate isn't listed: it never touches
+  // hoursSinceMeal at all.
+  var HUNGER_RESET_OFFSET_HOURS = { substantial: -3, roughWeather: -1, quick: 0, fresh: -1 };
+
+  // Comfort, not sustenance — no prep, no seastate/propane/water gates,
+  // no hunger/thirst/energy effect at all. A small, temporary morale
+  // lift with the same diminishing-returns shape as routineMoraleGain,
+  // keyed off lastChocolateAt so several pieces eaten back to back don't
+  // each land a full comfort bump.
+  function chocolateMoraleGain(state) {
+    var last = state.crew.lastChocolateAt;
+    var hoursSince = last == null ? 999 : (state.meta.voyageMinutes - last) / 60;
+    var fullGain = 7;
+    if (hoursSince >= 12) return fullGain;
+    if (hoursSince >= 3) return Math.round(fullGain * 0.4);
+    return Math.max(1, Math.round(fullGain * 0.15));
+  }
+  function eatChocolateLine(state) {
+    if (state.food.chocolate === 0) return 'You eat the last of the chocolate, and sit for a while.';
+    var lines = ['You eat some chocolate.', 'A square of chocolate. Small, but it helps.'];
+    return lines[Math.floor(Math.random() * lines.length)];
+  }
+
   function performEat(state, key) {
-    if (key === 'coffee') {
-      performCoffee(state);
-      return;
-    }
     var item = FOOD_ITEMS_BY_KEY[key];
     if (!item || state.food[key] <= 0) {
       printBlank();
       printLine("That's already gone.", 'dim');
       return;
     }
+
+    if (item.category === 'chocolate') {
+      runShortAction(state, {
+        label: 'EATING CHOCOLATE',
+        duration: 2,
+        action: function (s) {
+          s.food[key] -= 1;
+          var gain = chocolateMoraleGain(s);
+          s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+          s.crew.lastChocolateAt = s.meta.voyageMinutes;
+          log(s, eatChocolateLine(s));
+          flushNewLogEntries(s);
+        },
+      });
+      return;
+    }
+
     if (item.cooked) {
       if (state.weather.seaState >= 5) {
         printBlank();
@@ -3503,6 +3644,16 @@
         return;
       }
     }
+    // Cooking water: only oatmeal/rice/pasta carry a per-serving cost
+    // (item.waterGal); everything else draws 0 and this check is simply
+    // skipped for them.
+    var waterNeeded = item.waterGal || 0;
+    if (waterNeeded > 0 && !hasEnoughWater(state, waterNeeded)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+      return;
+    }
     // Gates passed (or there weren't any) — the actual preparing/eating
     // takes a few real seconds. Cooking takes longer than grabbing
     // something ready to eat.
@@ -3511,34 +3662,109 @@
       label: label,
       duration: item.cooked ? 5 : 2,
       action: function (s) {
+        var c = s.crew;
         if (item.cooked) {
           s.supplies.propane = clamp(s.supplies.propane - 1, 0, 999);
-          s.water.primary = clamp(s.water.primary - 0.2, 0, 999);
         }
+        if (waterNeeded > 0) consumeWater(s, waterNeeded);
         s.food[key] -= 1;
-        s.crew.hoursSinceMeal = 0;
-        var fatigueGain = item.heavy ? 6 : 3;
-        var moraleGain = item.comfort ? 6 : (item.heavy ? 3 : 1);
-        s.crew.fatigue = clamp(s.crew.fatigue - fatigueGain, 0, 100);
-        s.crew.morale = clamp(s.crew.morale + moraleGain, 0, 100);
+
+        // Hunger: a real meal genuinely holds longer than a handful of
+        // nuts, so this resets to a category-dependent offset rather
+        // than always snapping to a flat zero.
+        c.hoursSinceMeal = HUNGER_RESET_OFFSET_HOURS[item.category] || 0;
+
+        // Meal-history monotony (hidden, never shown): an exponential
+        // moving average nudged toward 1 by a snack, toward 0 by
+        // something substantial or fresh. One item barely moves it;
+        // several days the same way clearly does — see
+        // computeMoraleTarget's snackMealRatio pressure.
+        var snackWeight = (item.category === 'quick') ? 1 : (item.category === 'substantial' || item.category === 'fresh') ? 0 : 0.5;
+        c.snackMealRatio = c.snackMealRatio * 0.7 + snackWeight * 0.3;
+
+        // A cooked meal leaves dishes behind — stamped once, not
+        // re-stamped by a second meal before they're washed, so the
+        // clock reflects how long they've ACTUALLY been sitting.
+        if (item.cooked && c.dishesDirtySinceMinutes == null) {
+          c.dishesDirtySinceMinutes = s.meta.voyageMinutes;
+        }
+
+        var fatigueGain = item.heavy ? 3 : 1;
+        var moraleGain = item.heavy ? 3 : (item.category === 'fresh' ? 2 : 1);
+        // Finally breaking a run of snack-heavy eating with something
+        // proper feels genuinely restorative, on top of the flat amount.
+        if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
+        c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
+        c.morale = clamp(c.morale + moraleGain, 0, 100);
         log(s, eatFlavorLine(s, item));
         flushNewLogEntries(s);
       },
     });
   }
 
+  // DRINK — its own ROUTINE submenu (matching the existing submenu
+  // pattern), listing WATER/COFFEE/TEA with their live, authoritative
+  // quantities right in the option label. All three draw from the SAME
+  // state.water.gallons pool; there is no separate reserve for any of
+  // them. Coffee and tea are counted resources of their own
+  // (state.drinks), spent one at a time alongside the water they're
+  // made with.
+  function drinkMenuOptions(state) {
+    return [
+      { label: instrumentLine('WATER', state.water.gallons.toFixed(1) + ' GAL'), action: 'drink:water' },
+      { label: instrumentLine('COFFEE', String(state.drinks.coffee)), action: 'drink:coffee' },
+      { label: instrumentLine('TEA', String(state.drinks.tea)), action: 'drink:tea' },
+      { label: 'BACK', action: 'cancel' },
+    ];
+  }
+
+  function cmdDrink(state) {
+    printBlank();
+    printLine('DRINK', 'heading-label');
+    state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+  }
+
+  function performDrinkWater(state) {
+    if (!hasEnoughWater(state, WATER_DRINK_GAL)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    runShortAction(state, {
+      label: 'POURING WATER',
+      duration: 2,
+      action: function (s) {
+        consumeWater(s, WATER_DRINK_GAL);
+        s.crew.hoursSinceWater = 0;
+        s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
+        s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
+        log(s, 'You drink some water.');
+        flushNewLogEntries(s);
+      },
+    });
+  }
+
   function performCoffee(state) {
-    if (state.food.coffee <= 0) {
+    if (state.drinks.coffee <= 0) {
       printBlank();
       printLine('No coffee left.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    if (!hasEnoughWater(state, WATER_COFFEE_GAL)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
     runShortAction(state, {
       label: 'MAKING COFFEE',
       duration: 3,
       action: function (s) {
-        s.food.coffee -= 1;
-        s.water.primary = clamp(s.water.primary - 0.1, 0, 999);
+        s.drinks.coffee -= 1;
+        consumeWater(s, WATER_COFFEE_GAL);
+        s.crew.hoursSinceWater = 0;
         s.crew.lastCoffeeAt = s.meta.voyageMinutes;
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
         log(s, 'Coffee, strong and hot. The world sharpens a little.');
@@ -3547,41 +3773,28 @@
     });
   }
 
-  function cmdDrink(state) {
-    if (state.water.primary > 0) {
-      performDrinkFrom(state, 'primary');
-      return;
-    }
-    printBlank();
-    if (state.water.emergency > 0) {
-      printLine('Primary tank is empty.', 'amber');
-      state.pendingChoice = {
-        id: 'drink-emergency-choice',
-        options: [
-          { label: 'USE EMERGENCY RESERVE', action: 'drink:emergency' },
-          { label: 'NEVER MIND', action: 'cancel' },
-        ],
-      };
-      return;
-    }
-    printLine('No water left aboard.', 'amber');
-  }
-
-  function performDrinkFrom(state, tank) {
-    if (state.water[tank] <= 0) {
+  function performTea(state) {
+    if (state.drinks.tea <= 0) {
       printBlank();
-      printLine('Nothing there.', 'dim');
+      printLine('No tea left.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    if (!hasEnoughWater(state, WATER_TEA_GAL)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
     runShortAction(state, {
-      label: 'POURING WATER',
-      duration: 2,
+      label: 'MAKING TEA',
+      duration: 3,
       action: function (s) {
-        s.water[tank] = clamp(s.water[tank] - 0.25, 0, 999);
+        s.drinks.tea -= 1;
+        consumeWater(s, WATER_TEA_GAL);
         s.crew.hoursSinceWater = 0;
-        s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
-        s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
-        log(s, tank === 'emergency' ? "Water from the emergency jugs. It'll have to do." : 'Water, straight from the tap. Cool enough.');
+        s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
+        log(s, 'Tea, warm in your hands. Something steadying about it.');
         flushNewLogEntries(s);
       },
     });
@@ -4090,8 +4303,12 @@
 
     if (action.indexOf('eat:') === 0) {
       performEat(state, action.slice(4));
-    } else if (action.indexOf('drink:') === 0) {
-      performDrinkFrom(state, action.slice(6));
+    } else if (action === 'drink:water') {
+      performDrinkWater(state);
+    } else if (action === 'drink:coffee') {
+      performCoffee(state);
+    } else if (action === 'drink:tea') {
+      performTea(state);
     } else if (action.indexOf('inventory:') === 0) {
       var invCat = action.slice(10);
       if (invCat === 'back') {
@@ -4568,18 +4785,52 @@
         crackers: Math.round(12 * foodFrac), peanutButter: Math.round(10 * foodFrac), nuts: Math.round(16 * foodFrac),
         driedFruit: Math.round(12 * foodFrac), energyBars: Math.round(12 * foodFrac),
         freshFruit: Math.round(8 * foodFrac), freshBread: Math.round(6 * foodFrac),
-        comfort: Math.round(6 * foodFrac), coffee: Math.round(24 * foodFrac),
+        chocolate: Math.round(6 * foodFrac), coffee: Math.round(24 * foodFrac),
       };
       state.water = { primary: +(35 * waterFrac).toFixed(1), emergency: 8 };
       state.supplies = { propane: Math.round(60 * foodFrac) };
       delete c.foodDays;
       delete c.waterDays;
     }
+    // Consolidate the old primary+emergency water split into one
+    // authoritative pool. This sums whatever remained of each — an
+    // existing voyage's actual remaining supply carries over exactly,
+    // never reset to the new 50-gallon starting amount and never
+    // topped up with phantom extra water.
+    if (state.water.gallons === undefined) {
+      var oldPrimary = state.water.primary != null ? state.water.primary : 0;
+      var oldEmergency = state.water.emergency != null ? state.water.emergency : 0;
+      state.water = { gallons: oldPrimary + oldEmergency };
+    }
+    // Coffee moves out of food into its own drinks bucket, preserving
+    // however much the player already has left. Tea never existed
+    // before this pass, so there's no prior consumption to preserve —
+    // an existing voyage is granted a fresh supply of it.
+    if (!state.drinks) {
+      state.drinks = {
+        coffee: state.food.coffee != null ? state.food.coffee : 24,
+        tea: 24,
+      };
+      delete state.food.coffee;
+    }
+    // Comfort Food is retired in favor of Chocolate — any existing save
+    // that still has the old key carries its quantity over exactly
+    // (never topped up, never reset), then the old key is dropped.
+    if (state.food.comfort !== undefined) {
+      state.food.chocolate = (state.food.chocolate || 0) + state.food.comfort;
+      delete state.food.comfort;
+    }
+    if (state.food.chocolate === undefined) state.food.chocolate = 4;
     if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
+    if (c.snackMealRatio === undefined) c.snackMealRatio = 0;
+    if (c.dishesDirtySinceMinutes === undefined) c.dishesDirtySinceMinutes = null;
+    if (c.lastChocolateAt === undefined) c.lastChocolateAt = null;
     if (c.location === undefined) c.location = 'above';
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
+    if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
+    if (state.flags.galleyNarrated === undefined) state.flags.galleyNarrated = false;
     if (state.flags.freshFruitSpoiled === undefined) state.flags.freshFruitSpoiled = false;
     if (state.flags.freshBreadSpoiled === undefined) state.flags.freshBreadSpoiled = false;
     // Diesel used to be tracked as "hours of motoring left" — convert any
