@@ -386,10 +386,17 @@
         coffeeCount: 0,
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
-        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null }, // voyageMinutes of last use, for gentle diminishing returns
+        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
+        clothesWetSinceMinutes: null, // voyageMinutes clothes were first noticed wet (above deck in rain/spray), or null — cleared by DRY CLOTHES or CHANGE
+        toolsOutSinceMinutes: null,   // voyageMinutes since a completed repair left tools out, or null — cleared by PUT AWAY TOOLS
+        bunkUnmadeSinceMinutes: null, // voyageMinutes since last waking, or null once made — cleared by MAKE BUNK
+        dampCabinHours: 0,            // accumulates while below deck in bad weather; resets when the cabin is aired out
+        cabinStuffySinceMinutes: null, // voyageMinutes dampCabinHours first crossed the threshold, or null — cleared by AIR OUT CABIN
+        clutterCount: 0,              // small accumulator from minor activity (eating, reading); resets once TIDY UP is done
+        clutterSinceMinutes: null,    // voyageMinutes clutterCount first crossed the threshold, or null — for consistent chore ordering
       },
       food: {
         oatmeal: 12, pasta: 8, rice: 12, soup: 6, chili: 6,
@@ -952,6 +959,34 @@
     if (since == null) return 0;
     return (state.meta.voyageMinutes - since) / 60;
   }
+  function clothesWetHours(state) {
+    var since = state.crew.clothesWetSinceMinutes;
+    if (since == null) return 0;
+    return (state.meta.voyageMinutes - since) / 60;
+  }
+  function toolsOutHours(state) {
+    var since = state.crew.toolsOutSinceMinutes;
+    if (since == null) return 0;
+    return (state.meta.voyageMinutes - since) / 60;
+  }
+  function bunkUnmadeHours(state) {
+    var since = state.crew.bunkUnmadeSinceMinutes;
+    if (since == null) return 0;
+    return (state.meta.voyageMinutes - since) / 60;
+  }
+
+  // Thresholds/tuning for the dynamic CHORE system — see buildChoreOptions.
+  var CABIN_STUFFY_HOURS = 14;     // accumulated hours below deck in bad weather before AIR OUT CABIN appears
+  var CLUTTER_TIDY_THRESHOLD = 5;  // small accumulated actions before TIDY UP appears
+  var WET_CLOTHES_SEASTATE = 4;    // seaState at/above which spray counts as "heavy" for wet clothes
+
+  function bumpClutter(state, amount) {
+    var c = state.crew;
+    c.clutterCount += amount;
+    if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD && c.clutterSinceMinutes == null) {
+      c.clutterSinceMinutes = state.meta.voyageMinutes;
+    }
+  }
 
   function computeMoraleTarget(state) {
     var c = state.crew;
@@ -985,6 +1020,24 @@
     // Same shape for a galley left dirty a long time.
     var dishHours = dishesDirtyHours(state);
     if (dishHours > 30) target -= clamp((dishHours - 30) * 0.15, 0, 8);
+
+    // The rest of the "lived-in boat" pressure — wet gear, tools left
+    // out, an unmade bunk, a stuffy cabin, general clutter. Each is
+    // small and capped on its own, same shape as wash/dishes above:
+    // no consequence for a while, then a gentle, bounded drag. This is
+    // atmosphere, not a survival mechanic — even with everything
+    // neglected at once the total stays modest next to hunger/thirst.
+    var wetHours = clothesWetHours(state);
+    if (wetHours > 10) target -= clamp((wetHours - 10) * 0.2, 0, 6);
+
+    var toolHours = toolsOutHours(state);
+    if (toolHours > 20) target -= clamp((toolHours - 20) * 0.1, 0, 4);
+
+    var bunkHours = bunkUnmadeHours(state);
+    if (bunkHours > 24) target -= clamp((bunkHours - 24) * 0.08, 0, 3);
+
+    if (c.cabinStuffySinceMinutes != null) target -= 4;
+    if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD) target -= 3;
 
     // Meal monotony: a snack instead of a real meal is nothing on its
     // own — this only engages once recent eating has genuinely skewed
@@ -1884,6 +1937,24 @@
     if (state.weather.seaState >= 4) waterRate += 0.3;
     c.hoursSinceWater += hrs * waterRate;
 
+    // Being above deck in genuinely bad weather leaves clothes wet — set
+    // once, not continuously restamped, so DRY CLOTHES's clock reflects
+    // how long they've actually been wet. Being below deck in the same
+    // conditions instead lets damp/condensation build up in the cabin,
+    // tracked as an accumulating total (it's the CUMULATIVE time shut up
+    // in bad weather that matters, not any single tick of it).
+    var badWeather = state.weather.condition === 'rain' || state.weather.condition === 'squall' || state.weather.seaState >= WET_CLOTHES_SEASTATE;
+    if (badWeather) {
+      if (c.location === 'above' && c.clothesWetSinceMinutes == null) {
+        c.clothesWetSinceMinutes = state.meta.voyageMinutes;
+      } else if (c.location === 'below') {
+        c.dampCabinHours += hrs;
+        if (c.dampCabinHours >= CABIN_STUFFY_HOURS && c.cabinStuffySinceMinutes == null) {
+          c.cabinStuffySinceMinutes = state.meta.voyageMinutes;
+        }
+      }
+    }
+
     // Morale drifts toward whatever current conditions actually justify
     // (see computeMoraleTarget) rather than sitting still until some
     // explicit event nudges it — this is what makes neglect visible over
@@ -2568,6 +2639,7 @@
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
     state.crew.watchState = 'awake';
     state.crew.sleepStartedAt = null;
+    if (state.crew.bunkUnmadeSinceMinutes == null) state.crew.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
     var text = baseText;
     if (includeDuration !== false && minutesAsleep >= 5) {
       text += ' Roughly ' + describeSleepDuration(minutesAsleep) + ' below.';
@@ -3490,23 +3562,151 @@
     flushNewLogEntries(state);
   }
 
-  function cmdRoutine(state) {
+  function cmdWellbeing(state) {
     printBlank();
-    printLine('ROUTINE', 'heading-label');
+    printLine('WELLBEING', 'heading-label');
     printLine('Taking care of yourself.', 'dim');
     state.pendingChoice = {
-      id: 'routine-menu',
+      id: 'wellbeing-menu',
       options: [
         { label: 'EAT', action: 'cmd:eat' },
         { label: 'DRINK', action: 'cmd:drink' },
         { label: 'SLEEP', action: 'cmd:sleep' },
-        { label: 'WASH', action: 'cmd:wash' },
-        { label: 'DRESS', action: 'cmd:dress' },
-        { label: 'DISHES', action: 'cmd:dishes' },
         { label: 'READ', action: 'cmd:read' },
+        { label: 'WASH', action: 'cmd:wash' },
+        { label: 'CHANGE', action: 'cmd:dress' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
+  }
+
+  // Short, restrained variants per chore so the same line doesn't repeat
+  // constantly — picked at random each time; small pools are plenty for
+  // something this incidental.
+  var CHORE_LINES = {
+    dishes: [
+      'Washed the bowl and left it upside down to dry. Rain against the cabin roof.',
+      'Rinsed the dishes and stowed them. Small thing, but it helps.',
+      'Dishes done. The galley looks like itself again.',
+    ],
+    dryClothes: [
+      'Hung everything near the companionway. It smells like wet canvas in here.',
+      'Wrung out the oilskins and draped them to dry.',
+      'Strung a line below and hung the wet gear along it.',
+    ],
+    tools: [
+      'Stowed the tools back in their places.',
+      'Wiped down the tools and put them away.',
+      'Cleared the tools off the settee. The cabin feels less like a workshop.',
+    ],
+    bunk: [
+      'Pulled the bunk back together.',
+      'Straightened the berth and folded the blanket.',
+      'Made the bunk. Small order in a small space.',
+    ],
+    air: [
+      'Cracked the hatch and let the cabin breathe for a while.',
+      'Aired the cabin out. The dampness lifts, a little.',
+      'Opened things up below. Fresher air, finally.',
+    ],
+    tidy: [
+      'Put everything back where it belongs.\nThe cabin feels bigger somehow.',
+      'Cleared the clutter off the settee and stowed it properly.',
+      'A few minutes of tidying. Everything has a place again.',
+    ],
+  };
+  function pickChoreLine(kind) {
+    var pool = CHORE_LINES[kind];
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  // One definition per chore: what clears it, what (if anything) gates
+  // or consumes on top of that, and the small diminishing-returns
+  // morale nudge for actually doing it — same shape as WASH/DISHES
+  // always used. Never a big number; this is atmosphere, not a lever.
+  var CHORE_DEFS = {
+    dishes: {
+      label: 'CLEANING UP', duration: 3, moraleKey: 'dishes', moraleGain: 3,
+      canDo: function (s) { return hasEnoughWater(s, WATER_DISHES_GAL); },
+      consume: function (s) { consumeWater(s, WATER_DISHES_GAL); },
+      clear: function (s) { s.crew.dishesDirtySinceMinutes = null; },
+    },
+    dryClothes: {
+      label: 'DRYING GEAR', duration: 3, moraleKey: 'dryClothes', moraleGain: 3,
+      clear: function (s) { s.crew.clothesWetSinceMinutes = null; },
+    },
+    tools: {
+      label: 'STOWING TOOLS', duration: 2, moraleKey: 'tools', moraleGain: 2,
+      clear: function (s) { s.crew.toolsOutSinceMinutes = null; },
+    },
+    bunk: {
+      label: 'MAKING BUNK', duration: 2, moraleKey: 'bunk', moraleGain: 2,
+      clear: function (s) { s.crew.bunkUnmadeSinceMinutes = null; },
+    },
+    air: {
+      label: 'AIRING CABIN', duration: 3, moraleKey: 'air', moraleGain: 3,
+      clear: function (s) { s.crew.cabinStuffySinceMinutes = null; s.crew.dampCabinHours = 0; },
+    },
+    tidy: {
+      label: 'TIDYING UP', duration: 3, moraleKey: 'tidy', moraleGain: 3,
+      clear: function (s) { s.crew.clutterCount = 0; s.crew.clutterSinceMinutes = null; },
+    },
+  };
+  var CHORE_LABELS = {
+    dishes: 'DO DISHES', dryClothes: 'DRY CLOTHES', tools: 'PUT AWAY TOOLS',
+    bunk: 'MAKE BUNK', air: 'AIR OUT CABIN', tidy: 'TIDY UP',
+  };
+
+  // What's actually available right now, oldest-pending first, capped at
+  // 3 so the player is never confronted with a checklist — a quiet boat
+  // usually has 0-1 of these true at once.
+  function buildChoreOptions(state) {
+    var c = state.crew;
+    var candidates = [];
+    if (c.dishesDirtySinceMinutes != null) candidates.push({ kind: 'dishes', since: c.dishesDirtySinceMinutes });
+    if (c.clothesWetSinceMinutes != null) candidates.push({ kind: 'dryClothes', since: c.clothesWetSinceMinutes });
+    if (c.toolsOutSinceMinutes != null) candidates.push({ kind: 'tools', since: c.toolsOutSinceMinutes });
+    if (c.bunkUnmadeSinceMinutes != null) candidates.push({ kind: 'bunk', since: c.bunkUnmadeSinceMinutes });
+    if (c.cabinStuffySinceMinutes != null) candidates.push({ kind: 'air', since: c.cabinStuffySinceMinutes });
+    if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD) candidates.push({ kind: 'tidy', since: c.clutterSinceMinutes || 0 });
+    candidates.sort(function (a, b) { return a.since - b.since; });
+    return candidates.slice(0, 3).map(function (item) {
+      return { label: CHORE_LABELS[item.kind], action: 'chore:' + item.kind };
+    });
+  }
+
+  function cmdChore(state) {
+    printBlank();
+    printLine('CHORES', 'heading-label');
+    var options = buildChoreOptions(state);
+    if (options.length === 0) {
+      printLine('Nothing needs doing right now.', 'dim');
+      state.pendingChoice = { id: 'chore-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
+    state.pendingChoice = { id: 'chore-menu', options: options.concat([{ label: 'BACK', action: 'cancel' }]) };
+  }
+
+  function performChore(state, kind) {
+    var def = CHORE_DEFS[kind];
+    if (!def) return;
+    if (def.canDo && !def.canDo(state)) {
+      printBlank();
+      printLine('Not enough water.', 'amber');
+      return;
+    }
+    runShortAction(state, {
+      label: def.label,
+      duration: def.duration,
+      action: function (s) {
+        if (def.consume) def.consume(s);
+        def.clear(s);
+        var gain = routineMoraleGain(s, def.moraleKey, def.moraleGain);
+        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+        log(s, pickChoreLine(kind));
+        flushNewLogEntries(s);
+      },
+    });
   }
 
   // Small, quiet morale nudges for the four new routine activities. Full
@@ -3555,30 +3755,6 @@
     });
   }
 
-  function cmdDishes(state) {
-    if (!hasEnoughWater(state, WATER_DISHES_GAL)) {
-      printBlank();
-      printLine('Not enough water.', 'amber');
-      return;
-    }
-    var wasDirty = state.crew.dishesDirtySinceMinutes != null;
-    runShortAction(state, {
-      label: 'CLEANING UP',
-      duration: 3,
-      action: function (s) {
-        consumeWater(s, WATER_DISHES_GAL);
-        s.crew.dishesDirtySinceMinutes = null;
-        if (wasDirty) {
-          var gain = routineMoraleGain(s, 'dishes', 3);
-          s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-          log(s, 'Galley squared away. One less thing underfoot.');
-        } else {
-          log(s, 'Nothing much to clean, but you tidy up anyway.');
-        }
-        flushNewLogEntries(s);
-      },
-    });
-  }
 
   function cmdRead(state) {
     runShortAction(state, {
@@ -3588,6 +3764,7 @@
         var gain = routineMoraleGain(s, 'read', 5);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
+        bumpClutter(s, 1);
         log(s, 'A while lost in a book. The cabin feels smaller and calmer for it.');
         flushNewLogEntries(s);
       },
@@ -3733,6 +3910,7 @@
         if (item.cooked && c.dishesDirtySinceMinutes == null) {
           c.dishesDirtySinceMinutes = s.meta.voyageMinutes;
         }
+        bumpClutter(s, 1); // wrappers, crumbs, a bowl left out — any meal leaves a little something
 
         var fatigueGain = item.heavy ? 3 : 1;
         var moraleGain = item.heavy ? 3 : (item.category === 'fresh' ? 2 : 1);
@@ -3951,6 +4129,7 @@
       flushNewLogEntries(state);
       return;
     }
+    if (c.toolsOutSinceMinutes == null) c.toolsOutSinceMinutes = state.meta.voyageMinutes;
     if (hasMaterial) consumeRepairMaterial(state, systemKey);
 
     // Rested and steady crew do stronger, more lasting work; a repair
@@ -4034,13 +4213,13 @@
     engine: cmdEngine,
     course: cmdCourse,
     'change-course': cmdChangeCourse,
-    routine: cmdRoutine,
+    wellbeing: cmdWellbeing,
+    chore: cmdChore,
     sleep: cmdSleep,
     eat: cmdEat,
     drink: cmdDrink,
     wash: cmdWash,
     dress: cmdDress,
-    dishes: cmdDishes,
     read: cmdRead,
     repair: cmdRepair,
     restart: cmdRestart,
@@ -4131,7 +4310,10 @@
 
     if (state.crew.location === 'below') {
       return groupedOptions([
-        [{ label: 'ROUTINE', action: 'cmd:routine' }],
+        [
+          { label: 'WELLBEING', action: 'cmd:wellbeing' },
+          { label: 'CHORES', action: 'cmd:chore' },
+        ],
         [
           { label: 'POSITION', action: 'cmd:position' },
           { label: 'WEATHER', action: 'cmd:weather' },
@@ -4211,7 +4393,7 @@
             return;
           }
           openInfoPanel = INFO_COMMANDS[cmdName] ? cmdName : null;
-          printEcho(cmdName);
+          printEcho(cmdName === 'chore' ? 'chores' : cmdName);
           runCommand(state, cmdName);
         } else {
           clearTempView();
@@ -4348,6 +4530,8 @@
 
     if (action.indexOf('eat:') === 0) {
       performEat(state, action.slice(4));
+    } else if (action.indexOf('chore:') === 0) {
+      performChore(state, action.slice(6));
     } else if (action === 'drink:water') {
       performDrinkWater(state);
     } else if (action === 'drink:coffee') {
@@ -4893,6 +5077,18 @@
     if (c.snackMealRatio === undefined) c.snackMealRatio = 0;
     if (c.dishesDirtySinceMinutes === undefined) c.dishesDirtySinceMinutes = null;
     if (c.lastChocolateAt === undefined) c.lastChocolateAt = null;
+    if (c.clothesWetSinceMinutes === undefined) c.clothesWetSinceMinutes = null;
+    if (c.toolsOutSinceMinutes === undefined) c.toolsOutSinceMinutes = null;
+    if (c.bunkUnmadeSinceMinutes === undefined) c.bunkUnmadeSinceMinutes = null;
+    if (c.dampCabinHours === undefined) c.dampCabinHours = 0;
+    if (c.cabinStuffySinceMinutes === undefined) c.cabinStuffySinceMinutes = null;
+    if (c.clutterCount === undefined) c.clutterCount = 0;
+    if (c.clutterSinceMinutes === undefined) c.clutterSinceMinutes = null;
+    if (c.lastRoutineAt.dryClothes === undefined) c.lastRoutineAt.dryClothes = null;
+    if (c.lastRoutineAt.tools === undefined) c.lastRoutineAt.tools = null;
+    if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
+    if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
+    if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
     if (c.location === undefined) c.location = 'above';
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
