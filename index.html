@@ -2600,10 +2600,30 @@
   var layers = {};
 
   function unlockAudio() {
-    if (audioUnlocked) return;
+    if (audioUnlocked) {
+      // Already unlocked once, but a browser (iOS Safari especially) can
+      // suspend an existing context later — any subsequent legitimate
+      // user gesture is a valid opportunity to resume it defensively.
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().then(function () {
+          console.log('[Landfall engine audio] AudioContext resumed');
+        }).catch(function (err) {
+          console.warn('[Landfall engine audio] AudioContext resume failed:', describeError(err));
+        });
+      }
+      return;
+    }
     audioUnlocked = true;
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      console.log('[Landfall engine audio] AudioContext created, state:', audioCtx.state);
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().then(function () {
+          console.log('[Landfall engine audio] AudioContext resumed');
+        }).catch(function (err) {
+          console.warn('[Landfall engine audio] AudioContext resume failed:', describeError(err));
+        });
+      }
       buildAudioGraph();
     } catch (e) {
       console.warn('Audio unavailable:', describeError(e));
@@ -2708,9 +2728,12 @@
     engineGainNode.connect(masterGain);
   }
 
+  var engineLiveStartPending = false; // true when the player explicitly clicked START ENGINE before buffers were ready -- distinguishes a genuine live start (which must play the full startup sequence once buffers arrive) from a page load that merely finds engineOn already true (which must NOT)
+
   function loadEngineBuffers() {
     if (engineBufferState !== 'idle' || !audioCtx) return;
     engineBufferState = 'loading';
+    console.log('[Landfall engine audio] engine buffers loading');
     var keys = Object.keys(ENGINE_AUDIO_PATHS);
     Promise.all(keys.map(function (key) {
       return fetch(ENGINE_AUDIO_PATHS[key])
@@ -2719,14 +2742,26 @@
           return res.arrayBuffer();
         })
         .then(function (buf) { return audioCtx.decodeAudioData(buf); })
-        .then(function (decoded) { engineBuffers[key] = decoded; });
+        .then(function (decoded) {
+          engineBuffers[key] = decoded;
+          console.log('[Landfall engine audio] loaded', ENGINE_AUDIO_PATHS[key]);
+        });
     })).then(function () {
       engineBufferState = 'ready';
-      // Buffers just became available — if the engine is already meant
-      // to be running (or started while this was still loading), catch
-      // up immediately rather than waiting for the next unrelated state
-      // change to happen to call updateAudioForState.
-      if (GAME) syncEngineAudio(GAME);
+      console.log('[Landfall engine audio] all engine buffers ready');
+      if (engineLiveStartPending) {
+        // A real START ENGINE click happened while this was still
+        // loading — play the FULL startup sequence now. This must never
+        // fall through to syncEngineAudio's restore path: engineKnownOn
+        // was already set to true the moment the player clicked (see
+        // triggerLiveEngineStart), so that generic pass would just see
+        // "nothing changed" and silently skip the startup recording —
+        // exactly the bug this fix addresses.
+        engineLiveStartPending = false;
+        if (GAME && GAME.boat.engineOn) beginEngineStart();
+      } else if (GAME) {
+        syncEngineAudio(GAME);
+      }
     }).catch(function (err) {
       engineBufferState = 'failed';
       console.warn('[Landfall engine audio] failed to load engine audio files:', describeError(err));
@@ -2765,9 +2800,11 @@
     source.start(now);
     engineUnderwayNode = { source: source, gain: gainNode };
     engineAudioPhase = 'running';
+    console.log('[Landfall engine audio] underway audio playing');
   }
 
   function beginEngineStart() {
+    console.log('[Landfall engine audio] beginEngineStart called');
     ensureEngineGain();
     if (!audioCtx || !engineBuffers.start) {
       // Audio not ready — the engine still starts mechanically either
@@ -2785,6 +2822,7 @@
     source.start(now);
     engineStartNode = { source: source, gain: gainNode };
     engineAudioPhase = 'starting';
+    console.log('[Landfall engine audio] start audio playing');
 
     var dur = engineBuffers.start.duration;
     var overlap = clamp(ENGINE_CROSSFADE_SEC, 0.1, Math.min(0.3, dur));
@@ -2802,6 +2840,7 @@
   }
 
   function beginEngineStop() {
+    console.log('[Landfall engine audio] beginEngineStop called');
     ensureEngineGain();
     var overlap = ENGINE_CROSSFADE_SEC;
     // Whatever's currently sounding (normally the underway loop, but a
@@ -2824,6 +2863,7 @@
     source.connect(gainNode).connect(engineGainNode);
     source.start(now);
     engineStopNode = { source: source, gain: gainNode };
+    console.log('[Landfall engine audio] stop audio playing');
 
     var dur = engineBuffers.stop.duration;
     // A short fade to zero only right at the very end, purely as an
@@ -2839,18 +2879,57 @@
     }, (dur + 0.05) * 1000);
   }
 
-  // The one place gameplay's boat.engineOn is ever read to drive engine
-  // audio. Called from updateAudioForState, itself already invoked
-  // whenever state changes (menu actions, simulation ticks, audio
-  // unlocking) — this never runs on its own timer and never writes back
-  // to boat.engineOn. engineKnownOn === null means this is the FIRST
-  // sync since audio unlocked (right after the player's first
-  // interaction, or right after engine buffers just finished loading):
-  // that case jumps directly to whatever the engine already is, rather
-  // than replaying a start that already happened while the player was
-  // away or before audio was unlocked. Once synced, this is a no-op on
-  // every call where engineOn hasn't actually changed — the guarantee
-  // that menus, ticks, and re-renders can never retrigger anything.
+  // Explicit, direct triggers for the three PLAYER-INITIATED engine
+  // events (the departure sequence's START ENGINE step, and the ENGINE
+  // menu's START ENGINE / STOP ENGINE) — called immediately alongside
+  // setting boat.engineOn itself, never left for the next generic
+  // updateAudioForState pass to infer. This is what actually fixes the
+  // skip-the-startup-recording bug: syncEngineAudio's own "first sync"
+  // heuristic can't tell a genuine live START click apart from a page
+  // load that simply finds engineOn already true — especially when
+  // engine buffers are still loading at the exact moment the player
+  // clicks, which is exactly when the bug showed up. These functions
+  // remove that ambiguity entirely for the cases that matter most.
+  function triggerLiveEngineStart() {
+    unlockAudio(); // START ENGINE is itself a legitimate user gesture — ensures the AudioContext exists/resumes even if BOARD somehow didn't, or iOS suspended it since
+    console.log('[Landfall engine audio] LIVE START requested');
+    engineKnownOn = true; // this IS the change; the generic sync pass must see nothing left to do
+    if (engineBufferState === 'ready') {
+      beginEngineStart();
+    } else {
+      // Buffers not ready yet — remember that a genuine live start
+      // happened so it isn't mistaken for "the engine was already
+      // running when we loaded" once they do arrive (see
+      // loadEngineBuffers' completion handler).
+      engineLiveStartPending = true;
+      loadEngineBuffers(); // in case audio only just unlocked here and loading hasn't started at all yet
+    }
+  }
+
+  function triggerLiveEngineStop() {
+    console.log('[Landfall engine audio] LIVE STOP requested');
+    engineKnownOn = false;
+    engineLiveStartPending = false; // a stop cancels any start still pending on the buffers — nothing left to catch up to
+    if (engineBufferState === 'ready') beginEngineStop();
+    // If buffers aren't ready, there's nothing audible playing to stop.
+  }
+
+  // The catch-all for engine-audio changes that do NOT go through the
+  // direct triggers above: restoring existing state on page load/
+  // resume, and the engine dying on its own from an empty tank
+  // (checkFuel, inside simTick) — a real event, just not a button
+  // click. Called from updateAudioForState, itself already invoked
+  // whenever state changes (menu actions, ticks, audio unlocking);
+  // never runs on its own timer and never writes back to boat.engineOn.
+  // engineKnownOn === null means this is the FIRST sync since audio
+  // unlocked (right after the player's first interaction, or right
+  // after buffers just finished loading) AND no live trigger has
+  // already claimed it — that case jumps directly to whatever the
+  // engine already is, rather than replaying a start that already
+  // happened while the player was away. Once synced (by either path),
+  // this is a no-op on every call where engineOn hasn't actually
+  // changed — menus, ticks, and re-renders can never retrigger
+  // anything.
   function syncEngineAudio(state) {
     if (!audioCtx || engineBufferState !== 'ready') return;
     var on = state.boat.engineOn;
@@ -4629,6 +4708,7 @@
             duration: 3,
             action: function (s) {
               s.boat.engineOn = true;
+              triggerLiveEngineStart();
               // Recalculate immediately, using the heading as of the last
               // real tick — never invent a fresh heading here, since
               // computeHeading() also rolls a per-tick drift wobble that
@@ -4648,6 +4728,7 @@
             duration: 2,
             action: function (s) {
               s.boat.engineOn = false;
+              triggerLiveEngineStop();
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
               log(s, 'Engine stopped.');
               flushNewLogEntries(s);
@@ -4771,7 +4852,7 @@
       workingLabel: 'STARTING ENGINE',
       duration: 3,
       text: 'The engine catches.',
-      onEnter: function (s) { s.boat.engineOn = true; },
+      onEnter: function (s) { s.boat.engineOn = true; triggerLiveEngineStart(); },
     },
     {
       label: 'CAST OFF',
