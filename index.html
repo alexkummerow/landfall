@@ -2658,7 +2658,211 @@
 
     scheduleWaveSwell();
     scheduleHullCreaks();
+    loadEngineBuffers();
     if (GAME) updateAudioForState(GAME);
+  }
+
+  /* --------------------------------------------------------------
+     ENGINE AUDIO
+     ------------------------------------------------------------
+     A separate small subsystem sharing audioCtx/masterGain with the
+     ambient layers above. Purely reactive: it only ever READS
+     state.boat.engineOn (via syncEngineAudio, called from
+     updateAudioForState — never the reverse) and never sets gameplay
+     state. If buffers fail to load, or audioCtx never exists, every
+     function here degrades to a silent no-op; the engine itself is
+     entirely unaffected either way.
+
+     Three WAV files, played through their own short-lived
+     AudioBufferSourceNodes (a fresh one per playback — the Web Audio
+     API doesn't allow restarting a stopped source), each with its own
+     GainNode for independent crossfade control, all feeding one shared
+     engineGainNode that sets the overall engine volume relative to the
+     ambient wind/wave layers. engine_underway.wav uses native
+     `source.loop = true`, which is sample-accurate and gapless by the
+     Web Audio spec itself — no manual loop-boundary rescheduling is
+     needed as long as the source file already loops cleanly, which is
+     exactly what was asked for.
+     -------------------------------------------------------------- */
+  var ENGINE_AUDIO_PATHS = {
+    start: 'audio/engine/engine_start.wav',
+    underway: 'audio/engine/engine_underway.wav',
+    stop: 'audio/engine/engine_stop.wav',
+  };
+  var ENGINE_FADE_SEC = 0.1;       // default anti-click ramp (beginning/ending playback)
+  var ENGINE_CROSSFADE_SEC = 0.2;  // start<->underway<->stop overlap — within the requested 0.1-0.3s
+
+  var engineBuffers = { start: null, underway: null, stop: null };
+  var engineBufferState = 'idle';  // 'idle' | 'loading' | 'ready' | 'failed'
+  var engineGainNode = null;       // engine bus -> masterGain; overall engine volume lives here
+  var engineAudioPhase = 'off';    // 'off' | 'starting' | 'running' | 'stopping' — audio-side bookkeeping only, never saved
+  var engineKnownOn = null;        // last boat.engineOn this controller has synced to; null = not yet synced since audio unlocked
+  var engineStartNode = null;      // {source, gain} for the currently active/fading engine_start playback, or null
+  var engineUnderwayNode = null;   // {source, gain} for the currently looping engine_underway playback, or null
+  var engineStopNode = null;       // {source, gain} for the currently active engine_stop playback, or null
+
+  function ensureEngineGain() {
+    if (engineGainNode || !audioCtx || !masterGain) return;
+    engineGainNode = audioCtx.createGain();
+    engineGainNode.gain.value = 0.32; // restrained relative to wind/waves/rigging — audible, not dominant
+    engineGainNode.connect(masterGain);
+  }
+
+  function loadEngineBuffers() {
+    if (engineBufferState !== 'idle' || !audioCtx) return;
+    engineBufferState = 'loading';
+    var keys = Object.keys(ENGINE_AUDIO_PATHS);
+    Promise.all(keys.map(function (key) {
+      return fetch(ENGINE_AUDIO_PATHS[key])
+        .then(function (res) {
+          if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'no response') + ' loading ' + ENGINE_AUDIO_PATHS[key]);
+          return res.arrayBuffer();
+        })
+        .then(function (buf) { return audioCtx.decodeAudioData(buf); })
+        .then(function (decoded) { engineBuffers[key] = decoded; });
+    })).then(function () {
+      engineBufferState = 'ready';
+      // Buffers just became available — if the engine is already meant
+      // to be running (or started while this was still loading), catch
+      // up immediately rather than waiting for the next unrelated state
+      // change to happen to call updateAudioForState.
+      if (GAME) syncEngineAudio(GAME);
+    }).catch(function (err) {
+      engineBufferState = 'failed';
+      console.warn('[Landfall engine audio] failed to load engine audio files:', describeError(err));
+    });
+  }
+
+  // Ramps a currently-playing node's gain to 0 over `sec` and stops its
+  // source shortly after (once inaudible) — the one shared mechanism
+  // every transition below uses, so nothing is ever cut abruptly and
+  // nothing is ever left playing after its node reference is dropped.
+  function fadeOutAndStop(node, sec) {
+    if (!node || !audioCtx) return;
+    var now = audioCtx.currentTime;
+    try {
+      node.gain.gain.cancelScheduledValues(now);
+      node.gain.gain.setValueAtTime(node.gain.gain.value, now);
+      node.gain.gain.linearRampToValueAtTime(0, now + sec);
+    } catch (e) { /* node already stopped/disconnected — nothing to fade */ }
+    var src = node.source;
+    setTimeout(function () {
+      try { src.stop(); } catch (e) { /* already stopped */ }
+    }, sec * 1000 + 30);
+  }
+
+  function playEngineUnderway(fadeInSec) {
+    ensureEngineGain();
+    if (!audioCtx || !engineBuffers.underway) return;
+    var now = audioCtx.currentTime;
+    var gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(1, now + (fadeInSec != null ? fadeInSec : ENGINE_FADE_SEC));
+    var source = audioCtx.createBufferSource();
+    source.buffer = engineBuffers.underway;
+    source.loop = true; // native looping: sample-accurate, gapless — no manual loop-boundary handling needed
+    source.connect(gainNode).connect(engineGainNode);
+    source.start(now);
+    engineUnderwayNode = { source: source, gain: gainNode };
+    engineAudioPhase = 'running';
+  }
+
+  function beginEngineStart() {
+    ensureEngineGain();
+    if (!audioCtx || !engineBuffers.start) {
+      // Audio not ready — the engine still starts mechanically either
+      // way; loadEngineBuffers' own completion handler will call
+      // syncEngineAudio and catch up once (if) buffers do arrive.
+      return;
+    }
+    var now = audioCtx.currentTime;
+    var gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(1, now + ENGINE_FADE_SEC);
+    var source = audioCtx.createBufferSource();
+    source.buffer = engineBuffers.start;
+    source.connect(gainNode).connect(engineGainNode);
+    source.start(now);
+    engineStartNode = { source: source, gain: gainNode };
+    engineAudioPhase = 'starting';
+
+    var dur = engineBuffers.start.duration;
+    var overlap = clamp(ENGINE_CROSSFADE_SEC, 0.1, Math.min(0.3, dur));
+    var toUnderwayDelayMs = Math.max(0, dur - overlap) * 1000;
+
+    setTimeout(function () {
+      // If a STOP arrived while the start recording was still playing,
+      // beginEngineStop already moved the phase on and cleaned up its
+      // own nodes — this stale callback does nothing further.
+      if (engineAudioPhase !== 'starting') return;
+      fadeOutAndStop(engineStartNode, overlap);
+      engineStartNode = null;
+      playEngineUnderway(overlap);
+    }, toUnderwayDelayMs);
+  }
+
+  function beginEngineStop() {
+    ensureEngineGain();
+    var overlap = ENGINE_CROSSFADE_SEC;
+    // Whatever's currently sounding (normally the underway loop, but a
+    // very quick STOP right after START could still be mid-startup)
+    // fades out over the same window the stop recording fades in over.
+    if (engineUnderwayNode) { fadeOutAndStop(engineUnderwayNode, overlap); engineUnderwayNode = null; }
+    if (engineStartNode) { fadeOutAndStop(engineStartNode, overlap); engineStartNode = null; }
+    engineAudioPhase = 'stopping';
+
+    if (!audioCtx || !engineBuffers.stop) {
+      engineAudioPhase = 'off';
+      return;
+    }
+    var now = audioCtx.currentTime;
+    var gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(1, now + overlap);
+    var source = audioCtx.createBufferSource();
+    source.buffer = engineBuffers.stop;
+    source.connect(gainNode).connect(engineGainNode);
+    source.start(now);
+    engineStopNode = { source: source, gain: gainNode };
+
+    var dur = engineBuffers.stop.duration;
+    // A short fade to zero only right at the very end, purely as an
+    // anti-click safeguard if the recording doesn't already taper to
+    // silence on its own — not a dramatic fade-out over the whole clip.
+    var tailFade = Math.min(ENGINE_FADE_SEC, dur);
+    gainNode.gain.setValueAtTime(1, now + Math.max(0, dur - tailFade));
+    gainNode.gain.linearRampToValueAtTime(0, now + dur);
+    setTimeout(function () {
+      try { source.stop(); } catch (e) { /* already stopped */ }
+      engineStopNode = null;
+      if (engineAudioPhase === 'stopping') engineAudioPhase = 'off';
+    }, (dur + 0.05) * 1000);
+  }
+
+  // The one place gameplay's boat.engineOn is ever read to drive engine
+  // audio. Called from updateAudioForState, itself already invoked
+  // whenever state changes (menu actions, simulation ticks, audio
+  // unlocking) — this never runs on its own timer and never writes back
+  // to boat.engineOn. engineKnownOn === null means this is the FIRST
+  // sync since audio unlocked (right after the player's first
+  // interaction, or right after engine buffers just finished loading):
+  // that case jumps directly to whatever the engine already is, rather
+  // than replaying a start that already happened while the player was
+  // away or before audio was unlocked. Once synced, this is a no-op on
+  // every call where engineOn hasn't actually changed — the guarantee
+  // that menus, ticks, and re-renders can never retrigger anything.
+  function syncEngineAudio(state) {
+    if (!audioCtx || engineBufferState !== 'ready') return;
+    var on = state.boat.engineOn;
+    if (engineKnownOn === null) {
+      engineKnownOn = on;
+      if (on) playEngineUnderway(ENGINE_FADE_SEC); // fade straight into the running loop — never replay the start recording for a voyage already underway
+      return;
+    }
+    if (on === engineKnownOn) return;
+    engineKnownOn = on;
+    if (on) beginEngineStart();
+    else beginEngineStop();
   }
 
   function scheduleWaveSwell() {
@@ -2696,6 +2900,7 @@
 
   function updateAudioForState(state) {
     if (!audioCtx || !layers.wind) return;
+    syncEngineAudio(state);
     var w = state.weather;
     var now = audioCtx.currentTime;
 
