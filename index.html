@@ -3826,6 +3826,8 @@
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
     state.crew.watchState = 'trying';
     state.crew.sleepAttemptStartedAt = state.meta.voyageMinutes;
+    state.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and GET UP never actually appears
+    clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
     log(state, tryingToSleepNarrative());
     flushNewLogEntries(state);
   }
@@ -4762,7 +4764,7 @@
 
   function renderOptions(state) {
     applyCabinLighting(state);
-    syncReadingDots(state);
+    syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
     var opts = getContextualOptions(state);
@@ -4843,46 +4845,55 @@
   var uiBusy = false; // true while a short action's dots are animating — options are hidden, other actions wait
   var DOT_FRAME_MS = 700;
 
-  // Continuous reading's own activity indicator — same single-element,
+  // Shared indefinite-duration activity indicator — same single-element,
   // same-frames-and-timing approach as animateDots below, but indefinite
-  // rather than fixed-duration (reading has no set end time the way a
-  // short action does). syncReadingDots is called from renderOptions
-  // every time it runs (every action, every live tick, right after
-  // load) and is idempotent: it only starts the timer when reading is
-  // active and none is running, and only stops it when one is running
-  // but reading is no longer active — so it never fights an
-  // already-cycling animation, and it self-corrects after ANY way
-  // reading can end (STOP READING, completion, an interruption
-  // overwriting pendingChoice, or resuming mid-book after a reload)
-  // without needing an explicit stop call at each of those sites.
-  var readingDotsTimer = null;
-  var readingDotsEl = null;
-  var READING_DOT_FRAMES = ['.', '..', '...'];
+  // rather than fixed-duration (an ongoing activity has no set end time
+  // the way a short action does). syncActivityDots is called from
+  // renderOptions every time it runs (every action, every live tick,
+  // right after load) and is idempotent: it only starts the timer when
+  // some activity is active and none is running, and only stops it when
+  // one is running but nothing is active anymore — so it never fights
+  // an already-cycling animation, and it self-corrects after ANY way an
+  // activity can end (an explicit stop, natural completion, an
+  // interruption, or resuming mid-activity after a reload) without
+  // needing an explicit stop call scattered at each of those sites.
+  // activityDotsShouldBeVisible is where a future continuous activity
+  // adds its own condition — READ and SLEEP already share this exact
+  // mechanism rather than each having their own copy.
+  var activityDotsTimer = null;
+  var activityDotsEl = null;
+  var ACTIVITY_DOT_FRAMES = ['.', '..', '...'];
 
-  function startReadingDots() {
-    readingDotsEl = document.createElement('p');
-    readingDotsEl.className = 'line dim';
-    readingDotsEl.textContent = READING_DOT_FRAMES[0];
-    outputEl.insertBefore(readingDotsEl, tempViewEl);
+  function activityDotsShouldBeVisible(state) {
+    if (state.pendingChoice && state.pendingChoice.id === 'reading') return true;
+    if (state.crew.watchState === 'trying' || state.crew.watchState === 'sleeping') return true;
+    return false;
+  }
+
+  function startActivityDots() {
+    activityDotsEl = document.createElement('p');
+    activityDotsEl.className = 'line dim';
+    activityDotsEl.textContent = ACTIVITY_DOT_FRAMES[0];
+    outputEl.insertBefore(activityDotsEl, tempViewEl);
     var frameIndex = 0;
-    readingDotsTimer = setInterval(function () {
-      frameIndex = (frameIndex + 1) % READING_DOT_FRAMES.length;
-      if (readingDotsEl) readingDotsEl.textContent = READING_DOT_FRAMES[frameIndex];
+    activityDotsTimer = setInterval(function () {
+      frameIndex = (frameIndex + 1) % ACTIVITY_DOT_FRAMES.length;
+      if (activityDotsEl) activityDotsEl.textContent = ACTIVITY_DOT_FRAMES[frameIndex];
     }, DOT_FRAME_MS);
   }
 
-  function stopReadingDots() {
-    if (readingDotsTimer) { clearInterval(readingDotsTimer); readingDotsTimer = null; }
-    if (readingDotsEl && readingDotsEl.parentNode) readingDotsEl.parentNode.removeChild(readingDotsEl);
-    readingDotsEl = null;
+  function stopActivityDots() {
+    if (activityDotsTimer) { clearInterval(activityDotsTimer); activityDotsTimer = null; }
+    if (activityDotsEl && activityDotsEl.parentNode) activityDotsEl.parentNode.removeChild(activityDotsEl);
+    activityDotsEl = null;
   }
 
-  function syncReadingDots(state) {
-    var shouldBeReading = !!(state.pendingChoice && state.pendingChoice.id === 'reading');
-    if (shouldBeReading && !readingDotsTimer) {
-      startReadingDots();
-    } else if (!shouldBeReading && readingDotsTimer) {
-      stopReadingDots();
+  function syncActivityDots(state) {
+    var shouldBeActive = activityDotsShouldBeVisible(state);
+    if (shouldBeActive && !activityDotsTimer) {
+      startActivityDots();
+    } else if (!shouldBeActive && activityDotsTimer) {
+      stopActivityDots();
     }
   }
 
