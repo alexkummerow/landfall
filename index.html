@@ -270,8 +270,8 @@
      1. CONFIG & CONSTANTS
      ============================================================ */
   var STORAGE_KEY = 'kauaiVoyage_v1';
-  var TICK_MINUTES = 10;              // simulation resolution, in simulated minutes
-  var MAX_CATCHUP_TICKS = 20000;      // safety cap (~139 days) for offline catch-up
+  var TICK_MINUTES = 1;               // simulation resolution, in simulated minutes -- was 10; every per-tick rate/probability elsewhere is expressed as an hourly rate times (TICK_MINUTES/60), or converted via tickProbability() below, so it scales correctly with this value. A few things (driftWeather's random-walk magnitudes, computeHeading's wobble/drift-wander) are scaled by TICK_MINUTES/10 directly since they were tuned by feel for the old 10-minute step, not derived from a stated hourly rate.
+  var MAX_CATCHUP_TICKS = 200000;     // safety cap (~139 days) for offline catch-up -- scaled 10x alongside TICK_MINUTES to preserve the same real-world catch-up window per advanceSimulation call
   var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
 
   var VESSEL_NAME = 'SOLACE';
@@ -511,6 +511,19 @@
   function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
   function rand(min, max) { return min + Math.random() * (max - min); }
   function pickFromPool(pool) { return pool[Math.floor(Math.random() * pool.length)]; }
+  // Converts a probability that was designed as "chance per 10-minute
+  // tick" (the old TICK_MINUTES) into the correct chance per CURRENT
+  // tick, preserving the cumulative odds of the event having happened
+  // by any given point in time -- not just a linear p/10 approximation.
+  // If P is the chance of NOT happening in one old 10-minute tick, then
+  // over TICK_MINUTES/10 of a new tick the chance of not happening must
+  // be P^(TICK_MINUTES/10), so that TICK_MINUTES/10 of those compose
+  // back to exactly P across the same 10 minutes. Used by
+  // fallAsleepChance and wakeChanceWhileSleeping, both explicitly
+  // "per-tick" probabilities tuned against the old step size.
+  function tickProbability(p10) {
+    return 1 - Math.pow(1 - p10, TICK_MINUTES / 10);
+  }
   function normalizeDeg(d) { return ((d % 360) + 360) % 360; }
   function angleDiff(a, b) {
     var d = Math.abs(a - b) % 360;
@@ -1162,22 +1175,28 @@
 
   function driftWeather(w, lat) {
     // Small random walk so conditions feel alive without being chaotic.
-    w.windDirection = normalizeDeg(w.windDirection + (Math.random() - 0.5) * 6);
-    var delta = (Math.random() - 0.5) * 2.2;
-    if (w.trend === 'building') delta += 0.5;
-    if (w.trend === 'easing') delta -= 0.5;
+    // Every magnitude/probability below was tuned by feel against the
+    // old 10-minute tick, with no separately-stated hourly rate to
+    // derive from -- so each is scaled by this fraction, preserving the
+    // same expected amount of change/chance per hour regardless of the
+    // current tick size.
+    var scale = TICK_MINUTES / 10;
+    w.windDirection = normalizeDeg(w.windDirection + (Math.random() - 0.5) * 6 * scale);
+    var delta = (Math.random() - 0.5) * 2.2 * scale;
+    if (w.trend === 'building') delta += 0.5 * scale;
+    if (w.trend === 'easing') delta -= 0.5 * scale;
     w.windSpeed = clamp(w.windSpeed + delta, 2, 45);
 
-    if (Math.random() < 0.01) {
+    if (Math.random() < 0.01 * scale) {
       var trends = ['building', 'easing', 'steady'];
       w.trend = trends[Math.floor(Math.random() * trends.length)];
     }
 
     var target = clamp(Math.round(w.windSpeed / 7), 0, 6);
-    if (w.seaState < target && Math.random() < 0.2) w.seaState++;
-    if (w.seaState > target && Math.random() < 0.2) w.seaState--;
+    if (w.seaState < target && Math.random() < 0.2 * scale) w.seaState++;
+    if (w.seaState > target && Math.random() < 0.2 * scale) w.seaState--;
 
-    if (Math.random() < 0.006) {
+    if (Math.random() < 0.006 * scale) {
       var options = w.windSpeed > 25
         ? ['squall', 'rain', 'overcast']
         : ['clear', 'overcast', 'rain'];
@@ -1190,7 +1209,7 @@
     // right after this in simTick) takes over, the same way it does for
     // wind, whenever real data is actually available.
     var tempTarget = estimateTemperatureF(lat);
-    w.temperatureF = w.temperatureF + (tempTarget - w.temperatureF) * 0.02 + (Math.random() - 0.5) * 0.6;
+    w.temperatureF = w.temperatureF + (tempTarget - w.temperatureF) * 0.02 * scale + (Math.random() - 0.5) * 0.6 * scale;
   }
 
   /* --------------------------------------------------------------
@@ -1720,7 +1739,7 @@
         if (nav.driftHeading == null) {
           nav.driftHeading = nav.heading != null ? nav.heading : nav.setCourse;
         }
-        var seaWander = 0.3 + state.weather.seaState * 0.35;
+        var seaWander = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
         nav.driftHeading = normalizeDeg(nav.driftHeading + (Math.random() - 0.5) * seaWander);
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
@@ -1750,7 +1769,7 @@
     // shoves the track off line rather than just slowing the boat down —
     // calm seas barely nudge it, rough ones can walk it a long way over
     // many ticks, exactly the way a real storm would.
-    var wobble = (Math.random() - 0.5) * (3 + state.weather.seaState * 2);
+    var wobble = (Math.random() - 0.5) * (3 + state.weather.seaState * 2) * (TICK_MINUTES / 10);
     return normalizeDeg(steered + wobble);
   }
 
@@ -1808,7 +1827,7 @@
   var BATTERY_DRAIN_HEATER_PER_HOUR = 2;
   var BATTERY_DRAIN_FAN_PER_HOUR = 0.5;
   var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
-  var BATTERY_CHARGE_PER_HOUR = 600; // engine running: 0% -> 100% in 10 minutes = 10%/min = 600%/hour
+  var BATTERY_CHARGE_PER_HOUR = 50; // engine running: 0% -> 100% in 120 minutes = 0.8333%/min = 50%/hour
 
   // Cabin temperature — comfort/morale only, never a survival mechanic.
   // Centralized here so the COLD/COMFORTABLE/HOT bands are easy to
@@ -2374,6 +2393,13 @@
   // timestamp rather than a fixed TICK_MINUTES step, so it doesn't wait
   // for a full simTick to catch up. Called once per advanceSimulation —
   // never also from simTick — so elapsed time is never double-counted.
+  // KEPT as its own system even now that TICK_MINUTES=1 (rather than
+  // folded back into a plain per-tick update inside simTick): it never
+  // reads TICK_MINUTES itself, only currentGameMinutes(), so it's
+  // already resolution-independent, and it still earns its keep for
+  // sub-minute precision (a value read mid-minute, before that minute's
+  // tick has run, is still exactly correct) and for never needing a
+  // full tick before reacting to a heater/fan toggle.
   // Follows a simple target-and-catch-up model. The TARGET is the
   // warmer of outside ambient or (only if the heater is on and colder
   // than that) the heater's fixed 68°F ceiling — the heater never
@@ -2876,9 +2902,12 @@
     return rounded + (rounded === 1 ? " hour" : " hours");
   }
 
-  // Per-tick chance of actually dropping off while 'trying'. Fatigue does
-  // most of the work; a long stretch already awake nudges it further;
-  // rough seas and recent coffee push back against it.
+  // Chance of actually dropping off while 'trying', PER OLD 10-MINUTE
+  // TICK (all the math below is tuned against that frame) -- converted
+  // to the correct per-current-tick chance via tickProbability() at the
+  // very end, so the conditions/weights here never need to change.
+  // Fatigue does most of the work; a long stretch already awake nudges
+  // it further; rough seas and recent coffee push back against it.
   function fallAsleepChance(state) {
     var c = state.crew;
     var base = 0.15;
@@ -2886,19 +2915,22 @@
     var awakeBoost = clamp((c.hoursSinceRest - 4) / 20, 0, 0.25);
     var seaPenalty = state.weather.seaState >= 4 ? 0.15 : (state.weather.seaState >= 3 ? 0.05 : 0);
     var coffeePenalty = coffeeActive(state) ? 0.18 : 0;
-    return clamp(base + fatigueBoost + awakeBoost - seaPenalty - coffeePenalty, 0.03, 0.9);
+    var p10 = clamp(base + fatigueBoost + awakeBoost - seaPenalty - coffeePenalty, 0.03, 0.9);
+    return tickProbability(p10);
   }
 
-  // Per-tick chance of surfacing again once 'sleeping'. Low remaining
-  // fatigue (already well rested) makes waking likelier; rough seas add
-  // their own chance on top — sleep interrupted by weather, not just
-  // completed by resting enough.
+  // Chance of surfacing again once 'sleeping', PER OLD 10-MINUTE TICK,
+  // same tickProbability() conversion as fallAsleepChance above. Low
+  // remaining fatigue (already well rested) makes waking likelier;
+  // rough seas add their own chance on top — sleep interrupted by
+  // weather, not just completed by resting enough.
   function wakeChanceWhileSleeping(state) {
     var c = state.crew;
     var restedness = clamp(1 - c.fatigue / 100, 0, 1);
     var base = 0.02 + restedness * 0.10;
     var seaBoost = state.weather.seaState >= 5 ? 0.12 : (state.weather.seaState >= 4 ? 0.05 : 0);
-    return clamp(base + seaBoost, 0.01, 0.6);
+    var p10 = clamp(base + seaBoost, 0.01, 0.6);
+    return tickProbability(p10);
   }
 
   function wakeUp(state, baseText, includeDuration) {
@@ -4166,6 +4198,13 @@
   // step, so it doesn't wait for a full simTick to catch up. Called
   // once per advanceSimulation — never also from simTick — so elapsed
   // time is never double-counted.
+  // KEPT as its own system even now that TICK_MINUTES=1, same reasoning
+  // as syncCabinTemperature above: it never reads TICK_MINUTES, only
+  // currentGameMinutes(), so it was already resolution-independent, and
+  // it still earns its keep — STOP READING commits an exact sub-minute
+  // partial interval rather than losing up to a minute of it, and a
+  // milestone/completion is detected the moment it's crossed rather
+  // than waiting for the next full tick.
   function syncReadingProgress(state) {
     var c = state.crew;
     if (c.readingBookId == null) return;
