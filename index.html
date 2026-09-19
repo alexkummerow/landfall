@@ -12,6 +12,7 @@
 
   :root {
     --bg: #050806;
+    --bg-lit: #0a0f0c;           /* CABIN LIGHTS ON — subtly brighter, same near-black green cast; nothing else changes */
     --phosphor: #8fd7ac;         /* SOFT — all normal non-interactive game text */
     --phosphor-bright: #c9f5da;  /* BRIGHT — selectable actions/commands only */
     --phosphor-dim: #4d7a5e;     /* DARK — timestamps ONLY, nothing else */
@@ -27,6 +28,11 @@
     height: 100%;
     margin: 0;
     background: var(--bg);
+    transition: background-color 0.3s ease;
+  }
+
+  html.cabin-lit, body.cabin-lit {
+    background: var(--bg-lit);
   }
 
   body {
@@ -283,7 +289,7 @@
     var now = Date.now();
     var start = WAYPOINTS[0];
     var startBearing = bearingBetween(start.lat, start.lon, WAYPOINTS[1].lat, WAYPOINTS[1].lon);
-    return {
+    var state = {
       version: 1,
       meta: {
         departedAt: now,
@@ -304,6 +310,7 @@
         groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
         tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveCoastalAutoTack(). Never set in open ocean.
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
+        driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
@@ -360,18 +367,20 @@
         engineOn: false,           // running under power (departure motor-out, or engine failure recovery later)
         fuelGallons: 20,           // diesel remaining, in gallons — see DIESEL_BURN_RATE_GPH
         speed: 0,                  // kt — recomputed every tick; POSITION displays a live value regardless
-        hull: 100,
-        rigging: 100,
-        sails: 100,
-        electrical: 100,           // shown to the player as BATTERIES in STATUS
-        engine: 100,
-        steering: 100,
-        // Each system gets exactly one MAJOR repair for the voyage (see
-        // attemptSystemRepair) — real parts run out. Once used, further
-        // problems on that system can still be patched, just not as well.
-        majorRepairUsed: { hull: false, rigging: false, sails: false, engine: false, electrical: false, steering: false },
-        floodRate: 0,    // gal/hr currently entering the hull — 0 unless a leak is active
-        bilgeWater: 0,   // gal currently accumulated in the bilge
+        // The four tracked systems — GOOD or DAMAGED, nothing in between.
+        // No passive wear: these only change via a scheduled failure
+        // event or a repair. See checkScheduledFailures / performSystemRepairAttempt.
+        sails: 'GOOD',
+        steering: 'GOOD',
+        engine: 'GOOD',
+        electrical: 'GOOD',        // physical wiring/fuse CONDITION, separate from battery charge below
+        nextFailureAt: rand(24, 48) * 60, // voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
+        battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
+        autopilotOn: true,          // holds SET COURSE and auto-tacks; OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
+        fanOn: false,
+        heaterOn: false,
+        cabinLightsOn: false,
+        cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
       },
       crew: {
         fatigue: 8,
@@ -413,11 +422,7 @@
       supplies: {
         propane: 60, // stove uses
         spares: {
-          oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
-          spareLine: 100, shackles: 6, riggingTape: 2,
-          fuses: 10, wire: 50, connectors: 20, batteries: 2,
-          hose: 10, hoseClamps: 12,
-          sailRepair: 3, epoxy: 2, sealant: 2,
+          sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
         },
         safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
       },
@@ -427,7 +432,6 @@
         aftLockerResolved: false,
         aftLockerEscalated: false,
         aftLockerDeferredAt: null,
-        sailWarningIssued: false,
         fatigueNarrated: false,
         thirstNarrated: false,
         hungerNarrated: false,
@@ -436,11 +440,6 @@
         freshFruitSpoiled: false,
         freshBreadSpoiled: false,
         lastMilestone: 0,
-        hullLeakTriggerAt: null, // set lazily by checkHullLeak's own per-tick roll, not a fixed guaranteed time
-        hullLeakTriggered: false,
-        hullLeakResolved: false,
-        bilgeWarned50: false,
-        bilgeWarned100: false,
         arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
       },
       rescue: {
@@ -458,6 +457,8 @@
       pendingChoice: null,
       log: [],
     };
+    state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see updateCabinTemperature for the ongoing drift
+    return state;
   }
 
   /* ============================================================
@@ -505,6 +506,7 @@
      ============================================================ */
   function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
   function rand(min, max) { return min + Math.random() * (max - min); }
+  function pickFromPool(pool) { return pool[Math.floor(Math.random() * pool.length)]; }
   function normalizeDeg(d) { return ((d % 360) + 360) % 360; }
   function angleDiff(a, b) {
     var d = Math.abs(a - b) % 360;
@@ -689,24 +691,23 @@
     state.nav.landWarningLevel = level;
   }
 
-  var GROUNDING_HULL_DAMAGE = 22;
-
   // Called with where the boat's open-ocean movement would land this
   // tick. If that point falls inside a landmass, the movement is
   // rejected (caller does not apply it) rather than letting the boat's
   // position pass through — this is what "do not allow the simulation
-  // to pass through islands" actually means mechanically. Only damages
-  // and logs once per grounding episode (tracked by name), not every
-  // tick the player leaves the boat pointed at the beach; clears
-  // silently the moment a tick's projected position no longer hits land.
+  // to pass through islands" actually means mechanically. Grounding
+  // blocks movement and logs once per episode (tracked by name), not
+  // every tick the player leaves the boat pointed at the beach, but
+  // never damages the boat — there is no hull condition to damage.
+  // Clears silently the moment a tick's projected position no longer
+  // hits land.
   function applyGroundingIfNeeded(state, projectedLat, projectedLon) {
     for (var i = 0; i < LAND_MASSES.length; i++) {
       var lm = LAND_MASSES[i];
       if (distanceBetween(projectedLat, projectedLon, lm.lat, lm.lon) < lm.radiusNm) {
         if (state.nav.groundedOn !== lm.name) {
           state.nav.groundedOn = lm.name;
-          state.boat.hull = clamp(state.boat.hull - GROUNDING_HULL_DAMAGE, 0, 100);
-          log(state, 'The hull grinds onto rock and coral \u2014 aground on ' + lm.name + '. Change course to work free.');
+          log(state, 'Aground on ' + lm.name + ' \u2014 hull\u2019s fine, but she\u2019s not moving. Change course to work free.');
         }
         return true;
       }
@@ -778,6 +779,25 @@
     if (h < 20) return 'dusk';
     return 'night';
   }
+
+  // Darkness gating — physical below-deck tasks need CABIN LIGHTS after
+  // dark. Uses the existing time-of-day system rather than a second
+  // clock; see the below-deck command functions for where this is
+  // applied (EAT, COFFEE/TEA, READ, WASH, CHANGE, CHORES, REPAIR below
+  // deck). Informational/emergency functions and SLEEP are deliberately
+  // never gated by this.
+  function isDark(state) {
+    return timeOfDayPhase(state) === 'night';
+  }
+  function needsCabinLight(state) {
+    return isDark(state) && !state.boat.cabinLightsOn;
+  }
+  function blockedByDarkness(state) {
+    printBlank();
+    printLine('TOO DARK TO SEE.', 'amber');
+    state.pendingChoice = { id: 'dark-blocked', options: [{ label: 'BACK', action: 'cancel' }] };
+  }
+
 
   var OBSERVATIONS = {
     inland: {
@@ -1038,6 +1058,19 @@
 
     if (c.cabinStuffySinceMinutes != null) target -= 4;
     if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD) target -= 3;
+
+    // Cabin comfort: same gentle, capped shape as the drags above, and
+    // naturally self-correcting — there's no separate bonus for
+    // bringing the cabin back to GOOD, the penalty below just stops
+    // applying once it's not COLD or HOT anymore.
+    var cabinTempF = state.boat.cabinTemperatureF;
+    if (cabinTempF != null) {
+      if (cabinTempF <= CABIN_TEMP_COLD_MAX_F) {
+        target -= clamp((CABIN_TEMP_COLD_MAX_F - cabinTempF) * 0.4, 0, 6);
+      } else if (cabinTempF >= CABIN_TEMP_HOT_MIN_F) {
+        target -= clamp((cabinTempF - CABIN_TEMP_HOT_MIN_F) * 0.4, 0, 6);
+      }
+    }
 
     // Meal monotony: a snack instead of a real meal is nothing on its
     // own — this only engages once recent eating has genuinely skewed
@@ -1644,36 +1677,64 @@
   // (ACTUAL HEADING) tick to tick to make SET COURSE good.
   function computeHeading(state) {
     var nav = state.nav;
-    var desired, targetPoint;
+    var desired, targetPoint, steered;
+
     if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      // Coastal corridor: ALWAYS the existing safe automatic navigation,
+      // regardless of the autopilot toggle. The player is never asked
+      // to navigate confined water — autopilot or not — so this is the
+      // smallest sensible exception needed to preserve safe coastal
+      // routing (see the module notes above).
       targetPoint = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
       nav.intendedCourse = bearingBetween(nav.lat, nav.lon, targetPoint.lat, targetPoint.lon);
       desired = nav.intendedCourse;
+      steered = resolveAutoTack(state, desired, targetPoint);
     } else {
       nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
       if (nav.setCourse == null) {
         nav.setCourse = Math.round(nav.intendedCourse);
       }
-      desired = nav.setCourse;
       targetPoint = FINAL_DEST;
 
-      // Current correction — open water only; the coastal corridor's
-      // own automatic navigation already handles getting through
-      // safely (see the module notes above). This adjusts the LOCAL
-      // desired bearing fed into auto-tack, never nav.setCourse itself
-      // (the player's own chosen course is never touched) and never
-      // nav.intendedCourse (BEARING TO NĀWILIWILI stays the plain
-      // geographic bearing). The order matches real seamanship: work
-      // out what heading through the water actually makes the chosen
-      // course good against the current FIRST, then decide whether
-      // that heading is sailable or needs a tack.
-      var currentAnchor = state.weather.oceanCurrent;
-      if (currentAnchor.fetchedRealMs != null) {
-        var estSpeed = computeBoatSpeed(state, desired);
-        desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
+      if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
+        // Autopilot off, or steering damaged: no course-keeping, no
+        // auto-tacking — the boat just continues roughly along wherever
+        // it's already pointed, wandering gradually (restrained in calm
+        // conditions, further in rough seas) rather than snapping
+        // anywhere. nav.setCourse itself is left untouched, so switching
+        // autopilot back on (once steering is repaired, if that's what
+        // disabled it) simply resumes steering for it. If the drift
+        // walks the heading into the no-go zone, it's left to slow/luff
+        // there — computeBoatSpeed's point-of-sail handling already does
+        // that — rather than auto-tacking out of it.
+        if (nav.driftHeading == null) {
+          nav.driftHeading = nav.heading != null ? nav.heading : nav.setCourse;
+        }
+        var seaWander = 0.3 + state.weather.seaState * 0.35;
+        nav.driftHeading = normalizeDeg(nav.driftHeading + (Math.random() - 0.5) * seaWander);
+        if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
+        steered = nav.driftHeading;
+      } else {
+        desired = nav.setCourse;
+
+        // Current correction — open water only; the coastal corridor's
+        // own automatic navigation already handles getting through
+        // safely (see the module notes above). This adjusts the LOCAL
+        // desired bearing fed into auto-tack, never nav.setCourse itself
+        // (the player's own chosen course is never touched) and never
+        // nav.intendedCourse (BEARING TO NĀWILIWILI stays the plain
+        // geographic bearing). The order matches real seamanship: work
+        // out what heading through the water actually makes the chosen
+        // course good against the current FIRST, then decide whether
+        // that heading is sailable or needs a tack.
+        var currentAnchor = state.weather.oceanCurrent;
+        if (currentAnchor.fetchedRealMs != null) {
+          var estSpeed = computeBoatSpeed(state, desired);
+          desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
+        }
+        steered = resolveAutoTack(state, desired, targetPoint);
       }
     }
-    var steered = resolveAutoTack(state, desired, targetPoint);
     // Small per-tick heading noise: imperfect helming, wave action, minor
     // leeway and current. This is the mechanism by which weather actually
     // shoves the track off line rather than just slowing the boat down —
@@ -1682,6 +1743,7 @@
     var wobble = (Math.random() - 0.5) * (3 + state.weather.seaState * 2);
     return normalizeDeg(steered + wobble);
   }
+
 
   function pointOfSailFactor(headingDeg, windFromDeg) {
     // Angle between the boat's heading and the direction the wind comes FROM.
@@ -1727,6 +1789,26 @@
   var SAIL_PROPULSION_THRESHOLD_KT = 0.5; // below this, sails aren't usefully contributing (becalmed / in irons / furled / not hoisted)
   var SECONDARY_ASSIST_FLOOR = 0.15; // even very near hull speed, the weaker propulsion source still helps a little, never nothing
   var DIESEL_BURN_RATE_GPH = 0.65;   // gallons per hour while running, for a small auxiliary under load
+
+  // ELECTRICAL PANEL — battery charge (0-100%), entirely separate from
+  // boat.electrical (physical wiring/system CONDITION, still only
+  // damaged by faults/events and fixed by REPAIR). See
+  // updateBatteryAndCabin for how these are applied per tick.
+  var BATTERY_DRAIN_AUTOPILOT_PER_HOUR = 2;
+  var BATTERY_DRAIN_HEATER_PER_HOUR = 2;
+  var BATTERY_DRAIN_FAN_PER_HOUR = 0.5;
+  var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
+  var BATTERY_CHARGE_PER_HOUR = 600; // engine running: 0% -> 100% in 10 minutes = 10%/min = 600%/hour
+
+  // Cabin temperature — comfort/morale only, never a survival mechanic.
+  // Centralized here so the COLD/GOOD/HOT bands are easy to retune.
+  var CABIN_TEMP_COLD_MAX_F = 60;   // at/below: COLD
+  var CABIN_TEMP_HOT_MIN_F = 78;    // at/above: HOT — between the two is GOOD
+  var CABIN_AMBIENT_PULL_PER_HOUR = 0.06;  // fraction of the gap to outside temp closed per hour with no heater/fan
+  var CABIN_HEATER_RISE_PER_HOUR_F = 4;    // degrees/hour the heater pushes cabin temp up, independent of the ambient pull
+  var CABIN_HEATER_MAX_F = 85;             // small electric heater in a small cabin — realistic loose ceiling, keeps long offline catch-ups sane
+  var CABIN_FAN_FALL_PER_HOUR_F = 3;       // degrees/hour the fan pushes cabin temp down toward (but not below) outside ambient
+
   // Canonical departure quantities — the stable ORIGINAL half of every
   // CURRENT / ORIGINAL supply display throughout INVENTORY, EAT, DRINK,
   // and ENGINE. These are plain constants, not part of saved state:
@@ -1741,11 +1823,7 @@
   var ORIGINAL_PROPANE = 60;
   var ORIGINAL_FLARES = 6;
   var ORIGINAL_SPARES = {
-    oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
-    spareLine: 100, shackles: 6, riggingTape: 2,
-    fuses: 10, wire: 50, connectors: 20, batteries: 2,
-    hose: 10, hoseClamps: 12,
-    sailRepair: 3, epoxy: 2, sealant: 2,
+    sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
   };
 
   // Shared CURRENT / ORIGINAL formatting. Gallons keep one decimal place
@@ -1789,11 +1867,10 @@
   function computeSailSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
     if (b.sailConfig === 'furled') return 0; // furled = no canvas up = no sail propulsion, full stop
+    if (b.sails === 'DAMAGED') return 0; // torn/collapsed — no sail propulsion until repaired; the boat can still drift
     var speed = baseSpeedForWind(w.windSpeed)
       * pointOfSailFactor(heading, w.windDirection)
-      * sailConfigFactor(b.sailConfig, w.windSpeed)
-      * (0.5 + 0.5 * (b.hull / 100))
-      * (0.6 + 0.4 * (b.sails / 100));
+      * sailConfigFactor(b.sailConfig, w.windSpeed);
     if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= 3) speed *= 0.9; // poor trim, wandering helm
     if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — trying to sleep, or asleep
     return Math.max(0, speed);
@@ -1801,10 +1878,8 @@
 
   function computeEngineSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
-    if (!b.engineOn) return 0;
-    var speed = BASE_ENGINE_SPEED_KT
-      * (0.6 + 0.4 * (b.engine / 100))  // engine condition
-      * (0.6 + 0.4 * (b.hull / 100));   // hull condition — drag under power too
+    if (!b.engineOn) return 0; // DAMAGED engine can never be running — see cmdEngine/performSystemRepairAttempt
+    var speed = BASE_ENGINE_SPEED_KT;
     speed *= clamp(1 - w.seaState * 0.05, 0.55, 1); // pounding into a chop costs speed motoring, same as sailing
     // Wind on the nose costs speed under power; a following wind/sea helps a little.
     var windAngle = angleDiff(heading, w.windDirection); // 0 = wind dead ahead, 180 = dead astern
@@ -1965,15 +2040,10 @@
 
   function clampState(state) {
     var b = state.boat, c = state.crew;
-    b.hull = clamp(b.hull, 0, 100);
-    b.rigging = clamp(b.rigging, 0, 100);
-    b.sails = clamp(b.sails, 0, 100);
-    b.electrical = clamp(b.electrical, 0, 100);
-    b.engine = clamp(b.engine, 0, 100);
-    b.steering = clamp(b.steering, 0, 100);
+    b.battery = clamp(b.battery, 0, 100);
     c.fatigue = clamp(c.fatigue, 0, 100);
     c.morale = clamp(c.morale, 0, 100);
-    state.nav.positionConfidence = b.electrical < 30 ? 'uncertain' : 'good';
+    state.nav.positionConfidence = b.electrical === 'DAMAGED' ? 'uncertain' : 'good';
   }
 
   function simTick(state) {
@@ -2084,11 +2154,9 @@
 
     updateCrew(state);
     checkFuel(state);
-    checkSailStrain(state);
-    checkSystemWear(state);
+    updateBatteryAndCabin(state);
     checkAftLocker(state);
-    checkHullLeak(state);
-    checkFlooding(state);
+    checkScheduledFailures(state);
     checkRescue(state);
     checkWeatherNarration(state, prevCondition);
     checkFatigueNarration(state);
@@ -2146,62 +2214,55 @@
     }
   }
 
-  function checkSailStrain(state) {
-    if (state.boat.sailConfig === 'furled') return; // nothing to strain with no canvas up
-    var w = state.weather, b = state.boat, f = state.flags;
-    if (b.sailConfig === 'full' && w.windSpeed > 24) {
-      if (!f.sailWarningIssued) {
-        f.sailWarningIssued = true;
-        log(state, "Wind's up past what she likes with full sail on her. She's carrying too much.");
-      }
-      if (Math.random() < 0.05) {
-        b.sails = clamp(b.sails - rand(3, 9), 0, 100);
-        b.rigging = clamp(b.rigging - rand(1, 5), 0, 100);
-        log(state, "A gust rounds her up hard. Something aloft strains and holds — for now.");
-      }
-    }
-    if (w.windSpeed <= 20) f.sailWarningIssued = false;
-  }
-
-  // Background wear for the systems checkSailStrain doesn't cover.
-  // Rates are deliberately gentle — see PROJECT.md: competence should
-  // produce calm, not a slow-motion equipment apocalypse. Numbers below
-  // are tuned so that heavy, sustained use over the ~3-4 week voyage is
-  // what erodes a system, not routine operation.
-  function checkSystemWear(state) {
-    var b = state.boat, w = state.weather;
+  // Battery charge and cabin temperature — both per-tick, both driven by
+  // simulated elapsed time so they work identically in live play,
+  // offline catch-up, and long absences. Entirely separate from
+  // checkScheduledFailures' boat.electrical (physical condition).
+  function updateBatteryAndCabin(state) {
+    var b = state.boat;
     var hrs = TICK_MINUTES / 60;
 
-    // Motoring wears the engine down slowly — noticeable only after many
-    // cumulative hours running, which the fuel supply already limits to
-    // roughly a day and a half of continuous use at most.
+    // Charging takes priority: while the engine runs, it's actively
+    // pushing power in regardless of what's also drawing from it — a
+    // real alternator's output dwarfs any of these small loads. 0% to
+    // 100% in ten minutes of engine runtime, whether motoring,
+    // motor-sailing, or sails furled — anything with the engine on.
     if (b.engineOn) {
-      b.engine = clamp(b.engine - hrs * 0.6, 0, 100);
+      b.battery = clamp(b.battery + hrs * BATTERY_CHARGE_PER_HOUR, 0, 100);
+    } else {
+      var drain = 0;
+      if (b.autopilotOn) drain += BATTERY_DRAIN_AUTOPILOT_PER_HOUR;
+      if (b.heaterOn) drain += BATTERY_DRAIN_HEATER_PER_HOUR;
+      if (b.fanOn) drain += BATTERY_DRAIN_FAN_PER_HOUR;
+      if (b.cabinLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR;
+      b.battery = clamp(b.battery - hrs * drain, 0, 100);
     }
 
-    // Batteries drain a little just from being aboard and in use over a
-    // long voyage — slow background wear, not tied to any one action.
-    b.electrical = clamp(b.electrical - hrs * 0.08, 0, 100);
-
-    // Steering sees slow wear from continuous use under way, faster when
-    // fighting a confused sea.
-    if (b.speed > 0.3) {
-      var steeringRate = 0.05 + (w.seaState >= 4 ? 0.08 : 0);
-      b.steering = clamp(b.steering - hrs * steeringRate, 0, 100);
+    // Battery failure forces every load off, once, right when it
+    // happens — never auto-restored afterward. The player has to
+    // manually switch things back on once power returns.
+    if (b.battery <= 0) {
+      var hadSomethingOn = b.autopilotOn || b.fanOn || b.heaterOn || b.cabinLightsOn;
+      b.autopilotOn = false;
+      b.fanOn = false;
+      b.heaterOn = false;
+      b.cabinLightsOn = false;
+      if (hadSomethingOn) {
+        log(state, 'Battery dead. Everything electrical drops out.');
+      }
     }
 
-    // Heavy seas can knock the boat around hard enough to hurt the hull
-    // or steering directly — a chance-based jolt, same shape as
-    // checkSailStrain's gust damage, not a steady drain.
-    if (w.seaState >= 5) {
-      if (Math.random() < 0.02) {
-        b.hull = clamp(b.hull - rand(2, 7), 0, 100);
-        log(state, 'A hard sea slams into her broadside. Something below flinches.');
-      }
-      if (Math.random() < 0.015) {
-        b.steering = clamp(b.steering - rand(2, 6), 0, 100);
-        log(state, 'The helm fights the confused sea hard, gear straining under it.');
-      }
+    // Cabin temperature drifts toward outside ambient over time rather
+    // than tracking it directly; heater and fan push against that pull
+    // gradually too, never snapping the cabin to a target instantly.
+    var outside = state.weather.temperatureF;
+    if (b.cabinTemperatureF == null) b.cabinTemperatureF = outside;
+    b.cabinTemperatureF += (outside - b.cabinTemperatureF) * Math.min(1, CABIN_AMBIENT_PULL_PER_HOUR * hrs);
+    if (b.heaterOn) {
+      b.cabinTemperatureF = Math.min(CABIN_HEATER_MAX_F, b.cabinTemperatureF + CABIN_HEATER_RISE_PER_HOUR_F * hrs);
+    }
+    if (b.fanOn && b.cabinTemperatureF > outside) {
+      b.cabinTemperatureF = Math.max(outside, b.cabinTemperatureF - CABIN_FAN_FALL_PER_HOUR_F * hrs);
     }
   }
 
@@ -2223,58 +2284,136 @@
       var hoursSinceDeferred = (state.meta.voyageMinutes - f.aftLockerDeferredAt) / 60;
       if (hoursSinceDeferred > 5) {
         f.aftLockerEscalated = true;
-        state.boat.rigging = clamp(state.boat.rigging - rand(2, 6), 0, 100);
         state.crew.morale = clamp(state.crew.morale - 4, 0, 100);
-        log(state, "The thud from aft has worked something loose against the steering gear. Should have looked sooner.");
+        if (state.boat.steering === 'GOOD') {
+          state.boat.steering = 'DAMAGED';
+          log(state, "The thud from aft has worked something loose against the steering gear. Should have looked sooner.");
+        } else {
+          log(state, "The thud from aft has worked something loose. Should have looked sooner.");
+        }
       }
     }
   }
 
   /* --------------------------------------------------------------
-     FLOODING
+     BOAT SYSTEM FAILURES
 
-     A rare, weather-correlated event — not guaranteed every voyage.
-     A hull leak (boat.floodRate, gal/hr) either stays within what the
-     bilge pump can clear on its own, or it doesn't — in which case
-     water genuinely accumulates (boat.bilgeWater) until repaired.
-     This is the one path that makes the life raft a meaningful,
-     last-resort option rather than a decoration.
+     Four tracked systems — SAILS, STEERING, ENGINE, ELECTRICAL — each
+     simply GOOD or DAMAGED, no gradual wear. A failure is a distinct,
+     randomly-scheduled incident (24-48h apart on average, centered on
+     36h), weighted toward whichever system current conditions make most
+     plausible, never picking a system already DAMAGED. Occasionally a
+     failure schedules a short follow-up ("chain") instead of the normal
+     interval, so a bad stretch can occasionally compound — but usually
+     doesn't. Runs from checkScheduledFailures every tick, so it works
+     identically in live play, offline catch-up, and long absences.
      -------------------------------------------------------------- */
-  var BILGE_PUMP_CAPACITY_GPH = 60; // the automatic pump clears this much on its own
-  var BILGE_CRITICAL_GALLONS = 150; // past this, the boat is in genuine danger — see DISTRESS's life-raft gate
+  var FAILURE_INTERVAL_MIN_HOURS = 24;
+  var FAILURE_INTERVAL_MAX_HOURS = 48;   // centered ~36h
+  var FAILURE_CHAIN_CHANCE = 0.18;       // 15-20% chance of a shortened follow-up after ANY failure
+  var FAILURE_CHAIN_MIN_HOURS = 2;
+  var FAILURE_CHAIN_MAX_HOURS = 10;
+  var BOAT_FAIL_SYSTEMS = ['sails', 'steering', 'engine', 'electrical'];
 
-  function checkHullLeak(state) {
-    var f = state.flags;
-    if (f.hullLeakTriggered || state.crew.inLifeRaft) return;
-    if (state.departure.stageIndex < DEPARTURE_STEPS.length) return;
-    if (voyagePhase(state) === 'inland') return; // not out in real conditions yet
-    var chance = 0.00025; // per 10-minute tick, offshore, in ordinary conditions
-    if (state.weather.seaState >= 5) chance *= 4;
-    else if (state.weather.seaState >= 4) chance *= 2;
-    if (Math.random() < chance) {
-      f.hullLeakTriggered = true;
-      state.boat.floodRate = rand(15, 90);
-      log(state, "Water where there shouldn't be any \u2014 a leak somewhere below the waterline.");
-      flushNewLogEntries(state);
+  function scheduleNextFailure(state, chained) {
+    var hrs = chained
+      ? rand(FAILURE_CHAIN_MIN_HOURS, FAILURE_CHAIN_MAX_HOURS)
+      : rand(FAILURE_INTERVAL_MIN_HOURS, FAILURE_INTERVAL_MAX_HOURS);
+    // Bad weather modestly shortens a chain interval specifically — the
+    // normal cadence is left alone by conditions entirely.
+    if (chained && (state.weather.seaState >= 4 || state.weather.condition === 'squall')) {
+      hrs *= 0.8;
     }
+    state.boat.nextFailureAt = state.meta.voyageMinutes + hrs * 60;
   }
 
-  function checkFlooding(state) {
-    var b = state.boat, f = state.flags;
-    if (b.floodRate <= 0 && b.bilgeWater <= 0) return;
-    var hours = TICK_MINUTES / 60;
-    var net = b.floodRate - BILGE_PUMP_CAPACITY_GPH; // negative once the pump is winning
-    b.bilgeWater = clamp(b.bilgeWater + net * hours, 0, 9999);
-    if (b.bilgeWater >= 50 && !f.bilgeWarned50) {
-      f.bilgeWarned50 = true;
-      log(state, "Water sloshing in the bilge now. The pump is working for it.");
-      flushNewLogEntries(state);
+  // Weighting is a soft nudge, not a rule — every GOOD system always has
+  // SOME chance, conditions just shift the odds toward whichever failure
+  // makes the most sense right now.
+  function pickFailureSystem(state) {
+    var b = state.boat, w = state.weather;
+    var candidates = BOAT_FAIL_SYSTEMS.filter(function (k) { return b[k] === 'GOOD'; });
+    if (candidates.length === 0) return null;
+    var weights = {};
+    candidates.forEach(function (k) { weights[k] = 1; });
+    if (weights.sails !== undefined) {
+      if (w.windSpeed > 24) weights.sails += 1;
+      if (w.condition === 'squall') weights.sails += 1.5;
+      if (b.sailConfig === 'full' && w.windSpeed > 20) weights.sails += 1;
     }
-    if (b.bilgeWater >= 100 && !f.bilgeWarned100) {
-      f.bilgeWarned100 = true;
-      log(state, "The pump can't keep up. Water's rising below.");
-      flushNewLogEntries(state);
+    if (weights.steering !== undefined) {
+      if (w.seaState >= 4) weights.steering += 1;
+      if (w.seaState >= 5) weights.steering += 1;
     }
+    if (weights.engine !== undefined) {
+      if (b.engineOn) weights.engine += 1.5;
+    }
+    if (weights.electrical !== undefined) {
+      var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.fanOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
+      if (loadCount >= 2) weights.electrical += 1;
+      if (w.seaState >= 4) weights.electrical += 0.5;
+    }
+    var total = candidates.reduce(function (sum, k) { return sum + weights[k]; }, 0);
+    var r = Math.random() * total;
+    for (var i = 0; i < candidates.length; i++) {
+      r -= weights[candidates[i]];
+      if (r <= 0) return candidates[i];
+    }
+    return candidates[candidates.length - 1];
+  }
+
+  var FAILURE_NARRATIVES = {
+    sails: [
+      'A sharp crack overhead. The sail has torn along a seam.',
+      'Something lets go in the rig. The sail collapses loose.',
+    ],
+    steering: [
+      'The helm suddenly goes loose in your hands.',
+      'The wheel turns, but the rudder does not answer.',
+    ],
+    engine: [
+      'The engine coughs hard and dies.',
+      'A warning smell from below. The engine temperature is climbing fast.',
+    ],
+    electrical: [
+      'A fuse blows somewhere behind the panel. The cabin goes dark.',
+    ],
+  };
+
+  function triggerFailure(state, systemKey) {
+    var b = state.boat;
+    b[systemKey] = 'DAMAGED';
+    if (systemKey === 'engine' && b.engineOn) {
+      b.engineOn = false; // shut down immediately if it was running
+    }
+    if (systemKey === 'electrical') {
+      // A fuse problem, not a dead battery — battery charge itself is
+      // untouched. But every load it feeds drops out right away, same
+      // shape as a dead battery, and stays off until the player
+      // manually switches it back on (see performElectricalToggle) —
+      // repair only restores ACCESS, never flips anything back on itself.
+      b.autopilotOn = false;
+      b.fanOn = false;
+      b.heaterOn = false;
+      b.cabinLightsOn = false;
+    }
+    log(state, pickFromPool(FAILURE_NARRATIVES[systemKey]));
+    flushNewLogEntries(state);
+  }
+
+  function checkScheduledFailures(state) {
+    var b = state.boat;
+    if (state.crew.inLifeRaft) return; // no boat systems left to fail
+    if (state.meta.voyageMinutes < b.nextFailureAt) return;
+    var sys = pickFailureSystem(state);
+    if (!sys) {
+      // Everything's already DAMAGED — nothing left to break. Push the
+      // schedule out so this doesn't re-check every single tick.
+      scheduleNextFailure(state, false);
+      return;
+    }
+    triggerFailure(state, sys);
+    scheduleNextFailure(state, Math.random() < FAILURE_CHAIN_CHANCE);
   }
 
   /* --------------------------------------------------------------
@@ -2467,7 +2606,6 @@
     if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
     if (state.weather.seaState >= 5) return false;
     if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) return false; // an active problem aboard
-    if (state.boat.floodRate > 0) return false; // active flooding dominates attention too
     if (hungerLevel(state.crew.hoursSinceMeal) >= 3) return false;  // severe hunger/thirst — physical concerns dominate
     if (thirstLevel(state.crew.hoursSinceWater) >= 3) return false;
     return true;
@@ -2553,28 +2691,19 @@
 
   function resolveAftLocker(state) {
     var c = state.crew;
-    var spares = state.supplies.spares;
-    var hasShackle = spares.shackles > 0;
     var penalty = 0;
     if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.12;
     if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.15;
     if (coffeeActive(state)) penalty -= 0.05;
-    if (!hasShackle) penalty += 0.15; // improvising without the right hardware
     if (c.morale < 40) penalty += 0.06; // rattled, more likely to fumble it
     var successChance = clamp(0.92 - c.fatigue / 150 - penalty, 0.2, 0.92);
     var success = Math.random() < successChance;
     state.flags.aftLockerResolved = true;
     c.fatigue = clamp(c.fatigue + 4, 0, 100);
     if (success) {
-      if (hasShackle) {
-        spares.shackles -= 1;
-        log(state, "Found it: a jerry can, worked loose from its strap. A new shackle sets it right. Quiet again.");
-      } else {
-        log(state, "Found it: a jerry can, worked loose from its strap. No spare shackle aboard — lashed it down instead. Quiet again, for now.");
-      }
+      log(state, "Found it: a jerry can, worked loose from its strap. Lashed down tight. Quiet again.");
     } else {
-      state.boat.rigging = clamp(state.boat.rigging - rand(3, 8), 0, 100);
-      log(state, "Fumbled it in the dark — a bruised knuckle, and something aft feels different now, secured or not.");
+      log(state, "Fumbled it in the dark \u2014 a bruised knuckle, and it's still not quite secure.");
     }
     flushNewLogEntries(state);
   }
@@ -3085,34 +3214,6 @@
     ]);
   }
 
-  // Five-level boat-system condition (HULL, RIGGING, SAILS, ENGINE,
-  // BATTERIES/electrical, STEERING all share this scale). WORN is
-  // informational — nothing to do yet. POOR and below is where REPAIR
-  // has something to offer (see cmdRepair / attemptSystemRepair).
-  function boatConditionLevel(v) {
-    return describeLevel(v, [
-      { max: 10, text: 'FAILED' },
-      { max: 25, text: 'DAMAGED' },
-      { max: 50, text: 'POOR' },
-      { max: 75, text: 'WORN' },
-      { max: 100, text: 'GOOD' },
-    ]);
-  }
-
-  // BILGE reuses the exact thresholds the flooding warnings already fire
-  // at (50/100/150 gal) rather than inventing a parallel number — it's
-  // the same water, just read as a condition tier instead of a gallon
-  // count.
-  function bilgeConditionLevel(gal) {
-    return describeLevel(gal, [
-      { max: 19, text: 'GOOD' },
-      { max: 49, text: 'WORN' },
-      { max: 99, text: 'POOR' },
-      { max: 149, text: 'DAMAGED' },
-      { max: Infinity, text: 'FAILED' },
-    ]);
-  }
-
   function countPhrase(n, criticalMax, lowMax) {
     return describeLevel(n, [
       { max: criticalMax, text: "nearly gone — this needs attention" },
@@ -3186,13 +3287,21 @@
   /* ============================================================
      8. COMMANDS
      ============================================================ */
+  // Space-padded columns, not inventoryLine's dot-fill — STATUS and
+  // ELECTRICAL PANEL read as a short instrument panel, not a supply list.
+  function statusLine(label, value) {
+    return label + ' '.repeat(Math.max(2, 12 - label.length)) + value;
+  }
+
+  function cabinTempLabel(tempF) {
+    if (tempF == null) return 'GOOD';
+    if (tempF <= CABIN_TEMP_COLD_MAX_F) return 'COLD';
+    if (tempF >= CABIN_TEMP_HOT_MIN_F) return 'HOT';
+    return 'GOOD';
+  }
+
   function cmdStatus(state) {
     var b = state.boat, c = state.crew;
-    // Space-padded columns, not inventoryLine's dot-fill — STATUS reads as
-    // a short instrument panel, not a supply list.
-    function statusLine(label, value) {
-      return label + ' '.repeat(Math.max(2, 12 - label.length)) + value;
-    }
     printBlank();
     printLine('STATUS', 'heading-label');
     printBlank();
@@ -3201,14 +3310,69 @@
     printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
     printLine(statusLine('MORALE', moraleLevel(c.morale)));
     printBlank();
-    printLine(statusLine('HULL', boatConditionLevel(b.hull)));
-    printLine(statusLine('RIGGING', boatConditionLevel(b.rigging)));
-    printLine(statusLine('SAILS', boatConditionLevel(b.sails)));
-    printLine(statusLine('ENGINE', boatConditionLevel(b.engine)));
-    printLine(statusLine('BATTERIES', boatConditionLevel(b.electrical)));
-    printLine(statusLine('BILGE', bilgeConditionLevel(b.bilgeWater)));
-    printLine(statusLine('STEERING', boatConditionLevel(b.steering)));
+    printLine(statusLine('CABIN TEMP', cabinTempLabel(b.cabinTemperatureF)));
+    printLine(statusLine('BATTERY', Math.round(b.battery) + '%'));
+    printBlank();
+    printLine(statusLine('SAILS', b.sails));
+    printLine(statusLine('STEERING', b.steering));
+    printLine(statusLine('ENGINE', b.engine));
+    printLine(statusLine('ELECTRICAL', b.electrical));
     state.pendingChoice = { id: 'status-view', options: [{ label: 'BACK', action: 'cancel' }] };
+  }
+
+  function cmdElectrical(state) {
+    var b = state.boat;
+    printBlank();
+    printLine('ELECTRICAL PANEL', 'heading-label');
+    printBlank();
+    var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
+    printLine(statusLine('BATTERY', batteryLabel));
+    printLine(statusLine('CABIN TEMP', cabinTempLabel(b.cabinTemperatureF)));
+    if (b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
+    }
+    state.pendingChoice = {
+      id: 'electrical-panel',
+      options: [
+        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
+        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
+        { label: 'FAN \u2014 ' + (b.fanOn ? 'ON' : 'OFF'), action: 'electrical:fan' },
+        { label: 'AUTOPILOT \u2014 ' + (b.autopilotOn ? 'ON' : 'OFF'), action: 'electrical:autopilot' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
+  }
+
+  var ELECTRICAL_TOGGLE_FIELDS = {
+    cabinLights: 'cabinLightsOn',
+    heater: 'heaterOn',
+    fan: 'fanOn',
+    autopilot: 'autopilotOn',
+  };
+  // Toggles flip immediately and redraw the panel — no confirmation
+  // prompt, no delay, and deliberately no permanent-log entry for the
+  // routine flip itself (these can be switched often; logging every one
+  // would clutter the log fast). A dead battery can't power anything
+  // new on, though it can still be switched off.
+  function performElectricalToggle(state, key) {
+    var field = ELECTRICAL_TOGGLE_FIELDS[key];
+    if (!field) return;
+    var b = state.boat;
+    if (!b[field] && b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('Electrical system damaged.', 'amber');
+      cmdElectrical(state);
+      return;
+    }
+    if (!b[field] && b.battery <= 0) {
+      printBlank();
+      printLine('No power.', 'amber');
+      cmdElectrical(state);
+      return;
+    }
+    b[field] = !b[field];
+    cmdElectrical(state);
   }
 
   function cmdPosition(state) {
@@ -3305,6 +3469,14 @@
   // exists (see currentStrategicNote — never a recommendation, purely
   // what the data shows), then the external OPEN IN WINDY link.
   function cmdForecast(state) {
+    if (state.boat.battery <= 0 || state.boat.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('FORECAST', 'heading-label');
+      printBlank();
+      printLine('NO POWER', 'amber');
+      state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
     var real = state.weather.realWx;
     printBlank();
     printLine('FORECAST', 'heading-label');
@@ -3351,10 +3523,7 @@
      state.supplies.* alongside the existing propane count.
      -------------------------------------------------------------- */
   var SPARES_NAMES = {
-    impellers: 'Impellers', belts: 'Drive belts', fuelFilters: 'Fuel filters', oilFilters: 'Oil filters', oil: 'Engine oil (qt)', coolant: 'Coolant (qt)',
-    fuses: 'Fuses', wire: 'Wire (ft)', connectors: 'Connectors', batteries: 'Spare batteries',
-    hose: 'Hose (ft)', hoseClamps: 'Hose clamps', spareLine: 'Spare line (ft)', shackles: 'Shackles', riggingTape: 'Rigging tape',
-    sailRepair: 'Sail repair kits', epoxy: 'Epoxy', sealant: 'Sealant',
+    sailRepairKit: 'Sail repair kit', steeringParts: 'Steering parts', engineParts: 'Engine parts', fuses: 'Fuses',
   };
 
   function inventoryLine(name, valueText) {
@@ -3452,7 +3621,7 @@
     } else {
       printLine('EPIRB: ACTIVE \u2014 ' + rescueStatusLine(state));
     }
-    if (state.boat.bilgeWater > 80 && !state.crew.inLifeRaft) {
+    if (!state.crew.inLifeRaft) {
       opts.push({ label: 'DEPLOY LIFE RAFT', action: 'deploy-life-raft' });
     }
     if (r.encounterActive && state.supplies.safety.flares > 0) {
@@ -3467,6 +3636,11 @@
     printLine('ENGINE', 'heading-label');
     printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
     printLine('Diesel: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS));
+    if (!state.boat.engineOn && state.boat.engine === 'DAMAGED') {
+      printLine('Engine is damaged. Repair it before starting.', 'amber');
+      state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
     if (!state.boat.engineOn && state.boat.fuelGallons <= 0) {
       printLine('No diesel left to start it.', 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
@@ -3523,6 +3697,12 @@
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
+    if (state.boat.steering === 'DAMAGED') {
+      printBlank();
+      printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
+      state.pendingChoice = { id: 'course-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
     state.pendingChoice = {
       id: 'course-menu',
       options: [
@@ -3541,6 +3721,7 @@
   // COURSE screen doesn't offer CHANGE COURSE before then).
   function cmdChangeCourse(state) {
     var nav = state.nav;
+    if (state.boat.steering === 'DAMAGED') { cmdCourse(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
     printLine('CHANGE COURSE', 'heading-label');
@@ -3676,6 +3857,7 @@
   }
 
   function cmdChore(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     printBlank();
     printLine('CHORES', 'heading-label');
     var options = buildChoreOptions(state);
@@ -3724,6 +3906,7 @@
   }
 
   function cmdWash(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     if (!hasEnoughWater(state, WATER_WASH_GAL)) {
       printBlank();
       printLine('Not enough water.', 'amber');
@@ -3743,6 +3926,7 @@
   }
 
   function cmdDress(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     runShortAction(state, {
       label: 'CHANGING',
       duration: 2,
@@ -3757,6 +3941,7 @@
 
 
   function cmdRead(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     runShortAction(state, {
       label: 'READING',
       duration: 4,
@@ -3784,6 +3969,7 @@
   }
 
   function cmdEat(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     printBlank();
     printLine('PROVISIONS', 'heading-label');
     var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
@@ -3969,6 +4155,12 @@
   }
 
   function performCoffee(state) {
+    if (needsCabinLight(state)) {
+      printBlank();
+      printLine('TOO DARK TO SEE.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
     if (state.drinks.coffee <= 0) {
       printBlank();
       printLine('No coffee left.', 'amber');
@@ -3997,6 +4189,12 @@
   }
 
   function performTea(state) {
+    if (needsCabinLight(state)) {
+      printBlank();
+      printLine('TOO DARK TO SEE.', 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
     if (state.drinks.tea <= 0) {
       printBlank();
       printLine('No tea left.', 'amber');
@@ -4043,145 +4241,154 @@
   }
 
 
-  function attemptLeakRepair(state) {
-    var c = state.crew, spares = state.supplies.spares;
-    var hasSealant = spares.sealant > 0;
-    var hasHoseKit = spares.hose > 0 && spares.hoseClamps > 0;
-    var hasMaterial = hasSealant || hasHoseKit;
-    var penalty = 0;
-    if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.12;
-    if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.15;
-    if (state.weather.seaState >= 4) penalty += 0.15; // hard to work a repair in a seaway
-    if (!hasMaterial) penalty += 0.25; // improvising without the right materials
-    if (c.morale < 40) penalty += 0.06; // rattled, more likely to fumble it
-    var successChance = clamp(0.75 - c.fatigue / 200 - penalty, 0.15, 0.85);
-    var success = Math.random() < successChance;
-    c.fatigue = clamp(c.fatigue + 6, 0, 100);
-    if (success) {
-      if (hasSealant) spares.sealant -= 1;
-      else if (hasHoseKit) { spares.hose -= 1; spares.hoseClamps -= 1; }
-      state.boat.floodRate = 0;
-      state.flags.hullLeakResolved = true;
-      // Patching the leak is itself hull work, so it nudges the general
-      // hull condition stat too, not just the active flow.
-      state.boat.hull = clamp(state.boat.hull + 15, 0, 100);
-      log(state, hasMaterial ? "Sealant packed into the seam. The flow stops." : "Wedged and lashed with what's on hand. It's holding, for now.");
-    } else {
-      log(state, "Can't get at it properly \u2014 the water keeps coming.");
-    }
-    flushNewLogEntries(state);
-  }
+  // Which spare each system's repair consumes, and its display name.
+  var REPAIR_SPARE_KEY = { sails: 'sailRepairKit', steering: 'steeringParts', engine: 'engineParts', electrical: 'fuses' };
+  var REPAIR_SPARE_LABEL = { sailRepairKit: 'SAIL REPAIR KIT', steeringParts: 'STEERING PARTS', engineParts: 'ENGINE PARTS', fuses: 'FUSES' };
+  var REPAIR_SYSTEM_LABEL = { sails: 'SAILS', steering: 'STEERING', engine: 'ENGINE', electrical: 'ELECTRICAL' };
 
-  // Which spares a given system's repair likes to consume — reusing the
-  // existing spares inventory rather than inventing new resource types.
-  // Any one of them being present counts as "has material"; the first
-  // available is what gets used up.
-  var SYSTEM_REPAIR_MATERIALS = {
-    hull: ['sealant', 'hose', 'hoseClamps'],
-    rigging: ['riggingTape', 'spareLine', 'shackles'],
-    sails: ['sailRepair', 'epoxy'],
-    engine: ['oil', 'oilFilters', 'fuelFilters', 'belts', 'impellers'],
-    electrical: ['fuses', 'wire', 'connectors', 'batteries'],
-    steering: ['spareLine', 'wire'],
+  var REPAIR_SUCCESS_LINES = {
+    sails: ['The patch holds. Sail drawing again.', 'Stitched and taped \u2014 she fills properly again.'],
+    steering: ['The steering answers again.', 'The rudder bites again, helm answering true.'],
+    engine: ['The engine turns over and settles into its rhythm.', 'She catches, coughs once, then runs clean.'],
+    electrical: ['New fuse in. The panel comes back to life.', 'Power\u2019s back. The panel lights up again.'],
   };
-  var SYSTEM_REPAIR_NOUN = {
-    hull: 'the hull', rigging: 'the rigging', sails: 'the sails',
-    engine: 'the engine', electrical: 'the wiring', steering: 'the steering',
+  var REPAIR_FAILURE_LINES = {
+    sails: ['The patch pulls loose as soon as it takes load.', 'Can\u2019t get the seam to hold.'],
+    steering: ['The repair does not hold.', 'Whatever\u2019s wrong down there, this didn\u2019t fix it.'],
+    engine: ['You put it back together and try the starter. Nothing.', 'Turns over, but won\u2019t catch.'],
+    electrical: ['The new fuse goes immediately.', 'Still dead \u2014 the problem\u2019s elsewhere in the run.'],
   };
 
-  function hasRepairMaterial(state, systemKey) {
-    var spares = state.supplies.spares;
-    return (SYSTEM_REPAIR_MATERIALS[systemKey] || []).some(function (k) { return spares[k] > 0; });
-  }
-  function consumeRepairMaterial(state, systemKey) {
-    var spares = state.supplies.spares;
-    var keys = SYSTEM_REPAIR_MATERIALS[systemKey] || [];
-    for (var i = 0; i < keys.length; i++) {
-      if (spares[keys[i]] > 0) { spares[keys[i]] -= 1; return; }
+  // Centralized so the GOOD/FAIR/UNCERTAIN/POOR bands are easy to retune
+  // without touching the penalty math itself.
+  var REPAIR_SUCCESS_LABEL_THRESHOLDS = [
+    { min: 0.70, text: 'GOOD' },
+    { min: 0.50, text: 'FAIR' },
+    { min: 0.30, text: 'UNCERTAIN' },
+    { min: 0, text: 'POOR' },
+  ];
+  function repairSuccessLabel(chance) {
+    for (var i = 0; i < REPAIR_SUCCESS_LABEL_THRESHOLDS.length; i++) {
+      if (chance >= REPAIR_SUCCESS_LABEL_THRESHOLDS[i].min) return REPAIR_SUCCESS_LABEL_THRESHOLDS[i].text;
     }
+    return 'POOR';
   }
 
-  // One shared repair resolver for every general boat system (hull,
-  // rigging, sails, engine, electrical, steering) — the aft locker and
-  // an active leak stay on their own existing functions (resolveAftLocker,
-  // attemptLeakRepair), which this doesn't touch. Each system gets
-  // exactly one MAJOR repair for the voyage (parts run out); after that,
-  // further attempts are a smaller, temporary stopgap. A rested, fed,
-  // steady crew does stronger work — same shape as the other repairs.
-  function attemptSystemRepair(state, systemKey) {
-    var b = state.boat, c = state.crew;
-    var hasMaterial = hasRepairMaterial(state, systemKey);
-    var alreadyUsedMajor = b.majorRepairUsed[systemKey];
+  var REPAIR_BASE_SUCCESS_CHANCE = 0.85;
+  var REPAIR_SUCCESS_FLOOR = 0.15; // no single bad factor, or even several, fully prohibits an attempt
+  var REPAIR_SUCCESS_CEILING = 0.95;
 
-    var penalty = 0;
-    if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.10;
-    if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.12;
-    if (state.weather.seaState >= 4) penalty += 0.15;
-    if (!hasMaterial) penalty += 0.20;
-    if (c.morale < 40) penalty += 0.08;
+  // Only the factors actually hurting the attempt are returned — a clean
+  // bill of health on any one just leaves it off the list, per the spec.
+  // Labels/thresholds mirror STATUS's own wellbeing bands, no new
+  // vocabulary invented for this screen.
+  function computeRepairPenalties(state) {
+    var c = state.crew, w = state.weather;
+    var factors = [];
 
-    var successChance = clamp(0.8 - c.fatigue / 220 - penalty, 0.2, 0.9);
-    var success = Math.random() < successChance;
-    c.fatigue = clamp(c.fatigue + 7, 0, 100);
+    var eLvl = energyLevel(c.fatigue); // 0=DEPLETED..4=RESTED
+    var energyPenalty = [0.35, 0.20, 0.08, 0, 0][eLvl];
+    if (energyPenalty > 0) factors.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl], penalty: energyPenalty });
 
-    if (!success) {
-      log(state, "Couldn't get " + SYSTEM_REPAIR_NOUN[systemKey] + ' sorted this time.');
-      flushNewLogEntries(state);
-      return;
-    }
-    if (c.toolsOutSinceMinutes == null) c.toolsOutSinceMinutes = state.meta.voyageMinutes;
-    if (hasMaterial) consumeRepairMaterial(state, systemKey);
+    var hLvl = hungerLevel(c.hoursSinceMeal); // 0=FULL..4=STARVING
+    var hungerPenalty = [0, 0, 0.12, 0.22, 0.22][hLvl];
+    if (hungerPenalty > 0) factors.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl], penalty: hungerPenalty });
 
-    // Rested and steady crew do stronger, more lasting work; a repair
-    // attempted exhausted or shaken still holds, just not as well.
-    var repairQuality = clamp(1 - c.fatigue / 130 + (c.morale - 50) / 250, 0.25, 1);
+    var tLvl = thirstLevel(c.hoursSinceWater);
+    var thirstPenalty = [0, 0, 0.12, 0.28, 0.28][tLvl];
+    if (thirstPenalty > 0) factors.push({ label: 'THIRST', value: THIRST_LABELS[tLvl], penalty: thirstPenalty });
 
-    if (!alreadyUsedMajor) {
-      b.majorRepairUsed[systemKey] = true;
-      b[systemKey] = clamp(50 + Math.round(repairQuality * 30), 0, 100);
-      log(state, (repairQuality >= 0.6
-        ? 'Solid work on ' + SYSTEM_REPAIR_NOUN[systemKey] + '.'
-        : 'A tired repair on ' + SYSTEM_REPAIR_NOUN[systemKey] + ' \u2014 holds for now, not the strongest fix.')
-        + ' ' + boatConditionLevel(b[systemKey]) + ' now.');
+    var moralePenalty = 0, moraleLabelText = null;
+    if (c.morale < 20) { moralePenalty = 0.22; moraleLabelText = 'DEPLETED'; }
+    else if (c.morale < 40) { moralePenalty = 0.12; moraleLabelText = 'LOW'; }
+    if (moralePenalty > 0) factors.push({ label: 'MORALE', value: moraleLabelText, penalty: moralePenalty });
+
+    var seaPenalty = 0;
+    if (w.seaState >= 5) seaPenalty = 0.30;       // VERY ROUGH / HIGH
+    else if (w.seaState === 4) seaPenalty = 0.15; // ROUGH
+    if (seaPenalty > 0) factors.push({ label: 'SEA STATE', value: SEA_STATE_SHORT_LABELS[w.seaState], penalty: seaPenalty });
+
+    var totalPenalty = factors.reduce(function (sum, f) { return sum + f.penalty; }, 0);
+    return { factors: factors, totalPenalty: totalPenalty };
+  }
+
+  function repairSuccessChance(state) {
+    var p = computeRepairPenalties(state);
+    return clamp(REPAIR_BASE_SUCCESS_CHANCE - p.totalPenalty, REPAIR_SUCCESS_FLOOR, REPAIR_SUCCESS_CEILING);
+  }
+
+  // The decision screen for one damaged system: only negative factors,
+  // the resulting SUCCESS label, and — if a spare remains — the button
+  // to actually attempt it. No confirmation beyond this screen itself.
+  function cmdRepairSystem(state, systemKey) {
+    printBlank();
+    printLine('REPAIR \u2014 ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
+    var p = computeRepairPenalties(state);
+    p.factors.forEach(function (f) {
+      printLine(statusLine(f.label, f.value));
+    });
+    var chance = repairSuccessChance(state);
+    printLine(statusLine('SUCCESS', repairSuccessLabel(chance)));
+    var spareKey = REPAIR_SPARE_KEY[systemKey];
+    var options = [];
+    if (state.supplies.spares[spareKey] > 0) {
+      options.push({ label: 'ATTEMPT REPAIR', action: 'attempt-repair:' + systemKey });
     } else {
-      b[systemKey] = clamp(b[systemKey] + 10 + Math.round(repairQuality * 10), 0, 100);
-      log(state, 'A stopgap fix on ' + SYSTEM_REPAIR_NOUN[systemKey] + ' \u2014 no parts left aboard for a real repair. '
-        + boatConditionLevel(b[systemKey]) + ' now.');
+      printBlank();
+      printLine('NO ' + REPAIR_SPARE_LABEL[spareKey] + ' REMAIN.', 'amber');
     }
-    flushNewLogEntries(state);
+    options.push({ label: 'BACK', action: 'cmd:repair' });
+    state.pendingChoice = { id: 'repair-decision', options: options };
   }
 
-  // What's actually reachable and worth offering from here. WORN and
-  // above is informational only (see boatConditionLevel); POOR or worse
-  // is where a repair has something to do. An active leak always takes
-  // priority over hull's general condition, since it's the urgent thing.
-  function repairableSystemsAt(state, location) {
+  // The actual attempt: one spare consumed regardless of outcome, some
+  // fatigue either way, and — only on success — the system restored to
+  // GOOD. A failed attempt leaves the system DAMAGED; it never damages
+  // anything else.
+  function performSystemRepairAttempt(state, systemKey) {
+    var spareKey = REPAIR_SPARE_KEY[systemKey];
+    if (state.supplies.spares[spareKey] <= 0) return; // not reachable with the button hidden, but guard anyway
+    var chance = repairSuccessChance(state);
+    runShortAction(state, {
+      label: 'WORKING ON ' + REPAIR_SYSTEM_LABEL[systemKey],
+      duration: 6,
+      action: function (s) {
+        s.supplies.spares[spareKey] -= 1;
+        s.crew.fatigue = clamp(s.crew.fatigue + rand(6, 10), 0, 100);
+        if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
+        if (Math.random() < chance) {
+          s.boat[systemKey] = 'GOOD';
+          log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
+        } else {
+          log(s, pickFromPool(REPAIR_FAILURE_LINES[systemKey]));
+        }
+        flushNewLogEntries(s);
+      },
+    });
+  }
+
+  // What's actually reachable and worth offering: the aft locker (its
+  // own separate, unrelated event) plus whichever of the four tracked
+  // systems are currently DAMAGED — nothing else, and never anything
+  // GOOD, since there's nothing to do there.
+  function buildDamagedSystemsList(state) {
     var b = state.boat;
     var items = [];
-    if (location === 'above') {
-      if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
-        items.push({ label: 'AFT LOCKER', action: 'repair:aftLocker' });
-      }
-      if (b.sails <= 50) items.push({ label: 'SAILS \u2014 ' + boatConditionLevel(b.sails), action: 'repair:sails' });
-      if (b.rigging <= 50) items.push({ label: 'RIGGING \u2014 ' + boatConditionLevel(b.rigging), action: 'repair:rigging' });
-    } else {
-      if (b.floodRate > 0) {
-        items.push({ label: 'HULL LEAK', action: 'repair:leak' });
-      } else if (b.hull <= 50) {
-        items.push({ label: 'HULL \u2014 ' + boatConditionLevel(b.hull), action: 'repair:hull' });
-      }
-      if (b.engine <= 50) items.push({ label: 'ENGINE \u2014 ' + boatConditionLevel(b.engine), action: 'repair:engine' });
-      if (b.electrical <= 50) items.push({ label: 'BATTERIES \u2014 ' + boatConditionLevel(b.electrical), action: 'repair:electrical' });
-      if (b.steering <= 50) items.push({ label: 'STEERING \u2014 ' + boatConditionLevel(b.steering), action: 'repair:steering' });
+    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
+      items.push({ label: 'AFT LOCKER', action: 'repair:aftLocker' });
     }
+    BOAT_FAIL_SYSTEMS.forEach(function (k) {
+      if (b[k] === 'DAMAGED') items.push({ label: REPAIR_SYSTEM_LABEL[k], action: 'repair-select:' + k });
+    });
     return items;
   }
 
   function cmdRepair(state) {
-    var items = repairableSystemsAt(state, state.crew.location);
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
+    var items = buildDamagedSystemsList(state);
     if (items.length === 0) {
       printBlank();
-      printLine('Nothing aboard is asking to be fixed right now.', 'dim');
+      printLine('Nothing aboard needs repair.', 'dim');
       return;
     }
     printBlank();
@@ -4215,6 +4422,7 @@
     'change-course': cmdChangeCourse,
     wellbeing: cmdWellbeing,
     chore: cmdChore,
+    electrical: cmdElectrical,
     sleep: cmdSleep,
     eat: cmdEat,
     drink: cmdDrink,
@@ -4322,6 +4530,7 @@
         ],
         [
           { label: 'STATUS', action: 'cmd:status' },
+          { label: 'ELECTRICAL PANEL', action: 'cmd:electrical' },
           { label: 'REPAIR', action: 'cmd:repair' },
           { label: 'DISTRESS', action: 'cmd:distress' },
         ],
@@ -4354,7 +4563,17 @@
   var INFO_COMMANDS = { inventory: true };
   var openInfoPanel = null;
 
+  // Cosmetic only — see the --bg-lit CSS variable. Called from
+  // renderOptions so it's always in sync with state, including right
+  // after loading a saved game.
+  function applyCabinLighting(state) {
+    var lit = !!state.boat.cabinLightsOn;
+    document.documentElement.classList.toggle('cabin-lit', lit);
+    document.body.classList.toggle('cabin-lit', lit);
+  }
+
   function renderOptions(state) {
+    applyCabinLighting(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
     var opts = getContextualOptions(state);
@@ -4532,6 +4751,8 @@
       performEat(state, action.slice(4));
     } else if (action.indexOf('chore:') === 0) {
       performChore(state, action.slice(6));
+    } else if (action.indexOf('electrical:') === 0) {
+      performElectricalToggle(state, action.slice(11));
     } else if (action === 'drink:water') {
       performDrinkWater(state);
     } else if (action === 'drink:coffee') {
@@ -4545,19 +4766,12 @@
       } else {
         showInventoryCategory(state, invCat);
       }
-    } else if (action.indexOf('repair:') === 0) {
-      var repairKey = action.slice(7);
-      if (repairKey === 'aftLocker') {
-        runShortAction(state, { label: 'CHECKING AFT LOCKER', duration: 6, action: resolveAftLocker });
-      } else if (repairKey === 'leak') {
-        runShortAction(state, { label: 'WORKING THE LEAK', duration: 6, action: attemptLeakRepair });
-      } else {
-        runShortAction(state, {
-          label: 'WORKING ON ' + SYSTEM_REPAIR_NOUN[repairKey].toUpperCase(),
-          duration: 6,
-          action: function (s) { attemptSystemRepair(s, repairKey); },
-        });
-      }
+    } else if (action === 'repair:aftLocker') {
+      runShortAction(state, { label: 'CHECKING AFT LOCKER', duration: 6, action: resolveAftLocker });
+    } else if (action.indexOf('repair-select:') === 0) {
+      cmdRepairSystem(state, action.slice(14));
+    } else if (action.indexOf('attempt-repair:') === 0) {
+      performSystemRepairAttempt(state, action.slice(15));
     } else if (action.indexOf('course-draft:') === 0) {
       // The CHANGE COURSE dial: nudge the draft value and redraw the
       // same picker so the player sees where they've landed before
@@ -4648,6 +4862,7 @@
           });
           break;
         case 'engine-start':
+          if (state.boat.engine === 'DAMAGED') break; // shouldn't be reachable — button isn't shown otherwise
           runShortAction(state, {
             label: 'STARTING ENGINE',
             duration: 3,
@@ -4734,6 +4949,7 @@
         cmdCourse(state);
         break;
       case 'set-for-nawiliwili':
+        if (state.boat.steering === 'DAMAGED') { cmdCourse(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
         refreshHeadingAndSpeed(state);
         printBlank();
@@ -5090,6 +5306,12 @@
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
     if (c.location === undefined) c.location = 'above';
+    if (b.battery === undefined) b.battery = 100;
+    if (b.autopilotOn === undefined) b.autopilotOn = true;
+    if (b.fanOn === undefined) b.fanOn = false;
+    if (b.heaterOn === undefined) b.heaterOn = false;
+    if (b.cabinLightsOn === undefined) b.cabinLightsOn = false;
+    if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
     if (state.flags.galleyNarrated === undefined) state.flags.galleyNarrated = false;
@@ -5104,43 +5326,21 @@
       delete b.fuelHours;
     }
     // Consolidate the old 11-category supplies (engine/rigging/electrical/
-    // plumbing/repair/medical/safety/tools) into the simplified shape:
-    // one merged "spares" bucket, and "safety" holding only the flare
-    // count — EPIRB/life-raft are now status derived from state.rescue /
-    // crew.inLifeRaft, not a separate inventory count. Also covers saves
-    // old enough to have had no supplies breakdown beyond propane at all.
-    if (!state.supplies.spares) {
-      var oldCats = ['engine', 'rigging', 'electrical', 'plumbing', 'repair'];
-      var merged = {};
-      oldCats.forEach(function (cat) {
-        var obj = state.supplies[cat];
-        if (obj) Object.keys(obj).forEach(function (k) { merged[k] = obj[k]; });
-      });
-      var spareDefaults = {
-        oil: 2, coolant: 2, fuelFilters: 4, oilFilters: 2, impellers: 3, belts: 2,
-        spareLine: 100, shackles: 6, riggingTape: 2,
-        fuses: 10, wire: 50, connectors: 20, batteries: 2,
-        hose: 10, hoseClamps: 12,
-        sailRepair: 3, epoxy: 2, sealant: 2,
+    // Simplified spares: initialize the four new categories once,
+    // regardless of whatever the save's old spares table looked like
+    // (a handful of oil/coolant/wire/etc counts, or nothing at all for
+    // very old saves) — there's no natural mapping from the old
+    // categories to the new ones, so an existing voyage just starts
+    // them at the same canonical amounts a fresh voyage would.
+    if (!state.supplies.spares || state.supplies.spares.sailRepairKit === undefined) {
+      state.supplies.spares = {
+        sailRepairKit: ORIGINAL_SPARES.sailRepairKit,
+        steeringParts: ORIGINAL_SPARES.steeringParts,
+        engineParts: ORIGINAL_SPARES.engineParts,
+        fuses: ORIGINAL_SPARES.fuses,
       };
-      Object.keys(spareDefaults).forEach(function (k) {
-        if (merged[k] === undefined) merged[k] = spareDefaults[k];
-      });
-      state.supplies.spares = merged;
-      oldCats.forEach(function (cat) { delete state.supplies[cat]; });
-      delete state.supplies.medical;
-      delete state.supplies.tools;
-      var oldFlares = (state.supplies.safety && state.supplies.safety.flares != null) ? state.supplies.safety.flares : 6;
-      state.supplies.safety = { flares: oldFlares };
     }
-    // Flooding/life-raft/rescue are new this pass.
-    if (b.floodRate === undefined) b.floodRate = 0;
-    if (b.bilgeWater === undefined) b.bilgeWater = 0;
     if (c.inLifeRaft === undefined) c.inLifeRaft = false;
-    if (state.flags.hullLeakTriggered === undefined) state.flags.hullLeakTriggered = false;
-    if (state.flags.hullLeakResolved === undefined) state.flags.hullLeakResolved = false;
-    if (state.flags.bilgeWarned50 === undefined) state.flags.bilgeWarned50 = false;
-    if (state.flags.bilgeWarned100 === undefined) state.flags.bilgeWarned100 = false;
     if (!state.rescue) {
       state.rescue = {
         epirbOn: false, activatedAt: null, phase: 'none', travelMinutes: 0,
@@ -5148,15 +5348,35 @@
         encounterKind: null, encounterFlareFired: false,
       };
     }
-    // Ambient-event scheduling is new too — undefined is exactly the state
-    // checkAmbientEvent() already treats as "not scheduled yet, pick a
-    // first time," so there's nothing to actively backfill here; this line
-    // just documents that omission is intentional, not an oversight.
-    // Steering, per-system major-repair tracking, and the routine-activity
-    // cooldowns are new this pass.
-    if (b.steering === undefined) b.steering = 100;
-    if (!b.majorRepairUsed) {
-      b.majorRepairUsed = { hull: false, rigging: false, sails: false, engine: false, electrical: false, steering: false };
+    // One-time conversion from the old five-tier numeric condition model
+    // (HULL/RIGGING/SAILS/ENGINE/ELECTRICAL/STEERING, 0-100, plus
+    // flooding and per-system major-repair tracking) to the new
+    // four-system GOOD/DAMAGED model. b.hull existing at all is exactly
+    // what marks an old-format save — a fresh voyage never has it, so
+    // this can never re-run and never resets an already-migrated save.
+    if (b.hull !== undefined) {
+      var migrateCondition = function (v) { return (v != null && v < 25) ? 'DAMAGED' : 'GOOD'; };
+      b.sails = migrateCondition(b.sails);
+      b.steering = migrateCondition(b.steering);
+      b.engine = migrateCondition(b.engine);
+      b.electrical = migrateCondition(b.electrical);
+      // HULL and BILGE aren't migrated into anything else — just gone.
+      delete b.hull;
+      delete b.rigging;
+      delete b.floodRate;
+      delete b.bilgeWater;
+      delete b.majorRepairUsed;
+      delete state.flags.hullLeakTriggerAt;
+      delete state.flags.hullLeakTriggered;
+      delete state.flags.hullLeakResolved;
+      delete state.flags.bilgeWarned50;
+      delete state.flags.bilgeWarned100;
+      delete state.flags.sailWarningIssued;
+    }
+    if (b.nextFailureAt === undefined) {
+      // Migrating into the new failure system starts its clock now, same
+      // randomized 24-48h window a fresh voyage gets.
+      b.nextFailureAt = state.meta.voyageMinutes + rand(24, 48) * 60;
     }
     if (!c.lastRoutineAt) {
       c.lastRoutineAt = { wash: null, dress: null, dishes: null, read: null };
