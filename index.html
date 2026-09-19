@@ -408,6 +408,8 @@
         readingBookId: null,          // id into BOOKS while continuous reading is active, or null — see syncReadingProgress
         readingLastSyncedAt: null,    // currentGameMinutes() as of the last syncReadingProgress commit — set fresh in performStartReading, meaningless while readingBookId is null
         readingMoraleAccumMinutes: 0, // accumulated reading minutes since the last morale chunk was awarded — hidden, never shown
+        tapeListenDay: null,          // Math.floor(voyageMinutes/1440) as of tapeListenCount below — the only tape-player state that's persisted; see awardTapeListenMorale
+        tapeListenCount: 0,           // qualifying tape-listening sessions credited so far on tapeListenDay — resets whenever the current voyage day no longer matches
       },
       food: {
         oatmeal: 12, pasta: 8, rice: 12, soup: 6, chili: 6,
@@ -1919,6 +1921,22 @@
   var BOOKS_BY_ID = {};
   BOOKS.forEach(function (b) { BOOKS_BY_ID[b.id] = b; });
 
+  /* --------------------------------------------------------------
+     TAPE PLAYER — a persistent world object (the physical cassette
+     player below deck), not a UI activity. Its centralized data lives
+     here, mirroring BOOKS/BOOKS_BY_ID above; the actual playback
+     engine (audio graph, active-tape state, above/below-deck
+     filtering) lives in section 6, AMBIENT AUDIO, alongside audioCtx.
+     -------------------------------------------------------------- */
+  var TAPES = [
+    { title: 'Stargazing', path: 'audio/music/stargazing.mp3' },
+    { title: 'Homeward', path: 'audio/music/homeward.mp3' },
+    { title: 'Sunbeams', path: 'audio/music/sunbeams.mp3' },
+  ];
+  var TAPES_BY_TITLE = {};
+  TAPES.forEach(function (t) { TAPES_BY_TITLE[t.title] = t; });
+  var TAPE_OFF_PATH = 'audio/music/tape_off.mp3';
+
   // Small, periodic morale nudge — same diminishing-returns shape
   // (routineMoraleGain) as WASH/DRESS/etc., just keyed to a meaningful
   // chunk of accumulated reading time rather than granted per click.
@@ -3145,6 +3163,203 @@
     soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND: OFF' : 'SOUND: ON') : 'SOUND: OFF';
   }
 
+  /* --------------------------------------------------------------
+     TAPE PLAYER — a persistent world object (a physical cassette
+     player below deck), entirely separate from the ambient/synthesized
+     layers above: its own HTMLAudioElement, its own small Web Audio
+     graph, connected straight to audioCtx.destination rather than
+     through masterGain, so it is never affected by the ambient mute
+     toggle and never affects the ambient layers. All of this state is
+     intentionally module-level, not part of `state`/save data — see
+     the note above tapeListenDay/tapeListenCount in newGameState for
+     the one piece that DOES need to persist (the daily morale
+     anti-spam counters), and TAPE PLAYER STATE further down for why
+     the rest doesn't.
+
+     Menus (cmdTapePlayer et al.) only ever CONTROL this — start,
+     stop, change tape — they never own its lifecycle: once started, a
+     tape keeps playing through every other menu, activity, and
+     above/below-deck transition until it's explicitly stopped or
+     reaches its natural end.
+     -------------------------------------------------------------- */
+  var tapeAudioEl = null;        // single, reused <audio> element -- plays TAPES tracks AND tape_off.mp3 in sequence, since the two never overlap
+  var tapeSourceNode = null;     // MediaElementAudioSourceNode -- createMediaElementSource() can only ever be called once per element, so this is built exactly once
+  var tapeFilterNode = null;     // BiquadFilterNode -- the above-deck low-pass
+  var tapeGainNode = null;       // GainNode -- the above-deck volume multiplier
+  var tapeGraphReady = false;
+  var activeTapeTitle = null;    // title of the TAPES entry currently playing, or null -- this is what TAPE PLAYER's "X -- PLAYING" reflects; briefly null again while tape_off.mp3 is the only thing sounding, whether stopping or changing tapes
+  var tapeAudioRole = null;      // 'track' | 'tape_off' | null -- which of the two tapeAudioEl is currently loaded with, so the shared 'ended' handler knows what just finished
+  var pendingNextTapeTitle = null; // set only when CHANGING tapes: which tape to start once the in-flight tape_off.mp3 finishes
+  var pendingNextTapePath = null;
+  var tapeSessionQualified = false; // whether the CURRENT listening session (since this tape/track started) has already been credited toward today's morale allowance
+
+  var TAPE_QUALIFYING_SECONDS = 300;  // 5 minutes of actual playback before a session counts
+  var TAPE_MORALE_FIRST = 5;          // first qualifying listen this voyage day -- comparable to a wash/change
+  var TAPE_MORALE_SECOND = 2;         // second: noticeably smaller, matching a single reading-morale chunk
+  var TAPE_MORALE_DAILY_LIMIT = 2;    // third and beyond: no further benefit, but never blocks listening itself
+  var TAPE_FILTER_ABOVE_HZ = 2800;
+  var TAPE_FILTER_BELOW_HZ = 20000;   // effectively transparent -- reproduces the supplied MP3 normally
+  var TAPE_GAIN_ABOVE = 0.5;
+  var TAPE_GAIN_BELOW = 1.0;
+
+  // Called from the player's own explicit tape-selection click (never
+  // proactively/on load). Two independent layers, built at most once
+  // each: the plain <audio> element (tapeAudioEl) is basic, almost
+  // universally supported, and reused for every subsequent tape/
+  // tape_off by changing its src, exactly as the task requires --
+  // never recreated. The WebAudio filter graph on top of it (location-
+  // based volume/low-pass) needs an AudioContext and can fail
+  // separately and later; if it never builds, tapeAudioEl still plays
+  // normally through its own default output, just without the
+  // above-deck muffling effect. Playback and the tape-player's own
+  // state machine (activeTapeTitle etc.) must never depend on the
+  // WebAudio layer succeeding -- only the element itself.
+  function ensureTapeAudioReady() {
+    if (!tapeAudioEl) {
+      try {
+        tapeAudioEl = new Audio();
+        tapeAudioEl.preload = 'auto';
+        tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
+        tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
+      } catch (e) {
+        console.warn('Tape player audio unavailable:', describeError(e));
+        return false;
+      }
+    }
+    unlockAudio(); // idempotent; creates the AudioContext if this is somehow the very first sound interaction
+    if (audioCtx) {
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(function () {});
+      if (!tapeGraphReady) buildTapeAudioGraph();
+    }
+    return true;
+  }
+
+  // Best-effort location-based filter graph -- see ensureTapeAudioReady
+  // for why this is allowed to fail independently of tapeAudioEl itself.
+  function buildTapeAudioGraph() {
+    if (tapeGraphReady || !audioCtx || !tapeAudioEl) return;
+    try {
+      tapeSourceNode = audioCtx.createMediaElementSource(tapeAudioEl);
+      tapeFilterNode = audioCtx.createBiquadFilter();
+      tapeFilterNode.type = 'lowpass';
+      tapeFilterNode.Q.value = 0.7; // gentle -- no added resonance, per spec
+      tapeGainNode = audioCtx.createGain();
+      tapeSourceNode.connect(tapeFilterNode).connect(tapeGainNode).connect(audioCtx.destination);
+      applyTapeLocationAudio(GAME);
+      tapeGraphReady = true;
+    } catch (e) {
+      console.warn('Tape player filter graph unavailable:', describeError(e));
+    }
+  }
+
+  // Instant, no-fade -- per spec, above deck is simply quieter and
+  // muffled the moment the player is there, and full/normal the moment
+  // they're not. Safe to call whether or not a tape is currently
+  // playing (harmless if so, since it always applies to whatever's
+  // loaded); safe to call before the graph exists (no-op).
+  function applyTapeLocationAudio(state) {
+    if (!tapeFilterNode || !tapeGainNode || !audioCtx) return;
+    var above = !!(state && state.crew.location === 'above');
+    var now = audioCtx.currentTime;
+    tapeFilterNode.frequency.setValueAtTime(above ? TAPE_FILTER_ABOVE_HZ : TAPE_FILTER_BELOW_HZ, now);
+    tapeGainNode.gain.setValueAtTime(above ? TAPE_GAIN_ABOVE : TAPE_GAIN_BELOW, now);
+  }
+
+  // Awards the qualifying-listen morale, once per session, respecting
+  // the day's diminishing returns -- called both mid-playback (the
+  // moment 5 minutes of actual audio time is reached, so a long-running
+  // tape doesn't require the player to stop it to "cash in") and on a
+  // track's natural end (so a tape shorter than 5 minutes still
+  // qualifies by finishing). tapeSessionQualified makes a second call
+  // for the same session a harmless no-op either way.
+  function awardTapeListenMorale() {
+    if (!GAME || tapeSessionQualified) return;
+    tapeSessionQualified = true;
+    var c = GAME.crew;
+    var today = Math.floor(GAME.meta.voyageMinutes / 1440);
+    if (c.tapeListenDay !== today) {
+      c.tapeListenDay = today;
+      c.tapeListenCount = 0;
+    }
+    if (c.tapeListenCount >= TAPE_MORALE_DAILY_LIMIT) return; // still fine to listen -- just no more benefit today
+    c.tapeListenCount++;
+    var gain = c.tapeListenCount === 1 ? TAPE_MORALE_FIRST : TAPE_MORALE_SECOND;
+    c.morale = clamp(c.morale + gain, 0, 100);
+    saveGameState(GAME); // persist the anti-spam counter promptly -- this isn't tied to any UI action's own save/flush
+  }
+
+  function onTapeTimeUpdate() {
+    if (tapeAudioRole === 'track' && !tapeSessionQualified && tapeAudioEl.currentTime >= TAPE_QUALIFYING_SECONDS) {
+      awardTapeListenMorale();
+    }
+  }
+
+  // Shared 'ended' handler for both roles the single audio element can
+  // hold. A track ending naturally: credit a qualifying short tape,
+  // clear the active-tape state, play the mechanical stop sound, and
+  // never restart/advance to anything else. tape_off.mp3 ending: either
+  // silence (the normal case) or, if the player selected a different
+  // tape while this one was stopping, start that tape now that the
+  // cassette-swap sound has actually finished.
+  function onTapeAudioEnded() {
+    if (tapeAudioRole === 'track') {
+      awardTapeListenMorale(); // no-op if already credited via onTapeTimeUpdate
+      activeTapeTitle = null;
+      playTapeOffSound();
+    } else if (tapeAudioRole === 'tape_off') {
+      tapeAudioRole = null;
+      if (pendingNextTapePath) {
+        var title = pendingNextTapeTitle, path = pendingNextTapePath;
+        pendingNextTapeTitle = null;
+        pendingNextTapePath = null;
+        startTapeTrack(title, path);
+      }
+    }
+  }
+
+  function stopCurrentTapeTrackImmediately() {
+    if (tapeAudioEl && tapeAudioRole === 'track') {
+      tapeAudioEl.pause();
+      tapeAudioEl.currentTime = 0;
+    }
+    activeTapeTitle = null;
+  }
+
+  // play() is expected to return a Promise, but not every environment
+  // guarantees that (confirmed: it can come back undefined) -- calling
+  // .catch() on whatever it returns without checking would throw an
+  // uncaught exception right out of the click handler that triggered
+  // it, which is exactly the UI breakage graceful failure is supposed
+  // to prevent. This is the ONLY place tapeAudioEl.play() is ever
+  // called.
+  function safePlayTapeAudio() {
+    try {
+      var p = tapeAudioEl.play();
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {
+      // fail gracefully -- e.g. file genuinely missing, autoplay blocked without a promise, or play() itself throwing
+    }
+  }
+
+  function playTapeOffSound() {
+    if (!tapeAudioEl) return;
+    tapeAudioRole = 'tape_off';
+    tapeAudioEl.src = TAPE_OFF_PATH;
+    tapeAudioEl.currentTime = 0;
+    safePlayTapeAudio();
+  }
+
+  function startTapeTrack(title, path) {
+    if (!ensureTapeAudioReady()) return; // audio unavailable in this browser/session -- fail gracefully, no UI breakage
+    activeTapeTitle = title;
+    tapeAudioRole = 'track';
+    tapeSessionQualified = false;
+    tapeAudioEl.src = path;
+    tapeAudioEl.currentTime = 0;
+    applyTapeLocationAudio(GAME);
+    safePlayTapeAudio();
+  }
+
   /* ============================================================
      7. TERMINAL RENDERING
      ============================================================ */
@@ -3951,6 +4166,7 @@
         { label: 'DRINK', action: 'cmd:drink' },
         { label: 'SLEEP', action: 'cmd:sleep' },
         { label: 'READ', action: 'cmd:bookshelf' },
+        { label: 'LISTEN', action: 'cmd:tape-player' },
         { label: 'WASH', action: 'cmd:wash' },
         { label: 'CHANGE', action: 'cmd:dress' },
         { label: 'BACK', action: 'cancel' },
@@ -4188,6 +4404,61 @@
     log(state, 'You close the book.');
     flushNewLogEntries(state);
     cmdBookshelf(state);
+  }
+
+  // TAPE PLAYER — mirrors cmdBookshelf/buildBookshelfOptions in
+  // presentation, but unlike READ this is never an exclusive activity:
+  // selecting a tape here only ever starts/stops/changes the
+  // persistent tape-player object (see section 6); it never sets up a
+  // continuous "session" pendingChoice the way performStartReading
+  // does, and the player is free to leave this screen immediately
+  // while the tape keeps playing.
+  function buildTapePlayerOptions(state) {
+    var opts = [];
+    if (activeTapeTitle != null) {
+      opts.push({ label: 'STOP TAPE', action: 'stop-tape' });
+    }
+    TAPES.forEach(function (t) {
+      if (t.title === activeTapeTitle) return; // don't re-list the one already playing
+      opts.push({ label: t.title.toUpperCase(), action: 'start-tape:' + t.title });
+    });
+    opts.push({ label: 'BACK', action: 'cmd:wellbeing' });
+    return opts;
+  }
+
+  function cmdTapePlayer(state) {
+    printBlank();
+    printLine('TAPE PLAYER', 'heading-label');
+    if (activeTapeTitle != null) {
+      printBlank();
+      printLine(activeTapeTitle.toUpperCase() + ' \u2014 PLAYING', 'dim');
+    }
+    state.pendingChoice = { id: 'tape-player-menu', options: buildTapePlayerOptions(state) };
+  }
+
+  function performStartTape(state, title) {
+    var tape = TAPES_BY_TITLE[title];
+    if (!tape) { cmdTapePlayer(state); return; } // defensive
+    if (activeTapeTitle != null) {
+      // Changing tapes: stop the current one, play the mechanical
+      // cassette-stop sound, and queue the new tape to start the
+      // moment that sound actually finishes -- never overlapping.
+      stopCurrentTapeTrackImmediately();
+      pendingNextTapeTitle = tape.title;
+      pendingNextTapePath = tape.path;
+      playTapeOffSound();
+    } else {
+      startTapeTrack(tape.title, tape.path);
+    }
+    cmdTapePlayer(state);
+  }
+
+  function performStopTape(state) {
+    stopCurrentTapeTrackImmediately();
+    pendingNextTapeTitle = null; // an explicit stop cancels any change-in-progress too
+    pendingNextTapePath = null;
+    playTapeOffSound();
+    cmdTapePlayer(state);
   }
 
   // The continuous reading engine. Progress, milestones, morale, and
@@ -4747,6 +5018,7 @@
     wash: cmdWash,
     dress: cmdDress,
     bookshelf: cmdBookshelf,
+    'tape-player': cmdTapePlayer,
     repair: cmdRepair,
     restart: cmdRestart,
   };
@@ -4894,6 +5166,7 @@
 
   function renderOptions(state) {
     applyCabinLighting(state);
+    applyTapeLocationAudio(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
@@ -5130,6 +5403,10 @@
       performStartReading(state, action.slice(14));
     } else if (action === 'stop-reading') {
       performStopReading(state);
+    } else if (action.indexOf('start-tape:') === 0) {
+      performStartTape(state, action.slice(11));
+    } else if (action === 'stop-tape') {
+      performStopTape(state);
     } else if (action === 'drink:water') {
       performDrinkWater(state);
     } else if (action === 'drink:coffee') {
@@ -5686,6 +5963,8 @@
     if (c.readingBookId === undefined) c.readingBookId = null;
     if (c.readingLastSyncedAt === undefined) c.readingLastSyncedAt = currentGameMinutes(state);
     if (c.readingMoraleAccumMinutes === undefined) c.readingMoraleAccumMinutes = 0;
+    if (c.tapeListenDay === undefined) c.tapeListenDay = null;
+    if (c.tapeListenCount === undefined) c.tapeListenCount = 0;
     if (!state.books) state.books = newBooksState();
     BOOKS.forEach(function (b) {
       if (!state.books[b.id]) state.books[b.id] = { minutesRead: 0, completed: false, triggeredMilestones: [] };
