@@ -1063,13 +1063,19 @@
 
     // Cabin comfort: same gentle, capped shape as the drags above, and
     // naturally self-correcting — there's no separate bonus for
-    // bringing the cabin back to GOOD, the penalty below just stops
-    // applying once it's not COLD or HOT anymore.
+    // bringing the cabin back to COMFORTABLE, the penalty below just
+    // stops applying once it's not COLD or HOT anymore. HOT specifically
+    // uses the same fan-rescue logic as the displayed condition
+    // (cabinConditionLabel) — a running fan that's successfully keeping
+    // things COMFORTABLE (up to CABIN_TEMP_FAN_RESCUE_MAX_F) means no
+    // HOT penalty either, even though the raw temperature is still
+    // above the base HOT threshold. COLD gets no equivalent rescue from
+    // the heater — only the actual temperature rising resolves it.
     var cabinTempF = state.boat.cabinTemperatureF;
     if (cabinTempF != null) {
-      if (cabinTempF <= CABIN_TEMP_COLD_MAX_F) {
+      if (cabinTempF < CABIN_TEMP_COLD_MAX_F) {
         target -= clamp((CABIN_TEMP_COLD_MAX_F - cabinTempF) * 0.4, 0, 6);
-      } else if (cabinTempF >= CABIN_TEMP_HOT_MIN_F) {
+      } else if (cabinTempF > CABIN_TEMP_HOT_MIN_F && cabinConditionLabel(cabinTempF, state.boat.fanOn) === 'HOT') {
         target -= clamp((cabinTempF - CABIN_TEMP_HOT_MIN_F) * 0.4, 0, 6);
       }
     }
@@ -1803,13 +1809,15 @@
   var BATTERY_CHARGE_PER_HOUR = 600; // engine running: 0% -> 100% in 10 minutes = 10%/min = 600%/hour
 
   // Cabin temperature — comfort/morale only, never a survival mechanic.
-  // Centralized here so the COLD/GOOD/HOT bands are easy to retune.
-  var CABIN_TEMP_COLD_MAX_F = 60;   // at/below: COLD
-  var CABIN_TEMP_HOT_MIN_F = 78;    // at/above: HOT — between the two is GOOD
-  var CABIN_AMBIENT_PULL_PER_HOUR = 0.06;  // fraction of the gap to outside temp closed per hour with no heater/fan
-  var CABIN_HEATER_RISE_PER_HOUR_F = 4;    // degrees/hour the heater pushes cabin temp up, independent of the ambient pull
-  var CABIN_HEATER_MAX_F = 85;             // small electric heater in a small cabin — realistic loose ceiling, keeps long offline catch-ups sane
-  var CABIN_FAN_FALL_PER_HOUR_F = 3;       // degrees/hour the fan pushes cabin temp down toward (but not below) outside ambient
+  // Centralized here so the COLD/COMFORTABLE/HOT bands are easy to
+  // retune. Boundaries are strict (below/above), matching "65°F =
+  // COMFORTABLE" and "78°F = COMFORTABLE" being the inclusive edges of
+  // the comfortable range.
+  var CABIN_TEMP_COLD_MAX_F = 65;   // strictly below: COLD
+  var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above (base, no fan): HOT — 65-78 inclusive is COMFORTABLE
+  var CABIN_TEMP_FAN_RESCUE_MAX_F = 85; // FAN ON can make an otherwise-HOT cabin read COMFORTABLE up to and including this; past it, still HOT even with the fan running — a fan is not air conditioning
+  var CABIN_HEATER_TARGET_F = 68;          // the heater's fixed ceiling — it never pushes the cabin above this, and never adds heat once ambient is already warmer
+  var CABIN_TEMP_CHANGE_PER_MINUTE_F = 1;  // flat rate the actual cabin temperature moves toward its current target, warming or cooling alike — see updateBatteryAndCabin
 
   // Canonical departure quantities — the stable ORIGINAL half of every
   // CURRENT / ORIGINAL supply display throughout INVENTORY, EAT, DRINK,
@@ -2337,17 +2345,26 @@
       }
     }
 
-    // Cabin temperature drifts toward outside ambient over time rather
-    // than tracking it directly; heater and fan push against that pull
-    // gradually too, never snapping the cabin to a target instantly.
+    // Cabin temperature follows a simple target-and-catch-up model. The
+    // TARGET is the warmer of outside ambient or (only if the heater is
+    // on and colder than that) the heater's fixed 68°F ceiling — the
+    // heater never pushes the cabin above 68°F, and adds no heat at all
+    // once ambient is already warmer than that (ambient simply wins).
+    // The actual temperature then moves toward that target at a flat
+    // 1°F per in-game minute, warming or cooling alike, never
+    // overshooting past it — so a sudden swing in outside temperature
+    // or a heater toggle is still felt gradually, not snapped instantly.
+    // The fan has NO effect on this physical number at all; it only
+    // affects the player-facing HOT/COMFORTABLE read — see
+    // cabinConditionLabel.
     var outside = state.weather.temperatureF;
     if (b.cabinTemperatureF == null) b.cabinTemperatureF = outside;
-    b.cabinTemperatureF += (outside - b.cabinTemperatureF) * Math.min(1, CABIN_AMBIENT_PULL_PER_HOUR * hrs);
-    if (b.heaterOn) {
-      b.cabinTemperatureF = Math.min(CABIN_HEATER_MAX_F, b.cabinTemperatureF + CABIN_HEATER_RISE_PER_HOUR_F * hrs);
-    }
-    if (b.fanOn && b.cabinTemperatureF > outside) {
-      b.cabinTemperatureF = Math.max(outside, b.cabinTemperatureF - CABIN_FAN_FALL_PER_HOUR_F * hrs);
+    var cabinTarget = outside > CABIN_HEATER_TARGET_F ? outside : (b.heaterOn ? CABIN_HEATER_TARGET_F : outside);
+    var maxCabinChange = CABIN_TEMP_CHANGE_PER_MINUTE_F * TICK_MINUTES;
+    if (b.cabinTemperatureF < cabinTarget) {
+      b.cabinTemperatureF = Math.min(cabinTarget, b.cabinTemperatureF + maxCabinChange);
+    } else if (b.cabinTemperatureF > cabinTarget) {
+      b.cabinTemperatureF = Math.max(cabinTarget, b.cabinTemperatureF - maxCabinChange);
     }
   }
 
@@ -3378,11 +3395,27 @@
     return label + ' '.repeat(Math.max(2, 12 - label.length)) + value;
   }
 
-  function cabinTempLabel(tempF) {
-    if (tempF == null) return 'GOOD';
-    if (tempF <= CABIN_TEMP_COLD_MAX_F) return 'COLD';
-    if (tempF >= CABIN_TEMP_HOT_MIN_F) return 'HOT';
-    return 'GOOD';
+  // The DISPLAYED/perceived condition — COLD/COMFORTABLE/HOT. Distinct
+  // from the raw cabinTemperatureF number, which always stays visible
+  // and accurate (see formatCabinTemp): a running fan can make an
+  // otherwise-HOT cabin (up to CABIN_TEMP_FAN_RESCUE_MAX_F) read as
+  // COMFORTABLE without the actual temperature having caught up yet —
+  // see updateBatteryAndCabin for that gradual physical effect. The
+  // heater has no equivalent trick: it only ever works by actually
+  // raising the real temperature, so COLD never gets a similar rescue.
+  function cabinConditionLabel(tempF, fanOn) {
+    if (tempF == null) return 'COMFORTABLE';
+    if (tempF < CABIN_TEMP_COLD_MAX_F) return 'COLD';
+    if (tempF > CABIN_TEMP_HOT_MIN_F) {
+      if (fanOn && tempF <= CABIN_TEMP_FAN_RESCUE_MAX_F) return 'COMFORTABLE';
+      return 'HOT';
+    }
+    return 'COMFORTABLE';
+  }
+
+  function formatCabinTemp(tempF, fanOn) {
+    if (tempF == null) return 'COMFORTABLE';
+    return Math.round(tempF) + '\u00B0F ' + cabinConditionLabel(tempF, fanOn);
   }
 
   function cmdStatus(state) {
@@ -3395,7 +3428,7 @@
     printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
     printLine(statusLine('MORALE', moraleLevel(c.morale)));
     printBlank();
-    printLine(statusLine('CABIN TEMP', cabinTempLabel(b.cabinTemperatureF)));
+    printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
     printLine(statusLine('BATTERY', Math.round(b.battery) + '%'));
     printBlank();
     printLine(statusLine('SAILS', b.sails));
@@ -3412,7 +3445,7 @@
     printBlank();
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
-    printLine(statusLine('CABIN TEMP', cabinTempLabel(b.cabinTemperatureF)));
+    printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
