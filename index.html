@@ -405,7 +405,8 @@
         cabinStuffySinceMinutes: null, // voyageMinutes dampCabinHours first crossed the threshold, or null — cleared by AIR OUT CABIN
         clutterCount: 0,              // small accumulator from minor activity (eating, reading); resets once TIDY UP is done
         clutterSinceMinutes: null,    // voyageMinutes clutterCount first crossed the threshold, or null — for consistent chore ordering
-        readingBookId: null,          // id into BOOKS while continuous reading is active, or null — see processReadingTick
+        readingBookId: null,          // id into BOOKS while continuous reading is active, or null — see syncReadingProgress
+        readingLastSyncedAt: null,    // currentGameMinutes() as of the last syncReadingProgress commit — set fresh in performStartReading, meaningless while readingBookId is null
         readingMoraleAccumMinutes: 0, // accumulated reading minutes since the last morale chunk was awarded — hidden, never shown
       },
       food: {
@@ -459,7 +460,8 @@
       pendingChoice: null,
       log: [],
     };
-    state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see updateCabinTemperature for the ongoing drift
+    state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see syncCabinTemperature for the ongoing drift
+    state.boat.cabinTemperatureLastSyncedAt = 0; // currentGameMinutes() is 0 here too (voyageMinutes and leftoverMinutes both start at 0)
     return state;
   }
 
@@ -1800,8 +1802,8 @@
 
   // ELECTRICAL PANEL — battery charge (0-100%), entirely separate from
   // boat.electrical (physical wiring/system CONDITION, still only
-  // damaged by faults/events and fixed by REPAIR). See
-  // updateBatteryAndCabin for how these are applied per tick.
+  // damaged by faults/events and fixed by REPAIR). See updateBattery
+  // for how these are applied per tick.
   var BATTERY_DRAIN_AUTOPILOT_PER_HOUR = 2;
   var BATTERY_DRAIN_HEATER_PER_HOUR = 2;
   var BATTERY_DRAIN_FAN_PER_HOUR = 0.5;
@@ -1817,7 +1819,7 @@
   var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above (base, no fan): HOT — 65-78 inclusive is COMFORTABLE
   var CABIN_TEMP_FAN_RESCUE_MAX_F = 85; // FAN ON can make an otherwise-HOT cabin read COMFORTABLE up to and including this; past it, still HOT even with the fan running — a fan is not air conditioning
   var CABIN_HEATER_TARGET_F = 68;          // the heater's fixed ceiling — it never pushes the cabin above this, and never adds heat once ambient is already warmer
-  var CABIN_TEMP_CHANGE_PER_MINUTE_F = 1;  // flat rate the actual cabin temperature moves toward its current target, warming or cooling alike — see updateBatteryAndCabin
+  var CABIN_TEMP_CHANGE_PER_MINUTE_F = 1;  // flat rate the actual cabin temperature moves toward its current target, warming or cooling alike — see syncCabinTemperature
 
   // Canonical departure quantities — the stable ORIGINAL half of every
   // CURRENT / ORIGINAL supply display throughout INVENTORY, EAT, DRINK,
@@ -1840,7 +1842,7 @@
      BOOKSHELF — data-driven reading system. Every book is just an
      entry here (id, title, author, required minutes, and an ordered
      list of {pct, text} milestones); the reading engine (see
-     processReadingTick) works entirely off this data, so adding a
+     syncReadingProgress) works entirely off this data, so adding a
      later book/story event means adding another entry, not new logic.
      Non-story placeholder content only — see task notes.
      -------------------------------------------------------------- */
@@ -2246,7 +2248,7 @@
 
     updateCrew(state);
     checkFuel(state);
-    updateBatteryAndCabin(state);
+    updateBattery(state);
     checkAftLocker(state);
     checkScheduledFailures(state);
     checkRescue(state);
@@ -2260,9 +2262,20 @@
     checkMilestones(state);
     checkAmbientEvent(state);
     processSleepTick(state, prevCondition);
-    processReadingTick(state);
 
     clampState(state);
+  }
+
+  // The continuous, sub-tick-precision game clock. voyageMinutes only
+  // advances in whole TICK_MINUTES steps, inside simTick — so anything
+  // that needs to react smoothly between ticks (reading progress, cabin
+  // temperature) reads this instead. leftoverMinutes is the fractional
+  // remainder advanceSimulation hasn't yet folded into a full tick, kept
+  // current on every call (live, every LIVE_TICK_SECONDS, or offline
+  // catch-up) regardless of whether that call actually ran a tick — so
+  // together the two always equal the true elapsed game time.
+  function currentGameMinutes(state) {
+    return state.meta.voyageMinutes + (state.meta.leftoverMinutes || 0);
   }
 
   function advanceSimulation(state, minutes) {
@@ -2276,6 +2289,14 @@
     }
     delete state._ambientEventsThisPass; // transient — never persisted
     state.meta.leftoverMinutes = remaining;
+    // Continuous (non-tick) systems: each keeps its own last-synced
+    // timestamp and folds in whatever elapsed since, in one shot,
+    // regardless of how many (if any) full ticks just ran above — see
+    // syncReadingProgress and syncCabinTemperature. This is their ONLY
+    // update site; neither is also driven by simTick, so elapsed time
+    // is never double-counted between the two.
+    syncReadingProgress(state);
+    syncCabinTemperature(state);
     return ticks;
   }
 
@@ -2307,11 +2328,13 @@
     }
   }
 
-  // Battery charge and cabin temperature — both per-tick, both driven by
-  // simulated elapsed time so they work identically in live play,
-  // offline catch-up, and long absences. Entirely separate from
-  // checkScheduledFailures' boat.electrical (physical condition).
-  function updateBatteryAndCabin(state) {
+  // Battery charge — per-tick, driven by simulated elapsed time so it
+  // works identically in live play, offline catch-up, and long
+  // absences. Entirely separate from checkScheduledFailures'
+  // boat.electrical (physical condition). Cabin temperature used to be
+  // computed here too; it's now its own continuous system — see
+  // syncCabinTemperature.
+  function updateBattery(state) {
     var b = state.boat;
     var hrs = TICK_MINUTES / 60;
 
@@ -2344,23 +2367,36 @@
         log(state, 'Battery dead. Everything electrical drops out.');
       }
     }
+  }
 
-    // Cabin temperature follows a simple target-and-catch-up model. The
-    // TARGET is the warmer of outside ambient or (only if the heater is
-    // on and colder than that) the heater's fixed 68°F ceiling — the
-    // heater never pushes the cabin above 68°F, and adds no heat at all
-    // once ambient is already warmer than that (ambient simply wins).
-    // The actual temperature then moves toward that target at a flat
-    // 1°F per in-game minute, warming or cooling alike, never
-    // overshooting past it — so a sudden swing in outside temperature
-    // or a heater toggle is still felt gradually, not snapped instantly.
-    // The fan has NO effect on this physical number at all; it only
-    // affects the player-facing HOT/COMFORTABLE read — see
-    // cabinConditionLabel.
+  // Cabin temperature — a CONTINUOUS system (unlike battery above): it
+  // reacts to actual elapsed game time via its own cabinTemperatureLastSyncedAt
+  // timestamp rather than a fixed TICK_MINUTES step, so it doesn't wait
+  // for a full simTick to catch up. Called once per advanceSimulation —
+  // never also from simTick — so elapsed time is never double-counted.
+  // Follows a simple target-and-catch-up model. The TARGET is the
+  // warmer of outside ambient or (only if the heater is on and colder
+  // than that) the heater's fixed 68°F ceiling — the heater never
+  // pushes the cabin above 68°F, and adds no heat at all once ambient
+  // is already warmer than that (ambient simply wins). The actual
+  // temperature then moves toward that target at a flat 1°F per
+  // in-game minute, warming or cooling alike, never overshooting past
+  // it — so a sudden swing in outside temperature or a heater toggle is
+  // still felt gradually, not snapped instantly. The fan has NO effect
+  // on this physical number at all; it only affects the player-facing
+  // HOT/COMFORTABLE read — see cabinConditionLabel.
+  function syncCabinTemperature(state) {
+    var b = state.boat;
+    var now = currentGameMinutes(state);
+    if (b.cabinTemperatureLastSyncedAt == null) b.cabinTemperatureLastSyncedAt = now;
+    var elapsed = now - b.cabinTemperatureLastSyncedAt;
+    b.cabinTemperatureLastSyncedAt = now;
+    if (elapsed <= 0) return; // nothing to add (also guards a clock that hasn't moved, or moved backward)
+
     var outside = state.weather.temperatureF;
     if (b.cabinTemperatureF == null) b.cabinTemperatureF = outside;
     var cabinTarget = outside > CABIN_HEATER_TARGET_F ? outside : (b.heaterOn ? CABIN_HEATER_TARGET_F : outside);
-    var maxCabinChange = CABIN_TEMP_CHANGE_PER_MINUTE_F * TICK_MINUTES;
+    var maxCabinChange = CABIN_TEMP_CHANGE_PER_MINUTE_F * elapsed;
     if (b.cabinTemperatureF < cabinTarget) {
       b.cabinTemperatureF = Math.min(cabinTarget, b.cabinTemperatureF + maxCabinChange);
     } else if (b.cabinTemperatureF > cabinTarget) {
@@ -3400,7 +3436,7 @@
   // and accurate (see formatCabinTemp): a running fan can make an
   // otherwise-HOT cabin (up to CABIN_TEMP_FAN_RESCUE_MAX_F) read as
   // COMFORTABLE without the actual temperature having caught up yet —
-  // see updateBatteryAndCabin for that gradual physical effect. The
+  // see syncCabinTemperature for that gradual physical effect. The
   // heater has no equivalent trick: it only ever works by actually
   // raising the real temperature, so COLD never gets a similar rescue.
   function cabinConditionLabel(tempF, fanOn) {
@@ -4094,10 +4130,10 @@
   }
 
   // Begins the continuous activity: crew.readingBookId marks it active,
-  // and processReadingTick (called every simTick, live or offline
-  // catch-up alike) does the actual accumulating. The screen itself
-  // just shows the quiet "settled in" dots and STOP READING — nothing
-  // here needs repeated clicking.
+  // and syncReadingProgress (called every advanceSimulation, live or
+  // offline catch-up alike) does the actual accumulating. The screen
+  // itself just shows the quiet "settled in" dots and STOP READING —
+  // nothing here needs repeated clicking.
   function performStartReading(state, bookId) {
     var bookDef = BOOKS_BY_ID[bookId];
     if (!bookDef) return;
@@ -4105,6 +4141,7 @@
     if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
     state.crew.readingBookId = bookId;
+    state.crew.readingLastSyncedAt = currentGameMinutes(state); // starts the continuous clock fresh — nothing before this moment counts toward this session
     bumpClutter(state, 1); // the book itself, left out
     log(state, 'You open ' + bookDef.title + '.');
     flushNewLogEntries(state);
@@ -4113,18 +4150,69 @@
 
   function performStopReading(state) {
     if (state.crew.readingBookId == null) { cmdWellbeing(state); return; } // defensive -- shouldn't be reachable otherwise
+    syncReadingProgress(state); // commit the final partial interval since the last sync before stopping, so it's never lost
+    if (state.crew.readingBookId == null) { flushNewLogEntries(state); return; } // the sync itself already ended the session (completion or darkness) and set up its own next screen -- don't double-handle it
     state.crew.readingBookId = null;
     log(state, 'You close the book.');
     flushNewLogEntries(state);
     cmdBookshelf(state);
   }
 
-  // The per-tick reading engine. Progress, milestones, morale, and both
-  // kinds of stop (completion, darkness) all live here so the old
-  // one-shot logic never has to be duplicated per book.
-  function processReadingTick(state) {
+  // The continuous reading engine. Progress, milestones, morale, and
+  // both kinds of stop (completion, darkness) all live here so the old
+  // one-shot logic never has to be duplicated per book. Unlike the old
+  // per-tick version, this reacts to actual elapsed game time via its
+  // own readingLastSyncedAt timestamp rather than a fixed TICK_MINUTES
+  // step, so it doesn't wait for a full simTick to catch up. Called
+  // once per advanceSimulation — never also from simTick — so elapsed
+  // time is never double-counted.
+  function syncReadingProgress(state) {
     var c = state.crew;
     if (c.readingBookId == null) return;
+
+    var bookDef = BOOKS_BY_ID[c.readingBookId];
+    var bookState = state.books[c.readingBookId];
+    if (!bookDef || !bookState) { c.readingBookId = null; state.pendingChoice = null; return; } // defensive
+
+    // Commit whatever time has genuinely elapsed FIRST, before checking
+    // for anything that might end the session below -- otherwise a
+    // session-ending interruption (darkness, something else taking over
+    // the screen) would silently discard reading time that already
+    // happened before it was detected, which is exactly the kind of
+    // lost-progress bug this continuous system exists to prevent.
+    var now = currentGameMinutes(state);
+    if (c.readingLastSyncedAt == null) c.readingLastSyncedAt = now;
+    var elapsed = now - c.readingLastSyncedAt;
+    c.readingLastSyncedAt = now;
+    if (elapsed > 0) {
+      bookState.minutesRead += elapsed;
+      var completing = bookState.minutesRead >= bookDef.requiredMinutes;
+      if (completing) bookState.minutesRead = bookDef.requiredMinutes;
+      var pct = bookProgressPct(bookDef, bookState);
+
+      // Trigger every newly-crossed milestone, oldest first -- a large
+      // offline jump can cross several at once.
+      bookDef.milestones.forEach(function (m) {
+        if (pct >= m.pct && bookState.triggeredMilestones.indexOf(m.pct) === -1) {
+          bookState.triggeredMilestones.push(m.pct);
+          log(state, m.text);
+        }
+      });
+
+      c.readingMoraleAccumMinutes += elapsed;
+      if (c.readingMoraleAccumMinutes >= READ_MORALE_CHUNK_MINUTES) {
+        c.readingMoraleAccumMinutes -= READ_MORALE_CHUNK_MINUTES;
+        var gain = routineMoraleGain(state, 'read', READ_MORALE_CHUNK_GAIN);
+        c.morale = clamp(c.morale + gain, 0, 100);
+      }
+
+      if (completing) {
+        bookState.completed = true;
+        c.readingBookId = null;
+        state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+        return; // session already ended by completion -- no need to also check the interruption conditions below
+      }
+    }
 
     // Something else already took over the screen (an aft-locker prompt
     // and the like) -- reading quietly stops rather than fighting for
@@ -4135,45 +4223,15 @@
       return;
     }
 
-    // Darkness falling mid-session stops reading outright. Progress is
-    // preserved; lights are never auto-turned-on and the player is
-    // never auto-navigated to the electrical panel.
+    // Darkness falling mid-session stops reading outright. Progress up
+    // to this point is already committed above; lights are never
+    // auto-turned-on and the player is never auto-navigated to the
+    // electrical panel.
     if (c.location === 'below' && needsCabinLight(state)) {
       c.readingBookId = null;
       state.pendingChoice = null;
       log(state, 'Too dark to keep reading.');
       return;
-    }
-
-    var bookDef = BOOKS_BY_ID[c.readingBookId];
-    var bookState = state.books[c.readingBookId];
-    if (!bookDef || !bookState) { c.readingBookId = null; state.pendingChoice = null; return; } // defensive
-
-    bookState.minutesRead += TICK_MINUTES;
-    var completing = bookState.minutesRead >= bookDef.requiredMinutes;
-    if (completing) bookState.minutesRead = bookDef.requiredMinutes;
-    var pct = bookProgressPct(bookDef, bookState);
-
-    // Trigger every newly-crossed milestone, oldest first -- a large
-    // offline jump can cross several at once.
-    bookDef.milestones.forEach(function (m) {
-      if (pct >= m.pct && bookState.triggeredMilestones.indexOf(m.pct) === -1) {
-        bookState.triggeredMilestones.push(m.pct);
-        log(state, m.text);
-      }
-    });
-
-    c.readingMoraleAccumMinutes += TICK_MINUTES;
-    if (c.readingMoraleAccumMinutes >= READ_MORALE_CHUNK_MINUTES) {
-      c.readingMoraleAccumMinutes -= READ_MORALE_CHUNK_MINUTES;
-      var gain = routineMoraleGain(state, 'read', READ_MORALE_CHUNK_GAIN);
-      c.morale = clamp(c.morale + gain, 0, 100);
-    }
-
-    if (completing) {
-      bookState.completed = true;
-      c.readingBookId = null;
-      state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
     }
   }
 
@@ -5332,7 +5390,13 @@
       last = now;
       var ticks = advanceSimulation(GAME, minutes);
       GAME.meta.lastTick = now;
-      if (ticks > 0) {
+      // ticks > 0 covers the coarse simulation; the continuous systems
+      // (reading milestones/completion, darkness interrupting a
+      // session) synced inside advanceSimulation can also log something
+      // worth showing on their own, even when no full tick just ran —
+      // printedCount lagging behind state.log.length is the precise,
+      // cheap signal for that.
+      if (ticks > 0 || printedCount < GAME.log.length) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
         updateAudioForState(GAME);
@@ -5581,6 +5645,7 @@
     if (c.clutterCount === undefined) c.clutterCount = 0;
     if (c.clutterSinceMinutes === undefined) c.clutterSinceMinutes = null;
     if (c.readingBookId === undefined) c.readingBookId = null;
+    if (c.readingLastSyncedAt === undefined) c.readingLastSyncedAt = currentGameMinutes(state);
     if (c.readingMoraleAccumMinutes === undefined) c.readingMoraleAccumMinutes = 0;
     if (!state.books) state.books = newBooksState();
     BOOKS.forEach(function (b) {
@@ -5598,6 +5663,7 @@
     if (b.heaterOn === undefined) b.heaterOn = false;
     if (b.cabinLightsOn === undefined) b.cabinLightsOn = false;
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
+    if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
     if (state.flags.galleyNarrated === undefined) state.flags.galleyNarrated = false;
