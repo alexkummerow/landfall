@@ -405,6 +405,8 @@
         cabinStuffySinceMinutes: null, // voyageMinutes dampCabinHours first crossed the threshold, or null — cleared by AIR OUT CABIN
         clutterCount: 0,              // small accumulator from minor activity (eating, reading); resets once TIDY UP is done
         clutterSinceMinutes: null,    // voyageMinutes clutterCount first crossed the threshold, or null — for consistent chore ordering
+        readingBookId: null,          // id into BOOKS while continuous reading is active, or null — see processReadingTick
+        readingMoraleAccumMinutes: 0, // accumulated reading minutes since the last morale chunk was awarded — hidden, never shown
       },
       food: {
         oatmeal: 12, pasta: 8, rice: 12, soup: 6, chili: 6,
@@ -425,6 +427,7 @@
         },
         safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
       },
+      books: newBooksState(),
       flags: {
         aftLockerTriggerAt: rand(8 * 60, 16 * 60), // guaranteed once, sometime hour 8-16
         aftLockerTriggered: false,
@@ -791,10 +794,10 @@
   function needsCabinLight(state) {
     return isDark(state) && !state.boat.cabinLightsOn;
   }
-  function blockedByDarkness(state) {
+  function blockedByDarkness(state, backAction) {
     printBlank();
     printLine('TOO DARK TO SEE.', 'amber');
-    state.pendingChoice = { id: 'dark-blocked', options: [{ label: 'BACK', action: 'cancel' }] };
+    state.pendingChoice = { id: 'dark-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
   }
 
 
@@ -1825,6 +1828,88 @@
     sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
   };
 
+  /* --------------------------------------------------------------
+     BOOKSHELF — data-driven reading system. Every book is just an
+     entry here (id, title, author, required minutes, and an ordered
+     list of {pct, text} milestones); the reading engine (see
+     processReadingTick) works entirely off this data, so adding a
+     later book/story event means adding another entry, not new logic.
+     Non-story placeholder content only — see task notes.
+     -------------------------------------------------------------- */
+  var BOOKS = [
+    {
+      id: 'oldManSea', title: 'The Old Man and the Sea', author: 'Ernest Hemingway', requiredMinutes: 180,
+      milestones: [
+        { pct: 5, text: 'Maybe luck matters less than returning to the work.' },
+        { pct: 25, text: 'The farther you go, the more returning becomes part of the journey.' },
+        { pct: 50, text: "Endurance rarely feels like courage while you're enduring." },
+        { pct: 75, text: "Skill isn't control.\nIt's knowing what to do without it." },
+        { pct: 100, text: 'Sometimes you set out to bring one thing home, only to discover you were carrying something else all along.' },
+      ],
+    },
+    {
+      id: 'siddhartha', title: 'Siddhartha', author: 'Hermann Hesse', requiredMinutes: 240,
+      milestones: [
+        { pct: 5, text: "An answer given isn't the same as an answer understood." },
+        { pct: 25, text: 'Maybe searching is its own kind of becoming.' },
+        { pct: 50, text: 'You can spend so long looking for a path that you miss where it has already taken you.' },
+        { pct: 75, text: 'Some things can only be understood from inside them.' },
+        { pct: 100, text: "Maybe wisdom isn't finding the answer.\nMaybe it's no longer needing one." },
+      ],
+    },
+    {
+      id: 'odyssey', title: 'The Odyssey', author: 'Homer', requiredMinutes: 720,
+      milestones: [
+        { pct: 5, text: 'A destination is just a place until you have a reason to return to it.' },
+        { pct: 25, text: 'The farther you travel, the more home becomes an idea.' },
+        { pct: 50, text: "You can't return as the person who left." },
+        { pct: 75, text: "Maybe coming home isn't the same as going back." },
+        { pct: 100, text: "Perhaps home isn't where the journey ends.\nIt's what gives the journey a direction." },
+      ],
+    },
+    {
+      id: 'jurassicPark', title: 'Jurassic Park', author: 'Michael Crichton', requiredMinutes: 420,
+      milestones: [
+        { pct: 5, text: "We trust the things we've built because we built them." },
+        { pct: 25, text: "Knowing how something works isn't the same as knowing what it will do." },
+        { pct: 50, text: 'Control seems easiest to believe in just before you lose it.' },
+        { pct: 75, text: "Maybe chaos isn't disorder.\nMaybe it's order we can't see." },
+        { pct: 100, text: 'The more complicated something becomes, the stranger it is to believe anyone is really in charge.' },
+      ],
+    },
+    {
+      id: 'thisOldBoat', title: 'This Old Boat', author: 'Don Casey', requiredMinutes: 30,
+      milestones: [
+        { pct: 25, text: 'Almost everything can last longer if someone keeps tending to it.' },
+        { pct: 50, text: 'Maintenance is mostly noticing small things before they become large ones.' },
+        { pct: 75, text: 'Maybe caring for something is choosing, again and again, not to let it fall apart.' },
+        { pct: 100, text: "Nothing lasts on its own.\nMaybe that's what makes taking care of something matter." },
+      ],
+    },
+  ];
+  var BOOKS_BY_ID = {};
+  BOOKS.forEach(function (b) { BOOKS_BY_ID[b.id] = b; });
+
+  // Small, periodic morale nudge — same diminishing-returns shape
+  // (routineMoraleGain) as WASH/DRESS/etc., just keyed to a meaningful
+  // chunk of accumulated reading time rather than granted per click.
+  // This is what keeps "leave the book open" from farming morale: the
+  // same cooldown that already throttles the other comforts throttles
+  // this too, and no single chunk is large enough to matter on its own.
+  var READ_MORALE_CHUNK_MINUTES = 60;
+  var READ_MORALE_CHUNK_GAIN = 2;
+
+  // Initial per-book save-state shape, generated from BOOKS rather than
+  // hardcoded — adding a book to BOOKS is enough for it to show up here
+  // too. Reused by both newGameState and migrateProvisionsIfNeeded.
+  function newBooksState() {
+    var books = {};
+    BOOKS.forEach(function (b) {
+      books[b.id] = { minutesRead: 0, completed: false, triggeredMilestones: [] };
+    });
+    return books;
+  }
+
   // Shared CURRENT / ORIGINAL formatting. Gallons keep one decimal place
   // only when the value actually has one — "50" not "50.0", but "42.3"
   // stays "42.3" — matching the existing water/fuel precision. Countable
@@ -2167,6 +2252,7 @@
     checkMilestones(state);
     checkAmbientEvent(state);
     processSleepTick(state, prevCondition);
+    processReadingTick(state);
 
     clampState(state);
   }
@@ -3544,6 +3630,7 @@
   }
 
   function showInventoryCategory(state, cat) {
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
     printBlank();
     switch (cat) {
       case 'provisions':
@@ -3583,6 +3670,7 @@
   }
 
   function cmdInventory(state) {
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
     printBlank();
     printLine('INVENTORY', 'heading-label');
     state.pendingChoice = {
@@ -3746,13 +3834,20 @@
     printBlank();
     printLine('WELLBEING', 'heading-label');
     printLine('Taking care of yourself.', 'dim');
+    // The menu itself never hides options based on darkness — EAT,
+    // READ, WASH, and CHANGE stay visible and clickable at night with
+    // the lights off. Each of those already checks needsCabinLight at
+    // its own top and shows TOO DARK TO SEE. via blockedByDarkness (the
+    // same function CHORES uses) rather than performing the action, so
+    // the player discovers the restriction by trying the thing rather
+    // than never seeing it offered.
     state.pendingChoice = {
       id: 'wellbeing-menu',
       options: [
         { label: 'EAT', action: 'cmd:eat' },
         { label: 'DRINK', action: 'cmd:drink' },
         { label: 'SLEEP', action: 'cmd:sleep' },
-        { label: 'READ', action: 'cmd:read' },
+        { label: 'READ', action: 'cmd:bookshelf' },
         { label: 'WASH', action: 'cmd:wash' },
         { label: 'CHANGE', action: 'cmd:dress' },
         { label: 'BACK', action: 'cancel' },
@@ -3905,7 +4000,7 @@
   }
 
   function cmdWash(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
     if (!hasEnoughWater(state, WATER_WASH_GAL)) {
       printBlank();
       printLine('Not enough water.', 'amber');
@@ -3925,7 +4020,7 @@
   }
 
   function cmdDress(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
     runShortAction(state, {
       label: 'CHANGING',
       duration: 2,
@@ -3939,20 +4034,112 @@
   }
 
 
-  function cmdRead(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
-    runShortAction(state, {
-      label: 'READING',
-      duration: 4,
-      action: function (s) {
-        var gain = routineMoraleGain(s, 'read', 5);
-        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
-        bumpClutter(s, 1);
-        log(s, 'A while lost in a book. The cabin feels smaller and calmer for it.');
-        flushNewLogEntries(s);
-      },
+  function bookProgressPct(bookDef, bookState) {
+    return clamp(Math.round((bookState.minutesRead / bookDef.requiredMinutes) * 100), 0, 100);
+  }
+  function formatBookProgress(bookDef, bookState) {
+    if (bookState.completed) return 'READ';
+    return bookProgressPct(bookDef, bookState) + '%';
+  }
+
+  function buildBookshelfOptions(state) {
+    var opts = BOOKS.map(function (b) {
+      var bs = state.books[b.id];
+      return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
     });
+    opts.push({ label: 'BACK', action: 'cmd:wellbeing' });
+    return opts;
+  }
+
+  function cmdBookshelf(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    printBlank();
+    printLine('BOOKSHELF', 'heading-label');
+    state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+  }
+
+  // Begins the continuous activity: crew.readingBookId marks it active,
+  // and processReadingTick (called every simTick, live or offline
+  // catch-up alike) does the actual accumulating. The screen itself
+  // just shows the quiet "settled in" dots and STOP READING — nothing
+  // here needs repeated clicking.
+  function performStartReading(state, bookId) {
+    var bookDef = BOOKS_BY_ID[bookId];
+    if (!bookDef) return;
+    var bookState = state.books[bookId];
+    if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
+    state.crew.readingBookId = bookId;
+    bumpClutter(state, 1); // the book itself, left out
+    log(state, 'You open ' + bookDef.title + '.');
+    flushNewLogEntries(state);
+    state.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
+  }
+
+  function performStopReading(state) {
+    if (state.crew.readingBookId == null) { cmdWellbeing(state); return; } // defensive -- shouldn't be reachable otherwise
+    state.crew.readingBookId = null;
+    log(state, 'You close the book.');
+    flushNewLogEntries(state);
+    cmdBookshelf(state);
+  }
+
+  // The per-tick reading engine. Progress, milestones, morale, and both
+  // kinds of stop (completion, darkness) all live here so the old
+  // one-shot logic never has to be duplicated per book.
+  function processReadingTick(state) {
+    var c = state.crew;
+    if (c.readingBookId == null) return;
+
+    // Something else already took over the screen (an aft-locker prompt
+    // and the like) -- reading quietly stops rather than fighting for
+    // the UI; the interrupting event's own message already explains
+    // what happened.
+    if (state.pendingChoice && state.pendingChoice.id !== 'reading') {
+      c.readingBookId = null;
+      return;
+    }
+
+    // Darkness falling mid-session stops reading outright. Progress is
+    // preserved; lights are never auto-turned-on and the player is
+    // never auto-navigated to the electrical panel.
+    if (c.location === 'below' && needsCabinLight(state)) {
+      c.readingBookId = null;
+      state.pendingChoice = null;
+      log(state, 'Too dark to keep reading.');
+      return;
+    }
+
+    var bookDef = BOOKS_BY_ID[c.readingBookId];
+    var bookState = state.books[c.readingBookId];
+    if (!bookDef || !bookState) { c.readingBookId = null; state.pendingChoice = null; return; } // defensive
+
+    bookState.minutesRead += TICK_MINUTES;
+    var completing = bookState.minutesRead >= bookDef.requiredMinutes;
+    if (completing) bookState.minutesRead = bookDef.requiredMinutes;
+    var pct = bookProgressPct(bookDef, bookState);
+
+    // Trigger every newly-crossed milestone, oldest first -- a large
+    // offline jump can cross several at once.
+    bookDef.milestones.forEach(function (m) {
+      if (pct >= m.pct && bookState.triggeredMilestones.indexOf(m.pct) === -1) {
+        bookState.triggeredMilestones.push(m.pct);
+        log(state, m.text);
+      }
+    });
+
+    c.readingMoraleAccumMinutes += TICK_MINUTES;
+    if (c.readingMoraleAccumMinutes >= READ_MORALE_CHUNK_MINUTES) {
+      c.readingMoraleAccumMinutes -= READ_MORALE_CHUNK_MINUTES;
+      var gain = routineMoraleGain(state, 'read', READ_MORALE_CHUNK_GAIN);
+      c.morale = clamp(c.morale + gain, 0, 100);
+    }
+
+    if (completing) {
+      bookState.completed = true;
+      c.readingBookId = null;
+      state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+    }
   }
 
   function foodItemLine(item, servings) {
@@ -3968,7 +4155,7 @@
   }
 
   function cmdEat(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
     printBlank();
     printLine('PROVISIONS', 'heading-label');
     var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
@@ -4427,7 +4614,7 @@
     drink: cmdDrink,
     wash: cmdWash,
     dress: cmdDress,
-    read: cmdRead,
+    bookshelf: cmdBookshelf,
     repair: cmdRepair,
     restart: cmdRestart,
   };
@@ -4575,6 +4762,7 @@
 
   function renderOptions(state) {
     applyCabinLighting(state);
+    syncReadingDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
     var opts = getContextualOptions(state);
@@ -4654,6 +4842,49 @@
      -------------------------------------------------------------- */
   var uiBusy = false; // true while a short action's dots are animating — options are hidden, other actions wait
   var DOT_FRAME_MS = 700;
+
+  // Continuous reading's own activity indicator — same single-element,
+  // same-frames-and-timing approach as animateDots below, but indefinite
+  // rather than fixed-duration (reading has no set end time the way a
+  // short action does). syncReadingDots is called from renderOptions
+  // every time it runs (every action, every live tick, right after
+  // load) and is idempotent: it only starts the timer when reading is
+  // active and none is running, and only stops it when one is running
+  // but reading is no longer active — so it never fights an
+  // already-cycling animation, and it self-corrects after ANY way
+  // reading can end (STOP READING, completion, an interruption
+  // overwriting pendingChoice, or resuming mid-book after a reload)
+  // without needing an explicit stop call at each of those sites.
+  var readingDotsTimer = null;
+  var readingDotsEl = null;
+  var READING_DOT_FRAMES = ['.', '..', '...'];
+
+  function startReadingDots() {
+    readingDotsEl = document.createElement('p');
+    readingDotsEl.className = 'line dim';
+    readingDotsEl.textContent = READING_DOT_FRAMES[0];
+    outputEl.insertBefore(readingDotsEl, tempViewEl);
+    var frameIndex = 0;
+    readingDotsTimer = setInterval(function () {
+      frameIndex = (frameIndex + 1) % READING_DOT_FRAMES.length;
+      if (readingDotsEl) readingDotsEl.textContent = READING_DOT_FRAMES[frameIndex];
+    }, DOT_FRAME_MS);
+  }
+
+  function stopReadingDots() {
+    if (readingDotsTimer) { clearInterval(readingDotsTimer); readingDotsTimer = null; }
+    if (readingDotsEl && readingDotsEl.parentNode) readingDotsEl.parentNode.removeChild(readingDotsEl);
+    readingDotsEl = null;
+  }
+
+  function syncReadingDots(state) {
+    var shouldBeReading = !!(state.pendingChoice && state.pendingChoice.id === 'reading');
+    if (shouldBeReading && !readingDotsTimer) {
+      startReadingDots();
+    } else if (!shouldBeReading && readingDotsTimer) {
+      stopReadingDots();
+    }
+  }
 
   function runShortAction(state, config) {
     uiBusy = true;
@@ -4754,6 +4985,10 @@
       performChore(state, action.slice(6));
     } else if (action.indexOf('electrical:') === 0) {
       performElectricalToggle(state, action.slice(11));
+    } else if (action.indexOf('start-reading:') === 0) {
+      performStartReading(state, action.slice(14));
+    } else if (action === 'stop-reading') {
+      performStopReading(state);
     } else if (action === 'drink:water') {
       performDrinkWater(state);
     } else if (action === 'drink:coffee') {
@@ -5301,6 +5536,12 @@
     if (c.cabinStuffySinceMinutes === undefined) c.cabinStuffySinceMinutes = null;
     if (c.clutterCount === undefined) c.clutterCount = 0;
     if (c.clutterSinceMinutes === undefined) c.clutterSinceMinutes = null;
+    if (c.readingBookId === undefined) c.readingBookId = null;
+    if (c.readingMoraleAccumMinutes === undefined) c.readingMoraleAccumMinutes = 0;
+    if (!state.books) state.books = newBooksState();
+    BOOKS.forEach(function (b) {
+      if (!state.books[b.id]) state.books[b.id] = { minutesRead: 0, completed: false, triggeredMilestones: [] };
+    });
     if (c.lastRoutineAt.dryClothes === undefined) c.lastRoutineAt.dryClothes = null;
     if (c.lastRoutineAt.tools === undefined) c.lastRoutineAt.tools = null;
     if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
