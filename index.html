@@ -3151,15 +3151,16 @@
     creaksLight: 'audio/boat/creaks_light.mp3',
     creaksHeavy: 'audio/boat/creaks_heavy.mp3',
   };
-  var BOAT_AMBIENCE_CROSSFADE_SECONDS = 1.5; // "something around 1-2 seconds" per spec
+  var BOAT_AMBIENCE_CROSSFADE_SECONDS = 2; // shared by location transitions and weather-tier changes alike
 
-  // location/seaState -> which file (if any) each channel wants right
-  // now. A pure function of existing state, per the task's explicit
-  // boundaries -- 0 / 1-2 / 3-4 / 5-6 above deck, 0-4 / 5-6 below,
-  // creaks starting at 3.
-  function getBoatAudioState(state) {
-    var location = state.crew.location;
-    var seaState = state.weather.seaState;
+  // location/seaState -> which file (if any) each channel wants. Pure
+  // function of explicit values, per the task's boundaries -- 0 / 1-2 /
+  // 3-4 / 5-6 above deck, 0-4 / 5-6 below, creaks starting at 3. Takes
+  // location as a parameter (rather than reading state.crew.location
+  // directly) so a transition in progress can ask "what should play for
+  // the location the player is headed TO", which state.crew.location
+  // doesn't reflect until the GO ABOVE/GO BELOW action actually commits.
+  function getBoatAudioStateFor(location, seaState) {
     var exteriorTrack = null, interiorTrack = null, creakTrack = null;
     if (location === 'above') {
       if (seaState <= 0) exteriorTrack = BOAT_AUDIO_FILES.exteriorCalm;
@@ -3173,6 +3174,10 @@
       else creakTrack = BOAT_AUDIO_FILES.creaksHeavy;
     }
     return { location: location, seaState: seaState, exteriorTrack: exteriorTrack, interiorTrack: interiorTrack, creakTrack: creakTrack };
+  }
+
+  function getBoatAudioState(state) {
+    return getBoatAudioStateFor(state.crew.location, state.weather.seaState);
   }
 
   function makeBoatChannel(name, targetGain) {
@@ -3200,7 +3205,7 @@
       el.loop = true;
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1 };
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0 };
       el.addEventListener('error', function () {
         // el.currentSrc reflects the resolved URL that actually failed
         // (this element is reused for different paths over time, so
@@ -3239,16 +3244,22 @@
   }
 
   // "Healthy" means currentPath isn't just a remembered string -- the
-  // element it names is actually, verifiably the one loaded and
-  // running. A stale currentPath alone must never suppress a genuine
-  // restart attempt.
+  // element it names is actually, verifiably the one loaded, running,
+  // AND audible (or on its way there). A stale currentPath alone must
+  // never suppress a genuine restart attempt -- and neither must a path
+  // match by itself: a slot can be the correct track, unpaused and
+  // unended, yet still be the OUTGOING half of some earlier crossfade,
+  // gain ramping toward (or already sitting at) 0. gainTarget records
+  // the most recently scheduled destination for this slot's ramp --
+  // checking it (rather than the ramp's current, mid-flight, instant
+  // value) means an in-progress legitimate fade-in still reads healthy.
   function boatChannelIsHealthy(channel) {
     if (channel.currentPath === null) return channel.activeIndex === -1;
     if (channel.activeIndex === -1) return false;
     var slot = channel.slots[channel.activeIndex];
     if (!slot) return false;
     var el = slot.el;
-    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended);
+    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === channel.targetGain);
   }
 
   // Crossfades `channel` toward `desiredPath` (or silence if null).
@@ -3267,7 +3278,7 @@
 
     if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
     if (channel.currentPath === desiredPath && boatChannelIsHealthy(channel)) return; // genuinely already there
-    if (channel.loadingPath === desiredPath) return; // already mid-attempt for this exact path -- don't stack a duplicate
+    if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
 
     channel.generation++;
     var myGeneration = channel.generation;
@@ -3276,12 +3287,15 @@
 
     if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
       var outgoing = channel.slots[outgoingIndex];
+      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; } // this slot may already have a pause pending from an EARLIER fade-out -- if so it's stale as of this new fade-out and must not fire mid-way through (or after) this one
+      outgoing.gainTarget = 0;
       outgoing.gain.gain.cancelScheduledValues(now);
       outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
       outgoing.gain.gain.linearRampToValueAtTime(0, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
-      (function (el) {
-        setTimeout(function () { el.pause(); }, BOAT_AMBIENCE_CROSSFADE_SECONDS * 1000 + 100);
-      })(outgoing.el);
+      outgoing.pauseTimer = setTimeout(function () {
+        outgoing.pauseTimer = null;
+        outgoing.el.pause();
+      }, BOAT_AMBIENCE_CROSSFADE_SECONDS * 1000 + 100);
     }
 
     if (desiredPath == null) {
@@ -3300,12 +3314,17 @@
       var incoming = channel.slots[incomingIndex];
       if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
 
+      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; } // this slot may still be carrying a pause scheduled from when IT was the outgoing track of an earlier crossfade -- now that it's wanted again, that pause must never be allowed to fire
       incoming.pendingPath = desiredPath;
       incoming.pendingGeneration = myGeneration;
-      incoming.el.src = desiredPath;
-      incoming.el.currentTime = 0;
+      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
+      if (!alreadyLoaded) {
+        incoming.el.src = desiredPath;
+        incoming.el.currentTime = 0;
+      } // else: same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
+      incoming.gainTarget = channel.targetGain;
       incoming.gain.gain.cancelScheduledValues(now);
-      incoming.gain.gain.setValueAtTime(0, now);
+      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
       incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
       channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
 
@@ -3336,19 +3355,34 @@
     }
   }
 
-  // The single entry point: hands each channel's desired path to
-  // setBoatChannelTrack, which alone decides whether anything actually
-  // needs to happen. Called from updateAudioForState (so every existing
-  // call site -- the live loop, restart, offline catch-up, sound-on,
-  // etc. -- picks this up automatically, calculating from CURRENT state
-  // immediately rather than waiting for a future change) and directly
-  // from renderOptions (so a GO ABOVE/GO BELOW transition takes effect
-  // immediately rather than waiting for the next tick).
-  function updateBoatAudioForState(state) {
-    var desired = getBoatAudioState(state);
+  // Hands a {location, seaState, exteriorTrack, interiorTrack,
+  // creakTrack} shape to setBoatChannelTrack for all three channels,
+  // which alone decides whether anything actually needs to happen.
+  // Shared by both entry points below so GO ABOVE and GO BELOW are never
+  // separate implementations of the same crossfade.
+  function applyBoatAudioDesiredState(desired) {
     setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack, desired.location, desired.seaState);
     setBoatChannelTrack(boatChannels.interior, desired.interiorTrack, desired.location, desired.seaState);
     setBoatChannelTrack(boatChannels.creak, desired.creakTrack, desired.location, desired.seaState);
+  }
+
+  // The state-driven entry point, for everything that isn't a location
+  // transition in progress: the live loop, restart, offline catch-up,
+  // sound-on, and weather changing while the player stays put. Called
+  // from updateAudioForState and directly from renderOptions.
+  function updateBoatAudioForState(state) {
+    applyBoatAudioDesiredState(getBoatAudioState(state));
+  }
+
+  // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- not when
+  // it finishes. state.crew.location doesn't flip to targetLocation
+  // until the short action's dots finish running (several seconds
+  // later), so a call that read state.crew.location here would just
+  // re-apply the OLD location's ambience and silently undo nothing.
+  // Taking the target explicitly is what lets the crossfade start on
+  // click and makes both directions genuinely the same code path.
+  function transitionBoatAudioToLocation(state, targetLocation) {
+    applyBoatAudioDesiredState(getBoatAudioStateFor(targetLocation, state.weather.seaState));
   }
 
   /* --------------------------------------------------------------
@@ -5638,6 +5672,7 @@
           // a timestamped voyage-log entry — too minor and too frequent
           // to be worth a permanent log line every time.
           var goingBelow = state.crew.location !== 'below';
+          transitionBoatAudioToLocation(state, goingBelow ? 'below' : 'above');
           runShortAction(state, {
             label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
             transientLabel: true,
