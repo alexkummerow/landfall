@@ -3166,27 +3166,36 @@
   /* --------------------------------------------------------------
      TAPE PLAYER — a persistent world object (a physical cassette
      player below deck), entirely separate from the ambient/synthesized
-     layers above: its own HTMLAudioElement, its own small Web Audio
-     graph, connected straight to audioCtx.destination rather than
-     through masterGain, so it is never affected by the ambient mute
-     toggle and never affects the ambient layers. All of this state is
-     intentionally module-level, not part of `state`/save data — see
-     the note above tapeListenDay/tapeListenCount in newGameState for
-     the one piece that DOES need to persist (the daily morale
-     anti-spam counters), and TAPE PLAYER STATE further down for why
-     the rest doesn't.
+     layers above: its own plain HTMLAudioElement, with NO Web Audio
+     routing at all -- deliberately so. An earlier version routed this
+     element through a small Web Audio graph (MediaElementAudioSourceNode
+     -> BiquadFilterNode -> GainNode) to achieve the above-deck muffling
+     effect; that routing is a documented source of subtle playback-rate/
+     pitch drift in some browsers (the graph's clock has to stay
+     resampled against the AudioContext's own clock, which is not
+     always perfectly stable), so it has been removed entirely. Above/
+     below-deck is now just tapeAudioEl.volume, and speed/pitch are
+     therefore always exactly the source MP3's: nothing here ever
+     touches playbackRate away from 1.0, detunes anything, or
+     periodically corrects currentTime.
+
+     All of this state is intentionally module-level, not part of
+     `state`/save data — see the note above tapeListenDay/tapeListenCount
+     in newGameState for the one piece that DOES need to persist (the
+     daily morale anti-spam counters), and TAPE PLAYER STATE further
+     down for why the rest doesn't.
 
      Menus (cmdTapePlayer et al.) only ever CONTROL this — start,
      stop, change tape — they never own its lifecycle: once started, a
      tape keeps playing through every other menu, activity, and
      above/below-deck transition until it's explicitly stopped or
-     reaches its natural end.
+     reaches its natural end. The game's clock and the cassette's
+     playback clock are entirely separate: once .play() is called,
+     the browser's own native audio clock owns timing from there --
+     nothing here is ever synchronized to voyageMinutes, simulation
+     ticks, or any other game-time source.
      -------------------------------------------------------------- */
-  var tapeAudioEl = null;        // single, reused <audio> element -- plays TAPES tracks AND tape_off.mp3 in sequence, since the two never overlap
-  var tapeSourceNode = null;     // MediaElementAudioSourceNode -- createMediaElementSource() can only ever be called once per element, so this is built exactly once
-  var tapeFilterNode = null;     // BiquadFilterNode -- the above-deck low-pass
-  var tapeGainNode = null;       // GainNode -- the above-deck volume multiplier
-  var tapeGraphReady = false;
+  var tapeAudioEl = null;        // single, reused plain <audio> element -- plays TAPES tracks AND tape_off.mp3 in sequence, since the two never overlap
   var activeTapeTitle = null;    // title of the TAPES entry currently playing, or null -- this is what TAPE PLAYER's "X -- PLAYING" reflects; briefly null again while tape_off.mp3 is the only thing sounding, whether stopping or changing tapes
   var tapeAudioRole = null;      // 'track' | 'tape_off' | null -- which of the two tapeAudioEl is currently loaded with, so the shared 'ended' handler knows what just finished
   var pendingNextTapeTitle = null; // set only when CHANGING tapes: which tape to start once the in-flight tape_off.mp3 finishes
@@ -3197,72 +3206,37 @@
   var TAPE_MORALE_FIRST = 5;          // first qualifying listen this voyage day -- comparable to a wash/change
   var TAPE_MORALE_SECOND = 2;         // second: noticeably smaller, matching a single reading-morale chunk
   var TAPE_MORALE_DAILY_LIMIT = 2;    // third and beyond: no further benefit, but never blocks listening itself
-  var TAPE_FILTER_ABOVE_HZ = 2800;
-  var TAPE_FILTER_BELOW_HZ = 20000;   // effectively transparent -- reproduces the supplied MP3 normally
-  var TAPE_GAIN_ABOVE = 0.5;
-  var TAPE_GAIN_BELOW = 1.0;
+  var TAPE_VOLUME_ABOVE = 0;          // above deck: completely inaudible -- the cassette mechanism keeps running below, the player just can't hear it from up there
+  var TAPE_VOLUME_BELOW = 1;          // below deck: the MP3's own normal supplied level, unmodified
 
   // Called from the player's own explicit tape-selection click (never
-  // proactively/on load). Two independent layers, built at most once
-  // each: the plain <audio> element (tapeAudioEl) is basic, almost
-  // universally supported, and reused for every subsequent tape/
-  // tape_off by changing its src, exactly as the task requires --
-  // never recreated. The WebAudio filter graph on top of it (location-
-  // based volume/low-pass) needs an AudioContext and can fail
-  // separately and later; if it never builds, tapeAudioEl still plays
-  // normally through its own default output, just without the
-  // above-deck muffling effect. Playback and the tape-player's own
-  // state machine (activeTapeTitle etc.) must never depend on the
-  // WebAudio layer succeeding -- only the element itself.
+  // proactively/on load). Lazily creates the one persistent <audio>
+  // element -- no AudioContext, no Web Audio graph, nothing else to
+  // build. Plain HTMLAudioElement playback needs nothing more than a
+  // user-gesture-triggered .play() call to satisfy autoplay policy.
   function ensureTapeAudioReady() {
-    if (!tapeAudioEl) {
-      try {
-        tapeAudioEl = new Audio();
-        tapeAudioEl.preload = 'auto';
-        tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
-        tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
-      } catch (e) {
-        console.warn('Tape player audio unavailable:', describeError(e));
-        return false;
-      }
-    }
-    unlockAudio(); // idempotent; creates the AudioContext if this is somehow the very first sound interaction
-    if (audioCtx) {
-      if (audioCtx.state === 'suspended') audioCtx.resume().catch(function () {});
-      if (!tapeGraphReady) buildTapeAudioGraph();
-    }
-    return true;
-  }
-
-  // Best-effort location-based filter graph -- see ensureTapeAudioReady
-  // for why this is allowed to fail independently of tapeAudioEl itself.
-  function buildTapeAudioGraph() {
-    if (tapeGraphReady || !audioCtx || !tapeAudioEl) return;
+    if (tapeAudioEl) return true;
     try {
-      tapeSourceNode = audioCtx.createMediaElementSource(tapeAudioEl);
-      tapeFilterNode = audioCtx.createBiquadFilter();
-      tapeFilterNode.type = 'lowpass';
-      tapeFilterNode.Q.value = 0.7; // gentle -- no added resonance, per spec
-      tapeGainNode = audioCtx.createGain();
-      tapeSourceNode.connect(tapeFilterNode).connect(tapeGainNode).connect(audioCtx.destination);
-      applyTapeLocationAudio(GAME);
-      tapeGraphReady = true;
+      tapeAudioEl = new Audio();
+      tapeAudioEl.preload = 'auto';
+      tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
+      tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
+      return true;
     } catch (e) {
-      console.warn('Tape player filter graph unavailable:', describeError(e));
+      console.warn('Tape player audio unavailable:', describeError(e));
+      return false;
     }
   }
 
-  // Instant, no-fade -- per spec, above deck is simply quieter and
-  // muffled the moment the player is there, and full/normal the moment
-  // they're not. Safe to call whether or not a tape is currently
-  // playing (harmless if so, since it always applies to whatever's
-  // loaded); safe to call before the graph exists (no-op).
+  // Instant, no fade, and NEVER anything but a volume change -- no
+  // filter, no playbackRate touch, no seek. Safe to call whether or
+  // not a tape is currently playing (harmless either way, since it
+  // always applies to whatever's loaded); safe to call before the
+  // element exists (no-op).
   function applyTapeLocationAudio(state) {
-    if (!tapeFilterNode || !tapeGainNode || !audioCtx) return;
+    if (!tapeAudioEl) return;
     var above = !!(state && state.crew.location === 'above');
-    var now = audioCtx.currentTime;
-    tapeFilterNode.frequency.setValueAtTime(above ? TAPE_FILTER_ABOVE_HZ : TAPE_FILTER_BELOW_HZ, now);
-    tapeGainNode.gain.setValueAtTime(above ? TAPE_GAIN_ABOVE : TAPE_GAIN_BELOW, now);
+    tapeAudioEl.volume = above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
   }
 
   // Awards the qualifying-listen morale, once per session, respecting
@@ -3297,10 +3271,13 @@
   // Shared 'ended' handler for both roles the single audio element can
   // hold. A track ending naturally: credit a qualifying short tape,
   // clear the active-tape state, play the mechanical stop sound, and
-  // never restart/advance to anything else. tape_off.mp3 ending: either
-  // silence (the normal case) or, if the player selected a different
-  // tape while this one was stopping, start that tape now that the
-  // cassette-swap sound has actually finished.
+  // never restart/advance to anything else -- this fires at exactly
+  // the file's real natural end regardless of location, so a tape that
+  // finishes while the player is above deck clears correctly and on
+  // time; it just isn't audible when it happens. tape_off.mp3 ending:
+  // either silence (the normal case) or, if the player selected a
+  // different tape while this one was stopping, start that tape now
+  // that the cassette-swap sound has actually finished.
   function onTapeAudioEnded() {
     if (tapeAudioRole === 'track') {
       awardTapeListenMorale(); // no-op if already credited via onTapeTimeUpdate
@@ -3341,12 +3318,25 @@
     }
   }
 
+  // The ONE place a src is loaded and playback started, for either a
+  // music track or tape_off.mp3 -- centralizing this is what guarantees
+  // playbackRate/defaultPlaybackRate are always explicitly 1.0 no
+  // matter which path led here, per the core rule that speed and pitch
+  // must always match the source file exactly. Nothing outside this
+  // function ever touches playbackRate, defaultPlaybackRate, or
+  // currentTime once playback is underway.
+  function loadAndPlayTapeAudio(path) {
+    tapeAudioEl.src = path;
+    tapeAudioEl.currentTime = 0;
+    tapeAudioEl.playbackRate = 1.0;
+    tapeAudioEl.defaultPlaybackRate = 1.0;
+    safePlayTapeAudio();
+  }
+
   function playTapeOffSound() {
     if (!tapeAudioEl) return;
     tapeAudioRole = 'tape_off';
-    tapeAudioEl.src = TAPE_OFF_PATH;
-    tapeAudioEl.currentTime = 0;
-    safePlayTapeAudio();
+    loadAndPlayTapeAudio(TAPE_OFF_PATH);
   }
 
   function startTapeTrack(title, path) {
@@ -3354,10 +3344,8 @@
     activeTapeTitle = title;
     tapeAudioRole = 'track';
     tapeSessionQualified = false;
-    tapeAudioEl.src = path;
-    tapeAudioEl.currentTime = 0;
     applyTapeLocationAudio(GAME);
-    safePlayTapeAudio();
+    loadAndPlayTapeAudio(path);
   }
 
   /* ============================================================
