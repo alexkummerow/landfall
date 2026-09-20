@@ -2361,6 +2361,7 @@
     b.fuelGallons = clamp(b.fuelGallons - hrs * DIESEL_BURN_RATE_GPH, 0, 999);
     if (b.fuelGallons <= 0) {
       b.engineOn = false;
+      stopAllEngineLoops();
       log(state, "The engine coughs and dies. Fuel's gone.");
     }
   }
@@ -2567,6 +2568,7 @@
     b[systemKey] = 'DAMAGED';
     if (systemKey === 'engine' && b.engineOn) {
       b.engineOn = false; // shut down immediately if it was running
+      stopAllEngineLoops();
     }
     if (systemKey === 'electrical') {
       // A fuse problem, not a dead battery — battery charge itself is
@@ -3105,13 +3107,25 @@
     layers.rain = makeNoiseLayer(audioCtx, 4, 'highpass', 3500, 0.7);
 
     if (GAME) updateAudioForState(GAME);
+    if (GAME && GAME.boat.engineOn) {
+      // Catches up a resumed save where the engine was already running
+      // before sound was ever unlocked -- the normal engine-start
+      // trigger only fires from the real START ENGINE action, which
+      // won't fire again on a resume. No start.mp3 here, since the
+      // engine didn't just start; straight into whichever loop matches
+      // the current deck.
+      if (GAME.crew.location === 'above') playEngineLoop('cruise', ENGINE_VOLUME.cruise);
+      else playEngineLoop('interior', ENGINE_VOLUME.interior);
+    }
   }
 
   // The single top-level "sync all ambient audio to current state" entry
-  // point -- rain here, boat ambience (recorded exterior/interior/creak
-  // tracks) delegated to updateBoatAudioForState, and engine audio to
-  // syncEngineAudio, so weather/location/engine audio logic isn't
-  // scattered across call sites.
+  // point -- rain here, and boat ambience (recorded exterior/
+  // interior/creak tracks) delegated to updateBoatAudioForState.
+  // Engine audio is NOT synced here -- it's triggered directly from the
+  // actual engine-start/engine-stop actions (see beginEngineStartAudio/
+  // beginEngineStopAudio) and the GO ABOVE/GO BELOW handler
+  // (transitionEngineLocationAudio), not inferred from render state.
   function updateAudioForState(state) {
     if (audioCtx && layers.rain) {
       var now = audioCtx.currentTime;
@@ -3119,12 +3133,12 @@
       layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
     }
     updateBoatAudioForState(state);
-    syncEngineAudio(state);
   }
 
   function toggleMute() {
     muted = !muted;
     if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+    applyMuteToEngineAudio(); // engine audio bypasses masterGain entirely, so it needs its own mute application
     updateSoundLabel();
   }
 
@@ -3215,22 +3229,22 @@
       el.loop = true;
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, endedListener: null };
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0 };
       el.addEventListener('error', function () {
         // el.currentSrc reflects the resolved URL that actually failed
         // (this element is reused for different paths over time, so
         // reading it fresh here -- not capturing a path in a closure --
         // is what makes this correct for whichever load just failed).
         var path = el.currentSrc || el.src;
-        console.error('CHANNEL AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+        console.error('BOAT AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
       });
       el.addEventListener('loadeddata', function () {
         var path = el.currentSrc || el.src;
-        console.log('CHANNEL AUDIO LOADED', 'path:', path, 'duration:', el.duration);
+        console.log('BOAT AUDIO LOADED', 'path:', path, 'duration:', el.duration);
       });
       el.addEventListener('playing', function () {
         var path = el.currentSrc || el.src;
-        console.log('CHANNEL AUDIO PLAYING', 'path:', path);
+        console.log('BOAT AUDIO PLAYING', 'path:', path);
         // Confirmation path #2 (alongside the play() Promise below) --
         // only commit if this slot's most recent attempt is still the
         // channel's most recent attempt overall AND still what's
@@ -3249,7 +3263,7 @@
       slot.gain = gain;
       channel.slots[index] = slot;
     } catch (e) {
-      console.warn('Channel audio unavailable:', describeError(e));
+      console.warn('Boat ambience unavailable:', describeError(e));
     }
   }
 
@@ -3283,26 +3297,7 @@
   // unchanged optimization only fires when the channel is genuinely,
   // verifiably already there (boatChannelIsHealthy) -- a bare
   // currentPath string match is never sufficient on its own.
-  //
-  // opts (all optional; every existing call site omits this and gets
-  // exactly the previous behavior -- boat ambience's own crossfades,
-  // 2s, looped, unchanged) exists so the engine-audio system below can
-  // reuse this same, already-hardened machinery instead of a second,
-  // parallel implementation: crossfadeSeconds overrides the shared
-  // BOAT_AMBIENCE_CROSSFADE_SECONDS default; loop (default true) is set
-  // on the element every time a track is (re)assigned, not just once at
-  // creation, since a one-shot like engine start/off must never loop
-  // even if its slot previously held a looped track and vice versa;
-  // onEnded, if given, fires once when the incoming element reaches a
-  // natural (non-looped) end -- guarded by the same generation/
-  // desiredPath staleness check as the play()-confirmation path below,
-  // so a one-shot interrupted by a newer request before it finishes can
-  // never fire a stale callback.
-  function setBoatChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, opts) {
-    opts = opts || {};
-    var crossfadeSeconds = opts.crossfadeSeconds || BOAT_AMBIENCE_CROSSFADE_SECONDS;
-    var loop = opts.loop !== false;
-
+  function setBoatChannelTrack(channel, desiredPath, locationForLog, seaStateForLog) {
     channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
 
     if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
@@ -3317,15 +3312,14 @@
     if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
       var outgoing = channel.slots[outgoingIndex];
       if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; } // this slot may already have a pause pending from an EARLIER fade-out -- if so it's stale as of this new fade-out and must not fire mid-way through (or after) this one
-      if (outgoing.endedListener) { outgoing.el.removeEventListener('ended', outgoing.endedListener); outgoing.endedListener = null; } // this track is being displaced -- any "when I end, do X" callback it was carrying must never fire for it again
       outgoing.gainTarget = 0;
       outgoing.gain.gain.cancelScheduledValues(now);
       outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
       outgoing.pauseTimer = setTimeout(function () {
         outgoing.pauseTimer = null;
         outgoing.el.pause();
-      }, crossfadeSeconds * 1000 + 100);
+      }, BOAT_AMBIENCE_CROSSFADE_SECONDS * 1000 + 100);
     }
 
     if (desiredPath == null) {
@@ -3336,7 +3330,7 @@
     }
 
     channel.loadingPath = desiredPath;
-    console.log('CHANNEL AUDIO REQUEST', 'location:', locationForLog, 'seaState:', seaStateForLog, 'desiredPath:', desiredPath);
+    console.log('BOAT AUDIO REQUEST', 'location:', locationForLog, 'seaState:', seaStateForLog, 'desiredPath:', desiredPath);
 
     try {
       var incomingIndex = outgoingIndex === 0 ? 1 : 0;
@@ -3345,40 +3339,18 @@
       if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
 
       if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; } // this slot may still be carrying a pause scheduled from when IT was the outgoing track of an earlier crossfade -- now that it's wanted again, that pause must never be allowed to fire
-      if (incoming.endedListener) { incoming.el.removeEventListener('ended', incoming.endedListener); incoming.endedListener = null; } // same, for a leftover one-shot 'ended' callback from whatever this slot held before
       incoming.pendingPath = desiredPath;
       incoming.pendingGeneration = myGeneration;
-      // A one-shot being re-requested (e.g. engine start.mp3 playing
-      // again on restart) must always restart from the beginning --
-      // "already loaded" only ever means "resume this ongoing loop in
-      // place" for looped tracks, never "this discrete event already
-      // happened, skip it."
-      var alreadyLoaded = loop && incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
+      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
       if (!alreadyLoaded) {
         incoming.el.src = desiredPath;
         incoming.el.currentTime = 0;
       } // else: same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
-      incoming.el.loop = loop;
       incoming.gainTarget = channel.targetGain;
       incoming.gain.gain.cancelScheduledValues(now);
       incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
-      incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + crossfadeSeconds);
+      incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
       channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
-
-      if (opts.onEnded) {
-        var handleEnded = function () {
-          incoming.endedListener = null;
-          incoming.el.removeEventListener('ended', handleEnded);
-          // Stale-check, same as the play()-confirmation path below: a
-          // newer request may have superseded this one before it
-          // naturally finished (e.g. the engine was stopped again, or
-          // the player moved decks, before this one-shot ended).
-          if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
-          opts.onEnded();
-        };
-        incoming.endedListener = handleEnded;
-        incoming.el.addEventListener('ended', handleEnded);
-      }
 
       var playPromise = incoming.el.play();
       if (playPromise && typeof playPromise.then === 'function') {
@@ -3389,10 +3361,10 @@
           if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
           channel.currentPath = desiredPath;
           channel.loadingPath = null;
-          console.log('CHANNEL AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
+          console.log('BOAT AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
             'volume:', incoming.el.volume, 'muted:', incoming.el.muted, 'currentTime:', incoming.el.currentTime);
         }, function (error) {
-          console.error('CHANNEL AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          console.error('BOAT AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
           // currentPath was never set for this attempt -- nothing to
           // undo. Only clear loadingPath if this is still the most
           // recent attempt (a newer one may already be in flight).
@@ -3402,7 +3374,7 @@
       // If no Promise is returned at all (very old browsers), the
       // 'playing' listener above is the sole confirmation path.
     } catch (e) {
-      console.error('Channel audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      console.error('Boat audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
       if (channel.loadingPath === desiredPath) channel.loadingPath = null;
     }
   }
@@ -3441,38 +3413,22 @@
      ENGINE AUDIO -- a third, independent layer alongside boat/
      environment ambience (above) and the tape player (below): the
      recorded sound of the engine itself, playing underneath whichever
-     of those happen to be audible, never replacing them. Two channels,
-     reusing the exact same slot/crossfade machinery as boat ambience
-     (ensureBoatChannelSlot, boatChannelIsHealthy, setBoatChannelTrack
-     via its opts parameter) rather than a second parallel
-     implementation, but with a much shorter ~0.1s crossfade and two
-     one-shot events -- start.mp3 and off.mp3 -- that the always-looped
-     boat tracks never needed:
+     of those happen to be audible, never replacing them.
 
-     - outside: start.mp3 (one-shot) -> cruise.mp3 (looped) while the
-       engine runs and the player is above deck; off.mp3 (one-shot)
-       when the engine is switched off above deck.
-     - inside: interior.mp3 (looped) while the engine runs and the
-       player is below deck.
-
-     Engine state is authoritative (state.boat.engineOn) -- nothing
-     here tracks a second, independent "is the engine audio on" notion.
-     Two entry points read it, mirroring the boat-ambience pair above:
-
-     - syncEngineAudio(state), called from renderOptions right where
-       updateBoatAudioForState is, so every existing way engineOn or
-       location can change -- the ENGINE menu, the departure sequence,
-       an automatic fuel-out or damage shutdown, restart, offline
-       catch-up -- is covered without hooking each site individually.
-     - transitionEngineAudioToLocation(state, targetLocation), called
-       immediately from the GO ABOVE/GO BELOW handler alongside
-       transitionBoatAudioToLocation and for the identical reason:
-       state.crew.location doesn't update until the transition's dots
-       finish, so the crossfade needs the TARGET location up front to
-       begin on click rather than at the end. This path never plays
-       start.mp3 -- relocating a running engine always crossfades
-       straight into cruise/interior; the one-shot start is solely
-       syncEngineAudio's job, exactly once per engine run.
+     Deliberately NOT built on the boat-ambience channel machinery
+     above (no desiredPath/currentPath/loadingPath/generation
+     tracking) -- just four ordinary HTMLAudioElements, created lazily,
+     controlled directly with .play()/.pause()/.volume/.currentTime.
+     There is no "sync engine audio to current state" function that
+     runs on every render: the actual engine-start/engine-stop action
+     handlers below call these functions directly, at the moment the
+     player's choice actually takes effect (see the engine-start/
+     engine-stop cases and the departure-sequence START ENGINE step).
+     This means engine audio is authored to react to real events, not
+     inferred after the fact from state.boat.engineOn -- though that
+     flag remains the sole source of truth for whether the engine
+     itself is running; nothing here tracks a second, independent
+     notion of "is engine audio on."
      -------------------------------------------------------------- */
   var ENGINE_AUDIO_FILES = {
     start: 'audio/engine/start.mp3',
@@ -3480,129 +3436,175 @@
     interior: 'audio/engine/interior.mp3',
     off: 'audio/engine/off.mp3',
   };
-  var ENGINE_CROSSFADE_SECONDS = 0.1; // deliberately far shorter than BOAT_AMBIENCE_CROSSFADE_SECONDS -- long enough to avoid a click, nothing more
+  var ENGINE_VOLUME = { start: 0.55, cruise: 0.55, interior: 0.45, off: 0.55 };
+  var ENGINE_TRANSITION_SECONDS = 0.1; // click prevention only -- not an audible crossfade
 
-  var engineChannels = {
-    // start/cruise/off are mutually exclusive above-deck engine-room
-    // sounds that hand off to one another, so they share one channel
-    // and one target gain -- a volume jump between them, even as the
-    // timbre crossfades, would undercut the "feels immediate" goal.
-    // makeBoatChannel is channel-shape-agnostic despite the name (see
-    // above) -- reused here rather than duplicated.
-    outside: makeBoatChannel('engine-outside', 0.55),
-    // interior.mp3: the below-deck perspective, layered alongside the
-    // EXISTING boat interior ambience + creaks rather than replacing
-    // them, so pitched a little under those rather than matching outside.
-    inside: makeBoatChannel('engine-inside', 0.45),
-  };
+  var engineAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded)
 
-  // null until the first sync call; used to detect a genuine off->on or
-  // on->off transition -- the moment to trigger start.mp3/off.mp3 --
-  // rather than reacting to engineOn's bare value on every call, which
-  // would otherwise re-trigger the one-shot every time this runs,
-  // including on a resumed save where the engine was already running
-  // (that must resume straight into cruise/interior, never start.mp3).
-  var engineAudioLastKnownOn = null;
-
-  // start.mp3 plays once, then hands off to cruise.mp3 the moment it
-  // naturally ends -- onEnded's own staleness guard (inside
-  // setBoatChannelTrack) means if the engine is stopped again, or the
-  // player changes decks, before start.mp3 finishes, this handoff is
-  // silently skipped rather than firing late and audibly wrong.
-  function beginEngineStart(location) {
-    setBoatChannelTrack(engineChannels.outside, ENGINE_AUDIO_FILES.start, location, null, {
-      crossfadeSeconds: ENGINE_CROSSFADE_SECONDS,
-      loop: false,
-      onEnded: function () {
-        setBoatChannelTrack(engineChannels.outside, ENGINE_AUDIO_FILES.cruise, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      },
-    });
+  function getEngineAudioEl(key) {
+    var el = engineAudioEls[key];
+    if (el) return el;
+    el = new Audio(ENGINE_AUDIO_FILES[key]);
+    el.loop = (key === 'cruise' || key === 'interior');
+    el.preload = 'auto';
+    el.volume = 0;
+    engineAudioEls[key] = el;
+    return el;
   }
 
-  // off.mp3 plays once (crossfading in as cruise crossfades out), then
-  // clears the channel to silence the moment it naturally ends -- same
-  // staleness guarding as beginEngineStart.
-  function beginEngineShutdown(location) {
-    setBoatChannelTrack(engineChannels.outside, ENGINE_AUDIO_FILES.off, location, null, {
-      crossfadeSeconds: ENGINE_CROSSFADE_SECONDS,
-      loop: false,
-      onEnded: function () {
-        setBoatChannelTrack(engineChannels.outside, null, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      },
-    });
-  }
-
-  // The state-driven entry point -- called anywhere updateBoatAudioForState
-  // is, so engine audio stays correctly synced to state.boat.engineOn no
-  // matter what changed it (player action, fuel running out, a damage
-  // event, restart, offline catch-up). Safe to call more than once for
-  // the same underlying transition -- finish() calls both renderOptions
-  // and updateAudioForState in the same tick, so this runs twice back to
-  // back with no genuine state change between them. justTurnedOn/
-  // justTurnedOff only fire true once (engineAudioLastKnownOn is updated
-  // immediately below), so a second, redundant call in the same tick
-  // must never force cruise/silence directly if a start.mp3/off.mp3
-  // one-shot is already underway from the first call -- that would
-  // displace it mid-playback instead of letting it hand off naturally
-  // via its own onEnded callback.
-  function syncEngineAudio(state, targetLocation) {
-    var location = targetLocation || state.crew.location;
-    var engineOn = state.boat.engineOn;
-    var justTurnedOn = engineOn && engineAudioLastKnownOn === false;
-    var justTurnedOff = !engineOn && engineAudioLastKnownOn === true;
-    engineAudioLastKnownOn = engineOn;
-
-    if (!engineOn) {
-      if (justTurnedOff && location === 'above') {
-        beginEngineShutdown(location); // cruise -> off.mp3 -> silence
-      } else if (engineChannels.outside.desiredPath !== ENGINE_AUDIO_FILES.off) {
-        // Already off, or just turned off below deck -- off.mp3 is an
-        // exterior/cockpit-perspective sound, so below deck the engine
-        // sound simply stops with the same short fade, no one-shot.
-        // The desiredPath check leaves an in-progress off.mp3 alone
-        // rather than cutting it short on a redundant same-tick call.
-        setBoatChannelTrack(engineChannels.outside, null, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
+  // Ramps `el.volume` from its current value to `target` over `seconds`
+  // real seconds, plain setInterval steps -- no Web Audio API, no
+  // AudioParam scheduling. Cancels any fade already in flight on this
+  // element first, so overlapping requests can't fight each other.
+  function fadeEngineVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
       }
-      setBoatChannelTrack(engineChannels.inside, null, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      return;
-    }
+    }, stepMs);
+  }
 
+  // Starts (or leaves alone, if already playing) a looping engine
+  // track, fading to its target volume. el._baseVolume is remembered so
+  // toggleMute can restore the right level later without re-deriving
+  // what this element was fading toward.
+  function playEngineLoop(key, baseVolume) {
+    if (!audioUnlocked) return;
+    var el = getEngineAudioEl(key);
+    el._baseVolume = baseVolume;
+    if (el.paused) {
+      el.volume = 0;
+      var p = el.play();
+      if (p && p.catch) p.catch(function (e) { console.warn('Engine audio failed to play (' + key + '):', describeError(e)); });
+    }
+    fadeEngineVolume(el, muted ? 0 : baseVolume, ENGINE_TRANSITION_SECONDS);
+  }
+
+  // Fades a looping engine track to silence, then pauses it.
+  function stopEngineLoop(key) {
+    var el = engineAudioEls[key];
+    if (!el) return;
+    el._baseVolume = 0;
+    if (el.paused) return;
+    fadeEngineVolume(el, 0, ENGINE_TRANSITION_SECONDS, function () { el.pause(); });
+  }
+
+  // Plays a one-shot (start.mp3/off.mp3) from the beginning every time,
+  // fading in, and fires onEnded (once) when it naturally finishes --
+  // ordinary 'ended', not looped, no staleness tracking needed since
+  // stopAllEngineLoops (below) always clears any pending onended before
+  // it could fire late.
+  function playEngineOneShot(key, baseVolume, onEnded) {
+    if (!audioUnlocked) return;
+    var el = getEngineAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    el._baseVolume = baseVolume;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Engine audio failed to play (' + key + '):', describeError(e)); });
+    fadeEngineVolume(el, muted ? 0 : baseVolume, ENGINE_TRANSITION_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+  }
+
+  // The one small helper for automatic shutdowns (fuel out, engine
+  // damage): stops whichever engine loop is currently active so audio
+  // can never keep playing once state.boat.engineOn is false, and
+  // clears any pending start.mp3 handoff so it can't fire late and
+  // start a loop after the engine has already stopped. No off.mp3 here
+  // -- this is a safety net, not the player-facing shutdown
+  // presentation (see beginEngineStopAudio below for that).
+  function stopAllEngineLoops() {
+    var startEl = engineAudioEls.start;
+    if (startEl) {
+      startEl.onended = null;
+      if (startEl._fadeTimer) { clearInterval(startEl._fadeTimer); startEl._fadeTimer = null; }
+      if (!startEl.paused) startEl.pause();
+      startEl.volume = 0;
+      startEl._baseVolume = 0;
+    }
+    stopEngineLoop('cruise');
+    stopEngineLoop('interior');
+  }
+
+  // Called directly from the engine-start action (both the ENGINE menu
+  // toggle and the departure-sequence START ENGINE step) at the moment
+  // state.boat.engineOn actually becomes true -- never inferred later
+  // from render state. Above deck: start.mp3 once, then hands off to
+  // looping cruise.mp3 when it naturally ends. Below deck: straight
+  // into looping interior.mp3, no one-shot intro (today the ENGINE menu
+  // is above-deck only, so this branch isn't reachable in normal play,
+  // but stays correct if that ever changes).
+  function beginEngineStartAudio(location) {
     if (location === 'above') {
-      setBoatChannelTrack(engineChannels.inside, null, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      if (justTurnedOn) {
-        beginEngineStart(location); // start.mp3 once, then hands off to cruise.mp3
-      } else if (engineChannels.outside.desiredPath !== ENGINE_AUDIO_FILES.start) {
-        // The desiredPath check leaves an in-progress start.mp3 alone
-        // (same reasoning as above) -- this branch is for "already on
-        // cruise" and "just relocated from below," not a start.mp3
-        // sequence already underway from a moment-ago call.
-        setBoatChannelTrack(engineChannels.outside, ENGINE_AUDIO_FILES.cruise, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      }
+      playEngineOneShot('start', ENGINE_VOLUME.start, function () {
+        playEngineLoop('cruise', ENGINE_VOLUME.cruise);
+      });
     } else {
-      setBoatChannelTrack(engineChannels.outside, null, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      setBoatChannelTrack(engineChannels.inside, ENGINE_AUDIO_FILES.interior, location, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      // A fresh start while already below deck (only reachable if the
-      // game's own mechanics ever allow starting the engine from below
-      // -- they don't today, but this stays correct if that changes)
-      // has no one-shot intro of its own: interior.mp3 fading in
-      // directly already covers it, so justTurnedOn needs nothing
-      // further here.
+      playEngineLoop('interior', ENGINE_VOLUME.interior);
     }
   }
 
-  // Called immediately when a GO ABOVE/GO BELOW transition begins --
-  // same reasoning as transitionBoatAudioToLocation, and using the same
-  // TARGET location rather than state.crew.location, which hasn't
-  // updated yet.
-  function transitionEngineAudioToLocation(state, targetLocation) {
-    if (!state.boat.engineOn) return; // nothing running to relocate
-    if (targetLocation === 'above') {
-      setBoatChannelTrack(engineChannels.inside, null, targetLocation, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      setBoatChannelTrack(engineChannels.outside, ENGINE_AUDIO_FILES.cruise, targetLocation, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-    } else {
-      setBoatChannelTrack(engineChannels.outside, null, targetLocation, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
-      setBoatChannelTrack(engineChannels.inside, ENGINE_AUDIO_FILES.interior, targetLocation, null, { crossfadeSeconds: ENGINE_CROSSFADE_SECONDS });
+  // Called directly from the engine-stop action at the moment
+  // state.boat.engineOn actually becomes false. Above deck: cruise
+  // fades out and off.mp3 plays once. Below deck: interior just fades
+  // out -- off.mp3 is an exterior/cockpit-perspective sound, so it's
+  // skipped below deck rather than played out of place; the engine
+  // sound simply stops with the same short fade.
+  function beginEngineStopAudio(location) {
+    stopAllEngineLoops();
+    if (location === 'above') {
+      playEngineOneShot('off', ENGINE_VOLUME.off, null);
     }
+  }
+
+  // Called immediately when a GO ABOVE/GO BELOW transition begins (same
+  // reasoning as transitionBoatAudioToLocation above -- uses the TARGET
+  // location, since state.crew.location hasn't updated yet), but only
+  // if the engine is actually running. Never plays start.mp3 -- that's
+  // solely beginEngineStartAudio's job, exactly once per engine run;
+  // relocating a running engine always crossfades directly between
+  // cruise and interior.
+  function transitionEngineLocationAudio(state, targetLocation) {
+    if (!state.boat.engineOn) return;
+    if (targetLocation === 'above') {
+      stopEngineLoop('interior');
+      playEngineLoop('cruise', ENGINE_VOLUME.cruise);
+    } else {
+      stopEngineLoop('cruise');
+      playEngineLoop('interior', ENGINE_VOLUME.interior);
+    }
+  }
+
+  // Applies the current mute state to whichever engine element(s) are
+  // actually audible right now, instantly (matching masterGain's own
+  // instant, non-ramped mute toggle) -- called from toggleMute.
+  function applyMuteToEngineAudio() {
+    ['start', 'cruise', 'interior', 'off'].forEach(function (key) {
+      var el = engineAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : (el._baseVolume || 0);
+    });
   }
 
   /* --------------------------------------------------------------
@@ -5598,7 +5600,6 @@
     applyCabinLighting(state);
     applyTapeLocationAudio(state);
     updateBoatAudioForState(state);
-    syncEngineAudio(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
@@ -5894,7 +5895,7 @@
           // to be worth a permanent log line every time.
           var goingBelow = state.crew.location !== 'below';
           transitionBoatAudioToLocation(state, goingBelow ? 'below' : 'above');
-          transitionEngineAudioToLocation(state, goingBelow ? 'below' : 'above');
+          transitionEngineLocationAudio(state, goingBelow ? 'below' : 'above');
           runShortAction(state, {
             label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
             transientLabel: true,
@@ -5956,6 +5957,7 @@
             duration: 3,
             action: function (s) {
               s.boat.engineOn = true;
+              beginEngineStartAudio(s.crew.location);
               // Recalculate immediately, using the heading as of the last
               // real tick — never invent a fresh heading here, since
               // computeHeading() also rolls a per-tick drift wobble that
@@ -5975,6 +5977,7 @@
             duration: 2,
             action: function (s) {
               s.boat.engineOn = false;
+              beginEngineStopAudio(s.crew.location);
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
               log(s, 'Engine stopped.');
               flushNewLogEntries(s);
@@ -6099,7 +6102,7 @@
       workingLabel: 'STARTING ENGINE',
       duration: 3,
       text: 'BATTERY CHARGING',
-      onEnter: function (s) { s.boat.engineOn = true; },
+      onEnter: function (s) { s.boat.engineOn = true; beginEngineStartAudio(s.crew.location); },
     },
     {
       label: 'CAST OFF',
