@@ -216,6 +216,7 @@
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
+        <button id="test-boat-audio-btn" class="hdr-btn" type="button">TEST BOAT AUDIO</button>
         <button id="sound-btn" class="hdr-btn" type="button">SOUND: OFF</button>
         <span id="clock">—</span>
       </div>
@@ -3179,9 +3180,12 @@
     return {
       name: name,
       targetGain: targetGain,
-      slots: [null, null],    // each becomes { el, gain } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
-      activeIndex: -1,        // which slot is currently the audible/fading-in one, or -1 if silent
-      currentPath: undefined, // undefined = never yet synced against a real AudioContext; null = deliberately silent; a string = that file is what's wanted
+      slots: [null, null],    // each becomes { el, gain, pendingPath, pendingGeneration } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
+      activeIndex: -1,        // which slot we're currently pointing at (loading OR confirmed-playing), or -1 if silent
+      desiredPath: null,      // the LATEST path this channel has been asked for -- recorded synchronously on every call, regardless of anything else; async callbacks compare against this (plus generation) to detect staleness
+      loadingPath: null,      // path an in-flight play() attempt is currently for, or null if nothing in flight
+      currentPath: null,      // CONFIRMED actually playing, or null. ONLY ever set once playback is confirmed -- the play() Promise resolves and/or the element's 'playing' event fires -- AND that path is still desired at that moment. Never set merely because play() was called without throwing.
+      generation: 0,          // bumped every time a genuinely new attempt begins; closures/slots capture their own generation so a slow or stale async result can recognize it's been superseded and refuse to resurrect old state
     };
   }
   var boatChannels = {
@@ -3197,47 +3201,77 @@
       el.loop = true;
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1 };
       el.addEventListener('error', function () {
         // el.currentSrc reflects the resolved URL that actually failed
         // (this element is reused for different paths over time, so
-        // reading it fresh here -- not capturing `path` in the closure --
+        // reading it fresh here -- not capturing a path in a closure --
         // is what makes this correct for whichever load just failed).
-        console.error('Boat audio failed:', el.currentSrc || el.src, el.error);
+        var path = el.currentSrc || el.src;
+        console.error('BOAT AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
       });
       el.addEventListener('loadeddata', function () {
-        console.log('Boat audio loadeddata (' + channel.name + '):', el.currentSrc || el.src);
-      });
-      el.addEventListener('canplay', function () {
-        console.log('Boat audio canplay (' + channel.name + '):', el.currentSrc || el.src);
+        var path = el.currentSrc || el.src;
+        console.log('BOAT AUDIO LOADED', 'path:', path, 'duration:', el.duration);
       });
       el.addEventListener('playing', function () {
-        console.log('Boat audio playing (' + channel.name + '):', el.currentSrc || el.src, '| volume=' + el.volume, 'muted=' + el.muted, 'gain=' + gain.gain.value);
+        var path = el.currentSrc || el.src;
+        console.log('BOAT AUDIO PLAYING', 'path:', path);
+        // Confirmation path #2 (alongside the play() Promise below) --
+        // only commit if this slot's most recent attempt is still the
+        // channel's most recent attempt overall AND still what's
+        // actually desired; otherwise this is a stale signal from a
+        // track that's since been superseded (e.g. the player changed
+        // location again before this one finished starting).
+        if (slot.pendingGeneration === channel.generation && channel.desiredPath === slot.pendingPath) {
+          channel.currentPath = slot.pendingPath;
+          channel.loadingPath = null;
+        }
       });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
       source.connect(gain).connect(masterGain);
-      channel.slots[index] = { el: el, gain: gain };
+      slot.gain = gain;
+      channel.slots[index] = slot;
     } catch (e) {
       console.warn('Boat ambience unavailable:', describeError(e));
     }
   }
 
-  // Crossfades `channel` to `path` (or to silence if path is null).
-  // Only touches anything if the desired path actually differs from
-  // what's already recorded as current -- this runs on every render,
-  // so the common case (nothing changed) is a single cheap comparison,
-  // never a reload or restart of whatever's already looping correctly.
-  // currentPath is only committed to the new value once the attempt to
-  // start it has actually been made without throwing -- committing it
-  // up front would mean a single failure (a throw, a slot that failed
-  // to build) permanently "stuck" the channel believing it already had
-  // the right track, silently skipping every future retry via the
-  // no-op guard above; leaving it uncommitted on failure means the very
-  // next render tries again instead.
-  function setBoatChannelTrack(channel, path) {
-    if (!audioCtx) return; // not unlocked yet -- currentPath is only ever recorded below, so the first real call once it exists will correctly proceed instead of no-op'ing
-    if (channel.currentPath === path) return;
+  // "Healthy" means currentPath isn't just a remembered string -- the
+  // element it names is actually, verifiably the one loaded and
+  // running. A stale currentPath alone must never suppress a genuine
+  // restart attempt.
+  function boatChannelIsHealthy(channel) {
+    if (channel.currentPath === null) return channel.activeIndex === -1;
+    if (channel.activeIndex === -1) return false;
+    var slot = channel.slots[channel.activeIndex];
+    if (!slot) return false;
+    var el = slot.el;
+    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended);
+  }
+
+  // Crossfades `channel` toward `desiredPath` (or silence if null).
+  // currentPath is ONLY ever committed once playback is actually
+  // confirmed (see the play() .then() and the 'playing' listener
+  // above) -- never merely because play() didn't throw synchronously,
+  // since that proves nothing about whether audio is actually coming
+  // out. A generation counter, checked at commit time, means a slow or
+  // stale async result from an attempt that's since been superseded by
+  // a newer request can never resurrect old state. The skip-if-
+  // unchanged optimization only fires when the channel is genuinely,
+  // verifiably already there (boatChannelIsHealthy) -- a bare
+  // currentPath string match is never sufficient on its own.
+  function setBoatChannelTrack(channel, desiredPath, locationForLog, seaStateForLog) {
+    channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
+
+    if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
+    if (channel.currentPath === desiredPath && boatChannelIsHealthy(channel)) return; // genuinely already there
+    if (channel.loadingPath === desiredPath) return; // already mid-attempt for this exact path -- don't stack a duplicate
+
+    channel.generation++;
+    var myGeneration = channel.generation;
     var now = audioCtx.currentTime;
     var outgoingIndex = channel.activeIndex;
 
@@ -3251,58 +3285,71 @@
       })(outgoing.el);
     }
 
-    if (path == null) {
-      channel.currentPath = path; // silence always "succeeds" -- nothing to retry
+    if (desiredPath == null) {
       channel.activeIndex = -1;
+      channel.currentPath = null;
+      channel.loadingPath = null;
       return;
     }
+
+    channel.loadingPath = desiredPath;
+    console.log('BOAT AUDIO REQUEST', 'location:', locationForLog, 'seaState:', seaStateForLog, 'desiredPath:', desiredPath);
 
     try {
       var incomingIndex = outgoingIndex === 0 ? 1 : 0;
       ensureBoatChannelSlot(channel, incomingIndex);
       var incoming = channel.slots[incomingIndex];
-      if (!incoming) return; // couldn't build -- currentPath NOT committed, so the next render retries rather than staying silently stuck
-      incoming.el.src = path;
+      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
+
+      incoming.pendingPath = desiredPath;
+      incoming.pendingGeneration = myGeneration;
+      incoming.el.src = desiredPath;
       incoming.el.currentTime = 0;
       incoming.gain.gain.cancelScheduledValues(now);
       incoming.gain.gain.setValueAtTime(0, now);
       incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
-      console.log('Boat audio (' + channel.name + '): calling play() on', path, '-- target gain', channel.targetGain);
+      channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
+
       var playPromise = incoming.el.play();
-      if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch(function (error) {
-          console.error('Boat ambience play() failed:', error);
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(function () {
+          // Confirmation path #1. Stale-check before committing: a
+          // newer request may have already superseded this one while
+          // the browser was still deciding whether to allow playback.
+          if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
+          channel.currentPath = desiredPath;
+          channel.loadingPath = null;
+          console.log('BOAT AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
+            'volume:', incoming.el.volume, 'muted:', incoming.el.muted, 'currentTime:', incoming.el.currentTime);
+        }, function (error) {
+          console.error('BOAT AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          // currentPath was never set for this attempt -- nothing to
+          // undo. Only clear loadingPath if this is still the most
+          // recent attempt (a newer one may already be in flight).
+          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
         });
       }
-      channel.activeIndex = incomingIndex;
-      channel.currentPath = path; // only commit once the attempt has actually been made without throwing
+      // If no Promise is returned at all (very old browsers), the
+      // 'playing' listener above is the sole confirmation path.
     } catch (e) {
-      console.error('Boat audio failed to start (' + channel.name + ' channel, ' + path + '):', describeError(e));
-      // currentPath deliberately left uncommitted -- see function comment
+      console.error('Boat audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
     }
   }
 
-  // The single entry point: compares what SHOULD be playing (per
-  // getBoatAudioState) against each channel's currentPath and only
-  // acts where something has actually changed. Called from
-  // updateAudioForState (so every existing call site -- the live loop,
-  // restart, offline catch-up, etc. -- picks this up automatically)
-  // and directly from renderOptions (so a GO ABOVE/GO BELOW transition
-  // takes effect immediately rather than waiting for the next tick).
+  // The single entry point: hands each channel's desired path to
+  // setBoatChannelTrack, which alone decides whether anything actually
+  // needs to happen. Called from updateAudioForState (so every existing
+  // call site -- the live loop, restart, offline catch-up, sound-on,
+  // etc. -- picks this up automatically, calculating from CURRENT state
+  // immediately rather than waiting for a future change) and directly
+  // from renderOptions (so a GO ABOVE/GO BELOW transition takes effect
+  // immediately rather than waiting for the next tick).
   function updateBoatAudioForState(state) {
     var desired = getBoatAudioState(state);
-    if (audioCtx) {
-      var willChange = boatChannels.exterior.currentPath !== desired.exteriorTrack ||
-        boatChannels.interior.currentPath !== desired.interiorTrack ||
-        boatChannels.creak.currentPath !== desired.creakTrack;
-      if (willChange) {
-        console.log('Boat audio state:', desired.location, 'seaState', desired.seaState,
-          '-> exterior:', desired.exteriorTrack, '| interior:', desired.interiorTrack, '| creak:', desired.creakTrack);
-      }
-    }
-    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack);
-    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack);
-    setBoatChannelTrack(boatChannels.creak, desired.creakTrack);
+    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack, desired.location, desired.seaState);
+    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack, desired.location, desired.seaState);
+    setBoatChannelTrack(boatChannels.creak, desired.creakTrack, desired.location, desired.seaState);
   }
 
   /* --------------------------------------------------------------
@@ -6238,6 +6285,22 @@
       toggleMute();
     }
     updateSoundLabel();
+  });
+
+  // TEMPORARY diagnostic -- bypasses weather/location logic, AudioContext,
+  // masterGain, the ambience manager, crossfading, and all channel state
+  // entirely. Isolates a single question: can this exact browser, right
+  // now, play this exact file at all via the simplest possible
+  // HTMLAudioElement usage? Remove once boat ambience is confirmed
+  // working through the normal path.
+  document.getElementById('test-boat-audio-btn').addEventListener('click', function () {
+    var testBoatAudio = new Audio('audio/boat/interior_underway.mp3');
+    window.testBoatAudio = testBoatAudio;
+    testBoatAudio.loop = true;
+    testBoatAudio.volume = 1;
+    testBoatAudio.play()
+      .then(function () { console.log('DIRECT TEST SUCCESS'); })
+      .catch(function (err) { console.error('DIRECT TEST FAILED', err); });
   });
 
   document.addEventListener('visibilitychange', function () {
