@@ -3028,21 +3028,24 @@
      ------------------------------------------------------------
      Two independent systems share this one AudioContext/masterGain:
 
-     - Weather texture (rain) and a barely-audible hull hum, still
-       synthesized here since neither duplicates what the recorded
-       boat-ambience files below are for -- rain is precipitation, an
-       orthogonal phenomenon to sea state, and the hum is a constant,
-       location- and weather-independent texture.
+     - Weather texture (rain), still synthesized here since it doesn't
+       duplicate what the recorded boat-ambience files below are for --
+       rain is precipitation, an orthogonal phenomenon to sea state.
+       (There is deliberately no synthesized hum/oscillator layer here
+       any more -- an earlier version had a constant 55Hz sine tone,
+       which is exactly the kind of old procedural boat-ambience sound
+       the new recordings replace, and it was audible as a continuous
+       low tone competing with them. Removed entirely, not just muted.)
 
      - BOAT AMBIENCE (recorded, from audio/boat/): replaces what used
-       to be synthesized wind/wave/rigging noise and procedural hull
-       creaks entirely -- those were exactly what the new recordings
-       now provide, so layering the old procedural versions underneath
-       them would just be duplicated/competing sound. See
-       getBoatAudioState/updateBoatAudioForState further down:
-       state.crew.location and state.weather.seaState are the only
-       inputs, matching the game's existing state directly rather than
-       inventing a parallel audio-only weather variable.
+       to be synthesized wind/wave/rigging noise, the hum, and
+       procedural hull creaks entirely -- those were exactly what the
+       new recordings now provide, so layering the old procedural
+       versions underneath them would just be duplicated/competing
+       sound. See getBoatAudioState/updateBoatAudioForState further
+       down: state.crew.location and state.weather.seaState are the
+       only inputs, matching the game's existing state directly rather
+       than inventing a parallel audio-only weather variable.
 
      masterGain feeds audioCtx.destination once; every layer, old or
      new, is just a source -> (filter/gain) chain into that one
@@ -3101,19 +3104,11 @@
 
     layers.rain = makeNoiseLayer(audioCtx, 4, 'highpass', 3500, 0.7);
 
-    var hum = audioCtx.createOscillator();
-    hum.type = 'sine';
-    hum.frequency.value = 55;
-    var humGain = audioCtx.createGain();
-    humGain.gain.value = 0.02;
-    hum.connect(humGain).connect(masterGain);
-    hum.start();
-
     if (GAME) updateAudioForState(GAME);
   }
 
   // The single top-level "sync all ambient audio to current state" entry
-  // point -- rain/hum here, and boat ambience (recorded exterior/
+  // point -- rain here, and boat ambience (recorded exterior/
   // interior/creak tracks) delegated to updateBoatAudioForState so
   // weather/location audio logic isn't scattered across call sites.
   function updateAudioForState(state) {
@@ -3180,8 +3175,9 @@
     return { location: location, seaState: seaState, exteriorTrack: exteriorTrack, interiorTrack: interiorTrack, creakTrack: creakTrack };
   }
 
-  function makeBoatChannel(targetGain) {
+  function makeBoatChannel(name, targetGain) {
     return {
+      name: name,
       targetGain: targetGain,
       slots: [null, null],    // each becomes { el, gain } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
       activeIndex: -1,        // which slot is currently the audible/fading-in one, or -1 if silent
@@ -3189,9 +3185,9 @@
     };
   }
   var boatChannels = {
-    exterior: makeBoatChannel(0.6),
-    interior: makeBoatChannel(0.5),
-    creak: makeBoatChannel(0.4), // layered on top of interior, so mixed a bit under it
+    exterior: makeBoatChannel('exterior', 0.6),
+    interior: makeBoatChannel('interior', 0.5),
+    creak: makeBoatChannel('creak', 0.4), // layered on top of interior, so mixed a bit under it
   };
 
   function ensureBoatChannelSlot(channel, index) {
@@ -3200,6 +3196,13 @@
       var el = new Audio();
       el.loop = true;
       el.preload = 'auto';
+      el.addEventListener('error', function () {
+        // el.currentSrc reflects the resolved URL that actually failed
+        // (this element is reused for different paths over time, so
+        // reading it fresh here -- not capturing `path` in the closure --
+        // is what makes this correct for whichever load just failed).
+        console.warn('Boat ambience failed to load (' + channel.name + ' channel):', el.currentSrc || el.src);
+      });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
