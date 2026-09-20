@@ -3196,12 +3196,22 @@
       var el = new Audio();
       el.loop = true;
       el.preload = 'auto';
+      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
       el.addEventListener('error', function () {
         // el.currentSrc reflects the resolved URL that actually failed
         // (this element is reused for different paths over time, so
         // reading it fresh here -- not capturing `path` in the closure --
         // is what makes this correct for whichever load just failed).
-        console.warn('Boat ambience failed to load (' + channel.name + ' channel):', el.currentSrc || el.src);
+        console.error('Boat audio failed:', el.currentSrc || el.src, el.error);
+      });
+      el.addEventListener('loadeddata', function () {
+        console.log('Boat audio loadeddata (' + channel.name + '):', el.currentSrc || el.src);
+      });
+      el.addEventListener('canplay', function () {
+        console.log('Boat audio canplay (' + channel.name + '):', el.currentSrc || el.src);
+      });
+      el.addEventListener('playing', function () {
+        console.log('Boat audio playing (' + channel.name + '):', el.currentSrc || el.src, '| volume=' + el.volume, 'muted=' + el.muted, 'gain=' + gain.gain.value);
       });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
@@ -3218,10 +3228,16 @@
   // what's already recorded as current -- this runs on every render,
   // so the common case (nothing changed) is a single cheap comparison,
   // never a reload or restart of whatever's already looping correctly.
+  // currentPath is only committed to the new value once the attempt to
+  // start it has actually been made without throwing -- committing it
+  // up front would mean a single failure (a throw, a slot that failed
+  // to build) permanently "stuck" the channel believing it already had
+  // the right track, silently skipping every future retry via the
+  // no-op guard above; leaving it uncommitted on failure means the very
+  // next render tries again instead.
   function setBoatChannelTrack(channel, path) {
     if (!audioCtx) return; // not unlocked yet -- currentPath is only ever recorded below, so the first real call once it exists will correctly proceed instead of no-op'ing
     if (channel.currentPath === path) return;
-    channel.currentPath = path;
     var now = audioCtx.currentTime;
     var outgoingIndex = channel.activeIndex;
 
@@ -3236,22 +3252,34 @@
     }
 
     if (path == null) {
+      channel.currentPath = path; // silence always "succeeds" -- nothing to retry
       channel.activeIndex = -1;
       return;
     }
 
-    var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-    ensureBoatChannelSlot(channel, incomingIndex);
-    var incoming = channel.slots[incomingIndex];
-    if (!incoming) return; // couldn't build -- fail gracefully, no UI/state breakage
-    incoming.el.src = path;
-    incoming.el.currentTime = 0;
-    incoming.gain.gain.cancelScheduledValues(now);
-    incoming.gain.gain.setValueAtTime(0, now);
-    incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
-    var playPromise = incoming.el.play();
-    if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(function () {});
-    channel.activeIndex = incomingIndex;
+    try {
+      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+      ensureBoatChannelSlot(channel, incomingIndex);
+      var incoming = channel.slots[incomingIndex];
+      if (!incoming) return; // couldn't build -- currentPath NOT committed, so the next render retries rather than staying silently stuck
+      incoming.el.src = path;
+      incoming.el.currentTime = 0;
+      incoming.gain.gain.cancelScheduledValues(now);
+      incoming.gain.gain.setValueAtTime(0, now);
+      incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
+      console.log('Boat audio (' + channel.name + '): calling play() on', path, '-- target gain', channel.targetGain);
+      var playPromise = incoming.el.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(function (error) {
+          console.error('Boat ambience play() failed:', error);
+        });
+      }
+      channel.activeIndex = incomingIndex;
+      channel.currentPath = path; // only commit once the attempt has actually been made without throwing
+    } catch (e) {
+      console.error('Boat audio failed to start (' + channel.name + ' channel, ' + path + '):', describeError(e));
+      // currentPath deliberately left uncommitted -- see function comment
+    }
   }
 
   // The single entry point: compares what SHOULD be playing (per
@@ -3263,6 +3291,15 @@
   // takes effect immediately rather than waiting for the next tick).
   function updateBoatAudioForState(state) {
     var desired = getBoatAudioState(state);
+    if (audioCtx) {
+      var willChange = boatChannels.exterior.currentPath !== desired.exteriorTrack ||
+        boatChannels.interior.currentPath !== desired.interiorTrack ||
+        boatChannels.creak.currentPath !== desired.creakTrack;
+      if (willChange) {
+        console.log('Boat audio state:', desired.location, 'seaState', desired.seaState,
+          '-> exterior:', desired.exteriorTrack, '| interior:', desired.interiorTrack, '| creak:', desired.creakTrack);
+      }
+    }
     setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack);
     setBoatChannelTrack(boatChannels.interior, desired.interiorTrack);
     setBoatChannelTrack(boatChannels.creak, desired.creakTrack);
