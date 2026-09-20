@@ -3024,14 +3024,30 @@
   }
 
   /* ============================================================
-     6. AMBIENT AUDIO (procedural, WebAudio — no sound files needed)
+     6. AMBIENT AUDIO
      ------------------------------------------------------------
-     Every layer here is synthesized so the prototype has real,
-     working ambience out of the box. Later, any noise-based layer
-     could be swapped for a recorded sample (AudioBufferSourceNode)
-     without changing the mixing architecture: masterGain feeds the
-     destination, and each layer is just a source -> filter -> gain
-     chain into that master.
+     Two independent systems share this one AudioContext/masterGain:
+
+     - Weather texture (rain) and a barely-audible hull hum, still
+       synthesized here since neither duplicates what the recorded
+       boat-ambience files below are for -- rain is precipitation, an
+       orthogonal phenomenon to sea state, and the hum is a constant,
+       location- and weather-independent texture.
+
+     - BOAT AMBIENCE (recorded, from audio/boat/): replaces what used
+       to be synthesized wind/wave/rigging noise and procedural hull
+       creaks entirely -- those were exactly what the new recordings
+       now provide, so layering the old procedural versions underneath
+       them would just be duplicated/competing sound. See
+       getBoatAudioState/updateBoatAudioForState further down:
+       state.crew.location and state.weather.seaState are the only
+       inputs, matching the game's existing state directly rather than
+       inventing a parallel audio-only weather variable.
+
+     masterGain feeds audioCtx.destination once; every layer, old or
+     new, is just a source -> (filter/gain) chain into that one
+     master, so the global mute toggle (toggleMute) affects everything
+     uniformly with no per-system special-casing.
      ============================================================ */
   var audioCtx = null;
   var audioUnlocked = false;
@@ -3057,7 +3073,7 @@
     var last = 0;
     for (var i = 0; i < bufferSize; i++) {
       var white = Math.random() * 2 - 1;
-      last = (last + 0.02 * white) / 1.02; // lightly filtered ("brown-ish") noise reads as wind/sea, not static
+      last = (last + 0.02 * white) / 1.02; // lightly filtered ("brown-ish") noise reads as rain, not static
       data[i] = last * 3.5;
     }
     return buffer;
@@ -3083,9 +3099,6 @@
     masterGain.gain.value = muted ? 0 : 0.5;
     masterGain.connect(audioCtx.destination);
 
-    layers.wind = makeNoiseLayer(audioCtx, 4, 'bandpass', 900, 0.6);
-    layers.waves = makeNoiseLayer(audioCtx, 6, 'lowpass', 220, 0.8);
-    layers.rigging = makeNoiseLayer(audioCtx, 3, 'highpass', 2200, 1.2);
     layers.rain = makeNoiseLayer(audioCtx, 4, 'highpass', 3500, 0.7);
 
     var hum = audioCtx.createOscillator();
@@ -3096,61 +3109,20 @@
     hum.connect(humGain).connect(masterGain);
     hum.start();
 
-    scheduleWaveSwell();
-    scheduleHullCreaks();
     if (GAME) updateAudioForState(GAME);
   }
 
-  function scheduleWaveSwell() {
-    if (!audioCtx || !layers.waves) return;
-    var now = audioCtx.currentTime;
-    var base = layers.waves.targetGain || 0.15;
-    layers.waves.gain.gain.linearRampToValueAtTime(base * (0.7 + Math.random() * 0.6), now + 4 + Math.random() * 4);
-    setTimeout(scheduleWaveSwell, 4000 + Math.random() * 4000);
-  }
-
-  function scheduleHullCreaks() {
-    if (!audioCtx) return;
-    var seaState = GAME ? GAME.weather.seaState : 2;
-    var delay = Math.max(2000, 14000 - seaState * 1800) + Math.random() * 4000;
-    setTimeout(function () {
-      playCreak();
-      scheduleHullCreaks();
-    }, delay);
-  }
-
-  function playCreak() {
-    if (!audioCtx || muted) return;
-    var osc = audioCtx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = 70 + Math.random() * 40;
-    var g = audioCtx.createGain();
-    g.gain.value = 0;
-    osc.connect(g).connect(masterGain);
-    var now = audioCtx.currentTime;
-    g.gain.linearRampToValueAtTime(0.06, now + 0.05);
-    g.gain.linearRampToValueAtTime(0, now + 0.6);
-    osc.start(now);
-    osc.stop(now + 0.7);
-  }
-
+  // The single top-level "sync all ambient audio to current state" entry
+  // point -- rain/hum here, and boat ambience (recorded exterior/
+  // interior/creak tracks) delegated to updateBoatAudioForState so
+  // weather/location audio logic isn't scattered across call sites.
   function updateAudioForState(state) {
-    if (!audioCtx || !layers.wind) return;
-    var w = state.weather;
-    var now = audioCtx.currentTime;
-
-    var windLevel = clamp(w.windSpeed / 40, 0, 1);
-    layers.wind.gain.gain.linearRampToValueAtTime(0.04 + windLevel * 0.22, now + 2);
-    layers.wind.filter.frequency.linearRampToValueAtTime(600 + windLevel * 1400, now + 2);
-
-    var seaLevel = clamp(w.seaState / 6, 0, 1);
-    layers.waves.targetGain = 0.08 + seaLevel * 0.22;
-    layers.waves.gain.gain.linearRampToValueAtTime(layers.waves.targetGain, now + 3);
-
-    layers.rigging.gain.gain.linearRampToValueAtTime(0.02 + windLevel * 0.05, now + 2);
-
-    var rainOn = (w.condition === 'rain' || w.condition === 'squall') ? 1 : 0;
-    layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
+    if (audioCtx && layers.rain) {
+      var now = audioCtx.currentTime;
+      var rainOn = (state.weather.condition === 'rain' || state.weather.condition === 'squall') ? 1 : 0;
+      layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
+    }
+    updateBoatAudioForState(state);
   }
 
   function toggleMute() {
@@ -3161,6 +3133,136 @@
 
   function updateSoundLabel() {
     soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND: OFF' : 'SOUND: ON') : 'SOUND: OFF';
+  }
+
+  /* --------------------------------------------------------------
+     BOAT AMBIENCE (recorded) -- three independent looping channels
+     (exterior, interior, creak), each capable of crossfading between
+     recordings, or to/from silence, without ever overlapping itself.
+     getBoatAudioState() is the single source of truth for which file
+     (if any) each channel should be playing, derived entirely from
+     state.crew.location and state.weather.seaState -- no separate
+     "calm/moderate/heavy/severe" audio-only weather tier invented.
+     Exterior and interior are mutually exclusive by location; creak
+     only ever plays alongside interior, never above deck.
+     -------------------------------------------------------------- */
+  var BOAT_AUDIO_FILES = {
+    exteriorCalm: 'audio/boat/exterior_calm.mp3',
+    exteriorChop: 'audio/boat/exterior_chop.mp3',
+    exteriorWaves: 'audio/boat/exterior_waves.mp3',
+    exteriorGale: 'audio/boat/exterior_gale.mp3',
+    interiorUnderway: 'audio/boat/interior_underway.mp3',
+    interiorGale: 'audio/boat/interior_gale.mp3',
+    creaksLight: 'audio/boat/creaks_light.mp3',
+    creaksHeavy: 'audio/boat/creaks_heavy.mp3',
+  };
+  var BOAT_AMBIENCE_CROSSFADE_SECONDS = 1.5; // "something around 1-2 seconds" per spec
+
+  // location/seaState -> which file (if any) each channel wants right
+  // now. A pure function of existing state, per the task's explicit
+  // boundaries -- 0 / 1-2 / 3-4 / 5-6 above deck, 0-4 / 5-6 below,
+  // creaks starting at 3.
+  function getBoatAudioState(state) {
+    var location = state.crew.location;
+    var seaState = state.weather.seaState;
+    var exteriorTrack = null, interiorTrack = null, creakTrack = null;
+    if (location === 'above') {
+      if (seaState <= 0) exteriorTrack = BOAT_AUDIO_FILES.exteriorCalm;
+      else if (seaState <= 2) exteriorTrack = BOAT_AUDIO_FILES.exteriorChop;
+      else if (seaState <= 4) exteriorTrack = BOAT_AUDIO_FILES.exteriorWaves;
+      else exteriorTrack = BOAT_AUDIO_FILES.exteriorGale;
+    } else {
+      interiorTrack = seaState <= 4 ? BOAT_AUDIO_FILES.interiorUnderway : BOAT_AUDIO_FILES.interiorGale;
+      if (seaState <= 2) creakTrack = null;
+      else if (seaState <= 4) creakTrack = BOAT_AUDIO_FILES.creaksLight;
+      else creakTrack = BOAT_AUDIO_FILES.creaksHeavy;
+    }
+    return { location: location, seaState: seaState, exteriorTrack: exteriorTrack, interiorTrack: interiorTrack, creakTrack: creakTrack };
+  }
+
+  function makeBoatChannel(targetGain) {
+    return {
+      targetGain: targetGain,
+      slots: [null, null],    // each becomes { el, gain } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
+      activeIndex: -1,        // which slot is currently the audible/fading-in one, or -1 if silent
+      currentPath: undefined, // undefined = never yet synced against a real AudioContext; null = deliberately silent; a string = that file is what's wanted
+    };
+  }
+  var boatChannels = {
+    exterior: makeBoatChannel(0.6),
+    interior: makeBoatChannel(0.5),
+    creak: makeBoatChannel(0.4), // layered on top of interior, so mixed a bit under it
+  };
+
+  function ensureBoatChannelSlot(channel, index) {
+    if (channel.slots[index] || !audioCtx) return;
+    try {
+      var el = new Audio();
+      el.loop = true;
+      el.preload = 'auto';
+      var source = audioCtx.createMediaElementSource(el);
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain).connect(masterGain);
+      channel.slots[index] = { el: el, gain: gain };
+    } catch (e) {
+      console.warn('Boat ambience unavailable:', describeError(e));
+    }
+  }
+
+  // Crossfades `channel` to `path` (or to silence if path is null).
+  // Only touches anything if the desired path actually differs from
+  // what's already recorded as current -- this runs on every render,
+  // so the common case (nothing changed) is a single cheap comparison,
+  // never a reload or restart of whatever's already looping correctly.
+  function setBoatChannelTrack(channel, path) {
+    if (!audioCtx) return; // not unlocked yet -- currentPath is only ever recorded below, so the first real call once it exists will correctly proceed instead of no-op'ing
+    if (channel.currentPath === path) return;
+    channel.currentPath = path;
+    var now = audioCtx.currentTime;
+    var outgoingIndex = channel.activeIndex;
+
+    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
+      var outgoing = channel.slots[outgoingIndex];
+      outgoing.gain.gain.cancelScheduledValues(now);
+      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
+      (function (el) {
+        setTimeout(function () { el.pause(); }, BOAT_AMBIENCE_CROSSFADE_SECONDS * 1000 + 100);
+      })(outgoing.el);
+    }
+
+    if (path == null) {
+      channel.activeIndex = -1;
+      return;
+    }
+
+    var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+    ensureBoatChannelSlot(channel, incomingIndex);
+    var incoming = channel.slots[incomingIndex];
+    if (!incoming) return; // couldn't build -- fail gracefully, no UI/state breakage
+    incoming.el.src = path;
+    incoming.el.currentTime = 0;
+    incoming.gain.gain.cancelScheduledValues(now);
+    incoming.gain.gain.setValueAtTime(0, now);
+    incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + BOAT_AMBIENCE_CROSSFADE_SECONDS);
+    var playPromise = incoming.el.play();
+    if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(function () {});
+    channel.activeIndex = incomingIndex;
+  }
+
+  // The single entry point: compares what SHOULD be playing (per
+  // getBoatAudioState) against each channel's currentPath and only
+  // acts where something has actually changed. Called from
+  // updateAudioForState (so every existing call site -- the live loop,
+  // restart, offline catch-up, etc. -- picks this up automatically)
+  // and directly from renderOptions (so a GO ABOVE/GO BELOW transition
+  // takes effect immediately rather than waiting for the next tick).
+  function updateBoatAudioForState(state) {
+    var desired = getBoatAudioState(state);
+    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack);
+    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack);
+    setBoatChannelTrack(boatChannels.creak, desired.creakTrack);
   }
 
   /* --------------------------------------------------------------
@@ -5155,6 +5257,7 @@
   function renderOptions(state) {
     applyCabinLighting(state);
     applyTapeLocationAudio(state);
+    updateBoatAudioForState(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
