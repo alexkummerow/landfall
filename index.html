@@ -1975,6 +1975,28 @@
   var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
   var BATTERY_CHARGE_PER_HOUR = 100; // engine running: 0% -> 100% in 60 minutes = 100%/hour
 
+  // SOLAR — a modest passive daytime trickle charge, entirely automatic
+  // (no toggle, no separate resource). %/hour in full daylight, by
+  // weather condition; Landfall's weather model only ever produces
+  // these four strings (see wmoCodeToCondition), but SOLAR_RATE_FALLBACK
+  // covers anything unrecognized so this can never break. Deliberately
+  // weak relative to BATTERY_CHARGE_PER_HOUR above — a strong sunny day
+  // recovers roughly 10-15% battery, enough to meaningfully cut into the
+  // ~48%/day an always-on autopilot alone draws, never enough on its own
+  // to make engine charging unnecessary.
+  var SOLAR_RATE_BY_CONDITION = { clear: 1.0, overcast: 0.5, rain: 0.25, squall: 0.1 };
+  var SOLAR_RATE_FALLBACK = 0.5;
+
+  // 0 outside dawn-through-dusk daylight (see timeOfDayPhase); otherwise
+  // the weather-tiered rate above. Read by both updateBattery (the
+  // actual charge) and cmdElectrical (the qualitative CHARGING/OFF
+  // display), so the two always agree.
+  function solarChargeRate(state) {
+    if (timeOfDayPhase(state) === 'night') return 0;
+    var rate = SOLAR_RATE_BY_CONDITION[state.weather.condition];
+    return rate != null ? rate : SOLAR_RATE_FALLBACK;
+  }
+
   // Cabin temperature — comfort/morale only, never a survival mechanic.
   // Centralized here so the COLD/COMFORTABLE/HOT bands are easy to
   // retune. Boundaries are strict (below/above), matching "65°F =
@@ -2615,9 +2637,11 @@
 
     // Charging takes priority: while the engine runs, it's actively
     // pushing power in regardless of what's also drawing from it — a
-    // real alternator's output dwarfs any of these small loads. 0% to
-    // 100% in one hour of engine runtime, whether motoring,
-    // motor-sailing, or sails furled — anything with the engine on.
+    // real alternator's output dwarfs any of these small loads (solar
+    // included, so it's not worth adding here too — see the module
+    // notes on SOLAR_RATE_BY_CONDITION). 0% to 100% in one hour of
+    // engine runtime, whether motoring, motor-sailing, or sails furled —
+    // anything with the engine on.
     if (b.engineOn) {
       b.battery = clamp(b.battery + hrs * BATTERY_CHARGE_PER_HOUR, 0, 100);
     } else {
@@ -2626,7 +2650,10 @@
       if (b.heaterOn) drain += BATTERY_DRAIN_HEATER_PER_HOUR;
       if (b.fanOn) drain += BATTERY_DRAIN_FAN_PER_HOUR;
       if (b.cabinLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR;
-      b.battery = clamp(b.battery - hrs * drain, 0, 100);
+      // Solar simply offsets the draw, never pauses it or replaces it --
+      // a sunny day with autopilot alone nets a slow drain, not a gain.
+      var solar = solarChargeRate(state);
+      b.battery = clamp(b.battery + hrs * (solar - drain), 0, 100);
     }
 
     // Battery failure forces every load off, once, right when it
@@ -4577,6 +4604,7 @@
     printBlank();
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
+    printLine(statusLine('SOLAR', solarChargeRate(state) > 0 ? 'CHARGING' : 'OFF'));
     printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
     if (b.electrical === 'DAMAGED') {
       printBlank();
