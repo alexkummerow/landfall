@@ -374,7 +374,9 @@
         steering: 'GOOD',
         engine: 'GOOD',
         electrical: 'GOOD',        // physical wiring/fuse CONDITION, separate from battery charge below
-        nextFailureAt: rand(24, 48) * 60, // voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
+        nextFailureAt: rand(48, 96) * 60, // voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
+        engineRunningMinutes: 0,   // continuous current runtime, resets to 0 the moment the engine stops — see checkFuel/engineRuntimeWeightBonus
+        repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
         autopilotOn: true,          // holds SET COURSE and auto-tacks; OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
         fanOn: false,
@@ -428,7 +430,7 @@
       supplies: {
         propane: 60, // stove uses
         spares: {
-          sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
+          sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
         },
         safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
       },
@@ -1596,16 +1598,53 @@
     return null;
   }
 
-  // Same rough-weather threshold pickFailureSystem() uses for the extra
-  // autopilot-related steering/electrical risk — surfaced here as
-  // advance warning rather than only showing up after the fact.
-  function stormAutopilotNote(state) {
+  // SEAMANSHIP GUIDANCE — restrained, atmospheric FORECAST advice for
+  // upcoming SAILS/STEERING risk. Reuses sailRiskTier (see the STORM-
+  // DRIVEN RISK section) so the advice and the actual risk it's warning
+  // about always agree. A 'building' trend promotes the effective tier
+  // by one step, so the advice can arrive before conditions have
+  // actually crossed the hard threshold ("before conditions build"),
+  // not just after. Silent whenever the player's already appropriately
+  // prepared (MINIMAL/FURLED, or autopilot already off).
+  var SAIL_REDUCTION_LINES_ANTICIPATORY = [
+    'Consider reducing sail before conditions build.',
+    'It may be worth reducing sail early.',
+  ];
+  var SAIL_REDUCTION_LINES_IMMEDIATE = [
+    'Consider reducing sail.',
+    'Worth reducing sail soon.',
+  ];
+  var SAIL_AND_AUTOPILOT_LINE = 'Consider reducing sail and disengaging the autopilot.';
+  var AUTOPILOT_DISENGAGE_LINE = 'Consider disengaging the autopilot in these seas.';
+  var NIGHT_BUILDING_SAIL_LINE = 'Conditions deteriorating overnight. Consider reducing sail before turning in.';
+
+  function seamanshipForecastNote(state) {
     var w = state.weather, b = state.boat;
-    if (!b.autopilotOn) return null;
-    if (w.seaState >= 4 || w.condition === 'squall') {
-      return 'Consider reducing sail and disengaging the autopilot.';
+    var building = w.trend === 'building';
+
+    var tiers = ['ordinary', 'strong', 'severe'];
+    var rawIdx = tiers.indexOf(sailRiskTier(w));
+    var forecastIdx = building ? Math.min(rawIdx + 1, tiers.length - 1) : rawIdx;
+    var forecastTier = tiers[forecastIdx];
+    var anticipating = building && forecastIdx > rawIdx;
+
+    var needSailReduction = false;
+    if (forecastTier === 'strong' && b.sailConfig === 'full') needSailReduction = true;
+    if (forecastTier === 'severe' && (b.sailConfig === 'full' || b.sailConfig === 'reefed')) needSailReduction = true;
+
+    var forecastSeaState = w.seaState + (building ? 1 : 0);
+    var needAutopilotOff = forecastSeaState >= 4 && b.autopilotOn;
+
+    if (!needSailReduction && !needAutopilotOff) return null;
+    if (needSailReduction && needAutopilotOff) return SAIL_AND_AUTOPILOT_LINE;
+
+    if (needSailReduction) {
+      var tod = timeOfDayPhase(state);
+      if (anticipating && (tod === 'dusk' || tod === 'night')) return NIGHT_BUILDING_SAIL_LINE;
+      return pickFromPool(anticipating ? SAIL_REDUCTION_LINES_ANTICIPATORY : SAIL_REDUCTION_LINES_IMMEDIATE);
     }
-    return null;
+
+    return AUTOPILOT_DISENGAGE_LINE;
   }
 
   // Nudges the SAME fields driftWeather writes toward the last successful
@@ -1910,7 +1949,7 @@
   var ORIGINAL_PROPANE = 60;
   var ORIGINAL_FLARES = 6;
   var ORIGINAL_SPARES = {
-    sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
+    sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
   };
 
   /* --------------------------------------------------------------
@@ -2429,6 +2468,7 @@
     updateBattery(state);
     checkAftLocker(state);
     checkScheduledFailures(state);
+    checkStormRisk(state);
     checkRescue(state);
     checkWeatherNarration(state, prevCondition);
     checkFatigueNarration(state);
@@ -2497,9 +2537,13 @@
 
   function checkFuel(state) {
     var b = state.boat;
-    if (!b.engineOn) return;
+    if (!b.engineOn) {
+      b.engineRunningMinutes = 0; // stopped -- continuous-runtime failure pressure clears, see engineRuntimeWeightBonus
+      return;
+    }
     var hrs = TICK_MINUTES / 60;
     b.fuelGallons = clamp(b.fuelGallons - hrs * DIESEL_BURN_RATE_GPH, 0, 999);
+    b.engineRunningMinutes = (b.engineRunningMinutes || 0) + TICK_MINUTES;
     if (b.fuelGallons <= 0) {
       b.engineOn = false;
       stopAllEngineLoops();
@@ -2623,21 +2667,36 @@
      BOAT SYSTEM FAILURES
 
      Four tracked systems — SAILS, STEERING, ENGINE, ELECTRICAL — each
-     simply GOOD or DAMAGED, no gradual wear. A failure is a distinct,
-     randomly-scheduled incident (24-48h apart on average, centered on
-     36h), weighted toward whichever system current conditions make most
-     plausible, never picking a system already DAMAGED. Occasionally a
-     failure schedules a short follow-up ("chain") instead of the normal
-     interval, so a bad stretch can occasionally compound — but usually
-     doesn't. Runs from checkScheduledFailures every tick, so it works
+     simply GOOD or DAMAGED, no gradual wear. Two independent sources of
+     damage now feed them:
+
+     - The NORMAL/scheduled failure below (48-96h apart on average,
+       centered on 72h) — ordinary offshore mechanical trouble, weighted
+       heavily toward ENGINE/ELECTRICAL (usage-driven) with SAILS/
+       STEERING kept to a low baseline share, since their real risk
+       lives in the weather-driven system instead (see checkStormRisk
+       further down). Occasionally schedules a short, much less
+       aggressive follow-up ("chain") instead of the normal interval.
+       Never repicks a system still within its post-repair protection
+       window — see performSystemRepairAttempt.
+     - checkStormRisk — continuous, condition-driven exposure checks for
+       SAILS and STEERING specifically, entirely separate from the timer
+       below and NOT subject to the repair protection window (bad
+       enough conditions can still tear a just-patched sail).
+
+     Runs from checkScheduledFailures every tick, so it works
      identically in live play, offline catch-up, and long absences.
      -------------------------------------------------------------- */
-  var FAILURE_INTERVAL_MIN_HOURS = 24;
-  var FAILURE_INTERVAL_MAX_HOURS = 48;   // centered ~36h
-  var FAILURE_CHAIN_CHANCE = 0.18;       // 15-20% chance of a shortened follow-up after ANY failure
-  var FAILURE_CHAIN_MIN_HOURS = 2;
-  var FAILURE_CHAIN_MAX_HOURS = 10;
+  var FAILURE_INTERVAL_MIN_HOURS = 48;
+  var FAILURE_INTERVAL_MAX_HOURS = 96;   // centered ~72h
+  var FAILURE_CHAIN_CHANCE = 0.15;       // ~15% chance of a shortened follow-up after ANY failure
+  var FAILURE_CHAIN_MIN_HOURS = 12;
+  var FAILURE_CHAIN_MAX_HOURS = 36;
   var BOAT_FAIL_SYSTEMS = ['sails', 'steering', 'engine', 'electrical'];
+  // A successful repair shields that one system from the NORMAL draw
+  // for roughly this many hours — see performSystemRepairAttempt.
+  var REPAIR_PROTECTION_MIN_HOURS = 96;
+  var REPAIR_PROTECTION_MAX_HOURS = 120;
 
   function scheduleNextFailure(state, chained) {
     var hrs = chained
@@ -2651,44 +2710,58 @@
     state.boat.nextFailureAt = state.meta.voyageMinutes + hrs * 60;
   }
 
-  // Weighting is a soft nudge, not a rule — every GOOD system always has
-  // SOME chance, conditions just shift the odds toward whichever failure
-  // makes the most sense right now.
+  // Baseline share of the NORMAL failure draw per system — ENGINE/
+  // ELECTRICAL carry ordinary mechanical risk on their own; SAILS/
+  // STEERING sit low here on purpose, since their real exposure comes
+  // from checkStormRisk instead.
+  var BASE_FAILURE_WEIGHT = { sails: 0.4, steering: 0.4, engine: 1.5, electrical: 1.5 };
+
+  // Rough guideline, not a hard cutoff — 0-4h continuous runtime barely
+  // moves the odds, climbing through 4-8h/8-12h, meaningfully elevated
+  // beyond 12h. Resets whenever the engine actually stops (see checkFuel).
+  function engineRuntimeWeightBonus(minutes) {
+    var hrs = (minutes || 0) / 60;
+    if (hrs < 4) return 0;
+    if (hrs < 8) return 0.4;
+    if (hrs < 12) return 1.0;
+    return 2.0;
+  }
+
+  // Weighting is a soft nudge, not a rule. Deliberately computed across
+  // all four systems regardless of current GOOD/DAMAGED/protected state
+  // — the draw below only lets an eligible system actually fail, so an
+  // ineligible one's share of the odds is simply wasted (no failure this
+  // cycle) rather than being redistributed onto whichever systems remain
+  // eligible. Without this, ENGINE/ELECTRICAL running out of their own
+  // spares (very possible with a high draw weight and only a few spares
+  // each) would otherwise inflate SAILS/STEERING's effective share for
+  // the rest of the voyage — exactly what BASE_FAILURE_WEIGHT is trying
+  // to keep low.
   function pickFailureSystem(state) {
     var b = state.boat, w = state.weather;
-    var candidates = BOAT_FAIL_SYSTEMS.filter(function (k) { return b[k] === 'GOOD'; });
-    if (candidates.length === 0) return null;
     var weights = {};
-    candidates.forEach(function (k) { weights[k] = 1; });
-    if (weights.sails !== undefined) {
-      if (w.windSpeed > 24) weights.sails += 1;
-      if (w.condition === 'squall') weights.sails += 1.5;
-      if (b.sailConfig === 'full' && w.windSpeed > 20) weights.sails += 1;
-    }
-    if (weights.steering !== undefined) {
-      if (w.seaState >= 4) weights.steering += 1;
-      if (w.seaState >= 5) weights.steering += 1;
-      // Autopilot working hard to hold course in a real seaway adds its
-      // own modest extra load, on top of rough seas alone — still just a
-      // nudge in the odds, never a guaranteed failure.
-      if (b.autopilotOn && w.seaState >= 4) weights.steering += 0.75;
-    }
-    if (weights.engine !== undefined) {
-      if (b.engineOn) weights.engine += 1.5;
-    }
-    if (weights.electrical !== undefined) {
-      var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.fanOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
-      if (loadCount >= 2) weights.electrical += 1;
-      if (w.seaState >= 4) weights.electrical += 0.5;
-      if (b.autopilotOn && w.seaState >= 4) weights.electrical += 0.5;
-    }
-    var total = candidates.reduce(function (sum, k) { return sum + weights[k]; }, 0);
+    BOAT_FAIL_SYSTEMS.forEach(function (k) { weights[k] = BASE_FAILURE_WEIGHT[k]; });
+    if (b.engineOn) weights.engine += 1.5;
+    weights.engine += engineRuntimeWeightBonus(b.engineRunningMinutes);
+    var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.fanOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
+    if (loadCount >= 2) weights.electrical += 1;
+    if (loadCount >= 3) weights.electrical += 0.5;
+    // Rough OR wet weather, not just heavy seas — a damp panel is its
+    // own modest risk.
+    if (w.seaState >= 4 || w.condition === 'rain' || w.condition === 'squall') weights.electrical += 0.5;
+
+    var total = BOAT_FAIL_SYSTEMS.reduce(function (sum, k) { return sum + weights[k]; }, 0);
     var r = Math.random() * total;
-    for (var i = 0; i < candidates.length; i++) {
-      r -= weights[candidates[i]];
-      if (r <= 0) return candidates[i];
+    for (var i = 0; i < BOAT_FAIL_SYSTEMS.length; i++) {
+      var k = BOAT_FAIL_SYSTEMS[i];
+      r -= weights[k];
+      if (r <= 0) {
+        var shieldedUntil = b.repairProtectedUntil ? b.repairProtectedUntil[k] : 0;
+        var eligible = b[k] === 'GOOD' && !(shieldedUntil && state.meta.voyageMinutes < shieldedUntil);
+        return eligible ? k : null;
+      }
     }
-    return candidates[candidates.length - 1];
+    return null;
   }
 
   var FAILURE_NARRATIVES = {
@@ -2737,13 +2810,100 @@
     if (state.meta.voyageMinutes < b.nextFailureAt) return;
     var sys = pickFailureSystem(state);
     if (!sys) {
-      // Everything's already DAMAGED — nothing left to break. Push the
-      // schedule out so this doesn't re-check every single tick.
+      // Either everything's already DAMAGED/protected, or the draw simply
+      // landed on a system that currently isn't eligible (see
+      // pickFailureSystem) — either way, nothing happens this cycle. Push
+      // the schedule out so this doesn't re-check every single tick.
       scheduleNextFailure(state, false);
       return;
     }
     triggerFailure(state, sys);
     scheduleNextFailure(state, Math.random() < FAILURE_CHAIN_CHANCE);
+  }
+
+  /* --------------------------------------------------------------
+     STORM-DRIVEN RISK — SAILS and STEERING
+
+     Entirely separate from the scheduled failure above: continuous,
+     per-tick exposure checks driven by current conditions and how the
+     boat is actually being sailed, rather than a fixed timer. This is
+     deliberately where the real weather risk for these two systems
+     lives (see BASE_FAILURE_WEIGHT's low baseline for both) — sustained
+     bad decisions accumulate risk tick by tick rather than one big
+     single roll, and a few minutes of bad luck can't tear a sail on
+     their own. Ignores the post-repair protection window on purpose —
+     see performSystemRepairAttempt.
+     -------------------------------------------------------------- */
+
+  // Shared by both the storm-sail check and the FORECAST guidance below,
+  // so the two always agree about what counts as risky.
+  function sailRiskTier(w) {
+    if (w.condition === 'squall' || w.windSpeed > 32) return 'severe';
+    if (w.windSpeed > 22) return 'strong';
+    return 'ordinary';
+  }
+
+  // Chance PER 10 MINUTES of exposure at a given tier, before the sail
+  // configuration factor below — run through tickProbability() so it
+  // compounds correctly regardless of TICK_MINUTES. 'ordinary' is 0: full
+  // sail in unremarkable conditions carries no storm-driven risk at all.
+  // Calibrated against how driftWeather's own random walk actually
+  // behaves absent a real-weather anchor (no mean reversion, clamped at
+  // the edges) — it spends a large minority of all time in what
+  // sailRiskTier calls 'severe', in streaks of several continuous days,
+  // not the occasional squall these numbers might otherwise suggest. A
+  // careful player reducing sail through that has to stay safe across
+  // real cumulative WEEKS of exposure over a full crossing, not hours.
+  var SAIL_STORM_P10_BY_TIER = { ordinary: 0, strong: 0.0005, severe: 0.0015 };
+  // How much carrying less canvas cuts that risk — FURLED is 0: no
+  // canvas up, nothing for the wind to tear.
+  var SAIL_STORM_CONFIG_FACTOR = { full: 1, reefed: 0.35, minimal: 0.08, furled: 0 };
+
+  function checkStormSailRisk(state) {
+    var b = state.boat, w = state.weather;
+    if (state.crew.inLifeRaft) return;
+    if (b.sails !== 'GOOD') return;
+    var configFactor = SAIL_STORM_CONFIG_FACTOR[b.sailConfig];
+    if (!configFactor) return; // furled, or an unrecognized config -- no exposure
+    var p10 = SAIL_STORM_P10_BY_TIER[sailRiskTier(w)] * configFactor;
+    if (p10 <= 0) return;
+    if (Math.random() < tickProbability(p10)) {
+      triggerFailure(state, 'sails');
+    }
+  }
+
+  // Chance per 10 minutes at ROUGH (4) vs VERY ROUGH/HIGH (5-6), before
+  // the speed/sail/autopilot multipliers below. Calmer than that: no
+  // storm-driven steering risk at all. Same calibration note as the sail
+  // table above — rough seas are common and long-lasting under the
+  // random-walk weather fallback, so these are tuned for sustained,
+  // multi-day exposure rather than a brief squall.
+  var STEERING_STORM_P10_BY_SEASTATE = { 4: 0.00035, 5: 0.00085, 6: 0.00085 };
+
+  function checkStormSteeringRisk(state) {
+    var b = state.boat, w = state.weather;
+    if (state.crew.inLifeRaft) return;
+    if (b.steering !== 'GOOD') return;
+    var base = STEERING_STORM_P10_BY_SEASTATE[w.seaState];
+    if (!base) return;
+    // How hard the boat is being pushed, combined: real speed through a
+    // rough seaway, how much sail is up to drive that speed, and whether
+    // the autopilot is fighting the helm the whole time rather than a
+    // human easing off. Each factor compounds on the others, matching
+    // "several conditions combine" — reducing sail, slowing down, or
+    // disengaging the autopilot each meaningfully cuts the total.
+    var speedFactor = b.speed >= 7.5 ? 1.8 : (b.speed >= 6 ? 1.4 : 1);
+    var sailFactor = b.sailConfig === 'full' ? 1.3 : (b.sailConfig === 'reefed' ? 1.0 : 0.6);
+    var autopilotFactor = b.autopilotOn ? 1.3 : 1;
+    var p10 = base * speedFactor * sailFactor * autopilotFactor;
+    if (Math.random() < tickProbability(p10)) {
+      triggerFailure(state, 'steering');
+    }
+  }
+
+  function checkStormRisk(state) {
+    checkStormSailRisk(state);
+    checkStormSteeringRisk(state);
   }
 
   /* --------------------------------------------------------------
@@ -4605,10 +4765,10 @@
       printBlank();
       printLine(currentNote);
     }
-    var autopilotNote = stormAutopilotNote(state);
-    if (autopilotNote) {
+    var seamanshipNote = seamanshipForecastNote(state);
+    if (seamanshipNote) {
       printBlank();
-      printLine(autopilotNote, 'amber');
+      printLine(seamanshipNote, 'amber');
     }
     state.pendingChoice = {
       id: 'forecast-menu',
@@ -5626,7 +5786,7 @@
     return 'POOR';
   }
 
-  var REPAIR_BASE_SUCCESS_CHANCE = 0.85;
+  var REPAIR_BASE_SUCCESS_CHANCE = 0.95;
   var REPAIR_SUCCESS_FLOOR = 0.15; // no single bad factor, or even several, fully prohibits an attempt
   var REPAIR_SUCCESS_CEILING = 0.95;
 
@@ -5710,6 +5870,8 @@
         if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
         if (Math.random() < chance) {
           s.boat[systemKey] = 'GOOD';
+          if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
+          s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(REPAIR_PROTECTION_MIN_HOURS, REPAIR_PROTECTION_MAX_HOURS) * 60;
           log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
         } else {
           log(s, pickFromPool(REPAIR_FAILURE_LINES[systemKey]));
@@ -7759,9 +7921,11 @@
     }
     if (b.nextFailureAt === undefined) {
       // Migrating into the new failure system starts its clock now, same
-      // randomized 24-48h window a fresh voyage gets.
-      b.nextFailureAt = state.meta.voyageMinutes + rand(24, 48) * 60;
+      // randomized 48-96h window a fresh voyage gets.
+      b.nextFailureAt = state.meta.voyageMinutes + rand(48, 96) * 60;
     }
+    if (b.engineRunningMinutes === undefined) b.engineRunningMinutes = 0;
+    if (!b.repairProtectedUntil) b.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
     if (!c.lastRoutineAt) {
       c.lastRoutineAt = { wash: null, dress: null, dishes: null, read: null };
     }
