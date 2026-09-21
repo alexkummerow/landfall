@@ -2718,6 +2718,22 @@
     }
   }
 
+  // The ONLY normal conditions under which RADIO FOR RESCUE becomes
+  // available. Repair is always expected first -- this only returns
+  // true once repair genuinely isn't possible (the relevant spare is
+  // gone) or there's no potable water at all (no repair path exists
+  // for that one). Deliberately does NOT factor in engine or
+  // electrical condition -- the voyage can continue under sail or
+  // without power. This governs only whether rescue can be INITIATED;
+  // once active, rescue-related status/actions stay reachable
+  // regardless of what this returns afterward (see getContextualOptions).
+  function canRadioForRescue(state) {
+    var sailsUnrecoverable = state.boat.sails === 'DAMAGED' && state.supplies.spares.sailRepairKit <= 0;
+    var steeringUnrecoverable = state.boat.steering === 'DAMAGED' && state.supplies.spares.steeringParts <= 0;
+    var noWater = state.water.gallons <= 0;
+    return sailsUnrecoverable || steeringUnrecoverable || noWater;
+  }
+
   function weatherChangeLine(condition) {
     var lines = {
       rain: "Rain starts, fine and steady.",
@@ -4539,28 +4555,41 @@
     return '';
   }
 
-  // DISTRESS is the one place EPIRB/life-raft/flare actions live — the
-  // SAFETY inventory screen only ever reports what's aboard and its
-  // status, never triggers anything itself.
+  // Reachable only once rescue is already underway (via RESCUE
+  // STATUS in getContextualOptions) -- the old entry point (DISTRESS,
+  // with ACTIVATE EPIRB/DEPLOY LIFE RAFT as player choices) is gone;
+  // see cmdRadioForRescue below for how rescue actually starts now.
+  // FIRE FLARE is the one action that still happens here, unchanged.
   function cmdDistress(state) {
     printBlank();
-    printLine('DISTRESS', 'heading-label');
+    printLine('RESCUE STATUS', 'heading-label');
     var r = state.rescue;
     var opts = [];
-    if (!r.epirbOn) {
-      printLine('EPIRB: READY');
-      opts.push({ label: 'ACTIVATE EPIRB', action: 'activate-epirb' });
-    } else {
-      printLine('EPIRB: ACTIVE \u2014 ' + rescueStatusLine(state));
-    }
-    if (!state.crew.inLifeRaft) {
-      opts.push({ label: 'DEPLOY LIFE RAFT', action: 'deploy-life-raft' });
-    }
+    printLine('RESCUE REQUESTED \u2014 ' + rescueStatusLine(state));
     if (r.encounterActive && state.supplies.safety.flares > 0) {
       opts.push({ label: 'FIRE FLARE', action: 'fire-flare' });
     }
     opts.push({ label: 'BACK', action: 'cancel' });
-    state.pendingChoice = { id: 'distress-menu', options: opts };
+    state.pendingChoice = { id: 'rescue-status-menu', options: opts };
+  }
+
+  // The point-of-no-return warning -- selecting RADIO FOR RESCUE never
+  // starts rescue by itself; only COMMENCE RESCUE (handled in
+  // handleAction) actually does, via the same activation the old
+  // ACTIVATE EPIRB action used to perform.
+  function cmdRadioForRescue(state) {
+    printBlank();
+    printLine('RADIO FOR RESCUE', 'heading-label');
+    printBlank();
+    printLine('Requesting rescue will end the voyage.');
+    printLine('You will not continue to Kaua\u02bbi.');
+    state.pendingChoice = {
+      id: 'radio-rescue-confirm',
+      options: [
+        { label: 'COMMENCE RESCUE', action: 'commence-rescue' },
+        { label: 'CANCEL', action: 'cancel' },
+      ],
+    };
   }
 
   function cmdEngine(state) {
@@ -5533,7 +5562,8 @@
     weather: cmdWeather,
     forecast: cmdForecast,
     inventory: cmdInventory,
-    distress: cmdDistress,
+    'rescue-status': cmdDistress,
+    'radio-for-rescue': cmdRadioForRescue,
     sails: cmdSails,
     engine: cmdEngine,
     course: cmdCourse,
@@ -6466,14 +6496,30 @@
     scrollToBottom();
   }
 
+  // What (if anything) the top-level rescue-related menu item should
+  // be right now. Once rescue is actually underway, it stays
+  // reachable regardless of canRadioForRescue's current value (e.g. a
+  // later repair shouldn't hide an already-active rescue) -- see the
+  // ACTIVE RESCUE note on canRadioForRescue above. Returns null when
+  // neither applies, so callers can simply skip adding anything.
+  function rescueMenuOption(state) {
+    if (state.rescue.phase !== 'none' && state.rescue.phase !== 'rescued') {
+      return { label: 'RESCUE STATUS', action: 'cmd:rescue-status' };
+    }
+    if (canRadioForRescue(state)) {
+      return { label: 'RADIO FOR RESCUE', action: 'cmd:radio-for-rescue' };
+    }
+    return null;
+  }
+
   function getContextualOptions(state) {
     // A pending decision always wins — including a restart request made
     // mid-departure, mid-attempt, or mid-sleep, which must be answerable
     // even though those states otherwise show just one button. Pending
-    // choices (SAILS' FULL/REEFED/etc, DISTRESS' ACTIVATE EPIRB/DEPLOY
-    // LIFE RAFT/FIRE FLARE, and so on) are unaffected by physical
-    // location — a rescue interaction started below can still surface
-    // FIRE FLARE regardless of where the sailor is standing.
+    // choices (SAILS' FULL/REEFED/etc, the rescue warning's COMMENCE
+    // RESCUE/CANCEL, RESCUE STATUS' FIRE FLARE, and so on) are unaffected
+    // by physical location — a rescue interaction started below can
+    // still surface FIRE FLARE regardless of where the sailor is standing.
     if (state.pendingChoice) return state.pendingChoice.options;
 
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) {
@@ -6496,12 +6542,14 @@
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
 
+    var rescueItem = rescueMenuOption(state);
+
     if (state.crew.inLifeRaft) {
       // Nothing left to sail, motor, steer, or fix — the voyage has
       // become survival until rescue, full stop. There's no boat left
       // to be above or below on, so this stays the one flat list it
       // always was (minus STATUS, which is gone everywhere now).
-      return [
+      var raftOptions = [
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
         { label: 'INVENTORY', action: 'cmd:inventory' },
@@ -6509,15 +6557,25 @@
         { label: 'EAT', action: 'cmd:eat' },
         { label: 'DRINK', action: 'cmd:drink' },
         { label: 'SLEEP', action: 'cmd:sleep' },
-        { label: 'DISTRESS', action: 'cmd:distress' },
       ];
+      if (rescueItem) raftOptions.push(rescueItem);
+      return raftOptions;
     }
 
     // REPAIR is always offered in both locations now, plain-labeled —
     // cmdRepair decides, by location, exactly what's reachable and shows
     // its own picker if there's more than one thing (or one) to choose
-    // from; "nothing to fix" if not.
+    // from; "nothing to fix" if not. RADIO FOR RESCUE/RESCUE STATUS sits
+    // right alongside it in both locations too, conditionally (see
+    // rescueMenuOption) — DISTRESS is gone; there is no unconditional
+    // rescue entry point anymore.
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
+    var repairGroupBelow = [
+      { label: 'STATUS', action: 'cmd:status' },
+      { label: 'ELECTRICAL PANEL', action: 'cmd:electrical' },
+      { label: 'REPAIR', action: 'cmd:repair' },
+    ];
+    if (rescueItem) repairGroupBelow.push(rescueItem);
 
     if (state.crew.location === 'below') {
       return groupedOptions([
@@ -6531,17 +6589,14 @@
           { label: 'FORECAST', action: 'cmd:forecast' },
           { label: 'INVENTORY', action: 'cmd:inventory' },
         ],
-        [
-          { label: 'STATUS', action: 'cmd:status' },
-          { label: 'ELECTRICAL PANEL', action: 'cmd:electrical' },
-          { label: 'REPAIR', action: 'cmd:repair' },
-          { label: 'DISTRESS', action: 'cmd:distress' },
-        ],
+        repairGroupBelow,
         [{ label: goLabel, action: 'go-above-below' }],
       ]);
     }
 
     // ABOVE (the default/starting location).
+    var repairGroupAbove = [{ label: 'REPAIR', action: 'cmd:repair' }];
+    if (rescueItem) repairGroupAbove.push(rescueItem);
     return groupedOptions([
       [
         { label: 'SAILS', action: 'cmd:sails' },
@@ -6549,7 +6604,7 @@
         { label: 'COURSE', action: 'cmd:course' },
         { label: 'FISH', action: 'cmd:fish' },
       ],
-      [{ label: 'REPAIR', action: 'cmd:repair' }],
+      repairGroupAbove,
       [{ label: goLabel, action: 'go-above-below' }],
     ]);
   }
@@ -6987,16 +7042,16 @@
             },
           });
           break;
-        case 'activate-epirb':
+        case 'commence-rescue':
           runShortAction(state, {
-            label: 'ACTIVATING EPIRB',
+            label: 'CALLING FOR HELP',
             duration: 4,
             action: function (s) {
               s.rescue.epirbOn = true;
               s.rescue.activatedAt = s.meta.voyageMinutes;
               s.rescue.phase = 'traveling';
               s.rescue.travelMinutes = estimateRescueTravelMinutes(s);
-              log(s, 'Distress beacon transmitting.');
+              log(s, 'You make the call.');
               log(s, 'Rescue requested.');
               flushNewLogEntries(s);
             },
