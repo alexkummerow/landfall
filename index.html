@@ -5812,6 +5812,14 @@
     el.loop = (key === 'reel');
     el.preload = 'auto';
     el.volume = 0;
+    // Diagnostic only -- a load/decode failure (wrong path, missing
+    // file, unsupported format) fires 'error' on the element itself.
+    // This is passive (never runs synchronously as part of element
+    // creation or playback) and mirrors the same pattern boat ambience
+    // already uses successfully elsewhere in this file.
+    el.addEventListener('error', function () {
+      console.warn('Fishing audio failed to load (' + key + '): ' + FISHING_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
     fishingAudioEls[key] = el;
     return el;
   }
@@ -5903,38 +5911,36 @@
     return 'catchLarge';
   }
 
-  // Drag sounds: occasional, subtle "something's moving down there"
-  // texture during the wait. Never overlap, since only one is ever
-  // scheduled at a time, and the NEXT one is only scheduled once the
-  // CURRENT one has actually finished playing (via its own onEnded),
-  // plus another randomized gap on top -- never a fixed interval.
-  // fishingDragActive is the on/off switch: cancelFishingDragScheduler
-  // flips it off immediately so a pending setTimeout (or a
-  // still-playing sound's onEnded) can never schedule another round
-  // after cancellation.
-  var fishingDragActive = false;
+  // Drag sounds: alternate strictly drag1 -> drag2 -> drag1 -> ... every
+  // cast restarts the alternation at drag1. Timing is measured from
+  // when each sound is TRIGGERED, not from when it finishes: first
+  // drag at a random point 3-6s after CAST, then every next one at a
+  // random point 15-20s after the previous one fired. Pure recursive
+  // setTimeout -- at most one pending drag timer ever exists, and the
+  // callback re-checks both that a session still exists and that it's
+  // still in the 'waiting' phase before playing, in case cancellation
+  // was somehow missed.
   var fishingDragTimer = null;
+  var fishingNextDragKey = 'drag1';
 
-  function scheduleFishingDragSound() {
-    if (!fishingDragActive) return;
-    var delayMs = rand(4000, 9000); // "fairly generous" spacing, deliberately randomized rather than fixed
+  function scheduleFishingDragSound(delayMs) {
     fishingDragTimer = setTimeout(function () {
       fishingDragTimer = null;
-      if (!fishingDragActive) return;
-      var key = Math.random() < 0.5 ? 'drag1' : 'drag2';
-      playFishingOneShot(key, function () {
-        scheduleFishingDragSound(); // only schedules the next one once this one has actually finished
-      });
+      if (!fishingSession || fishingSession.phase !== 'waiting') return; // session ended, or no longer waiting for a bite
+      var key = fishingNextDragKey;
+      console.log('FISH AUDIO: drag ' + (key === 'drag1' ? '1' : '2') + ' requested'); // TEMP DEBUG -- remove once confirmed fixed
+      playFishingOneShot(key);
+      fishingNextDragKey = (key === 'drag1') ? 'drag2' : 'drag1';
+      scheduleFishingDragSound(rand(15000, 20000));
     }, delayMs);
   }
 
   function startFishingDragScheduler() {
-    fishingDragActive = true;
-    scheduleFishingDragSound();
+    fishingNextDragKey = 'drag1'; // every new cast restarts the alternation at drag1
+    scheduleFishingDragSound(rand(3000, 6000));
   }
 
   function cancelFishingDragScheduler() {
-    fishingDragActive = false;
     if (fishingDragTimer) { clearTimeout(fishingDragTimer); fishingDragTimer = null; }
     // Also hard-stops a drag sound that's actively mid-playback right
     // now, rather than letting it finish naturally -- a stray drag
@@ -5943,7 +5949,6 @@
     ['drag1', 'drag2'].forEach(function (key) {
       var el = fishingAudioEls[key];
       if (!el) return;
-      el.onended = null;
       if (!el.paused) el.pause();
     });
   }
@@ -6218,6 +6223,7 @@
     stopFishingReelLoop();
     var catchSoundKey = fishingCatchSoundKeyForWeight(session.weightLb);
     console.log('FISH AUDIO: ' + (catchSoundKey === 'catchSmall' ? 'small' : catchSoundKey === 'catchMedium' ? 'medium' : 'large') + ' catch requested'); // TEMP DEBUG -- remove once the regression is confirmed fixed
+    console.log('FISH FINAL AUDIO', session.weightLb, catchSoundKey); // TEMP DEBUG -- remove once the regression is confirmed fixed
     playFishingOneShot(catchSoundKey);
 
     printBlank();
@@ -6263,6 +6269,7 @@
         stopFishingReelLoop();
         var marlinCatchSoundKey = fishingCatchSoundKeyForWeight(session.weightLb);
         console.log('FISH AUDIO: ' + (marlinCatchSoundKey === 'catchSmall' ? 'small' : marlinCatchSoundKey === 'catchMedium' ? 'medium' : 'large') + ' catch requested'); // TEMP DEBUG -- remove once the regression is confirmed fixed
+        console.log('FISH FINAL AUDIO', session.weightLb, marlinCatchSoundKey); // TEMP DEBUG -- remove once the regression is confirmed fixed
         playFishingOneShot(marlinCatchSoundKey);
         printBlank();
         printLine('MARLIN \u2014 ' + session.weightLb.toFixed(1) + ' LB');
