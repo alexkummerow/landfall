@@ -310,7 +310,7 @@
         tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveCoastalAutoTack(). Never set in open ocean.
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
-        autopilotWobble: 0,        // open ocean, AUTOPILOT ON only — small bounded correction oscillation around the steering solution; see computeHeading
+        autopilotWobble: 0,        // open ocean, whenever something is ACTIVELY holding course — AUTOPILOT ON or AT THE HELM — small bounded correction oscillation around the steering solution; see computeHeading
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
@@ -397,6 +397,7 @@
         coffeeCount: 0,
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
+        atHelm: false,              // manually hand-steering (AUTOPILOT OFF only) — see cmdHelm/computeHeading; ends automatically on GO BELOW, SLEEP, autopilot re-engaging, or STEERING damage
         lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
@@ -697,8 +698,8 @@
   var LAND_WARNING_TEXT = { ahead: 'LAND AHEAD', close: 'CLOSE TO SHORE', danger: 'DANGER OF GROUNDING' };
 
   // Escalating only — logs when the level goes UP, stays quiet on the
-  // way back down (COURSE reflects the current level continuously; see
-  // cmdCourse), and never runs at all inside the coastal corridor.
+  // way back down (HELM reflects the current level continuously; see
+  // cmdHelm), and never runs at all inside the coastal corridor.
   function checkLandProximity(state) {
     if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
       state.nav.landWarningLevel = 'none';
@@ -1826,21 +1827,55 @@
       }
       targetPoint = FINAL_DEST;
 
-      if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
-        // Autopilot off, or steering damaged: no course-keeping, no
-        // auto-tacking — the boat just continues roughly along wherever
-        // it's already pointed. Two separate, additive components drive
-        // the drift itself: a persistent BIAS toward the direction the
-        // wind is physically pushing the boat (stronger with more sail
-        // exposed to catch it), plus independent RANDOM yaw from sea
-        // state (wave action, rolling, imperfect passive steering) that
-        // applies regardless of sail. nav.setCourse itself is left
-        // untouched, so switching autopilot back on (once steering is
-        // repaired, if that's what disabled it) simply resumes steering
-        // for it. If the drift walks the heading into the no-go zone,
-        // it's left to slow/luff there — computeBoatSpeed's point-of-
-        // sail handling already does that — rather than auto-tacking
-        // out of it.
+      if (state.boat.autopilotOn && state.boat.steering !== 'DAMAGED') {
+        steered = autopilotSteeringSolution(state, targetPoint);
+
+        // Small bounded correction oscillation: whoever's actively
+        // holding course — the autopilot here, or a human AT THE HELM
+        // just below — is always nudging back toward the steering
+        // solution rather than holding an unrealistically perfect
+        // number, but it never wanders more than sea state allows
+        // before correcting back — a mean-drifting random walk clamped
+        // to its bound, not independent noise each tick, so it reads as
+        // a smooth "working back toward course" rather than a jitter.
+        // Shared between the two since they're the same underlying
+        // pattern; only who's doing the holding differs.
+        var oscBound = 1 + state.weather.seaState;
+        var oscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
+        if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
+        nav.autopilotWobble = clamp(nav.autopilotWobble + (Math.random() - 0.5) * oscStep, -oscBound, oscBound);
+        steered = normalizeDeg(steered + nav.autopilotWobble);
+      } else if (state.crew.atHelm && state.boat.steering !== 'DAMAGED') {
+        // AT THE HELM: the player is actively holding SET COURSE by
+        // hand — a direct compass heading, not the current-corrected,
+        // auto-tack-aware solution the autopilot computes (a human
+        // helmsman steers by compass, doesn't auto-tack, and doesn't
+        // silently correct for current the way electronic course-
+        // keeping would). Same bounded correction oscillation as
+        // autopilot, above, standing in for imperfect human steering.
+        steered = nav.setCourse;
+        var helmOscBound = 1 + state.weather.seaState;
+        var helmOscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
+        if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
+        nav.autopilotWobble = clamp(nav.autopilotWobble + (Math.random() - 0.5) * helmOscStep, -helmOscBound, helmOscBound);
+        steered = normalizeDeg(steered + nav.autopilotWobble);
+        if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; } // no auto-tack while hand-steering
+      } else {
+        // Autopilot off AND nobody at the helm (or steering itself is
+        // DAMAGED, which rules out manual helming too): no course-
+        // keeping, no auto-tacking — the boat just continues roughly
+        // along wherever it's already pointed. Two separate, additive
+        // components drive the drift itself: a persistent BIAS toward
+        // the direction the wind is physically pushing the boat
+        // (stronger with more sail exposed to catch it), plus
+        // independent RANDOM yaw from sea state (wave action, rolling,
+        // imperfect passive steering) that applies regardless of sail.
+        // nav.setCourse itself is left untouched, so switching autopilot
+        // back on or taking the helm (once steering is repaired, if
+        // that's what disabled it) simply resumes steering toward it.
+        // If the drift walks the heading into the no-go zone, it's left
+        // to slow/luff there — computeBoatSpeed's point-of-sail handling
+        // already does that — rather than auto-tacking out of it.
         if (nav.driftHeading == null) {
           nav.driftHeading = nav.heading != null ? nav.heading : nav.setCourse;
         }
@@ -1873,21 +1908,6 @@
 
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
-      } else {
-        steered = autopilotSteeringSolution(state, targetPoint);
-
-        // Small bounded correction oscillation: the autopilot is always
-        // nudging back toward the steering solution rather than holding
-        // an unrealistically perfect number, but it never wanders more
-        // than sea state allows before correcting back — a mean-drifting
-        // random walk clamped to its bound, not independent noise each
-        // tick, so it reads as a smooth "working back toward course"
-        // rather than a jitter.
-        var oscBound = 1 + state.weather.seaState;
-        var oscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
-        if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
-        nav.autopilotWobble = clamp(nav.autopilotWobble + (Math.random() - 0.5) * oscStep, -oscBound, oscBound);
-        steered = normalizeDeg(steered + nav.autopilotWobble);
       }
     }
     // Small per-tick heading noise: imperfect helming, wave action, minor
@@ -2234,12 +2254,13 @@
   }
 
   // The heading the boat should physically turn toward whenever
-  // nav.setCourse changes or AUTOPILOT re-engages. AUTOPILOT ON: the
-  // same current-corrected, auto-tack-aware solution computeHeading()
-  // would steer toward on its own (see autopilotSteeringSolution).
-  // AUTOPILOT OFF: the player's raw chosen heading, unadjusted — a
-  // deliberate manual turn, no auto-tack, since that's an AUTOPILOT-ON
-  // feature only.
+  // nav.setCourse changes, AUTOPILOT re-engages, or the player TAKEs THE
+  // HELM. AUTOPILOT ON: the same current-corrected, auto-tack-aware
+  // solution computeHeading() would steer toward on its own (see
+  // autopilotSteeringSolution). Otherwise (autopilot off, whether or not
+  // the player is at the helm): the player's raw chosen heading,
+  // unadjusted — a deliberate manual turn, no auto-tack, since that's an
+  // AUTOPILOT-ON feature only.
   function courseSteeringTarget(state) {
     if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
       return state.nav.setCourse;
@@ -2819,6 +2840,15 @@
     if (systemKey === 'engine' && b.engineOn) {
       b.engineOn = false; // shut down immediately if it was running
       stopAllEngineLoops();
+    }
+    if (systemKey === 'steering') {
+      // The helm itself is gone -- can't still be manually steering it.
+      // Autopilot is deliberately left alone here (its own ON/OFF flag
+      // stays whatever it was): computeHeading already treats damaged
+      // steering as unattended drift regardless of that flag, and
+      // restoring steering should resume whichever mode the flag says,
+      // exactly like it always has.
+      state.crew.atHelm = false;
     }
     if (systemKey === 'electrical') {
       // A fuse problem, not a dead battery — battery charge itself is
@@ -4656,6 +4686,11 @@
 
     if (key === 'autopilot') {
       if (turningOn) {
+        // If the player was AT THE HELM, the autopilot takes over from
+        // them — end manual helming before the turn begins, same as it
+        // would end from any other incompatible activity (see
+        // performGoAboveBelow/cmdSleep).
+        state.crew.atHelm = false;
         // Clear any stale value from an earlier OFF period so the NEXT
         // disengagement (if any) re-initializes drift from wherever the
         // boat actually is at that future moment — see the driftHeading
@@ -5007,10 +5042,9 @@
     state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { label: 'BACK', action: 'cancel' }] };
   }
 
-  function cmdCourse(state) {
+  function cmdHelm(state) {
     var nav = state.nav;
     printBlank();
-    printLine('COURSE', 'heading-label');
 
     if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
       // COASTAL: fully automatic. SET COURSE is the current leg's
@@ -5018,9 +5052,12 @@
       // ACTUAL HEADING reflects whatever the coastal auto-tack is doing
       // right now, which can differ from it. No manual control here —
       // the corridor is authored-safe and the player isn't required to
-      // navigate it. Bearing/distance are computed fresh here rather
-      // than read from nav.intendedCourse, which only updates once per
-      // simTick and can be a stale tick behind when just viewed.
+      // navigate it (nor is the new manual-helm system relevant here —
+      // see the module notes on computeHeading). Bearing/distance are
+      // computed fresh here rather than read from nav.intendedCourse,
+      // which only updates once per simTick and can be a stale tick
+      // behind when just viewed.
+      printLine('HELM', 'heading-label');
       var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
       printLine('SET COURSE ' + Math.round(bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon)) + '\u00B0');
       printLine('ACTUAL HEADING ' + Math.round(nav.heading) + '\u00B0');
@@ -5031,40 +5068,117 @@
       printLine('DISTANCE ' + Math.round(distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon)).toLocaleString() + ' NM');
       printBlank();
       printLine('Automatic through the coastal passage \u2014 course control unlocks in open water.', 'dim');
-      state.pendingChoice = { id: 'course-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      state.pendingChoice = { id: 'helm-menu', options: [{ label: 'BACK', action: 'cancel' }] };
       return;
     }
 
-    // OPEN OCEAN: full manual course control, automatic steering. Bearing/
-    // distance to Nāwiliwili computed fresh for the same reason as above —
-    // this must reflect the boat's actual current position the instant
-    // the screen is viewed, e.g. right after SET FOR NĀWILIWILI, not
-    // whatever nav.intendedCourse happened to hold as of the last tick.
-    var liveBearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-    printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
-    printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
-    if (nav.tack) {
-      printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
+    nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    if (nav.setCourse == null) {
+      nav.setCourse = Math.round(nav.intendedCourse);
     }
+    // Computed fresh for the same reason as the coastal branch above —
+    // must reflect the boat's actual current position the instant the
+    // screen is viewed, e.g. right after SET FOR NĀWILIWILI, not
+    // whatever nav.intendedCourse held as of the last tick.
+    var liveBearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+
+    if (state.boat.steering === 'DAMAGED') {
+      // Same "nothing to be done here" shape regardless of the
+      // autopilot flag or manual-helm state — see the module notes on
+      // computeHeading: damaged steering already forces the boat to
+      // unattended drift either way, and TAKE THE HELM isn't reachable
+      // with the helm itself broken. Preserve the existing repair/
+      // rescue path; no second steering-condition system.
+      printLine('HELM', 'heading-label');
+      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
+      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
+      printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
+      printBlank();
+      printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+      printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
+      if (nav.landWarningLevel !== 'none') {
+        printBlank();
+        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
+      }
+      printBlank();
+      printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
+      state.pendingChoice = { id: 'helm-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
+
+    if (state.crew.atHelm) {
+      // AT THE HELM: the player is actively hand-steering. Deliberately
+      // a leaner field set than the other two states — SET COURSE,
+      // ACTUAL HEADING, WIND FROM, SPEED — the direct feedback loop for
+      // learning to sail by feel (course chosen vs. where the bow
+      // actually settles vs. wind vs. how fast that combination is
+      // going), rather than the navigational BEARING/DISTANCE fields
+      // that matter more when something else is doing the steering.
+      printLine('AT THE HELM', 'heading-label');
+      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
+      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
+      printLine(inventoryLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
+      printLine(inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT'));
+      if (nav.landWarningLevel !== 'none') {
+        printBlank();
+        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
+      }
+      state.pendingChoice = {
+        id: 'helm-menu',
+        options: [
+          { label: 'CHANGE COURSE', action: 'cmd:change-course' },
+          { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+          { label: 'LEAVE THE HELM', action: 'leave-helm' },
+        ],
+      };
+      return;
+    }
+
+    printLine('HELM', 'heading-label');
+    if (state.boat.autopilotOn) {
+      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
+      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
+      if (nav.tack) {
+        printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
+      }
+      printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
+      printBlank();
+      printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+      printLine(inventoryLine('AUTOPILOT', 'ON'));
+      if (nav.landWarningLevel !== 'none') {
+        printBlank();
+        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
+      }
+      state.pendingChoice = {
+        id: 'helm-menu',
+        options: [
+          { label: 'CHANGE COURSE', action: 'cmd:change-course' },
+          { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+          { label: 'BACK', action: 'cancel' },
+        ],
+      };
+      return;
+    }
+
+    // AUTOPILOT OFF, nobody at the helm: unattended. SET COURSE is
+    // deliberately not shown here — nothing is currently steering
+    // toward it, so displaying it alongside ACTUAL HEADING would
+    // wrongly suggest something still is. It's preserved internally
+    // (see computeHeading/TAKE THE HELM) — just not surfaced until
+    // someone actually takes the helm or the autopilot comes back on.
+    printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
     printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
     printBlank();
     printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-    printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
+    printLine(inventoryLine('AUTOPILOT', 'OFF'));
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    if (state.boat.steering === 'DAMAGED') {
-      printBlank();
-      printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      state.pendingChoice = { id: 'course-menu', options: [{ label: 'BACK', action: 'cancel' }] };
-      return;
-    }
     state.pendingChoice = {
-      id: 'course-menu',
+      id: 'helm-menu',
       options: [
-        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
-        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+        { label: 'TAKE THE HELM', action: 'take-helm' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -5075,10 +5189,10 @@
   // The player's way of picking any of 000-359 through a button-only
   // interface: dial a draft value up or down from the current course,
   // then confirm. Only ever reachable once open ocean unlocks it (the
-  // COURSE screen doesn't offer CHANGE COURSE before then).
+  // HELM screen doesn't offer CHANGE COURSE before then).
   function cmdChangeCourse(state) {
     var nav = state.nav;
-    if (state.boat.steering === 'DAMAGED') { cmdCourse(state); return; } // shouldn't be reachable — button isn't shown otherwise
+    if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
     printLine('CHANGE COURSE', 'heading-label');
@@ -5981,7 +6095,7 @@
     'radio-for-rescue': cmdRadioForRescue,
     sails: cmdSails,
     engine: cmdEngine,
-    course: cmdCourse,
+    helm: cmdHelm,
     'change-course': cmdChangeCourse,
     wellbeing: cmdWellbeing,
     chore: cmdChore,
@@ -7014,9 +7128,9 @@
     if (rescueItem) aboveMiscGroup.push(rescueItem);
     return groupedOptions([
       [
+        { label: 'HELM', action: 'cmd:helm' },
         { label: 'SAILS', action: 'cmd:sails' },
         { label: 'ENGINE', action: 'cmd:engine' },
-        { label: 'COURSE', action: 'cmd:course' },
         { label: 'FISH', action: 'cmd:fish' },
       ],
       aboveMiscGroup,
@@ -7372,6 +7486,7 @@
             duration: 2,
             action: function (s) {
               s.crew.location = goingBelow ? 'below' : 'above';
+              if (goingBelow) s.crew.atHelm = false; // can't stay at the helm while below -- see cmdSleep for the same pattern
               printPersistentLine(goingBelow ? 'You go below.' : 'You go above.', 'dim');
             },
           });
@@ -7506,23 +7621,45 @@
           settleLine: 'Coming around.',
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
-          redisplay: cmdCourse,
+          redisplay: cmdHelm,
         });
         break;
       case 'course-draft-cancel':
         state.nav.courseDraft = null;
-        cmdCourse(state);
+        cmdHelm(state);
         break;
       case 'set-for-nawiliwili':
-        if (state.boat.steering === 'DAMAGED') { cmdCourse(state); break; } // shouldn't be reachable — button isn't shown otherwise
+        if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
         beginCourseTurn(state, {
           firstLine: 'Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.',
           settleLine: 'Coming around.',
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
-          redisplay: cmdCourse,
+          redisplay: cmdHelm,
         });
+        break;
+      case 'take-helm':
+        if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
+        state.crew.atHelm = true;
+        state.nav.driftHeading = null; // stale drift value from any earlier unattended period shouldn't carry into the next one -- see the same pattern for autopilot re-engaging
+        beginCourseTurn(state, {
+          firstLine: 'You take the helm.',
+          settleLine: 'Bringing her back on course.',
+          targetHeading: courseSteeringTarget(state),
+          redisplay: cmdHelm,
+        });
+        break;
+      case 'leave-helm':
+        state.crew.atHelm = false;
+        // Unattended drift must resume from exactly where the boat
+        // actually is right now, not wherever it happened to be after
+        // the last CHANGE COURSE settled while at the helm -- see the
+        // driftHeading note in the nav state block.
+        state.nav.driftHeading = state.nav.heading;
+        printBlank();
+        printLine('You leave the helm.', 'dim');
+        cmdHelm(state);
         break;
       case 'resolve-aft-locker-now':
         resolveAftLocker(state);
@@ -7889,6 +8026,7 @@
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
     if (c.location === undefined) c.location = 'above';
+    if (c.atHelm === undefined) c.atHelm = false;
     if (b.battery === undefined) b.battery = 100;
     if (b.autopilotOn === undefined) b.autopilotOn = true;
     if (b.fanOn === undefined) b.fanOn = false;
