@@ -3174,6 +3174,7 @@
     if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
     applyMuteToEngineAudio(); // engine audio bypasses masterGain entirely, so it needs its own mute application
     applyMuteToFishingAudio(); // FISHING HOOK -- same reasoning as engine audio
+    applyMuteToCabinSwitchAudio(); // ELECTRICAL HOOK -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -4218,6 +4219,65 @@
     fan: 'fanOn',
     autopilot: 'autopilotOn',
   };
+
+  /* --------------------------------------------------------------
+     CABIN SWITCH AUDIO -- the physical click of a panel toggle.
+     Deliberately its own tiny, self-contained system: same lazy
+     per-key HTMLAudioElement pattern used everywhere else in this file
+     (see ENGINE_AUDIO_FILES/getEngineAudioEl and the fishing audio
+     section for the same shape), but simpler still, since these are
+     short, discrete, non-overlapping clicks with no loop, fade, or
+     crossfade to manage -- just start it from the beginning, no fade,
+     nothing long. Only performElectricalToggle below ever calls this;
+     nothing else in the game touches it.
+     -------------------------------------------------------------- */
+  var CABIN_SWITCH_AUDIO_FILES = {
+    on: 'audio/cabin/switch_on.mp3',
+    off: 'audio/cabin/switch_off.mp3',
+  };
+  var CABIN_SWITCH_VOLUME = 0.5;
+
+  var cabinSwitchAudioEls = {}; // 'on'/'off' -> HTMLAudioElement, created on first use -- kept as two separate elements (not one reused element) so a rapid ON-then-OFF click always starts the new sound immediately rather than waiting on the other's tail
+
+  function getCabinSwitchAudioEl(key) {
+    var el = cabinSwitchAudioEls[key];
+    if (el) return el;
+    el = new Audio(CABIN_SWITCH_AUDIO_FILES[key]);
+    el.preload = 'auto';
+    el.volume = 0;
+    cabinSwitchAudioEls[key] = el;
+    return el;
+  }
+
+  // Plays the physical switch click for a successful player toggle --
+  // turningOn true plays switch_on.mp3, false plays switch_off.mp3.
+  // Called only once performElectricalToggle has already decided the
+  // toggle is actually going through (never on a blocked attempt).
+  // Always restarts from the beginning; no fade, immediate.
+  function playElectricalSwitchSound(turningOn) {
+    if (!audioUnlocked) return;
+    var key = turningOn ? 'on' : 'off';
+    var el = getCabinSwitchAudioEl(key);
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el._baseVolume = CABIN_SWITCH_VOLUME;
+    el.volume = muted ? 0 : CABIN_SWITCH_VOLUME;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Cabin switch audio failed to play (' + key + '):', describeError(e)); });
+  }
+
+  // Called from toggleMute, same pattern as applyMuteToEngineAudio/
+  // applyMuteToFishingAudio -- only matters for the rare case where a
+  // switch click is still audible at the exact moment mute is toggled,
+  // given how short these sounds are.
+  function applyMuteToCabinSwitchAudio() {
+    Object.keys(cabinSwitchAudioEls).forEach(function (key) {
+      var el = cabinSwitchAudioEls[key];
+      if (!el || el.paused) return;
+      el.volume = muted ? 0 : (el._baseVolume || 0);
+    });
+  }
+
   // Toggles flip immediately and redraw the panel — no confirmation
   // prompt, no delay, and deliberately no permanent-log entry for the
   // routine flip itself (these can be switched often; logging every one
@@ -4239,7 +4299,9 @@
       cmdElectrical(state);
       return;
     }
-    b[field] = !b[field];
+    var turningOn = !b[field];
+    b[field] = turningOn;
+    playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through, never on a blocked attempt above
     cmdElectrical(state);
   }
 
