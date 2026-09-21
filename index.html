@@ -5798,7 +5798,7 @@
     release: 'audio/fishing/release.mp3',
   };
   var FISHING_AUDIO_VOLUME = {
-    cast: 0.6, catch: 0.65, catchSmall: 0.6, catchMedium: 0.6, catchLarge: 0.6,
+    cast: 0.6, catch: 0.65, catchLanding: 0.6,
     drag1: 0.35, drag2: 0.35, reel: 0.4, release: 0.55,
   };
   var FISHING_CROSSFADE_SECONDS = 0.1; // quick fade-in every fishing one-shot uses at its own start (click prevention only) -- unrelated to the reel-to-catch handoff, which is an instant stop, no fade
@@ -5900,21 +5900,16 @@
     el.pause();
   }
 
-  // The landing sound (catchSmall/catchMedium/catchLarge) is
-  // deliberately allowed to finish playing on its own -- it is NOT
-  // touched by clearFishingTimers, and nothing in the normal
-  // bite/reel/reveal/KEEP/RELEASE flow calls this. It is only ever cut
-  // off from these specific, explicit call sites: a new cast beginning
-  // (performFishCast), STOP FISHING (performFishStop), leaving/
-  // re-entering the FISH screen (cmdFish), or a new landing sound about
-  // to replace it (beginFishLandingSequence/revealMarlin, defensively,
-  // in case an earlier one from a prior catch is somehow still going).
+  // The landing sound is deliberately allowed to finish playing on its
+  // own -- it is NOT touched by clearFishingTimers, and nothing in the
+  // normal bite/reel/reveal/KEEP/RELEASE flow calls this. It is only
+  // ever cut off from these specific, explicit call sites: a new cast
+  // beginning (performFishCast), STOP FISHING (performFishStop), or
+  // leaving/re-entering the FISH screen (cmdFish). (A new landing
+  // sound about to replace an old one is handled by
+  // playFishingLandingAudio's own pause() step, not by this function.)
   function stopFishingLandingSound() {
-    ['catchSmall', 'catchMedium', 'catchLarge'].forEach(function (key) {
-      var el = fishingAudioEls[key];
-      if (!el || el.paused) return;
-      el.pause();
-    });
+    if (!fishingLandingAudio.paused) fishingLandingAudio.pause();
   }
 
   // Which final catch sound fits the fish's actual generated weight --
@@ -5926,6 +5921,67 @@
     if (weightLb <= 10) return 'catchSmall';
     if (weightLb <= 20) return 'catchMedium';
     return 'catchLarge';
+  }
+
+  /* --------------------------------------------------------------
+     FINAL LANDING AUDIO -- deliberately its own single, dedicated
+     element rather than three separate lazily-created ones (unlike
+     every other fishing sound, which still goes through
+     getFishingAudioEl/playFishingOneShot unchanged). The old
+     catchSmall/catchMedium/catchLarge keys meant each size could be
+     instantiated for the very first time deep inside the async reel
+     sequence, never having been touched during any real user gesture
+     -- some mobile browsers require each individual HTMLAudioElement
+     to itself be played at least once synchronously within a genuine
+     gesture, not just the page as a whole. One element, primed once
+     (see primeFishingLandingAudio), then reused for every catch by
+     reassigning .src, sidesteps that entirely.
+     -------------------------------------------------------------- */
+  var fishingLandingAudio = new Audio();
+  var fishingLandingAudioPrimed = false;
+
+  // Called synchronously from the REEL IN click itself (a genuine user
+  // gesture) so fishingLandingAudio has already been played at least
+  // once by the time the async reel sequence actually needs it later.
+  // Silent (volume 0, paused back out immediately) and a one-time
+  // no-op after the first successful call -- once an element has been
+  // gesture-authorized this way it stays authorized for the rest of
+  // the page's life, so this never needs to run again.
+  function primeFishingLandingAudio() {
+    if (fishingLandingAudioPrimed || !audioUnlocked) return;
+    fishingLandingAudioPrimed = true;
+    fishingLandingAudio.src = FISHING_AUDIO_FILES.catchSmall; // content is irrelevant here -- always reassigned before any real landing playback
+    fishingLandingAudio.volume = 0;
+    var p = fishingLandingAudio.play();
+    if (p && p.then) {
+      p.then(function () {
+        fishingLandingAudio.pause();
+        fishingLandingAudio.currentTime = 0;
+      }).catch(function () { /* best-effort priming only -- a real landing play() later still gets its own warning if it fails */ });
+    } else {
+      fishingLandingAudio.pause();
+    }
+  }
+
+  // Plays the correct size-based landing sound on the SAME dedicated
+  // element every time -- never a fresh Audio() -- by reassigning its
+  // .src. Called only from the one place the final suspense beat's own
+  // step already triggers it (see beginFishLandingSequence/revealMarlin).
+  function playFishingLandingAudio(weightLb) {
+    if (!audioUnlocked) return;
+    var catchSoundKey = fishingCatchSoundKeyForWeight(weightLb);
+    var landingSrc = FISHING_AUDIO_FILES[catchSoundKey];
+    fishingLandingAudio.pause();
+    fishingLandingAudio.src = landingSrc;
+    fishingLandingAudio.currentTime = 0;
+    fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
+    console.log('LANDING AUDIO', weightLb, landingSrc, fishingLandingAudio.src); // TEMP DEBUG -- remove once confirmed fixed
+    var p = fishingLandingAudio.play();
+    if (p && p.catch) {
+      p.catch(function (err) {
+        console.warn('Final fishing catch audio failed:', landingSrc, describeError(err));
+      });
+    }
   }
 
   // Drag sounds: alternate strictly drag1 -> drag2 -> drag1 -> ... every
@@ -5979,6 +6035,13 @@
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       el.volume = muted ? 0 : (el._baseVolume || 0);
     });
+    // fishingLandingAudio is a standalone element, not part of
+    // fishingAudioEls -- see its own section comment for why -- so it
+    // needs this one extra line rather than being covered by the loop
+    // above.
+    if (!fishingLandingAudio.paused) {
+      fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
+    }
   }
 
   // Transient, in-progress fishing session -- NOT persisted; see the
@@ -6143,6 +6206,7 @@
   function performFishReel(state) {
     if (!fishingSession || fishingSession.phase !== 'reacting') return; // stale/duplicate click -- shouldn't be reachable since the button disappears on the next render, but stay defensive
     clearFishingTimers();
+    primeFishingLandingAudio(); // FISHING HOOK -- synchronous, within this genuine click, so fishingLandingAudio is already gesture-authorized well before beginFishLandingSequence's async chain actually needs it
     beginFishLandingSequence(state);
   }
 
@@ -6219,8 +6283,7 @@
         // trigger) comes later, inside revealMarlin -- the flash line
         // here is not yet marlin's last line before its reveal.
         stopFishingReelLoop();
-        stopFishingLandingSound(); // defensive -- clears a stray sound left over from an earlier catch, never this one
-        playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
+        playFishingLandingAudio(session.weightLb);
       }
       scrollToBottom();
       index++;
@@ -6288,8 +6351,7 @@
         // range, so this naturally resolves to catchLarge -- no
         // separate marlin audio logic needed.
         stopFishingReelLoop();
-        stopFishingLandingSound(); // defensive -- see beginFishLandingSequence's own note on this
-        playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
+        playFishingLandingAudio(session.weightLb);
         printBlank();
         printLine('MARLIN \u2014 ' + session.weightLb.toFixed(1) + ' LB');
         session.phase = 'marlin-release';
