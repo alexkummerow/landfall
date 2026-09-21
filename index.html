@@ -416,11 +416,9 @@
         tapeListenCount: 0,           // qualifying tape-listening sessions credited so far on tapeListenDay — resets whenever the current voyage day no longer matches
       },
       food: {
-        oatmeal: 12, pasta: 8, rice: 12, soup: 6, chili: 6,
-        tuna: 8, crackers: 8, peanutButter: 8, nuts: 12,
-        driedFruit: 8, energyBars: 8, freshFruit: 6, freshBread: 4,
-        chocolate: 4,
-        freshFish: 0, // FISHING HOOK -- caught, not part of starting provisions; see FOOD_ITEMS and the FISHING section
+        macCheese: 5, chiliRice: 5, chickenNoodleSoup: 5, oatmeal: 15, pancakes: 10,
+        tunaCrackers: 5, mixedNuts: 5, driedMangos: 5, energyBar: 5, popcorn: 10,
+        chocolate: 5,
       },
       drinks: {
         coffee: 24, tea: 24,
@@ -440,7 +438,7 @@
       // section's fishingSession variable and its own comment for why).
       fishing: {
         keptFishOnDay: null,                     // voyageDayNumber() on which a fish was last kept, for the one-kept-fish-per-day rule
-        freshFishCaughtAt: [],                   // voyageMinutes of each currently-held Fresh Fish unit, for individual spoilage — see checkSpoilage()
+        heldFish: null,                          // { speciesId, caughtDay } for the currently-held catch, or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
       },
       books: newBooksState(),
       flags: {
@@ -454,8 +452,6 @@
         hungerNarrated: false,
         cleanlinessNarrated: false,
         galleyNarrated: false,
-        freshFruitSpoiled: false,
-        freshBreadSpoiled: false,
         lastMilestone: 0,
         arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
       },
@@ -1136,34 +1132,59 @@
 
   // Foods: one unit is one serving. `cooked` items need the stove (propane
   // + water per waterGal, and calm-enough seas); everything else is ready
-  // to eat as-is. `category` drives how much hunger-relief time a meal
-  // buys (see HUNGER_RESET_OFFSET_HOURS), how it weighs into recent-meal
-  // monotony (see performEat/snackMealRatio), and — for chocolate only —
-  // an entirely separate path with no hunger/energy effect at all.
+  // to eat as-is. Explicit meal/snack/chocolate classification — MEAL
+  // gives full hunger relief, SNACK about half (see
+  // HUNGER_RESET_HOURS_BY_TYPE in performEat), CHOCOLATE none at all
+  // (morale-only, handled entirely separately — see
+  // chocolateMoraleGain/eatChocolateLine). Chocolate is visually grouped
+  // with SNACKS in the EAT menu but is its own type so it can never
+  // accidentally count as nourishment.
   var FOOD_ITEMS = [
-    { key: 'oatmeal', name: 'Oatmeal', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial', original: 12 },
-    { key: 'pasta', name: 'Pasta', cooked: true, heavy: true, waterGal: 0.125, category: 'substantial', original: 8 },
-    { key: 'rice', name: 'Rice', cooked: true, heavy: true, waterGal: 0.0625, category: 'substantial', original: 12 },
-    { key: 'soup', name: 'Soup', cooked: true, heavy: true, category: 'substantial', original: 6 },
-    { key: 'chili', name: 'Chili / Beans', cooked: true, heavy: true, category: 'substantial', original: 6 },
-    { key: 'tuna', name: 'Tuna', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
-    { key: 'crackers', name: 'Crackers', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
-    { key: 'peanutButter', name: 'Peanut Butter', cooked: false, heavy: false, category: 'roughWeather', original: 8 },
-    { key: 'nuts', name: 'Nuts', cooked: false, heavy: false, category: 'quick', original: 12 },
-    { key: 'driedFruit', name: 'Dried Fruit', cooked: false, heavy: false, category: 'quick', original: 8 },
-    { key: 'energyBars', name: 'Energy Bars', cooked: false, heavy: false, category: 'quick', original: 8 },
-    { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 6 },
-    { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 4 },
-    { key: 'chocolate', name: 'Chocolate', cooked: false, heavy: false, category: 'chocolate', original: 4 },
-    // FISHING HOOK -- caught via FISH, not part of starting provisions
-    // (original: 0; see countCurrentOriginal's falsy-original handling
-    // and checkSpoilage's per-catch spoilage check, keyed off
-    // state.fishing.freshFishCaughtAt rather than a fixed voyage-day
-    // threshold like the other two 'fresh' items above).
-    { key: 'freshFish', name: 'Fresh Fish', cooked: true, heavy: false, perishable: true, category: 'fresh', original: 0 },
+    // MEALS — 40 total
+    { key: 'macCheese', name: 'Mac & Cheese', type: 'meal', cooked: true, original: 5 },
+    { key: 'chiliRice', name: 'Chili Rice', type: 'meal', cooked: true, original: 5 },
+    { key: 'chickenNoodleSoup', name: 'Chicken Noodle Soup', type: 'meal', cooked: true, original: 5 },
+    { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 15 },
+    { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 10 },
+    // SNACKS — 30 total
+    { key: 'tunaCrackers', name: 'Tuna on Crackers', type: 'snack', cooked: false, original: 5 },
+    { key: 'mixedNuts', name: 'Mixed Nuts', type: 'snack', cooked: false, original: 5 },
+    { key: 'driedMangos', name: 'Dried Mangos', type: 'snack', cooked: false, original: 5 },
+    { key: 'energyBar', name: 'Energy Bar', type: 'snack', cooked: false, original: 5 },
+    { key: 'popcorn', name: 'Popcorn', type: 'snack', cooked: true, original: 10 }, // needs the stove, unlike the rest of SNACKS -- see performEat's cooked gate
+    // CHOCOLATE — 5. Shown under SNACKS in the menu but never counted as one.
+    { key: 'chocolate', name: 'Chocolate', type: 'chocolate', cooked: false, original: 5 },
   ];
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
+
+  // Specialty meal for whichever fish is currently held (state.fishing.
+  // heldFish) — species-specific, so KEEP never produces a generic
+  // "Fresh Fish" anymore. Every entry is a cooked meal (see performEat's
+  // cooked gate) even where a real kitchen wouldn't need the stove
+  // (poke), by design. Pacific Herring is the one FISH_SPECIES entry
+  // with no distinct regional dish of its own -- HERRING RICE BOWL
+  // keeps it a real meal rather than a special case. Marlin never
+  // appears here — release-only, never kept, never a food item.
+  var FISH_MEAL_BY_SPECIES = {
+    coho: 'Salmon + Mashed Potatoes',
+    chinook: 'Salmon Rice Bowl',
+    pink: 'Salmon + Roasted Potatoes',
+    rockfish: 'Rockfish Stew',
+    lingcod: 'Lingcod Stew',
+    mackerel: 'Mackerel Rice Bowl',
+    bonito: 'Bonito Curry',
+    albacore: 'Albacore Over Pasta',
+    skipjack: 'Aku Poke Bowl',
+    mahimahi: 'Mahi Coconut Curry',
+    yellowfin: 'Ahi Poke Bowl',
+    wahoo: 'Ono Rice Bowl',
+    herring: 'Herring Rice Bowl',
+  };
+  // Reserved key for whatever fish is currently held — never a real
+  // FOOD_ITEMS entry, since its name/existence depends entirely on
+  // state.fishing.heldFish. performEat special-cases this key.
+  var HELD_FISH_KEY = 'heldFish';
 
   // Current canonical food schema version — bump this whenever
   // FOOD_ITEMS' `original` quantities change again, so an existing
@@ -1171,18 +1192,7 @@
   // than every time it loads. newGameState() sets meta.foodInventoryVersion
   // to this same value up front, so a fresh voyage is already current
   // and never gets rebased.
-  var FOOD_INVENTORY_VERSION = 2;
-  // The canonical departure quantities food actually shipped with
-  // before the two rounds of reduction that led to today's FOOD_ITEMS —
-  // i.e. what a save with no foodInventoryVersion marker at all actually
-  // started its voyage with, however far it's since been consumed down
-  // or however many later reductions have already applied to it.
-  var OLD_FOOD_ORIGINAL = {
-    oatmeal: 18, pasta: 12, rice: 16, soup: 8, chili: 8,
-    tuna: 10, crackers: 12, peanutButter: 10, nuts: 16,
-    driedFruit: 12, energyBars: 12, freshFruit: 8, freshBread: 6,
-    chocolate: 6,
-  };
+  var FOOD_INVENTORY_VERSION = 3;
 
   // Fallback temperature from latitude alone, when no real-world reading
   // is available (or ever arrives) — cool in the mid-40s near Shilshole,
@@ -3241,36 +3251,15 @@
   }
 
   function checkSpoilage(state) {
-    var days = state.meta.voyageMinutes / 1440;
-    var f = state.flags, food = state.food;
-    if (!f.freshFruitSpoiled && days > 6 && food.freshFruit > 0) {
-      food.freshFruit = 0;
-      f.freshFruitSpoiled = true;
-      log(state, "The last of the fresh fruit has gone soft and off. Over the side with it.");
-    }
-    if (!f.freshBreadSpoiled && days > 4 && food.freshBread > 0) {
-      food.freshBread = 0;
-      f.freshBreadSpoiled = true;
-      log(state, "The bread has finally gone \u2014 mold, then over the side.");
-    }
-    // FISHING HOOK -- Fresh Fish, one timestamp per currently-held unit
-    // rather than a single flag: it's caught mid-voyage, at whatever
-    // moment, not part of the fixed starting provisions the two checks
-    // above are timed against.
-    var caughtAt = state.fishing.freshFishCaughtAt;
-    if (caughtAt.length) {
-      var windowMinutes = FISHING_CONFIG.freshFishSpoilHours * 60;
-      var stillGood = [];
-      var anySpoiled = false;
-      for (var i = 0; i < caughtAt.length; i++) {
-        if (state.meta.voyageMinutes - caughtAt[i] >= windowMinutes) anySpoiled = true;
-        else stillGood.push(caughtAt[i]);
-      }
-      if (anySpoiled) {
-        state.fishing.freshFishCaughtAt = stillGood;
-        food.freshFish = stillGood.length;
-        log(state, 'The fish has spoiled.');
-      }
+    // FISHING HOOK -- the held catch spoils at the next local-midnight
+    // day rollover (voyageDayNumber), not on a rolling elapsed-hours
+    // timer -- a fish kept at 11:40pm has only minutes of grace, one
+    // kept at 8am stays good the rest of that day. See
+    // performFishKeep/heldFishAsMealItem.
+    var held = state.fishing.heldFish;
+    if (held && held.caughtDay !== voyageDayNumber(state)) {
+      state.fishing.heldFish = null;
+      log(state, 'The fish has spoiled. You throw it overboard.');
     }
   }
 
@@ -5646,23 +5635,79 @@
     return item.name + ' ' + dots + ' ' + countCurrentOriginal(servings, item.original) + ' servings';
   }
 
-  function buildEatOptions(state) {
-    var opts = FOOD_ITEMS.filter(function (f) { return state.food[f.key] > 0; })
-      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + countCurrentOriginal(state.food[f.key], f.original) + ')', action: 'eat:' + f.key }; });
-    opts.push({ label: 'NEVER MIND', action: 'cancel' });
+  // Resolves the currently-held catch (if any) into a food-item-shaped
+  // object so the rest of performEat/eatFlavorLine can treat it exactly
+  // like any other meal — species-specific name, always a cooked meal
+  // (see FISH_MEAL_BY_SPECIES). Returns null if nothing's held, or the
+  // held species somehow has no mapped meal (shouldn't happen — every
+  // real FISH_SPECIES entry has one).
+  function heldFishAsMealItem(state) {
+    var held = state.fishing.heldFish;
+    if (!held) return null;
+    var mealName = FISH_MEAL_BY_SPECIES[held.speciesId];
+    if (!mealName) return null;
+    return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true };
+  }
+
+  function buildMealsOptions(state) {
+    var opts = FOOD_ITEMS.filter(function (f) { return f.type === 'meal' && state.food[f.key] > 0; })
+      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+    // FISHING HOOK -- the currently-held catch's specialty meal, if any,
+    // appended as an additional MEALS option — never a generic FRESH
+    // FISH entry. Only one can ever be held, so the count is always 1.
+    var fishItem = heldFishAsMealItem(state);
+    if (fishItem) opts.push({ label: fishItem.name.toUpperCase() + ' (1)', action: 'eat:' + HELD_FISH_KEY });
+    opts.push({ label: 'BACK', action: 'cmd:eat' });
     return opts;
+  }
+
+  function buildSnacksOptions(state) {
+    var opts = FOOD_ITEMS.filter(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; })
+      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+    opts.push({ label: 'BACK', action: 'cmd:eat' });
+    return opts;
+  }
+
+  // Whichever of MEALS/SNACKS an item belongs to, as a redisplay target
+  // for a failed cooking gate (rough seas / no propane / not enough
+  // water) — chocolate never reaches these gates (see performEat), so
+  // this only ever needs to choose between the other two.
+  function eatSubmenuPendingChoice(state, item) {
+    return item.type === 'meal'
+      ? { id: 'meals-menu', options: buildMealsOptions(state) }
+      : { id: 'snacks-menu', options: buildSnacksOptions(state) };
   }
 
   function cmdEat(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
     printBlank();
     printLine('PROVISIONS', 'heading-label');
-    var any = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
-    if (!any) {
+    var anyMeal = FOOD_ITEMS.some(function (f) { return f.type === 'meal' && state.food[f.key] > 0; }) || !!heldFishAsMealItem(state);
+    var anySnack = FOOD_ITEMS.some(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; });
+    if (!anyMeal && !anySnack) {
       printLine('Nothing left aboard to eat.', 'amber');
       return;
     }
-    state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+    state.pendingChoice = {
+      id: 'provisions-menu',
+      options: [
+        { label: 'MEALS', action: 'cmd:meals' },
+        { label: 'SNACKS', action: 'cmd:snacks' },
+        { label: 'NEVER MIND', action: 'cancel' },
+      ],
+    };
+  }
+
+  function cmdMeals(state) {
+    printBlank();
+    printLine('MEALS', 'heading-label');
+    state.pendingChoice = { id: 'meals-menu', options: buildMealsOptions(state) };
+  }
+
+  function cmdSnacks(state) {
+    printBlank();
+    printLine('SNACKS', 'heading-label');
+    state.pendingChoice = { id: 'snacks-menu', options: buildSnacksOptions(state) };
   }
 
   function eatFlavorLine(state, item) {
@@ -5672,12 +5717,14 @@
     return verb + ' ' + item.name.toLowerCase() + ' ' + where + '.';
   }
 
-  // How much hunger-relief TIME each meal category buys, applied as the
-  // value hoursSinceMeal resets to (often negative — "buys a few extra
-  // hours before hunger starts building again") rather than always
-  // snapping to a flat zero. Chocolate isn't listed: it never touches
-  // hoursSinceMeal at all.
-  var HUNGER_RESET_OFFSET_HOURS = { substantial: -3, roughWeather: -1, quick: 0, fresh: -1 };
+  // How much hunger-relief TIME each type buys, applied as the value
+  // hoursSinceMeal resets to (often negative — "buys a few extra hours
+  // before hunger starts building again") rather than always snapping to
+  // a flat zero. A MEAL's -3 keeps the sailor out of HUNGRY (threshold
+  // 3, see hungerLevel) roughly twice as long as a SNACK's 0 — a meal
+  // holding about twice as long as a snack is the whole point. Chocolate
+  // isn't listed: it never touches hoursSinceMeal at all.
+  var HUNGER_RESET_HOURS_BY_TYPE = { meal: -3, snack: 0 };
 
   // Comfort, not sustenance — no prep, no seastate/propane/water gates,
   // no hunger/thirst/energy effect at all. A small, temporary morale
@@ -5692,21 +5739,33 @@
     if (hoursSince >= 3) return Math.round(fullGain * 0.4);
     return Math.max(1, Math.round(fullGain * 0.15));
   }
+  // Two pools depending on whether the sailor is still hungry (hungerLevel
+  // > 0, i.e. not FULL) when the chocolate goes down — chocolate never
+  // relieves hunger itself (see performEat), so a still-hungry sailor
+  // gets copy that says so honestly rather than reading like a meal.
+  var CHOCOLATE_LINES_FULL = ['You eat some chocolate.', 'A square of chocolate. Small, but it helps.'];
+  var CHOCOLATE_LINES_HUNGRY = [
+    'You\u2019re still hungry, but your spirits lift a little.',
+    'You\u2019re still hungry. The chocolate helps anyway.',
+    'It doesn\u2019t do much for the hunger, but your mood lifts.',
+    'Still hungry, but a little better for it.',
+  ];
   function eatChocolateLine(state) {
     if (state.food.chocolate === 0) return 'You eat the last of the chocolate, and sit for a while.';
-    var lines = ['You eat some chocolate.', 'A square of chocolate. Small, but it helps.'];
+    var lines = hungerLevel(state.crew.hoursSinceMeal) > 0 ? CHOCOLATE_LINES_HUNGRY : CHOCOLATE_LINES_FULL;
     return lines[Math.floor(Math.random() * lines.length)];
   }
 
   function performEat(state, key) {
-    var item = FOOD_ITEMS_BY_KEY[key];
-    if (!item || state.food[key] <= 0) {
+    var isHeldFish = key === HELD_FISH_KEY;
+    var item = isHeldFish ? heldFishAsMealItem(state) : FOOD_ITEMS_BY_KEY[key];
+    if (!item || (!isHeldFish && state.food[key] <= 0)) {
       printBlank();
       printLine("That's already gone.", 'dim');
       return;
     }
 
-    if (item.category === 'chocolate') {
+    if (item.type === 'chocolate') {
       runShortAction(state, {
         label: 'EATING CHOCOLATE',
         duration: 2,
@@ -5727,24 +5786,24 @@
         printBlank();
         printLine('THE BOAT IS MOVING TOO VIOLENTLY', 'amber');
         printLine('TO COOK SAFELY.', 'amber');
-        state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+        state.pendingChoice = eatSubmenuPendingChoice(state, item);
         return;
       }
       if (state.supplies.propane <= 0) {
         printBlank();
         printLine('Out of propane. Nothing left to cook with.', 'amber');
-        state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+        state.pendingChoice = eatSubmenuPendingChoice(state, item);
         return;
       }
     }
-    // Cooking water: only oatmeal/rice/pasta carry a per-serving cost
-    // (item.waterGal); everything else draws 0 and this check is simply
-    // skipped for them.
+    // Cooking water: only items with a per-serving cost (item.waterGal,
+    // currently just Oatmeal) draw any; everything else is 0 and this
+    // check is simply skipped for them.
     var waterNeeded = item.waterGal || 0;
     if (waterNeeded > 0 && !hasEnoughWater(state, waterNeeded)) {
       printBlank();
       printLine('Not enough water.', 'amber');
-      state.pendingChoice = { id: 'eat-choice', options: buildEatOptions(state) };
+      state.pendingChoice = eatSubmenuPendingChoice(state, item);
       return;
     }
     // Gates passed (or there weren't any) — the actual preparing/eating
@@ -5760,26 +5819,28 @@
           s.supplies.propane = clamp(s.supplies.propane - 1, 0, 999);
         }
         if (waterNeeded > 0) consumeWater(s, waterNeeded);
-        s.food[key] -= 1;
-        // FISHING HOOK -- eating a unit of Fresh Fish must retire its own
-        // spoilage timestamp too, oldest first, or checkSpoilage() later
-        // finds a stale entry with nothing left to spoil and logs "The
-        // fish has spoiled." for a fish that's already been eaten.
-        if (key === 'freshFish' && s.fishing && Array.isArray(s.fishing.freshFishCaughtAt) && s.fishing.freshFishCaughtAt.length) {
-          s.fishing.freshFishCaughtAt.shift();
+        // FISHING HOOK -- the held catch is consumed whole, species and
+        // all, rather than decrementing a food[] count — only one can
+        // ever be held at a time. Clearing it here (rather than leaving
+        // it to checkSpoilage) is what stops an eaten fish from later
+        // being logged as spoiled.
+        if (isHeldFish) {
+          s.fishing.heldFish = null;
+        } else {
+          s.food[key] -= 1;
         }
 
-        // Hunger: a real meal genuinely holds longer than a handful of
-        // nuts, so this resets to a category-dependent offset rather
-        // than always snapping to a flat zero.
-        c.hoursSinceMeal = HUNGER_RESET_OFFSET_HOURS[item.category] || 0;
+        // Hunger: a real meal genuinely holds longer than a snack, so
+        // this resets to a type-dependent offset rather than always
+        // snapping to a flat zero.
+        c.hoursSinceMeal = HUNGER_RESET_HOURS_BY_TYPE[item.type] || 0;
 
         // Meal-history monotony (hidden, never shown): an exponential
-        // moving average nudged toward 1 by a snack, toward 0 by
-        // something substantial or fresh. One item barely moves it;
-        // several days the same way clearly does — see
-        // computeMoraleTarget's snackMealRatio pressure.
-        var snackWeight = (item.category === 'quick') ? 1 : (item.category === 'substantial' || item.category === 'fresh') ? 0 : 0.5;
+        // moving average nudged toward 1 by a snack, toward 0 by a real
+        // meal. One item barely moves it; several days the same way
+        // clearly does — see computeMoraleTarget's snackMealRatio
+        // pressure.
+        var snackWeight = item.type === 'snack' ? 1 : 0;
         c.snackMealRatio = c.snackMealRatio * 0.7 + snackWeight * 0.3;
 
         // A cooked meal leaves dishes behind — stamped once, not
@@ -5790,8 +5851,8 @@
         }
         bumpClutter(s, 1); // wrappers, crumbs, a bowl left out — any meal leaves a little something
 
-        var fatigueGain = item.heavy ? 3 : 1;
-        var moraleGain = item.heavy ? 3 : (item.category === 'fresh' ? 2 : 1);
+        var fatigueGain = item.type === 'meal' ? 3 : 1;
+        var moraleGain = item.type === 'meal' ? 3 : 1;
         // Finally breaking a run of snack-heavy eating with something
         // proper feels genuinely restorative, on top of the flat amount.
         if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
@@ -6130,6 +6191,8 @@
     electrical: cmdElectrical,
     sleep: cmdSleep,
     eat: cmdEat,
+    meals: cmdMeals,
+    snacks: cmdSnacks,
     drink: cmdDrink,
     wash: cmdWash,
     dress: cmdDress,
@@ -6176,10 +6239,11 @@
      CAST -> WAIT -> BITE -> REACT -> LAND -> KEEP/RELEASE. An Above
      Deck activity (see getContextualOptions above and cmdFish below)
      layered on top of two EXISTING systems rather than duplicating
-     either: FOOD_ITEMS' freshFish entry (provisions/hunger/morale) and
-     checkSpoilage (per-catch spoilage). Everything fishing-specific
-     lives in this one block, plus the handful of small hooks elsewhere
-     marked "FISHING HOOK".
+     either: FISH_MEAL_BY_SPECIES/heldFishAsMealItem (the held catch's
+     specialty meal, shown in MEALS and eaten via the normal performEat
+     path — provisions/hunger/morale) and checkSpoilage (day-rollover
+     spoilage). Everything fishing-specific lives in this one block,
+     plus the handful of small hooks elsewhere marked "FISHING HOOK".
 
      TERMINAL PRESENTATION: fishing uses the exact same #temp-view
      track (printLine/printBlank/clearTempView) as every other command
@@ -6229,10 +6293,12 @@
      the whole time) always cancels whatever's in flight via STOP
      FISHING, which returns to the normal Above Deck menu.
 
-     Only two things about fishing are persisted, in state.fishing (see
-     GAME STATE) and state.food.freshFish:
+     Only two things about fishing are persisted, entirely within
+     state.fishing (see GAME STATE):
        - which voyage day a fish was last kept (the one-per-day rule)
-       - a timestamp per currently-held Fresh Fish unit (spoilage)
+       - the currently-held catch's species and the day it was caught
+         (heldFish; its specialty meal — FISH_MEAL_BY_SPECIES — and
+         spoilage both key off this, not a separate food[] count)
      ============================================================ */
 
   var FISHING_CONFIG = {
@@ -6269,8 +6335,6 @@
     // marlin -- this is deliberately small so a marlin stays "an
     // especially rare possibility," not a guaranteed flavor of big fish.
     marlinChanceWithinTrophyTier: 0.15,
-
-    freshFishSpoilHours: 4, // catch it -> cook/eat it within this many IN-GAME hours
   };
 
   // FISH_SPECIES_ANCHORS: six hand-authored species/weight tables, one
@@ -7015,10 +7079,11 @@
   function performFishKeep(state) {
     if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.pendingCatch) return;
     var caught = fishingSession.pendingCatch;
-    state.food.freshFish = (state.food.freshFish || 0) + 1;
-    state.fishing.freshFishCaughtAt.push(state.meta.voyageMinutes);
+    var speciesId = fishingSession.species.id;
+    var mealName = FISH_MEAL_BY_SPECIES[speciesId] || caught.displayName;
+    state.fishing.heldFish = { speciesId: speciesId, caughtDay: voyageDayNumber(state) };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
-    log(state, 'Kept: FRESH FISH \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
+    log(state, 'Kept: ' + mealName.toUpperCase() + ' \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
     flushNewLogEntries(state);
     showFishResultScreen(state);
   }
@@ -7997,35 +8062,38 @@
       };
       delete state.food.coffee;
     }
-    // Comfort Food is retired in favor of Chocolate — any existing save
-    // that still has the old key carries its quantity over exactly
-    // (never topped up, never reset), then the old key is dropped.
-    if (state.food.comfort !== undefined) {
-      state.food.chocolate = (state.food.chocolate || 0) + state.food.comfort;
-      delete state.food.comfort;
-    }
-    if (state.food.chocolate === undefined) state.food.chocolate = 4;
-    // Rebase an existing voyage's food onto the CURRENT canonical
-    // departure quantities while preserving exactly how much has
-    // already been eaten — never resetting to full, never just
-    // swapping the denominator underneath the same remaining count,
-    // and never letting CURRENT end up above the new ORIGINAL. Runs at
-    // most once per save: newGameState() already stamps
+    // The food system was fully replaced (MEALS/SNACKS, an all-new item
+    // lineup — see FOOD_ITEMS) as part of this rebase. There's no
+    // sensible old-to-new mapping to preserve partial consumption
+    // across (most items have no equivalent at all, and even the two
+    // that share a name — Oatmeal, Chocolate — started at different
+    // quantities under the old system), so an existing voyage's
+    // provisions are simply restocked fresh under the new lineup,
+    // exactly like a new departure's. Old-format keys (including the
+    // now-defunct Comfort Food and the old generic Fresh Fish, both
+    // retired in earlier passes) are dropped outright. Runs at most
+    // once per save: newGameState() already stamps
     // meta.foodInventoryVersion at FOOD_INVENTORY_VERSION up front, so
     // a fresh voyage never touches this at all, and once an existing
     // save has been rebased here its version marker prevents it from
     // ever happening again on a later load.
     if (state.meta.foodInventoryVersion === undefined) state.meta.foodInventoryVersion = 0;
     if (state.meta.foodInventoryVersion < FOOD_INVENTORY_VERSION) {
-      FOOD_ITEMS.forEach(function (f) {
-        var oldStarting = OLD_FOOD_ORIGINAL[f.key];
-        if (oldStarting != null && state.food[f.key] != null) {
-          var consumed = oldStarting - state.food[f.key];
-          state.food[f.key] = Math.max(0, f.original - consumed);
-        }
-      });
+      var oldFoodKeys = ['pasta', 'rice', 'soup', 'chili', 'tuna', 'crackers', 'peanutButter',
+        'nuts', 'driedFruit', 'energyBars', 'freshFruit', 'freshBread', 'freshFish', 'comfort'];
+      oldFoodKeys.forEach(function (k) { delete state.food[k]; });
+      FOOD_ITEMS.forEach(function (f) { state.food[f.key] = f.original; });
       state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
     }
+    // FISHING HOOK -- ensure the whole fishing bucket exists first (a
+    // save old enough to predate the feature entirely won't have it),
+    // then retire the old generic-Fresh-Fish timestamp array (see
+    // checkSpoilage's new day-rollover rule) -- there's no way to know
+    // what species an old-format held fish was, so it's simply not
+    // carried forward.
+    if (!state.fishing) state.fishing = { keptFishOnDay: null, heldFish: null };
+    delete state.fishing.freshFishCaughtAt;
+    if (state.fishing.heldFish === undefined) state.fishing.heldFish = null;
     if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
@@ -8065,8 +8133,6 @@
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
     if (state.flags.galleyNarrated === undefined) state.flags.galleyNarrated = false;
-    if (state.flags.freshFruitSpoiled === undefined) state.flags.freshFruitSpoiled = false;
-    if (state.flags.freshBreadSpoiled === undefined) state.flags.freshBreadSpoiled = false;
     // Diesel used to be tracked as "hours of motoring left" — convert any
     // older save to real gallons at the same burn rate the simulation now
     // uses, so a save mid-passage doesn't suddenly gain or lose fuel.
@@ -8151,14 +8217,6 @@
     }
     if (w.oceanCurrent.northSample === undefined) w.oceanCurrent.northSample = null;
     if (w.oceanCurrent.southSample === undefined) w.oceanCurrent.southSample = null;
-    // FISHING HOOK -- backfill for any save that predates this feature.
-    if (state.food.freshFish === undefined) state.food.freshFish = 0;
-    if (!state.fishing) {
-      state.fishing = {
-        keptFishOnDay: null,
-        freshFishCaughtAt: [],
-      };
-    }
   }
 
   function boot() {
