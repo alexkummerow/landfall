@@ -5803,6 +5803,15 @@
   };
   var FISHING_CROSSFADE_SECONDS = 0.1; // reel.mp3's fade-out into the catch sound -- click prevention only, not an audible crossfade
 
+  // Human-readable name per sound, for diagnostics only -- lets a
+  // console warning say "bite audio failed" rather than the internal
+  // key ('catch'), and likewise distinguishes the three catch-sound
+  // sizes and reel/release/cast/drag from each other.
+  var FISHING_AUDIO_LABELS = {
+    cast: 'cast', catch: 'bite', catchSmall: 'small catch', catchMedium: 'medium catch', catchLarge: 'large catch',
+    drag1: 'drag', drag2: 'drag', reel: 'reel', release: 'release',
+  };
+
   var fishingAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as engineAudioEls
 
   function getFishingAudioEl(key) {
@@ -5812,6 +5821,14 @@
     el.loop = (key === 'reel');
     el.preload = 'auto';
     el.volume = 0;
+    // A load/decode failure (wrong path, missing file, unsupported
+    // format) fires 'error' on the element itself -- this is a
+    // different, often more likely failure mode than a play() promise
+    // rejection (see playFishingOneShot/startFishingReelLoop's own
+    // p.catch below), so it needs its own listener to ever be visible.
+    el.addEventListener('error', function () {
+      console.warn('Fishing audio failed to load (' + (FISHING_AUDIO_LABELS[key] || key) + '): ' + FISHING_AUDIO_FILES[key]);
+    });
     fishingAudioEls[key] = el;
     return el;
   }
@@ -5849,11 +5866,14 @@
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     if (!el.paused) el.pause();
-    el.currentTime = 0;
+    // Seeking before enough of the file has loaded can throw in some
+    // browsers (InvalidStateError) -- catch it so playback below still
+    // proceeds instead of the whole call silently aborting here.
+    try { el.currentTime = 0; } catch (e) { /* not loaded far enough yet to seek -- harmless, play() still starts from the top */ }
     el.volume = 0;
     el._baseVolume = FISHING_AUDIO_VOLUME[key];
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + (FISHING_AUDIO_LABELS[key] || key) + '):', describeError(e)); });
     fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -5871,11 +5891,11 @@
     if (!audioUnlocked) return;
     var el = getFishingAudioEl('reel');
     if (!el.paused) el.pause();
-    el.currentTime = 0;
+    try { el.currentTime = 0; } catch (e) { /* see playFishingOneShot's own note on this */ }
     el.volume = 0;
     el._baseVolume = FISHING_AUDIO_VOLUME.reel;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (reel):', describeError(e)); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + FISHING_AUDIO_LABELS.reel + '):', describeError(e)); });
     fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME.reel, FISHING_CROSSFADE_SECONDS);
   }
 
@@ -6006,6 +6026,7 @@
 
     playFishingOneShot('cast'); // FISHING HOOK -- fire-and-forget, does not delay anything below
     startFishingDragScheduler(); // FISHING HOOK -- cancelled by clearFishingTimers whenever the wait ends, for any reason
+    getFishingAudioEl('catch'); // FISHING HOOK -- pre-warm the bite alert now so it's had the whole wait to load by the time a bite actually needs it (creating it lazily, only at bite time, left it no lead time)
 
     // #temp-view was already cleared by the generic click handler that
     // routed the CAST click here (see renderOptions) -- just append the
@@ -6076,6 +6097,7 @@
     var isMarlin = tier.key === 'trophy' && marlinEligible(state) && Math.random() < FISHING_CONFIG.marlinChanceWithinTrophyTier;
     var species = isMarlin ? null : pickFishSpeciesForWeight(state, weightLb);
 
+    getFishingAudioEl(fishingCatchSoundKeyForWeight(weightLb)); // FISHING HOOK -- pre-warm the specific size-based catch sound now, well ahead of the reveal, for the same lead-time reason as the bite alert above
     fishingSession = { phase: 'bite-prompt', tier: tier, weightLb: weightLb, isMarlin: isMarlin, species: species, resolveTimer: null };
 
     printLine('The line jerks hard.');
