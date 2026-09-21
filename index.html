@@ -5801,7 +5801,7 @@
     cast: 0.6, catch: 0.65, catchSmall: 0.6, catchMedium: 0.6, catchLarge: 0.6,
     drag1: 0.35, drag2: 0.35, reel: 0.4, release: 0.55,
   };
-  var FISHING_CROSSFADE_SECONDS = 0.1; // reel.mp3's fade-out into the catch sound -- click prevention only, not an audible crossfade
+  var FISHING_CROSSFADE_SECONDS = 0.1; // quick fade-in every fishing one-shot uses at its own start (click prevention only) -- unrelated to the reel-to-catch handoff, which is an instant stop, no fade
 
   var fishingAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as engineAudioEls
 
@@ -5869,7 +5869,6 @@
         onEnded();
       };
     }
-    return p; // additive -- existing callers all ignore this; exposed so a caller can observe start/reject if it wants to
   }
 
   // Starts the continuous reel.mp3 bed -- fresh from the beginning
@@ -5888,20 +5887,17 @@
     fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME.reel, FISHING_CROSSFADE_SECONDS);
   }
 
-  // Fades reel.mp3 out over the same short 0.1s used everywhere else
-  // here, then pauses it -- called both at the natural end of a
-  // landing sequence (right as the catch sound fires, so the two
-  // overlap just enough to feel like a crossfade, not a gap) and
-  // defensively from clearFishingTimers, so at most one reel.mp3
-  // instance is ever actually audible at a time. ONLY touches the reel
-  // element -- never catchSmall/catchMedium/catchLarge (see
-  // stopFishingLandingSound below, a deliberately separate function so
-  // the two lifecycles can never accidentally get conflated).
+  // ONLY touches the reel element -- never catchSmall/catchMedium/
+  // catchLarge (see stopFishingLandingSound below, a deliberately
+  // separate function so the two lifecycles can never accidentally get
+  // conflated). Instant stop, no fade: the size-based catch sound
+  // starts in the very same step this is called from (see
+  // beginFishLandingSequence/revealMarlin), so there's no gap left to
+  // smooth over.
   function stopFishingReelLoop() {
     var el = fishingAudioEls.reel;
     if (!el || el.paused) return;
-    el._baseVolume = 0;
-    fadeFishingVolume(el, 0, FISHING_CROSSFADE_SECONDS, function () { el.pause(); });
+    el.pause();
   }
 
   // The landing sound (catchSmall/catchMedium/catchLarge) is
@@ -5911,14 +5907,13 @@
   // off from these specific, explicit call sites: a new cast beginning
   // (performFishCast), STOP FISHING (performFishStop), leaving/
   // re-entering the FISH screen (cmdFish), or a new landing sound about
-  // to replace it (resolveFishLanded/revealMarlin, defensively, in
-  // case an earlier one from a prior catch is somehow still going).
-  function stopFishingLandingSound(reason) {
+  // to replace it (beginFishLandingSequence/revealMarlin, defensively,
+  // in case an earlier one from a prior catch is somehow still going).
+  function stopFishingLandingSound() {
     ['catchSmall', 'catchMedium', 'catchLarge'].forEach(function (key) {
       var el = fishingAudioEls[key];
       if (!el || el.paused) return;
       el.pause();
-      console.log('FISH LANDING AUDIO STOPPED', reason); // TEMP DEBUG -- remove once confirmed fixed
     });
   }
 
@@ -6018,7 +6013,7 @@
 
   function cmdFish(state) {
     clearFishingTimers(); // FISHING HOOK -- defensive; ensures no audio from a previous attempt can leak in
-    stopFishingLandingSound('left fishing'); // FISHING HOOK -- a landing sound is deliberately NOT touched by clearFishingTimers; this is one of its few explicit stopping points
+    stopFishingLandingSound(); // FISHING HOOK -- a landing sound is deliberately NOT touched by clearFishingTimers; this is one of its few explicit stopping points
     fishingSession = null; // a fresh visit to the FISH screen always starts idle -- see FISHING section comment on why nothing here is resumed
     printBlank();
     printLine('FISHING', 'heading-label');
@@ -6027,7 +6022,7 @@
 
   function performFishCast(state) {
     clearFishingTimers();
-    stopFishingLandingSound('new cast'); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
+    stopFishingLandingSound(); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
     var willBite = Math.random() < FISHING_CONFIG.biteChance; // flat 60% -- see FISHING_CONFIG.biteChance comment for why nothing else modifies this
 
     fishingSession = { phase: 'waiting', willBite: willBite, resolveTimer: null, dotsTimer: null, dotsLineEl: null };
@@ -6072,7 +6067,7 @@
 
   function performFishStop(state) {
     clearFishingTimers();
-    stopFishingLandingSound('stop fishing'); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
+    stopFishingLandingSound(); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
     fishingSession = null;
     printBlank();
     printLine('You bring the line in.', 'dim');
@@ -6195,11 +6190,12 @@
     var tier = session.tier;
     var hintLines = FISH_TIER_HINT_POOLS[tier.key].map(function (pool) { return pickFromPool(pool); });
 
-    startFishingReelLoop(); // FISHING HOOK -- continuous bed underneath the suspense text; stopped by resolveFishLanded/revealMarlin below
+    startFishingReelLoop(); // FISHING HOOK -- continuous bed underneath the suspense text; stopped at the final beat below (non-marlin) or in revealMarlin (marlin)
 
     var lines = [];
     hintLines.forEach(function (h) { lines.push(h, '...'); });
-    lines.push(session.isMarlin ? pickFromPool(MARLIN_FLASH_LINES) : pickFromPool(FISH_GLIMPSE_LINES), '...');
+    var finalLineIndex = lines.length; // the final suspense beat, about to be appended below -- the exact step that (for a non-marlin catch) triggers the audio transition
+    lines.push(session.isMarlin ? pickFromPool(MARLIN_FLASH_LINES) : pickFromPool(FISH_GLIMPSE_LINES));
 
     session.phase = 'landing';
     state.pendingChoice = { id: 'fish-landing', options: [] }; // automatic -- nothing to click during this sequence
@@ -6215,6 +6211,17 @@
     function showNextLine() {
       if (fishingSession !== mySession) return;
       printLine(lines[index]);
+      if (index === finalLineIndex && !session.isMarlin) {
+        // FISHING HOOK -- tied directly to this same step, the moment
+        // the final suspense line prints: stop reel.mp3 (instant, no
+        // fade) and start the size-based catch sound, back-to-back, no
+        // timeout between them. Marlin's own final beat (and audio
+        // trigger) comes later, inside revealMarlin -- the flash line
+        // here is not yet marlin's last line before its reveal.
+        stopFishingReelLoop();
+        stopFishingLandingSound(); // defensive -- clears a stray sound left over from an earlier catch, never this one
+        playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
+      }
       scrollToBottom();
       index++;
       if (index < lines.length) {
@@ -6237,27 +6244,9 @@
     session.phase = 'keep-release';
     session.pendingCatch = { displayName: displayName, weightLb: session.weightLb };
 
-    // FISHING HOOK -- reel.mp3 fades out (0.1s) right as the size-based
-    // catch sound fires, so the two overlap briefly into a tight
-    // crossfade rather than leaving an audible gap; see
-    // fishingCatchSoundKeyForWeight for the weight->sound mapping.
-    // Only the reel is stopped here -- stopFishingLandingSound is NOT
-    // called at this transition (see that function's own comment); the
-    // defensive call below only clears a stray landing sound left over
-    // from an EARLIER catch, never this one.
-    stopFishingReelLoop();
-    stopFishingLandingSound('replaced by a new landing sound');
-    var catchSoundKey = fishingCatchSoundKeyForWeight(session.weightLb);
-    console.log('FISH LANDING PLAY REQUEST', session.weightLb, catchSoundKey); // TEMP DEBUG -- remove once confirmed fixed
-    var landingPlayPromise = playFishingOneShot(catchSoundKey);
-    if (landingPlayPromise) {
-      landingPlayPromise.then(function () {
-        console.log('FISH LANDING PLAY STARTED', catchSoundKey); // TEMP DEBUG -- remove once confirmed fixed
-      }).catch(function (err) {
-        console.warn('FISH LANDING PLAY FAILED', catchSoundKey, err); // TEMP DEBUG -- remove once confirmed fixed
-      });
-    }
-
+    // No audio here -- the reel-stop and catch-sound trigger already
+    // happened in beginFishLandingSequence, tied directly to the final
+    // suspense line's own print step. This is just the text reveal.
     printBlank();
     printLine(displayName.toUpperCase() + ' \u2014 ' + session.weightLb.toFixed(1) + ' LB');
 
@@ -6291,25 +6280,16 @@
       scrollToBottom();
       fishingSession.resolveTimer = setTimeout(function () {
         if (fishingSession !== mySession) return;
-        // FISHING HOOK -- same reel-stop+catch-sound handoff as
-        // resolveFishLanded, timed to the actual weight reveal (not
-        // the earlier "A marlin." beat, which is still part of the
-        // suspense the reel bed should keep playing underneath).
-        // Marlin's weight always falls in the trophy 30-40lb range, so
-        // this naturally resolves to catchLarge -- no separate marlin
-        // audio logic needed.
+        // FISHING HOOK -- tied directly to this same step, right as
+        // the rarity line (marlin's own final suspense beat before the
+        // reveal) has just printed: stop reel.mp3 (instant, no fade)
+        // and start catch_large.mp3, back-to-back, no timeout between
+        // them. Marlin's weight always falls in the trophy 30-40lb
+        // range, so this naturally resolves to catchLarge -- no
+        // separate marlin audio logic needed.
         stopFishingReelLoop();
-        stopFishingLandingSound('replaced by a new landing sound');
-        var marlinCatchSoundKey = fishingCatchSoundKeyForWeight(session.weightLb);
-        console.log('FISH LANDING PLAY REQUEST', session.weightLb, marlinCatchSoundKey); // TEMP DEBUG -- remove once confirmed fixed
-        var marlinLandingPlayPromise = playFishingOneShot(marlinCatchSoundKey);
-        if (marlinLandingPlayPromise) {
-          marlinLandingPlayPromise.then(function () {
-            console.log('FISH LANDING PLAY STARTED', marlinCatchSoundKey); // TEMP DEBUG -- remove once confirmed fixed
-          }).catch(function (err) {
-            console.warn('FISH LANDING PLAY FAILED', marlinCatchSoundKey, err); // TEMP DEBUG -- remove once confirmed fixed
-          });
-        }
+        stopFishingLandingSound(); // defensive -- see beginFishLandingSequence's own note on this
+        playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
         printBlank();
         printLine('MARLIN \u2014 ' + session.weightLb.toFixed(1) + ' LB');
         session.phase = 'marlin-release';
