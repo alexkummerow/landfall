@@ -4202,7 +4202,20 @@
     printLine(statusLine('STEERING', b.steering));
     printLine(statusLine('ENGINE', b.engine));
     printLine(statusLine('ELECTRICAL', b.electrical));
-    state.pendingChoice = { id: 'status-view', options: [{ label: 'BACK', action: 'cancel' }] };
+    var opts = [];
+    // REPAIR is now reachable only from here, and only while there's
+    // actually something to repair -- hasRepairableDamage covers the
+    // four tracked systems; the aft-locker check alongside it covers
+    // the one-off event cmdRepair also offers (a deferred "SECURE IT
+    // LATER" aft locker isn't a DAMAGED system yet, but the player
+    // still needs a way back to it before it escalates on its own).
+    if (hasRepairableDamage(state) || (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)) {
+      opts.push({ label: 'REPAIR', action: 'cmd:repair' });
+    }
+    var rescueItem = rescueMenuOption(state);
+    if (rescueItem) opts.push(rescueItem);
+    opts.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'status-view', options: opts };
   }
 
   function cmdElectrical(state) {
@@ -5530,6 +5543,16 @@
     return items;
   }
 
+  // Whether any of the four tracked boat systems is currently DAMAGED
+  // -- used to decide whether STATUS offers REPAIR at all (see
+  // cmdStatus). Deliberately narrower than buildDamagedSystemsList
+  // above: it does not count a pending, still-deferrable aft-locker
+  // event on its own, since that's a one-off notice rather than a
+  // standing system failure -- cmdStatus's own gate accounts for both.
+  function hasRepairableDamage(state) {
+    return BOAT_FAIL_SYSTEMS.some(function (k) { return state.boat[k] === 'DAMAGED'; });
+  }
+
   function cmdRepair(state) {
     if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
     var items = buildDamagedSystemsList(state);
@@ -6562,20 +6585,18 @@
       return raftOptions;
     }
 
-    // REPAIR is always offered in both locations now, plain-labeled —
-    // cmdRepair decides, by location, exactly what's reachable and shows
-    // its own picker if there's more than one thing (or one) to choose
-    // from; "nothing to fix" if not. RADIO FOR RESCUE/RESCUE STATUS sits
-    // right alongside it in both locations too, conditionally (see
-    // rescueMenuOption) — DISTRESS is gone; there is no unconditional
-    // rescue entry point anymore.
+    // REPAIR no longer lives here at all — it's reachable only from
+    // STATUS now, and only while hasRepairableDamage(state) (or a
+    // still-pending aft-locker event) is true; see cmdStatus. RADIO
+    // FOR RESCUE/RESCUE STATUS keeps its existing placement here,
+    // conditionally (see rescueMenuOption) — DISTRESS is gone; there
+    // is no unconditional rescue entry point anymore.
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
-    var repairGroupBelow = [
+    var belowMiscGroup = [
       { label: 'STATUS', action: 'cmd:status' },
       { label: 'ELECTRICAL PANEL', action: 'cmd:electrical' },
-      { label: 'REPAIR', action: 'cmd:repair' },
     ];
-    if (rescueItem) repairGroupBelow.push(rescueItem);
+    if (rescueItem) belowMiscGroup.push(rescueItem);
 
     if (state.crew.location === 'below') {
       return groupedOptions([
@@ -6589,14 +6610,14 @@
           { label: 'FORECAST', action: 'cmd:forecast' },
           { label: 'INVENTORY', action: 'cmd:inventory' },
         ],
-        repairGroupBelow,
+        belowMiscGroup,
         [{ label: goLabel, action: 'go-above-below' }],
       ]);
     }
 
     // ABOVE (the default/starting location).
-    var repairGroupAbove = [{ label: 'REPAIR', action: 'cmd:repair' }];
-    if (rescueItem) repairGroupAbove.push(rescueItem);
+    var aboveMiscGroup = [];
+    if (rescueItem) aboveMiscGroup.push(rescueItem);
     return groupedOptions([
       [
         { label: 'SAILS', action: 'cmd:sails' },
@@ -6604,7 +6625,7 @@
         { label: 'COURSE', action: 'cmd:course' },
         { label: 'FISH', action: 'cmd:fish' },
       ],
-      repairGroupAbove,
+      aboveMiscGroup,
       [{ label: goLabel, action: 'go-above-below' }],
     ]);
   }
