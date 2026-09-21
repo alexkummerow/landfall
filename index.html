@@ -416,6 +416,7 @@
         tuna: 8, crackers: 8, peanutButter: 8, nuts: 12,
         driedFruit: 8, energyBars: 8, freshFruit: 6, freshBread: 4,
         chocolate: 4,
+        freshFish: 0, // FISHING HOOK -- caught, not part of starting provisions; see FOOD_ITEMS and the FISHING section
       },
       drinks: {
         coffee: 24, tea: 24,
@@ -429,6 +430,13 @@
           sailRepairKit: 2, steeringParts: 2, engineParts: 2, fuses: 3,
         },
         safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
+      },
+      // FISHING HOOK -- the only persisted fishing state; the in-progress
+      // cast/bite/reaction session itself is NOT here (see the FISHING
+      // section's fishingSession variable and its own comment for why).
+      fishing: {
+        keptFishOnDay: null,                     // voyageDayNumber() on which a fish was last kept, for the one-kept-fish-per-day rule
+        freshFishCaughtAt: [],                   // voyageMinutes of each currently-held Fresh Fish unit, for individual spoilage — see checkSpoilage()
       },
       books: newBooksState(),
       flags: {
@@ -1143,6 +1151,12 @@
     { key: 'freshFruit', name: 'Fresh Fruit', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 6 },
     { key: 'freshBread', name: 'Fresh Bread', cooked: false, heavy: false, perishable: true, category: 'fresh', original: 4 },
     { key: 'chocolate', name: 'Chocolate', cooked: false, heavy: false, category: 'chocolate', original: 4 },
+    // FISHING HOOK -- caught via FISH, not part of starting provisions
+    // (original: 0; see countCurrentOriginal's falsy-original handling
+    // and checkSpoilage's per-catch spoilage check, keyed off
+    // state.fishing.freshFishCaughtAt rather than a fixed voyage-day
+    // threshold like the other two 'fresh' items above).
+    { key: 'freshFish', name: 'Fresh Fish', cooked: true, heavy: false, perishable: true, category: 'fresh', original: 0 },
   ];
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
@@ -1970,6 +1984,7 @@
     return formatGal(current) + ' / ' + formatGal(original) + ' gal';
   }
   function countCurrentOriginal(current, original) {
+    if (!original) return String(current); // FISHING HOOK -- Fresh Fish has no fixed starting quantity to compare against
     return current + ' / ' + original;
   }
 
@@ -2843,6 +2858,25 @@
       f.freshBreadSpoiled = true;
       log(state, "The bread has finally gone \u2014 mold, then over the side.");
     }
+    // FISHING HOOK -- Fresh Fish, one timestamp per currently-held unit
+    // rather than a single flag: it's caught mid-voyage, at whatever
+    // moment, not part of the fixed starting provisions the two checks
+    // above are timed against.
+    var caughtAt = state.fishing.freshFishCaughtAt;
+    if (caughtAt.length) {
+      var windowMinutes = FISHING_CONFIG.freshFishSpoilHours * 60;
+      var stillGood = [];
+      var anySpoiled = false;
+      for (var i = 0; i < caughtAt.length; i++) {
+        if (state.meta.voyageMinutes - caughtAt[i] >= windowMinutes) anySpoiled = true;
+        else stillGood.push(caughtAt[i]);
+      }
+      if (anySpoiled) {
+        state.fishing.freshFishCaughtAt = stillGood;
+        food.freshFish = stillGood.length;
+        log(state, 'The fish has spoiled.');
+      }
+    }
   }
 
   function checkMilestones(state) {
@@ -3139,6 +3173,7 @@
     muted = !muted;
     if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
     applyMuteToEngineAudio(); // engine audio bypasses masterGain entirely, so it needs its own mute application
+    applyMuteToFishingAudio(); // FISHING HOOK -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -5452,6 +5487,7 @@
     bookshelf: cmdBookshelf,
     'tape-player': cmdTapePlayer,
     repair: cmdRepair,
+    fish: cmdFish, // FISHING HOOK
     restart: cmdRestart,
   };
 
@@ -5483,6 +5519,794 @@
       result = result.concat(group);
     });
     return result;
+  }
+
+  /* ============================================================
+     FISHING
+     ------------------------------------------------------------
+     CAST -> WAIT -> BITE -> REACT -> LAND -> KEEP/RELEASE. An Above
+     Deck activity (see getContextualOptions above and cmdFish below)
+     layered on top of two EXISTING systems rather than duplicating
+     either: FOOD_ITEMS' freshFish entry (provisions/hunger/morale) and
+     checkSpoilage (per-catch spoilage). Everything fishing-specific
+     lives in this one block, plus the handful of small hooks elsewhere
+     marked "FISHING HOOK".
+
+     TERMINAL PRESENTATION: fishing uses the exact same #temp-view
+     track (printLine/printBlank/clearTempView) as every other command
+     in the game, and no fishing-specific CSS at all -- REEL IN is a
+     plain .option button, same as everything else in #options.
+     Landfall's own generic button-click handler already clears
+     #temp-view before dispatching ANY action (see renderOptions), so a
+     fresh click-triggered screen (CAST, REEL IN, KEEP/RELEASE, STOP
+     FISHING) naturally starts from a blank temp-view without this code
+     needing to clear it itself. Within a single automatic sequence
+     that isn't waiting on a click (the bite arriving, the REEL IN
+     prompt, a landing sequence's own hint beats), nothing here ever
+     clears -- each new line is simply appended below the last, so the
+     whole thing reads as one continuous unfolding of ordinary terminal
+     text, never a wiped-and-redrawn screen.
+
+     BITE CHANCE is a flat, unconditional 60% on every cast
+     (FISHING_CONFIG.biteChance) -- there is deliberately no hidden
+     "local activity" state carrying pressure between casts anymore.
+     Each attempt is fully independent, exactly as specified: casting
+     again after a catch, a loss, or a plain miss re-rolls from
+     scratch, with nothing remembered from the attempt before. The
+     one-kept-fish-per-day rule (below) is what actually keeps fishing
+     from becoming a free, unlimited food source -- not a bite-chance
+     penalty.
+
+     FISH WEIGHT is rolled directly into one of four tiers
+     (FISHING_CONFIG.weightTiers) the moment a bite occurs -- there is
+     no separate small/medium/large category feeding into it. The tier
+     drives rarity, how long and how intense the automatic reel-in
+     sequence feels, and -- for the rare top tier only -- whether a
+     marlin is even possible. Marlin is NOT a separate roll applied to
+     every fish; it only has a chance to occur once the weight tier has
+     already landed on the top (30-40lb) bracket, and only in
+     marlin-eligible waters -- see beginFishBite. A marlin CAN be
+     landed (weight shown, same as anything else) but can never be
+     kept -- see revealMarlin/performFishRelease.
+
+     In-progress session state (which phase, the pending reaction
+     deadline, the fish about to be revealed, etc.) is deliberately NOT
+     part of the persisted `state` object -- it lives in the
+     module-level fishingSession variable below, same as uiBusy/
+     openInfoPanel. A reaction window can't meaningfully survive a
+     reload or a tab switch, so there's nothing to gain from persisting
+     it, and leaving the FISH screen (the only way to reach any other
+     menu while a session is active, since it owns state.pendingChoice
+     the whole time) always cancels whatever's in flight via STOP
+     FISHING, which returns to the normal Above Deck menu.
+
+     Only two things about fishing are persisted, in state.fishing (see
+     GAME STATE) and state.food.freshFish:
+       - which voyage day a fish was last kept (the one-per-day rule)
+       - a timestamp per currently-held Fresh Fish unit (spoilage)
+     ============================================================ */
+
+  var FISHING_CONFIG = {
+    biteChance: 0.6, // flat, every cast -- no hidden state modifies this
+    bite: {
+      totalWaitMs: 90000, // max wait per attempt; if a bite is going to happen, it lands at a uniformly random point anywhere in this window
+    },
+
+    biteToPromptDelayMs: 1000, // "The line jerks hard." sits alone for exactly this long, then "REEL IN" appears -- no clicks are accepted during this window
+
+    // Once REEL IN appears, how long the player has to select it -- one
+    // flat value regardless of the fish's weight tier. The window is
+    // about whether the player is paying attention right now, not a
+    // dexterity check.
+    reactionWindowMs: 3000,
+
+    // Fish weight is rolled directly into one of these tiers the
+    // moment a bite occurs (see beginFishBite) -- `weight` is the
+    // relative chance (normalized automatically; these sum to 100 for
+    // readability but don't have to), and durationMsRange is how long
+    // the automatic reel-in sequence takes for a fish landing in that
+    // tier. See FISH_TIER_HINT_POOLS for the matching hint text.
+    weightTiers: [
+      { key: 'common', minLb: 0, maxLb: 10, weight: 60, durationMsRange: [6000, 9000] },
+      { key: 'substantial', minLb: 10, maxLb: 20, weight: 30, durationMsRange: [9000, 13000] },
+      { key: 'big', minLb: 20, maxLb: 30, weight: 8, durationMsRange: [13000, 17000] },
+      { key: 'trophy', minLb: 30, maxLb: 40, weight: 2, durationMsRange: [18000, 22000] },
+    ],
+
+    // Only rolled when the weight tier has ALREADY landed on 'trophy'
+    // (itself just 2% of hooked fish) AND the boat is in
+    // marlin-eligible waters -- see marlinEligible. Most trophy-tier
+    // catches are still an ordinary (if exceptional) large fish, not a
+    // marlin -- this is deliberately small so a marlin stays "an
+    // especially rare possibility," not a guaranteed flavor of big fish.
+    marlinChanceWithinTrophyTier: 0.15,
+
+    freshFishSpoilHours: 4, // catch it -> cook/eat it within this many IN-GAME hours
+  };
+
+  // FISH_SPECIES_ANCHORS: six hand-authored species/weight tables, one
+  // per named region, anchored to actual nm-remaining-to-Nāwiliwili
+  // values (reusing distanceBetween/FINAL_DEST/WAYPOINTS -- the exact
+  // same position data voyagePhase itself already uses, so the species
+  // mix lines up with the same regions the player already sees named
+  // in POSITION). fishSpeciesWeightsForState linearly interpolates
+  // every species' weight between the two anchors bracketing the
+  // boat's CURRENT position, so the mix shifts gradually with distance
+  // sailed rather than snapping at a boundary -- a species fading
+  // in/out is just its weight rising from/falling to 0 across anchors,
+  // nothing more special than that.
+  var FISH_SPECIES = [
+    { id: 'coho', name: 'Coho Salmon', maxLb: 15 },
+    { id: 'pink', name: 'Pink Salmon', maxLb: 6 },
+    { id: 'chinook', name: 'Chinook Salmon', maxLb: 40 },
+    { id: 'herring', name: 'Pacific Herring', maxLb: 1.5 },
+    { id: 'mackerel', name: 'Pacific Mackerel', maxLb: 4 },
+    { id: 'rockfish', name: 'Rockfish', maxLb: 12 },
+    { id: 'lingcod', name: 'Lingcod', maxLb: 30 },
+    { id: 'bonito', name: 'Pacific Bonito', maxLb: 20 },
+    { id: 'albacore', name: 'Albacore', maxLb: 40 },
+    { id: 'skipjack', name: 'Skipjack Tuna', hawaiianName: 'Aku', maxLb: 25 },
+    { id: 'mahimahi', name: 'Mahi-Mahi', maxLb: 40 },
+    { id: 'yellowfin', name: 'Yellowfin Tuna', hawaiianName: 'Ahi', maxLb: 40 },
+    { id: 'wahoo', name: 'Wahoo', hawaiianName: 'Ono', maxLb: 40 },
+  ];
+  var FISH_SPECIES_BY_ID = {};
+  FISH_SPECIES.forEach(function (sp) { FISH_SPECIES_BY_ID[sp.id] = sp; });
+
+  // Ordered by DESCENDING distRemainingNm (voyage start first, arrival
+  // last) -- fishSpeciesWeightsForState depends on this order. The
+  // first three anchors reuse actual waypoints (Shilshole, the Strait's
+  // eastern entrance, Cape Flattery); the last three reuse voyagePhase's
+  // own offshore/tropics/approach thresholds (1845nm, 861nm, 0nm) so
+  // the blend lines up with the same phase boundaries POSITION/regionName
+  // already use, even though the species mix itself never hard-switches.
+  var FISH_SPECIES_ANCHORS = [
+    { // Puget Sound / early departure -- typical catches skew smaller
+      distRemainingNm: distanceBetween(WAYPOINTS[0].lat, WAYPOINTS[0].lon, FINAL_DEST.lat, FINAL_DEST.lon),
+      weights: { coho: 30, pink: 10, chinook: 5, herring: 20, mackerel: 15, rockfish: 15, lingcod: 8 },
+    },
+    { // Strait of Juan de Fuca -- transitional between coastal and offshore
+      distRemainingNm: distanceBetween(WAYPOINTS[6].lat, WAYPOINTS[6].lon, FINAL_DEST.lat, FINAL_DEST.lon), // 'Strait East'
+      weights: { coho: 22, pink: 4, chinook: 10, herring: 8, mackerel: 16, rockfish: 14, lingcod: 12, bonito: 4, albacore: 1 },
+    },
+    { // Coastal Pacific / just offshore
+      distRemainingNm: distanceBetween(WAYPOINTS[11].lat, WAYPOINTS[11].lon, FINAL_DEST.lat, FINAL_DEST.lon), // 'Cape Flattery'
+      weights: { coho: 10, chinook: 3, mackerel: 14, rockfish: 5, lingcod: 4, bonito: 12, albacore: 10, skipjack: 2 },
+    },
+    { // North Pacific / well offshore -- coastal species gone, salmon fading
+      distRemainingNm: 1845, // voyagePhase's own offshore/tropics threshold
+      weights: { coho: 1, mackerel: 3, bonito: 16, albacore: 26, skipjack: 12, mahimahi: 3, yellowfin: 1 },
+    },
+    { // Mid-Pacific / tropics
+      distRemainingNm: 861, // voyagePhase's own tropics/approach threshold
+      weights: { bonito: 6, albacore: 14, skipjack: 22, mahimahi: 22, yellowfin: 8, wahoo: 3 },
+    },
+    { // Approaching Hawai'i -- northwest species gone entirely
+      distRemainingNm: 0,
+      weights: { albacore: 2, skipjack: 24, mahimahi: 30, yellowfin: 12, wahoo: 8 },
+    },
+  ];
+
+  function fishSpeciesWeightsForState(state) {
+    var dist = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    var anchors = FISH_SPECIES_ANCHORS;
+    var earlier = anchors[0], later = anchors[anchors.length - 1];
+    for (var i = 0; i < anchors.length - 1; i++) {
+      if (dist <= anchors[i].distRemainingNm && dist >= anchors[i + 1].distRemainingNm) {
+        earlier = anchors[i];
+        later = anchors[i + 1];
+        break;
+      }
+    }
+    var span = earlier.distRemainingNm - later.distRemainingNm;
+    var frac = span > 0 ? clamp((earlier.distRemainingNm - dist) / span, 0, 1) : 0; // 0 at `earlier`, 1 at `later`
+    var weights = {};
+    FISH_SPECIES.forEach(function (sp) {
+      var wEarlier = earlier.weights[sp.id] || 0;
+      var wLater = later.weights[sp.id] || 0;
+      weights[sp.id] = wEarlier + (wLater - wEarlier) * frac;
+    });
+    return weights;
+  }
+
+  // Weighted species pick, restricted to species that can plausibly
+  // reach the ACTUAL rolled weight (species.maxLb >= weightLb) -- used
+  // for every tier, so a catch is never an implausibly large example
+  // of a small-bodied species (no 29lb herring), not just at the rare
+  // top tier. Falls back to the single largest-maxLb species available
+  // at this location if, somehow, nothing qualifies.
+  function pickFishSpeciesForWeight(state, weightLb) {
+    var weights = fishSpeciesWeightsForState(state);
+    var candidates = FISH_SPECIES.filter(function (sp) { return sp.maxLb >= weightLb; });
+    var total = 0;
+    candidates.forEach(function (sp) { total += weights[sp.id] || 0; });
+    if (total <= 0) {
+      var byMaxLbDesc = FISH_SPECIES.filter(function (sp) { return (weights[sp.id] || 0) > 0; })
+        .sort(function (a, b) { return b.maxLb - a.maxLb; });
+      return byMaxLbDesc[0] || FISH_SPECIES[0]; // shouldn't happen -- every anchor has enough species with weight to cover every tier -- but never leave this unhandled
+    }
+    var roll = Math.random() * total;
+    for (var i = 0; i < candidates.length; i++) {
+      var w = weights[candidates[i].id] || 0;
+      if (roll < w) return candidates[i];
+      roll -= w;
+    }
+    return candidates[candidates.length - 1];
+  }
+
+  // Some species go by a different name near Hawai'i (skipjack/aku,
+  // yellowfin/ahi, wahoo/ono) -- purely cosmetic, doesn't affect which
+  // species gets picked or its weight.
+  function fishSpeciesDisplayName(state, species) {
+    if (species.hawaiianName && voyagePhase(state) === 'approach') return species.hawaiianName;
+    return species.name;
+  }
+
+  function pickFishWeightTier() {
+    var tiers = FISHING_CONFIG.weightTiers;
+    var total = 0;
+    tiers.forEach(function (t) { total += t.weight; });
+    var roll = Math.random() * total;
+    for (var i = 0; i < tiers.length; i++) {
+      if (roll < tiers[i].weight) return tiers[i];
+      roll -= tiers[i].weight;
+    }
+    return tiers[tiers.length - 1];
+  }
+
+  function pickFishWeightLbInTier(tier) {
+    return +(rand(tier.minLb, tier.maxLb)).toFixed(1);
+  }
+
+  function marlinEligible(state) {
+    var phase = voyagePhase(state);
+    return phase === 'tropics' || phase === 'approach';
+  }
+
+  function fishAlreadyKeptToday(state) {
+    return state.fishing.keptFishOnDay === voyageDayNumber(state);
+  }
+
+  /* --------------------------------------------------------------
+     FISHING AUDIO -- a fourth independent layer (alongside boat
+     ambience, engine audio, and the tape player), built exactly the
+     same way as engine audio (see ENGINE_AUDIO_FILES/playEngineOneShot
+     etc. in the AMBIENT AUDIO section above): plain HTMLAudioElements,
+     lazily created, controlled directly with .play()/.pause()/.volume/
+     .currentTime -- no Web Audio API, no new unlock mechanism. Kept as
+     its own, fully independent copy of that same small set of helpers
+     (fadeFishingVolume mirrors fadeEngineVolume exactly) rather than
+     sharing the engine-audio functions, for the same reason engine
+     audio itself stays separate from boat ambience: independent
+     systems, each easy to reason about on its own.
+
+     Every trigger point below is either a real button click (CAST,
+     REEL IN, RELEASE) or a setTimeout chained from one (the bite
+     firing, a landing sequence's own beats), so it's already covered
+     by the same audioUnlocked gate every other sound in the game
+     already relies on -- nothing new to unlock.
+     -------------------------------------------------------------- */
+  var FISHING_AUDIO_FILES = {
+    cast: 'audio/fishing/cast.mp3',
+    catch: 'audio/fishing/catch.mp3',
+    catchSmall: 'audio/fishing/catch_small.mp3',
+    catchMedium: 'audio/fishing/catch_medium.mp3',
+    catchLarge: 'audio/fishing/catch_large.mp3',
+    drag1: 'audio/fishing/drag_1.mp3',
+    drag2: 'audio/fishing/drag_2.mp3',
+    reel: 'audio/fishing/reel.mp3',
+    release: 'audio/fishing/release.mp3',
+  };
+  var FISHING_AUDIO_VOLUME = {
+    cast: 0.6, catch: 0.65, catchSmall: 0.6, catchMedium: 0.6, catchLarge: 0.6,
+    drag1: 0.35, drag2: 0.35, reel: 0.4, release: 0.55,
+  };
+  var FISHING_CROSSFADE_SECONDS = 0.1; // reel.mp3's fade-out into the catch sound -- click prevention only, not an audible crossfade
+
+  var fishingAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as engineAudioEls
+
+  function getFishingAudioEl(key) {
+    var el = fishingAudioEls[key];
+    if (el) return el;
+    el = new Audio(FISHING_AUDIO_FILES[key]);
+    el.loop = (key === 'reel');
+    el.preload = 'auto';
+    el.volume = 0;
+    fishingAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeEngineVolume -- see that function's own
+  // comment; kept as its own copy here for the independence reasons
+  // explained in the section comment above.
+  function fadeFishingVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a one-shot (cast/catch/catch_small/catch_medium/catch_large/
+  // release/drag1/drag2) from the beginning every time, with a quick
+  // fade-in to avoid a click at the start -- and fires onEnded (once)
+  // when it naturally finishes, same wiring as playEngineOneShot.
+  function playFishingOneShot(key, onEnded) {
+    if (!audioUnlocked) return;
+    var el = getFishingAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    el._baseVolume = FISHING_AUDIO_VOLUME[key];
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); });
+    fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+  }
+
+  // Starts the continuous reel.mp3 bed -- fresh from the beginning
+  // every time (a new reel-in sequence is always a clean start, never
+  // a resume), looped (see getFishingAudioEl), left running underneath
+  // the automatic suspense text until stopFishingReelLoop fades it out.
+  function startFishingReelLoop() {
+    if (!audioUnlocked) return;
+    var el = getFishingAudioEl('reel');
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    el._baseVolume = FISHING_AUDIO_VOLUME.reel;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (reel):', describeError(e)); });
+    fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME.reel, FISHING_CROSSFADE_SECONDS);
+  }
+
+  // Fades reel.mp3 out over the same short 0.1s used everywhere else
+  // here, then pauses it -- called both at the natural end of a
+  // landing sequence (right as the catch sound fires, so the two
+  // overlap just enough to feel like a crossfade, not a gap) and
+  // defensively from clearFishingTimers, so at most one reel.mp3
+  // instance is ever actually audible at a time.
+  function stopFishingReelLoop() {
+    var el = fishingAudioEls.reel;
+    if (!el || el.paused) return;
+    el._baseVolume = 0;
+    fadeFishingVolume(el, 0, FISHING_CROSSFADE_SECONDS, function () { el.pause(); });
+  }
+
+  // Which final catch sound fits the fish's actual generated weight --
+  // used identically for a normal catch and for marlin (whose weight
+  // always falls in the 30-40lb trophy range, so it always resolves to
+  // catchLarge here with no separate marlin-specific audio logic
+  // needed at all).
+  function fishingCatchSoundKeyForWeight(weightLb) {
+    if (weightLb <= 10) return 'catchSmall';
+    if (weightLb <= 20) return 'catchMedium';
+    return 'catchLarge';
+  }
+
+  // Drag sounds: occasional, subtle "something's moving down there"
+  // texture during the wait. Never overlap, since only one is ever
+  // scheduled at a time, and the NEXT one is only scheduled once the
+  // CURRENT one has actually finished playing (via its own onEnded),
+  // plus another randomized gap on top -- never a fixed interval.
+  // fishingDragActive is the on/off switch: cancelFishingDragScheduler
+  // flips it off immediately so a pending setTimeout (or a
+  // still-playing sound's onEnded) can never schedule another round
+  // after cancellation.
+  var fishingDragActive = false;
+  var fishingDragTimer = null;
+
+  function scheduleFishingDragSound() {
+    if (!fishingDragActive) return;
+    var delayMs = rand(4000, 9000); // "fairly generous" spacing, deliberately randomized rather than fixed
+    fishingDragTimer = setTimeout(function () {
+      fishingDragTimer = null;
+      if (!fishingDragActive) return;
+      var key = Math.random() < 0.5 ? 'drag1' : 'drag2';
+      playFishingOneShot(key, function () {
+        scheduleFishingDragSound(); // only schedules the next one once this one has actually finished
+      });
+    }, delayMs);
+  }
+
+  function startFishingDragScheduler() {
+    fishingDragActive = true;
+    scheduleFishingDragSound();
+  }
+
+  function cancelFishingDragScheduler() {
+    fishingDragActive = false;
+    if (fishingDragTimer) { clearTimeout(fishingDragTimer); fishingDragTimer = null; }
+    // Also hard-stops a drag sound that's actively mid-playback right
+    // now, rather than letting it finish naturally -- a stray drag
+    // sound bleeding into the sudden catch.mp3 bite alert (or into
+    // silence after STOP FISHING) would undercut both moments.
+    ['drag1', 'drag2'].forEach(function (key) {
+      var el = fishingAudioEls[key];
+      if (!el) return;
+      el.onended = null;
+      if (!el.paused) el.pause();
+    });
+  }
+
+  // Applies the current mute state to whichever fishing element(s) are
+  // actually audible right now, instantly -- called from toggleMute,
+  // same pattern as applyMuteToEngineAudio.
+  function applyMuteToFishingAudio() {
+    Object.keys(fishingAudioEls).forEach(function (key) {
+      var el = fishingAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : (el._baseVolume || 0);
+    });
+  }
+
+  // Transient, in-progress fishing session -- NOT persisted; see the
+  // section comment above for why. null whenever no cast is currently
+  // in flight (idle FISH screen, or the player has left it entirely).
+  var fishingSession = null;
+
+  function clearFishingTimers() {
+    // FISHING HOOK -- always safe to call, whether or not either was
+    // actually active; extends this already-central cleanup point so
+    // every existing call site (a new cast, a bite arriving, no bite,
+    // a missed reaction, STOP FISHING) also gets audio cleanup for
+    // free, with no new call sites needed elsewhere.
+    cancelFishingDragScheduler();
+    stopFishingReelLoop();
+    if (!fishingSession) return;
+    if (fishingSession.resolveTimer) clearTimeout(fishingSession.resolveTimer);
+    if (fishingSession.dotsTimer) clearInterval(fishingSession.dotsTimer);
+    // The waiting dots are a single DOM node this code inserted directly
+    // (not through printLine, since it needs to keep updating the SAME
+    // element rather than appending a new one every frame) -- remove it
+    // explicitly rather than relying on some later clearTempView(),
+    // since under the append-only model nothing else will.
+    if (fishingSession.dotsLineEl && fishingSession.dotsLineEl.parentNode) {
+      fishingSession.dotsLineEl.parentNode.removeChild(fishingSession.dotsLineEl);
+    }
+  }
+
+  function fishingIdleOptions() {
+    return [{ label: 'CAST', action: 'fish-cast' }, { label: 'STOP FISHING', action: 'fish-stop' }];
+  }
+
+  function cmdFish(state) {
+    clearFishingTimers(); // FISHING HOOK -- defensive; ensures no audio from a previous attempt can leak in
+    fishingSession = null; // a fresh visit to the FISH screen always starts idle -- see FISHING section comment on why nothing here is resumed
+    printBlank();
+    printLine('FISHING', 'heading-label');
+    state.pendingChoice = { id: 'fish-idle', options: fishingIdleOptions() };
+  }
+
+  function performFishCast(state) {
+    clearFishingTimers();
+    var willBite = Math.random() < FISHING_CONFIG.biteChance; // flat 60% -- see FISHING_CONFIG.biteChance comment for why nothing else modifies this
+
+    fishingSession = { phase: 'waiting', willBite: willBite, resolveTimer: null, dotsTimer: null, dotsLineEl: null };
+
+    playFishingOneShot('cast'); // FISHING HOOK -- fire-and-forget, does not delay anything below
+    startFishingDragScheduler(); // FISHING HOOK -- cancelled by clearFishingTimers whenever the wait ends, for any reason
+
+    // #temp-view was already cleared by the generic click handler that
+    // routed the CAST click here (see renderOptions) -- just append the
+    // waiting dots, same visual rhythm as any other short action's dots
+    // (see animateDots in runShortAction) and no special styling. A
+    // single DOM node whose text content is updated in place -- never
+    // prints a new line while waiting.
+    var dotsLine = document.createElement('p');
+    dotsLine.className = 'line dim';
+    dotsLine.textContent = '.';
+    tempViewEl.appendChild(dotsLine);
+    fishingSession.dotsLineEl = dotsLine;
+    var frames = ['.', '..', '...'];
+    var frameIndex = 0;
+    fishingSession.dotsTimer = setInterval(function () {
+      frameIndex = (frameIndex + 1) % frames.length;
+      dotsLine.textContent = frames[frameIndex];
+    }, DOT_FRAME_MS);
+
+    state.pendingChoice = { id: 'fish-waiting', options: [{ label: 'STOP FISHING', action: 'fish-stop' }] };
+
+    var mySession = fishingSession;
+    // If a bite is going to happen at all, it lands at a uniformly
+    // random point somewhere in the full wait window -- not weighted
+    // toward any particular part of it.
+    var resolveAtMs = willBite ? rand(0, FISHING_CONFIG.bite.totalWaitMs) : FISHING_CONFIG.bite.totalWaitMs;
+    fishingSession.resolveTimer = setTimeout(function () {
+      if (fishingSession !== mySession) return; // superseded -- STOP FISHING was clicked, or another cast started
+      if (willBite) beginFishBite(state);
+      else resolveFishNoBite(state);
+    }, resolveAtMs);
+    // Deliberately no renderOptions/save/scroll call here -- this runs
+    // inside handleAction (via performFishCast), whose own tail does
+    // that once this returns, same as every other action.
+  }
+
+  function performFishStop(state) {
+    clearFishingTimers();
+    fishingSession = null;
+    printBlank();
+    printLine('You bring the line in.', 'dim');
+    // pendingChoice deliberately left unset -- handleAction's tail
+    // clears it (nothing here sets a new one), so the normal Above
+    // Deck menu takes over on the next render, exactly like 'cancel'
+    // elsewhere. This is what "return the player to the normal Above
+    // Deck interface" means mechanically.
+  }
+
+  function resolveFishNoBite(state) {
+    clearFishingTimers();
+    printBlank();
+    printLine('Nothing\u2019s biting.', 'dim');
+    showFishResultScreen(state);
+  }
+
+  // Weight tier, weight, and (if applicable) the marlin/species
+  // decision are ALL made right here, the moment the bite occurs --
+  // before the player ever sees REEL IN, same as before. None of it is
+  // shown or hinted at this point; it only shapes the automatic
+  // sequence once a successful reaction hooks the fish.
+  function beginFishBite(state) {
+    clearFishingTimers(); // stops the dots timer and removes the dots line -- the wait is over
+    var tier = pickFishWeightTier();
+    var weightLb = pickFishWeightLbInTier(tier);
+    // Marlin is only ever possible once the tier roll has ALREADY
+    // landed on the rare top bracket, and only in eligible waters --
+    // see the FISHING_CONFIG.marlinChanceWithinTrophyTier comment.
+    var isMarlin = tier.key === 'trophy' && marlinEligible(state) && Math.random() < FISHING_CONFIG.marlinChanceWithinTrophyTier;
+    var species = isMarlin ? null : pickFishSpeciesForWeight(state, weightLb);
+
+    fishingSession = { phase: 'bite-prompt', tier: tier, weightLb: weightLb, isMarlin: isMarlin, species: species, resolveTimer: null };
+
+    printLine('The line jerks hard.');
+    playFishingOneShot('catch'); // FISHING HOOK -- the sudden bite alert; fire-and-forget, does not delay anything below
+    // No options at all -- ignores clicks/taps before REEL IN appears,
+    // since there's nothing here to click.
+    state.pendingChoice = { id: 'fish-bite-prompt', options: [] };
+    renderOptions(state);
+    scrollToBottom();
+
+    var mySession = fishingSession;
+    fishingSession.resolveTimer = setTimeout(function () {
+      if (fishingSession !== mySession) return;
+      beginFishReelPrompt(state);
+    }, FISHING_CONFIG.biteToPromptDelayMs);
+  }
+
+  function beginFishReelPrompt(state) {
+    clearFishingTimers();
+    fishingSession.phase = 'reacting';
+    printLine('REEL IN'); // a plain, ordinary terminal line -- REEL IN's button (below, in #options) is a normal .option, no special styling either
+    state.pendingChoice = { id: 'fish-reacting', options: [{ label: 'REEL IN', action: 'fish-reel' }] };
+    renderOptions(state);
+    scrollToBottom();
+
+    var mySession = fishingSession;
+    fishingSession.resolveTimer = setTimeout(function () {
+      if (fishingSession !== mySession) return;
+      resolveFishReactionMissed(state);
+    }, FISHING_CONFIG.reactionWindowMs);
+  }
+
+  function resolveFishReactionMissed(state) {
+    clearFishingTimers();
+    printBlank();
+    printLine('The line goes slack.', 'dim');
+    printLine('The fish is lost.', 'dim');
+    showFishResultScreen(state);
+  }
+
+  function performFishReel(state) {
+    if (!fishingSession || fishingSession.phase !== 'reacting') return; // stale/duplicate click -- shouldn't be reachable since the button disappears on the next render, but stay defensive
+    clearFishingTimers();
+    beginFishLandingSequence(state);
+  }
+
+  // Hint beats by weight TIER (not species) -- each tier gets a pool of
+  // short lines per beat slot so a sequence doesn't read identically
+  // every time. 'trophy' beats are the shared opening/mid beats for
+  // EVERY 30-40lb catch, marlin or not -- the player can't tell which
+  // it is yet at this point, which is deliberate; the branch only
+  // happens in the final beat(s), see beginFishLandingSequence.
+  var FISH_TIER_HINT_POOLS = {
+    common: [
+      ['There\u2019s weight on the line.', 'Something\u2019s there.', 'A light tug.'],
+      ['It pulls away, then eases.', 'You gain some line.', 'It comes in without much fuss.'],
+    ],
+    substantial: [
+      ['The line pulls harder.', 'Something pushes back.', 'A stronger tug this time.'],
+      ['It runs a little, then settles.', 'It\u2019s not coming in easy.', 'Steady resistance.'],
+      ['You gain line, then lose a little back.', 'It fights for a moment.', 'A real pull now.'],
+    ],
+    big: [
+      ['Real weight, right away.', 'This one doesn\u2019t give easily.', 'Something big is pulling back.'],
+      ['It runs, and keeps running.', 'The line stays taut.', 'It\u2019s not tiring yet.'],
+      ['Whatever it is, it\u2019s strong.', 'The rod bends hard.', 'It\u2019s still fighting.'],
+      ['Slowly, you start to gain line.', 'It gives an inch at a time.', 'The fight is starting to turn.'],
+    ],
+    trophy: [
+      ['Heavy.', 'Heavier than anything so far.'],
+      ['It runs again.', 'It takes line back, fast.'],
+      ['Whatever\u2019s down there is big.', 'This is something else.'],
+    ],
+  };
+  var FISH_GLIMPSE_LINES = ['You catch a glimpse beneath the surface.', 'Something breaks the surface, big.'];
+  var MARLIN_FLASH_LINES = ['A flash of blue beneath the surface.'];
+  var MARLIN_RARITY_LINES = ['You don\u2019t see many of these this close.', 'Not something you see every voyage.'];
+
+  // Automatic, no further player input: the weight tier's own hint
+  // beats (each followed by its own "..." line), then either an
+  // ordinary glimpse-and-reveal (most catches) or the marlin-specific
+  // flash-and-reveal (only when fishingSession.isMarlin) -- spread
+  // evenly across the tier's randomized total duration. Species/weight
+  // (or marlin-ness) were already decided back at the bite; nothing
+  // here changes what's on the line, only how it's narrated.
+  function beginFishLandingSequence(state) {
+    var session = fishingSession;
+    var tier = session.tier;
+    var hintLines = FISH_TIER_HINT_POOLS[tier.key].map(function (pool) { return pickFromPool(pool); });
+
+    startFishingReelLoop(); // FISHING HOOK -- continuous bed underneath the suspense text; stopped by resolveFishLanded/revealMarlin below
+
+    var lines = [];
+    hintLines.forEach(function (h) { lines.push(h, '...'); });
+    lines.push(session.isMarlin ? pickFromPool(MARLIN_FLASH_LINES) : pickFromPool(FISH_GLIMPSE_LINES), '...');
+
+    session.phase = 'landing';
+    state.pendingChoice = { id: 'fish-landing', options: [] }; // automatic -- nothing to click during this sequence
+    renderOptions(state);
+    scrollToBottom();
+
+    var range = tier.durationMsRange;
+    var totalMs = rand(range[0], range[1]);
+    var stepMs = totalMs / (lines.length + 1); // + one more beat's worth of pause before the reveal
+
+    var mySession = session;
+    var index = 0;
+    function showNextLine() {
+      if (fishingSession !== mySession) return;
+      printLine(lines[index]);
+      scrollToBottom();
+      index++;
+      if (index < lines.length) {
+        fishingSession.resolveTimer = setTimeout(showNextLine, stepMs);
+      } else {
+        fishingSession.resolveTimer = setTimeout(function () {
+          if (fishingSession !== mySession) return;
+          if (session.isMarlin) revealMarlin(state);
+          else resolveFishLanded(state);
+        }, stepMs);
+      }
+    }
+    fishingSession.resolveTimer = setTimeout(showNextLine, stepMs);
+  }
+
+  function resolveFishLanded(state) {
+    var session = fishingSession;
+    var displayName = fishSpeciesDisplayName(state, session.species);
+
+    session.phase = 'keep-release';
+    session.pendingCatch = { displayName: displayName, weightLb: session.weightLb };
+
+    // FISHING HOOK -- reel.mp3 fades out (0.1s) right as the size-based
+    // catch sound fires, so the two overlap briefly into a tight
+    // crossfade rather than leaving an audible gap; see
+    // fishingCatchSoundKeyForWeight for the weight->sound mapping.
+    stopFishingReelLoop();
+    playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
+
+    printBlank();
+    printLine(displayName.toUpperCase() + ' \u2014 ' + session.weightLb.toFixed(1) + ' LB');
+
+    if (fishAlreadyKeptToday(state)) {
+      printLine('I\u2019ve got enough for today.', 'dim');
+      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
+    } else {
+      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'KEEP', action: 'fish-keep' }, { label: 'RELEASE', action: 'fish-release' }] };
+    }
+
+    renderOptions(state);
+    saveGameState(state);
+    scrollToBottom();
+  }
+
+  // Marlin CAN be landed -- weight shown, same as any other fish -- but
+  // can never be kept (see performFishRelease's marlin-release branch,
+  // and note there is no "case 'fish-keep'" path into this phase at
+  // all). "A marlin." and the rarity line each get their own brief
+  // pause rather than appearing all at once, matching the unhurried
+  // pacing of everything else here.
+  function revealMarlin(state) {
+    var session = fishingSession;
+    printLine('A marlin.');
+    scrollToBottom();
+
+    var mySession = session;
+    fishingSession.resolveTimer = setTimeout(function () {
+      if (fishingSession !== mySession) return;
+      printLine(pickFromPool(MARLIN_RARITY_LINES), 'dim');
+      scrollToBottom();
+      fishingSession.resolveTimer = setTimeout(function () {
+        if (fishingSession !== mySession) return;
+        // FISHING HOOK -- same reel-stop+catch-sound handoff as
+        // resolveFishLanded, timed to the actual weight reveal (not
+        // the earlier "A marlin." beat, which is still part of the
+        // suspense the reel bed should keep playing underneath).
+        // Marlin's weight always falls in the trophy 30-40lb range, so
+        // this naturally resolves to catchLarge -- no separate marlin
+        // audio logic needed.
+        stopFishingReelLoop();
+        playFishingOneShot(fishingCatchSoundKeyForWeight(session.weightLb));
+        printBlank();
+        printLine('MARLIN \u2014 ' + session.weightLb.toFixed(1) + ' LB');
+        session.phase = 'marlin-release';
+        state.pendingChoice = { id: 'fish-marlin-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
+        renderOptions(state);
+        saveGameState(state);
+        scrollToBottom();
+      }, 1400);
+    }, 1400);
+  }
+
+  function performFishKeep(state) {
+    if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.pendingCatch) return;
+    var caught = fishingSession.pendingCatch;
+    state.food.freshFish = (state.food.freshFish || 0) + 1;
+    state.fishing.freshFishCaughtAt.push(state.meta.voyageMinutes);
+    state.fishing.keptFishOnDay = voyageDayNumber(state);
+    log(state, 'Kept: FRESH FISH \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
+    flushNewLogEntries(state);
+    showFishResultScreen(state);
+  }
+
+  function performFishRelease(state) {
+    if (!fishingSession) return;
+    if (fishingSession.phase === 'marlin-release') {
+      playFishingOneShot('release'); // FISHING HOOK
+      // A marlin is memorable enough to be worth a permanent voyage-log
+      // line, unlike an ordinary release (which stays transient/#temp-view
+      // only) -- see the FISHING section comment on why this is the one
+      // deliberate asymmetry here.
+      printBlank();
+      printLine('You let it go.', 'dim');
+      log(state, 'A marlin came alongside \u2014 rare enough to remember \u2014 then went back over the side.');
+      flushNewLogEntries(state);
+      showFishResultScreen(state);
+      return;
+    }
+    if (fishingSession.phase !== 'keep-release') return;
+    playFishingOneShot('release'); // FISHING HOOK
+    printBlank();
+    printLine('You let it go.', 'dim');
+    showFishResultScreen(state);
+  }
+
+  function showFishResultScreen(state) {
+    fishingSession = { phase: 'result' };
+    state.pendingChoice = { id: 'fish-result', options: fishingIdleOptions() };
+    renderOptions(state);
+    saveGameState(state);
+    scrollToBottom();
   }
 
   function getContextualOptions(state) {
@@ -5566,6 +6390,7 @@
         { label: 'SAILS', action: 'cmd:sails' },
         { label: 'ENGINE', action: 'cmd:engine' },
         { label: 'COURSE', action: 'cmd:course' },
+        { label: 'FISH', action: 'cmd:fish' },
       ],
       [{ label: 'REPAIR', action: 'cmd:repair' }],
       [{ label: goLabel, action: 'go-above-below' }],
@@ -5859,6 +6684,24 @@
       cmdRepairSystem(state, action.slice(14));
     } else if (action.indexOf('attempt-repair:') === 0) {
       performSystemRepairAttempt(state, action.slice(15));
+    } else if (action.indexOf('fish-') === 0) {
+      // FISHING HOOK -- the whole cast/wait/bite/reel/land/keep-release
+      // session lives in its own section (search "FISHING" above
+      // getContextualOptions); this just routes the player-clicked
+      // actions into it. uiBusy is deliberately never set for any of
+      // these -- the session drives its own state.pendingChoice/
+      // renderOptions calls directly from its own setTimeout chain
+      // rather than through runShortAction, since (unlike every other
+      // short action) it's long, variable-length, and interruptible
+      // (STOP FISHING) rather than fixed-duration.
+      switch (action) {
+        case 'fish-cast': performFishCast(state); break;
+        case 'fish-stop': performFishStop(state); break;
+        case 'fish-reel': performFishReel(state); break;
+        case 'fish-keep': performFishKeep(state); break;
+        case 'fish-release': performFishRelease(state); break;
+        default: break;
+      }
     } else if (action.indexOf('course-draft:') === 0) {
       // The CHANGE COURSE dial: nudge the draft value and redraw the
       // same picker so the player sees where they've landed before
@@ -6506,6 +7349,14 @@
     }
     if (w.oceanCurrent.northSample === undefined) w.oceanCurrent.northSample = null;
     if (w.oceanCurrent.southSample === undefined) w.oceanCurrent.southSample = null;
+    // FISHING HOOK -- backfill for any save that predates this feature.
+    if (state.food.freshFish === undefined) state.food.freshFish = 0;
+    if (!state.fishing) {
+      state.fishing = {
+        keptFishOnDay: null,
+        freshFishCaughtAt: [],
+      };
+    }
   }
 
   function boot() {
