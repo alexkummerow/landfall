@@ -309,7 +309,8 @@
         groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
         tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveCoastalAutoTack(). Never set in open ocean.
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
-        driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps
+        driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
+        autopilotWobble: 0,        // open ocean, AUTOPILOT ON only — small bounded correction oscillation around the steering solution; see computeHeading
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
@@ -1595,6 +1596,18 @@
     return null;
   }
 
+  // Same rough-weather threshold pickFailureSystem() uses for the extra
+  // autopilot-related steering/electrical risk — surfaced here as
+  // advance warning rather than only showing up after the fact.
+  function stormAutopilotNote(state) {
+    var w = state.weather, b = state.boat;
+    if (!b.autopilotOn) return null;
+    if (w.seaState >= 4 || w.condition === 'squall') {
+      return 'Consider reducing sail and disengaging the autopilot.';
+    }
+    return null;
+  }
+
   // Nudges the SAME fields driftWeather writes toward the last successful
   // real observation, rather than snapping to it — see the module
   // header above for why the sailing model needs no separate wiring to
@@ -1720,8 +1733,34 @@
   //
   // Either way, resolveAutoTack() decides what the boat actually steers
   // (ACTUAL HEADING) tick to tick to make SET COURSE good.
+  //
+  // AUTOPILOT ON, open water: desired course is current-corrected, then
+  // run through resolveAutoTack exactly as below — factored out as
+  // autopilotSteeringSolution() so beginCourseTurn() (the "boat actually
+  // has to come around" turn animation — see its own section) can ask
+  // for the same answer up front, as the turn's target, without
+  // duplicating the current-correction/auto-tack logic.
+  function autopilotSteeringSolution(state, targetPoint) {
+    var desired = state.nav.setCourse;
+    var currentAnchor = state.weather.oceanCurrent;
+    if (currentAnchor.fetchedRealMs != null) {
+      var estSpeed = computeBoatSpeed(state, desired);
+      desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
+    }
+    return resolveAutoTack(state, desired, targetPoint);
+  }
+
   function computeHeading(state) {
     var nav = state.nav;
+    // While a course-turn animation (beginCourseTurn) is actively
+    // carrying nav.heading toward its target over its own few real
+    // seconds, a live simTick landing mid-turn must not fight it —
+    // leave nav.heading exactly as the turn last set it and let
+    // everything else in simTick (position, weather, battery) proceed
+    // normally against that. Never true for more than a handful of
+    // seconds, and never persisted.
+    if (headingTurnActive) return nav.heading;
+
     var desired, targetPoint, steered;
 
     if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
@@ -1755,29 +1794,30 @@
         if (nav.driftHeading == null) {
           nav.driftHeading = nav.heading != null ? nav.heading : nav.setCourse;
         }
-        var seaWander = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
+        // Magnitude tuned so real, noticeable course error accumulates
+        // over unattended time — a few degrees within half an hour,
+        // tens of degrees over several hours in anything but calm seas —
+        // rather than the imperceptible helming noise below. Wind adds a
+        // modest further push once it's blowing hard.
+        var seaWander = (12 + state.weather.seaState * 6 + Math.max(0, state.weather.windSpeed - 10) * 0.3) * (TICK_MINUTES / 10);
         nav.driftHeading = normalizeDeg(nav.driftHeading + (Math.random() - 0.5) * seaWander);
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
       } else {
-        desired = nav.setCourse;
+        steered = autopilotSteeringSolution(state, targetPoint);
 
-        // Current correction — open water only; the coastal corridor's
-        // own automatic navigation already handles getting through
-        // safely (see the module notes above). This adjusts the LOCAL
-        // desired bearing fed into auto-tack, never nav.setCourse itself
-        // (the player's own chosen course is never touched) and never
-        // nav.intendedCourse (BEARING TO NĀWILIWILI stays the plain
-        // geographic bearing). The order matches real seamanship: work
-        // out what heading through the water actually makes the chosen
-        // course good against the current FIRST, then decide whether
-        // that heading is sailable or needs a tack.
-        var currentAnchor = state.weather.oceanCurrent;
-        if (currentAnchor.fetchedRealMs != null) {
-          var estSpeed = computeBoatSpeed(state, desired);
-          desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
-        }
-        steered = resolveAutoTack(state, desired, targetPoint);
+        // Small bounded correction oscillation: the autopilot is always
+        // nudging back toward the steering solution rather than holding
+        // an unrealistically perfect number, but it never wanders more
+        // than sea state allows before correcting back — a mean-drifting
+        // random walk clamped to its bound, not independent noise each
+        // tick, so it reads as a smooth "working back toward course"
+        // rather than a jitter.
+        var oscBound = 1 + state.weather.seaState;
+        var oscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
+        if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
+        nav.autopilotWobble = clamp(nav.autopilotWobble + (Math.random() - 0.5) * oscStep, -oscBound, oscBound);
+        steered = normalizeDeg(steered + nav.autopilotWobble);
       }
     }
     // Small per-tick heading noise: imperfect helming, wave action, minor
@@ -2101,23 +2141,109 @@
 
   }
 
-  // nav.heading and boat.speed are otherwise only written inside
-  // simTick() — real, instantaneous quantities that just happen to be
-  // cached in state rather than recomputed on every read. That's fine
-  // as long as something calls this the moment anything upstream of
-  // them actually changes; without it, a course change updates
-  // nav.setCourse immediately but leaves heading/tack/speed sitting at
-  // whatever they were until the next tick runs, which can be minutes
-  // away in live play. Call this right after any state change that
-  // should make the boat respond NOW rather than waiting for that —
-  // currently, only the two places nav.setCourse itself changes. Does
-  // not advance voyageMinutes or move the boat; it only recomputes what
-  // the boat would be doing at the CURRENT moment, the same computation
-  // simTick would make anyway, just not deferred until the next one.
-  function refreshHeadingAndSpeed(state) {
-    var heading = computeHeading(state);
-    state.nav.heading = heading;
-    state.boat.speed = computeBoatSpeed(state, heading);
+  /* --------------------------------------------------------------
+     COURSE TURN — the boat physically comes around onto a new heading
+     over a few real seconds rather than snapping there instantly.
+     Shared by CHANGE COURSE, SET FOR NĀWILIWILI (both open water only),
+     and re-engaging AUTOPILOT at the electrical panel (which corrects
+     back toward SET COURSE from wherever the boat drifted to while it
+     was off). Pure UI presentation — never advances voyageMinutes, and
+     nothing about it is persisted; if the page reloads mid-turn it
+     simply resumes as a fresh tick would. nav.heading is nudged
+     directly by this function's own short-lived timer; computeHeading()
+     stands down for the duration (see headingTurnActive, checked at its
+     own top) so a live simTick landing mid-turn can't fight it.
+     -------------------------------------------------------------- */
+  var headingTurnActive = false;
+
+  function courseTurnDurationSeconds(angularDist) {
+    // ~2s for a small nudge, up to ~7s for a full reversal — a sqrt
+    // curve so small changes stay snappy while big ones get the full
+    // pause, rather than scaling linearly with angle.
+    return clamp(2 + Math.sqrt(angularDist / 180) * 5, 2, 7);
+  }
+
+  // The heading the boat should physically turn toward whenever
+  // nav.setCourse changes or AUTOPILOT re-engages. AUTOPILOT ON: the
+  // same current-corrected, auto-tack-aware solution computeHeading()
+  // would steer toward on its own (see autopilotSteeringSolution).
+  // AUTOPILOT OFF: the player's raw chosen heading, unadjusted — a
+  // deliberate manual turn, no auto-tack, since that's an AUTOPILOT-ON
+  // feature only.
+  function courseSteeringTarget(state) {
+    if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
+      return state.nav.setCourse;
+    }
+    return autopilotSteeringSolution(state, FINAL_DEST);
+  }
+
+  // opts: firstLine (printed immediately), settleLine (printed once the
+  // turn finishes), targetHeading, onSettle(state) (optional — e.g.
+  // resuming drift from the new heading), redisplay(state) (redraws
+  // whichever screen asked for the turn — COURSE or the ELECTRICAL
+  // PANEL). Text is temp-view, exactly like the screens it's launched
+  // from — this isn't a permanent voyage-log event, just menu browsing.
+  function beginCourseTurn(state, opts) {
+    var nav = state.nav;
+    var startHeading = nav.heading != null ? nav.heading : opts.targetHeading;
+    var totalDiff = signedAngleDiff(opts.targetHeading, startHeading);
+    var angularDist = Math.abs(totalDiff);
+
+    printBlank();
+    printLine(opts.firstLine, 'dim');
+
+    function settle() {
+      nav.heading = normalizeDeg(opts.targetHeading);
+      state.boat.speed = computeBoatSpeed(state, nav.heading);
+      headingTurnActive = false;
+      if (opts.onSettle) opts.onSettle(state);
+      printBlank();
+      printLine(opts.settleLine, 'dim');
+      uiBusy = false;
+      opts.redisplay(state);
+      flushNewLogEntries(state); // resolveAutoTack (inside courseSteeringTarget, called before this turn began) may have logged a tack
+      renderOptions(state);
+      saveGameState(state);
+      updateAudioForState(state);
+      scrollToBottom();
+    }
+
+    if (angularDist < 0.5) {
+      // Already on (or confirmed) that heading — nothing to physically
+      // turn through, so settle immediately with no dots.
+      settle();
+      return;
+    }
+
+    uiBusy = true;
+    optionsEl.innerHTML = '';
+    headingTurnActive = true;
+
+    var dotsLine = document.createElement('p');
+    dotsLine.className = 'line dim';
+    dotsLine.textContent = '.';
+    tempViewEl.appendChild(dotsLine);
+    scrollToBottom();
+    var frames = ['.', '..', '...'];
+    var frameIndex = 0;
+    var dotTimer = setInterval(function () {
+      frameIndex = (frameIndex + 1) % frames.length;
+      dotsLine.textContent = frames[frameIndex];
+    }, DOT_FRAME_MS);
+
+    var duration = courseTurnDurationSeconds(angularDist);
+    var startTime = Date.now();
+    var interpTimer = setInterval(function () {
+      var frac = clamp((Date.now() - startTime) / (duration * 1000), 0, 1);
+      nav.heading = normalizeDeg(startHeading + totalDiff * frac);
+    }, 150);
+
+    setTimeout(function () {
+      clearInterval(dotTimer);
+      clearInterval(interpTimer);
+      if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+      settle();
+    }, duration * 1000);
   }
 
   function updateCrew(state) {
@@ -2542,6 +2668,10 @@
     if (weights.steering !== undefined) {
       if (w.seaState >= 4) weights.steering += 1;
       if (w.seaState >= 5) weights.steering += 1;
+      // Autopilot working hard to hold course in a real seaway adds its
+      // own modest extra load, on top of rough seas alone — still just a
+      // nudge in the odds, never a guaranteed failure.
+      if (b.autopilotOn && w.seaState >= 4) weights.steering += 0.75;
     }
     if (weights.engine !== undefined) {
       if (b.engineOn) weights.engine += 1.5;
@@ -2550,6 +2680,7 @@
       var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.fanOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
       if (loadCount >= 2) weights.electrical += 1;
       if (w.seaState >= 4) weights.electrical += 0.5;
+      if (b.autopilotOn && w.seaState >= 4) weights.electrical += 0.5;
     }
     var total = candidates.reduce(function (sum, k) { return sum + weights[k]; }, 0);
     var r = Math.random() * total;
@@ -4233,10 +4364,10 @@
     state.pendingChoice = {
       id: 'electrical-panel',
       options: [
-        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
-        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
-        { label: 'FAN \u2014 ' + (b.fanOn ? 'ON' : 'OFF'), action: 'electrical:fan' },
         { label: 'AUTOPILOT \u2014 ' + (b.autopilotOn ? 'ON' : 'OFF'), action: 'electrical:autopilot' },
+        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
+        { label: 'FAN \u2014 ' + (b.fanOn ? 'ON' : 'OFF'), action: 'electrical:fan' },
+        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -4331,6 +4462,27 @@
     var turningOn = !b[field];
     b[field] = turningOn;
     playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through, never on a blocked attempt above
+
+    if (key === 'autopilot') {
+      if (turningOn) {
+        // Clear any stale value from an earlier OFF period so the NEXT
+        // disengagement (if any) re-initializes drift from wherever the
+        // boat actually is at that future moment — see the driftHeading
+        // note in the nav state block.
+        state.nav.driftHeading = null;
+        beginCourseTurn(state, {
+          firstLine: 'Autopilot engaged.',
+          settleLine: 'Correcting course.',
+          targetHeading: courseSteeringTarget(state),
+          redisplay: cmdElectrical,
+        });
+      } else {
+        printBlank();
+        printLine('Autopilot disengaged.', 'dim');
+        cmdElectrical(state);
+      }
+      return;
+    }
     cmdElectrical(state);
   }
 
@@ -4452,6 +4604,11 @@
     if (currentNote) {
       printBlank();
       printLine(currentNote);
+    }
+    var autopilotNote = stormAutopilotNote(state);
+    if (autopilotNote) {
+      printBlank();
+      printLine(autopilotNote, 'amber');
     }
     state.pendingChoice = {
       id: 'forecast-menu',
@@ -4693,13 +4850,15 @@
     // the screen is viewed, e.g. right after SET FOR NĀWILIWILI, not
     // whatever nav.intendedCourse happened to hold as of the last tick.
     var liveBearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-    printLine('SET COURSE ' + Math.round(nav.setCourse) + '\u00B0');
-    printLine('ACTUAL HEADING ' + Math.round(nav.heading) + '\u00B0');
+    printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
+    printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
     if (nav.tack) {
       printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
     }
-    printLine('BEARING TO N\u0100WILIWILI ' + Math.round(liveBearingToDest) + '\u00B0');
-    printLine('DISTANCE TO N\u0100WILIWILI ' + Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM');
+    printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
+    printBlank();
+    printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+    printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -7142,10 +7301,13 @@
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
         state.nav.courseDraft = null;
-        refreshHeadingAndSpeed(state);
-        printBlank();
-        printLine('New course set: ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
-        cmdCourse(state);
+        beginCourseTurn(state, {
+          firstLine: 'Course set to ' + Math.round(state.nav.setCourse) + '\u00B0.',
+          settleLine: 'Coming around.',
+          targetHeading: courseSteeringTarget(state),
+          onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
+          redisplay: cmdCourse,
+        });
         break;
       case 'course-draft-cancel':
         state.nav.courseDraft = null;
@@ -7154,10 +7316,13 @@
       case 'set-for-nawiliwili':
         if (state.boat.steering === 'DAMAGED') { cmdCourse(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
-        refreshHeadingAndSpeed(state);
-        printBlank();
-        printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
-        cmdCourse(state);
+        beginCourseTurn(state, {
+          firstLine: 'Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.',
+          settleLine: 'Coming around.',
+          targetHeading: courseSteeringTarget(state),
+          onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
+          redisplay: cmdCourse,
+        });
         break;
       case 'resolve-aft-locker-now':
         resolveAftLocker(state);
@@ -7691,7 +7856,6 @@
 
   boot();
   setInterval(updateClock, 30000);
-
 })();
 </script>
 </body>
