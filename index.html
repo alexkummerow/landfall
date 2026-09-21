@@ -1789,6 +1789,13 @@
     return resolveAutoTack(state, desired, targetPoint);
   }
 
+  // AUTOPILOT OFF drift — how strongly wind-push direction pulls at
+  // driftHeading, relative to how much canvas is actually exposed to
+  // catch it. FURLED barely feels this at all, which is the whole point
+  // of reducing sail before a storm — see computeHeading's autopilot-off
+  // branch, the only place this is read.
+  var DRIFT_SAIL_FACTOR = { full: 1.00, reefed: 0.60, minimal: 0.30, furled: 0.12 };
+
   function computeHeading(state) {
     var nav = state.nav;
     // While a course-turn animation (beginCourseTurn) is actively
@@ -1822,24 +1829,48 @@
       if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
         // Autopilot off, or steering damaged: no course-keeping, no
         // auto-tacking — the boat just continues roughly along wherever
-        // it's already pointed, wandering gradually (restrained in calm
-        // conditions, further in rough seas) rather than snapping
-        // anywhere. nav.setCourse itself is left untouched, so switching
-        // autopilot back on (once steering is repaired, if that's what
-        // disabled it) simply resumes steering for it. If the drift
-        // walks the heading into the no-go zone, it's left to slow/luff
-        // there — computeBoatSpeed's point-of-sail handling already does
-        // that — rather than auto-tacking out of it.
+        // it's already pointed. Two separate, additive components drive
+        // the drift itself: a persistent BIAS toward the direction the
+        // wind is physically pushing the boat (stronger with more sail
+        // exposed to catch it), plus independent RANDOM yaw from sea
+        // state (wave action, rolling, imperfect passive steering) that
+        // applies regardless of sail. nav.setCourse itself is left
+        // untouched, so switching autopilot back on (once steering is
+        // repaired, if that's what disabled it) simply resumes steering
+        // for it. If the drift walks the heading into the no-go zone,
+        // it's left to slow/luff there — computeBoatSpeed's point-of-
+        // sail handling already does that — rather than auto-tacking
+        // out of it.
         if (nav.driftHeading == null) {
           nav.driftHeading = nav.heading != null ? nav.heading : nav.setCourse;
         }
-        // Magnitude tuned so real, noticeable course error accumulates
-        // over unattended time — a few degrees within half an hour,
-        // tens of degrees over several hours in anything but calm seas —
-        // rather than the imperceptible helming noise below. Wind adds a
-        // modest further push once it's blowing hard.
-        var seaWander = (12 + state.weather.seaState * 6 + Math.max(0, state.weather.windSpeed - 10) * 0.3) * (TICK_MINUTES / 10);
-        nav.driftHeading = normalizeDeg(nav.driftHeading + (Math.random() - 0.5) * seaWander);
+
+        // RANDOM sea-state yaw — independent of wind direction and sail
+        // configuration on purpose (see the module notes above): even a
+        // furled boat still yaws in a rough seaway. Magnitude tuned so
+        // real, noticeable course error can still accumulate from this
+        // alone in anything but calm seas.
+        var seaYaw = (10 + state.weather.seaState * 7) * (TICK_MINUTES / 10);
+        nav.driftHeading = normalizeDeg(nav.driftHeading + (Math.random() - 0.5) * seaYaw);
+
+        // DIRECTIONAL wind bias — a small, persistent nudge toward
+        // windPushDirection (the direction the wind is blowing the boat
+        // TOWARD, the opposite of windDirection, which is where it's
+        // coming FROM) each tick, clamped so it closes the remaining gap
+        // rather than ever overshooting past it — gradual and
+        // cumulative, never an instant snap downwind. Scales with wind
+        // speed (nothing below a light-air floor) and with how much
+        // sail is up to actually catch that wind; a furled boat barely
+        // feels this term at all, which is the whole point of reducing
+        // sail before a storm.
+        var windPushDirection = normalizeDeg(state.weather.windDirection + 180);
+        var sailDriftFactor = DRIFT_SAIL_FACTOR[state.boat.sailConfig];
+        if (sailDriftFactor == null) sailDriftFactor = DRIFT_SAIL_FACTOR.full;
+        var windBiasMax = clamp((state.weather.windSpeed - 5) * 0.15, 0, 6) * sailDriftFactor * (TICK_MINUTES / 10);
+        var towardWind = signedAngleDiff(windPushDirection, nav.driftHeading);
+        var windBiasStep = clamp(towardWind, -windBiasMax, windBiasMax);
+        nav.driftHeading = normalizeDeg(nav.driftHeading + windBiasStep);
+
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
       } else {
