@@ -4531,12 +4531,6 @@
         printLine('SPARES', 'heading-label');
         printSuppliesCategory(state, 'spares', SPARES_NAMES, ORIGINAL_SPARES);
         break;
-      case 'safety':
-        printLine('SAFETY', 'heading-label');
-        printLine(inventoryLine('EPIRB', state.rescue.epirbOn ? 'ACTIVE' : 'READY'));
-        printLine(inventoryLine('Life raft', state.crew.inLifeRaft ? 'DEPLOYED' : 'READY'));
-        printLine(inventoryLine('Flares', countCurrentOriginal(state.supplies.safety.flares, ORIGINAL_FLARES)));
-        break;
       default:
         printLine('Nothing there.', 'dim');
     }
@@ -4554,7 +4548,6 @@
         { label: 'WATER', action: 'inventory:water' },
         { label: 'FUEL', action: 'inventory:fuel' },
         { label: 'SPARES', action: 'inventory:spares' },
-        { label: 'SAFETY', action: 'inventory:safety' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -4588,8 +4581,8 @@
 
   // The point-of-no-return warning -- selecting RADIO FOR RESCUE never
   // starts rescue by itself; only COMMENCE RESCUE (handled in
-  // handleAction) actually does, via the same activation the old
-  // ACTIVATE EPIRB action used to perform.
+  // handleAction) actually does, ending the voyage immediately via
+  // beginRescueEndingSequence below.
   function cmdRadioForRescue(state) {
     printBlank();
     printLine('RADIO FOR RESCUE', 'heading-label');
@@ -4603,6 +4596,46 @@
         { label: 'CANCEL', action: 'cancel' },
       ],
     };
+  }
+
+  // The rescue ending itself -- immediate and final, no search/travel/
+  // flare/EPIRB/life-raft sequence. A short, timed staggered reveal
+  // (same "..." pacing rhythm as the marlin reveal elsewhere in this
+  // file) culminating in the one permanent end state: NO LANDFALL,
+  // with RESTART as the only way forward. uiBusy is held for the
+  // duration so the header restart button can't interrupt it partway
+  // through (same reasoning as runShortAction's own use of it).
+  var RESCUE_ENDING_LINES = [
+    'You make the call.',
+    '...',
+    'Someone answers.',
+    '...',
+    'You won\u2019t reach Kaua\u02bbi this time.',
+    '...',
+  ];
+  function beginRescueEndingSequence(state) {
+    uiBusy = true;
+    var index = 0;
+    function showNext() {
+      printLine(RESCUE_ENDING_LINES[index]);
+      scrollToBottom();
+      index++;
+      if (index < RESCUE_ENDING_LINES.length) {
+        setTimeout(showNext, 1400);
+      } else {
+        setTimeout(function () {
+          printBlank();
+          printLine('NO LANDFALL', 'heading-label');
+          state.rescue.phase = 'rescued';
+          state.pendingChoice = { id: 'rescue-ending', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+          uiBusy = false;
+          renderOptions(state);
+          saveGameState(state);
+          scrollToBottom();
+        }, 1400);
+      }
+    }
+    showNext();
   }
 
   function cmdEngine(state) {
@@ -6525,10 +6558,12 @@
   // later repair shouldn't hide an already-active rescue) -- see the
   // ACTIVE RESCUE note on canRadioForRescue above. Returns null when
   // neither applies, so callers can simply skip adding anything.
+  // Rescue now resolves immediately on COMMENCE RESCUE -- there is no
+  // longer a traveling/searching interim phase to show status for, so
+  // this only ever needs to check whether rescue can be initiated at
+  // all. (phase === 'rescued' is handled earlier, in
+  // getContextualOptions, before this function is ever called.)
   function rescueMenuOption(state) {
-    if (state.rescue.phase !== 'none' && state.rescue.phase !== 'rescued') {
-      return { label: 'RESCUE STATUS', action: 'cmd:rescue-status' };
-    }
     if (canRadioForRescue(state)) {
       return { label: 'RADIO FOR RESCUE', action: 'cmd:radio-for-rescue' };
     }
@@ -6550,12 +6585,12 @@
     }
 
     if (state.rescue.phase === 'rescued') {
-      // The voyage is over — nothing left to do but look back at it. The
-      // log itself is always visible above, scrolled into history, so
-      // there's nothing else worth offering here. (STATUS used to be
-      // the one thing left to press; it's no longer player-facing, and
-      // nothing replaces it — there's genuinely nothing left to do.)
-      return [];
+      // The voyage is over -- rescue was called in and the attempt to
+      // reach Kaua'i has ended. Nothing left to do but restart; see
+      // beginRescueEndingSequence, which already sets this exact
+      // pendingChoice itself (checked above, before this branch is
+      // ever reached) -- this is just a defensive fallback matching it.
+      return [{ label: 'RESTART', action: 'confirm-restart' }];
     }
 
     if (state.crew.watchState === 'trying') {
@@ -7068,13 +7103,14 @@
             label: 'CALLING FOR HELP',
             duration: 4,
             action: function (s) {
-              s.rescue.epirbOn = true;
-              s.rescue.activatedAt = s.meta.voyageMinutes;
-              s.rescue.phase = 'traveling';
-              s.rescue.travelMinutes = estimateRescueTravelMinutes(s);
-              log(s, 'You make the call.');
-              log(s, 'Rescue requested.');
-              flushNewLogEntries(s);
+              s.rescue.epirbOn = true; // internal legacy field, kept for save compatibility -- no longer drives any player-facing search/travel logic
+              // Empty options here (not null) so runShortAction's own
+              // finish() -- which fires immediately after this action
+              // returns, before beginRescueEndingSequence's own timers
+              // resolve -- renders nothing instead of falling back to
+              // the normal contextual menu for a moment.
+              s.pendingChoice = { id: 'rescue-ending', options: [] };
+              beginRescueEndingSequence(s);
             },
           });
           break;
