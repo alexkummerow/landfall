@@ -427,7 +427,6 @@
         gallons: 50.0, // ONE authoritative potable-water supply for the whole boat -- drinking, coffee, tea, washing, dishes, and cooking all draw from this same value. See WATER_* constants and hasEnoughWater/consumeWater.
       },
       supplies: {
-        propane: 60, // stove uses
         spares: {
           sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
         },
@@ -1130,10 +1129,11 @@
     return last != null && (state.meta.voyageMinutes - last) < 180;
   }
 
-  // Foods: one unit is one serving. `cooked` items need the stove (propane
-  // + water per waterGal, and calm-enough seas); everything else is ready
-  // to eat as-is. Explicit meal/snack/chocolate classification — MEAL
-  // gives full hunger relief, SNACK about half (see
+  // Foods: one unit is one portion (never shown as "servings" — see
+  // foodItemLine). `cooked` items need the stove (water per waterGal,
+  // and calm-enough seas — cooking fuel itself isn't tracked); everything
+  // else is ready to eat as-is. Explicit meal/snack/chocolate
+  // classification — MEAL gives full hunger relief, SNACK about half (see
   // HUNGER_RESET_HOURS_BY_TYPE in performEat), CHOCOLATE none at all
   // (morale-only, handled entirely separately — see
   // chocolateMoraleGain/eatChocolateLine). Chocolate is visually grouped
@@ -2029,7 +2029,6 @@
   var WATER_STARTING_GALLONS = 50.0;
   var ORIGINAL_COFFEE = 24;
   var ORIGINAL_TEA = 24;
-  var ORIGINAL_PROPANE = 60;
   var ORIGINAL_FLARES = 6;
   var ORIGINAL_SPARES = {
     sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
@@ -2141,6 +2140,9 @@
   function formatGal(n) {
     var s = n.toFixed(1);
     return (s.slice(-2) === '.0') ? s.slice(0, -2) : s;
+  }
+  function galCurrentOnly(current) {
+    return formatGal(current) + ' gal';
   }
   function galCurrentOriginal(current, original) {
     return formatGal(current) + ' / ' + formatGal(original) + ' gal';
@@ -4878,8 +4880,13 @@
      which is what has happened. Provisions/water/fuel read from the
      same state.food / state.water / state.boat.fuelGallons that EAT,
      DRINK, and the ENGINE menu already use — there is no second copy
-     of any of these numbers. The remaining categories live under
-     state.supplies.* alongside the existing propane count.
+     of any of these numbers. The remaining categories (spares) live
+     under state.supplies.*.
+
+     INVENTORY is deliberately the ONE place CURRENT/ORIGINAL appears —
+     it's where the player compares what remains against what they
+     started with. EAT and DRINK (below) show CURRENT only: those menus
+     are about a choice right now, not a supply audit.
      -------------------------------------------------------------- */
   var SPARES_NAMES = {
     sailRepairKit: 'Sail repair kit', steeringParts: 'Steering parts', engineParts: 'Engine parts', fuses: 'Fuses',
@@ -4925,7 +4932,6 @@
       case 'fuel':
         printLine('FUEL', 'heading-label');
         printLine(inventoryLine('Diesel', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS)));
-        printLine(inventoryLine('Propane', countCurrentOriginal(state.supplies.propane, ORIGINAL_PROPANE) + ' uses'));
         break;
       case 'spares':
         printLine('SPARES', 'heading-label');
@@ -5632,7 +5638,7 @@
 
   function foodItemLine(item, servings) {
     var dots = '.'.repeat(Math.max(2, 22 - item.name.length));
-    return item.name + ' ' + dots + ' ' + countCurrentOriginal(servings, item.original) + ' servings';
+    return item.name + ' ' + dots + ' ' + countCurrentOriginal(servings, item.original);
   }
 
   // Resolves the currently-held catch (if any) into a food-item-shaped
@@ -5669,9 +5675,9 @@
   }
 
   // Whichever of MEALS/SNACKS an item belongs to, as a redisplay target
-  // for a failed cooking gate (rough seas / no propane / not enough
-  // water) — chocolate never reaches these gates (see performEat), so
-  // this only ever needs to choose between the other two.
+  // for a failed cooking gate (rough seas / not enough water) —
+  // chocolate never reaches these gates (see performEat), so this only
+  // ever needs to choose between the other two.
   function eatSubmenuPendingChoice(state, item) {
     return item.type === 'meal'
       ? { id: 'meals-menu', options: buildMealsOptions(state) }
@@ -5726,7 +5732,7 @@
   // isn't listed: it never touches hoursSinceMeal at all.
   var HUNGER_RESET_HOURS_BY_TYPE = { meal: -3, snack: 0 };
 
-  // Comfort, not sustenance — no prep, no seastate/propane/water gates,
+  // Comfort, not sustenance — no prep, no seastate/water gates,
   // no hunger/thirst/energy effect at all. A small, temporary morale
   // lift with the same diminishing-returns shape as routineMoraleGain,
   // keyed off lastChocolateAt so several pieces eaten back to back don't
@@ -5789,12 +5795,6 @@
         state.pendingChoice = eatSubmenuPendingChoice(state, item);
         return;
       }
-      if (state.supplies.propane <= 0) {
-        printBlank();
-        printLine('Out of propane. Nothing left to cook with.', 'amber');
-        state.pendingChoice = eatSubmenuPendingChoice(state, item);
-        return;
-      }
     }
     // Cooking water: only items with a per-serving cost (item.waterGal,
     // currently just Oatmeal) draw any; everything else is 0 and this
@@ -5815,9 +5815,6 @@
       duration: item.cooked ? 5 : 2,
       action: function (s) {
         var c = s.crew;
-        if (item.cooked) {
-          s.supplies.propane = clamp(s.supplies.propane - 1, 0, 999);
-        }
         if (waterNeeded > 0) consumeWater(s, waterNeeded);
         // FISHING HOOK -- the held catch is consumed whole, species and
         // all, rather than decrementing a food[] count — only one can
@@ -5870,12 +5867,13 @@
   // state.water.gallons pool; there is no separate reserve for any of
   // them. Coffee and tea are counted resources of their own
   // (state.drinks), spent one at a time alongside the water they're
-  // made with.
+  // made with. Current-quantity only, like EAT — DRINK is about a choice
+  // right now, not a supply audit; CURRENT/ORIGINAL is INVENTORY's job.
   function drinkMenuOptions(state) {
     return [
-      { label: instrumentLine('WATER', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS).toUpperCase()), action: 'drink:water' },
-      { label: instrumentLine('COFFEE', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE)), action: 'drink:coffee' },
-      { label: instrumentLine('TEA', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA)), action: 'drink:tea' },
+      { label: instrumentLine('WATER', galCurrentOnly(state.water.gallons).toUpperCase()), action: 'drink:water' },
+      { label: instrumentLine('COFFEE', String(state.drinks.coffee)), action: 'drink:coffee' },
+      { label: instrumentLine('TEA', String(state.drinks.tea)), action: 'drink:tea' },
       { label: 'BACK', action: 'cancel' },
     ];
   }
@@ -8037,10 +8035,14 @@
         chocolate: Math.round(6 * foodFrac), coffee: Math.round(24 * foodFrac),
       };
       state.water = { primary: +(35 * waterFrac).toFixed(1), emergency: 8 };
-      state.supplies = { propane: Math.round(60 * foodFrac) };
+      state.supplies = {};
       delete c.foodDays;
       delete c.waterDays;
     }
+    // Propane was retired as a tracked resource — cooking now only
+    // checks sea state and (where relevant) water. Any existing save
+    // simply drops the field; nothing reads it anymore.
+    delete state.supplies.propane;
     // Consolidate the old primary+emergency water split into one
     // authoritative pool. This sums whatever remained of each — an
     // existing voyage's actual remaining supply carries over exactly,
