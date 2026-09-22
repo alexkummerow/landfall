@@ -4137,7 +4137,7 @@
     applyMuteToFishingAudio(); // FISHING HOOK -- same reasoning as engine audio
     applyMuteToCabinSwitchAudio(); // ELECTRICAL HOOK -- same reasoning as engine audio
     applyMuteToSailsAudio(); // SAILS HOOK -- same reasoning as engine audio
-    applyMuteToThickBoilAudio(); // GALLEY HOOK -- same reasoning as engine audio
+    applyMuteToGalleyAudio(); // GALLEY HOOK -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -6668,20 +6668,23 @@
     return lines[Math.floor(Math.random() * lines.length)];
   }
 
-  // The six meals that get the thick_boil.mp3 cooking sound instead of
-  // the plain fixed-duration MAKING dots — see the GALLEY AUDIO section
-  // above. Matched by item.name, since that's the one thing both a
-  // FOOD_ITEMS entry (Chili Rice, Oatmeal) and a held-fish meal
-  // (Rockfish Stew, Lingcod Stew, Bonito Curry, Mahi Coconut Curry, via
-  // heldFishAsMealItem/FISH_MEAL_BY_SPECIES) share. No other meal uses
-  // this sound.
-  var THICK_BOIL_MEAL_NAMES = {
-    'Chili Rice': true,
-    'Oatmeal': true,
-    'Rockfish Stew': true,
-    'Lingcod Stew': true,
-    'Bonito Curry': true,
-    'Mahi Coconut Curry': true,
+  // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
+  // plays while a given meal is being made, keyed by item.name since
+  // that's the one thing both a FOOD_ITEMS entry (Chili Rice, Oatmeal)
+  // and a held-fish meal (Rockfish Stew, Lingcod Stew, Bonito Curry,
+  // Mahi Coconut Curry, via heldFishAsMealItem/FISH_MEAL_BY_SPECIES)
+  // share. A meal absent from this map (or any non-cooked item) just
+  // uses the plain fixed-duration MAKING/PREPARING dots below, as
+  // before. Adding a new preparation sound for a new or existing meal
+  // later is one line here plus one entry in GALLEY_AUDIO_FILES/
+  // GALLEY_AUDIO_VOLUME — nothing else in performEat changes.
+  var MEAL_PREP_AUDIO_KEY = {
+    'Chili Rice': 'thickBoil',
+    'Oatmeal': 'thickBoil',
+    'Rockfish Stew': 'thickBoil',
+    'Lingcod Stew': 'thickBoil',
+    'Bonito Curry': 'thickBoil',
+    'Mahi Coconut Curry': 'thickBoil',
   };
 
   function performEat(state, key) {
@@ -6780,16 +6783,20 @@
       flushNewLogEntries(s);
     };
 
-    if (item.cooked && THICK_BOIL_MEAL_NAMES[item.name]) {
-      // One of the six simmer/boil meals — the MAKING dots run for the
-      // actual length of thick_boil.mp3 (see runAudioSyncedAction and
-      // playThickBoil) rather than a fixed duration; everything else
-      // about the action (gates already checked above, the mutation
-      // itself, the resulting log line) is identical to any other meal.
+    // A cooked meal with a mapped preparation sound (see
+    // MEAL_PREP_AUDIO_KEY above) runs the MAKING dots for the actual
+    // length of that audio file (see runAudioSyncedAction and
+    // playGalleyOneShot) rather than a fixed duration — this is the
+    // one general hook point every current and future galley
+    // preparation sound goes through; everything else about the
+    // action (gates already checked above, the mutation itself, the
+    // resulting log line) is identical to any other meal.
+    var prepAudioKey = item.cooked ? MEAL_PREP_AUDIO_KEY[item.name] : null;
+    if (prepAudioKey) {
       runAudioSyncedAction(state, {
         label: label,
-        playAudio: function (onEnded) { playThickBoil(onEnded); },
-        fallbackSeconds: THICK_BOIL_FALLBACK_SECONDS,
+        playAudio: function (onEnded) { playGalleyOneShot(prepAudioKey, onEnded); },
+        fallbackSeconds: GALLEY_AUDIO_FALLBACK_SECONDS,
         action: doEat,
       });
     } else {
@@ -7705,38 +7712,54 @@
   }
 
   /* --------------------------------------------------------------
-     GALLEY AUDIO -- a single cooking sound, thick_boil.mp3, for the
-     six meals that involve an actual simmer/boil (see performEat's
-     THICK_BOIL_MEAL_NAMES below): Chili Rice, Oatmeal, Rockfish Stew,
-     Lingcod Stew, Bonito Curry, Mahi Coconut Curry. One-shot, not
-     looped -- a finite sound meant to play out fully once per
-     preparation, so this mirrors playSailsOneShot's shape (lazy
-     element, quick fade-in only to avoid a click, onEnded wiring) but
-     scoped to just the one file, since there's nothing else in this
-     small system to warrant a multi-key map. Its own independent fade
-     helper, same reasoning as fadeFishingVolume/fadeSailsVolume each
-     being their own copy rather than a shared one.
+     GALLEY AUDIO -- active food-preparation sounds (the player
+     physically doing something at the stove), as opposed to anything
+     ambient/reactive. Same lazy-per-key HTMLAudioElement shape as
+     SAILS_AUDIO_FILES/getSailsAudioEl below -- adding a future
+     preparation sound (chopping, stirring, sizzling, etc.), for a new
+     or existing meal, is just one new GALLEY_AUDIO_FILES/
+     GALLEY_AUDIO_VOLUME entry here plus one new MEAL_PREP_AUDIO_KEY
+     mapping in performEat, nothing structural. Currently one sound,
+     thickBoil (thick_boil.mp3), used for the six simmer/boil meals --
+     see MEAL_PREP_AUDIO_KEY. Every key here is a one-shot (none
+     currently loop; loop is only ever set true for an explicitly
+     reactive/ambient sound, matching sails' own luffing flag) and is
+     played via runAudioSyncedAction, so the existing ". .. ..." busy
+     indicator lasts exactly as long as the real file does, whatever
+     that turns out to be -- see playGalleyOneShot's onEnded wiring and
+     performEat's own use of it. fallbackSeconds there is a failure-
+     only safety net (missing/blocked/unplayable file), never the
+     normal path when the audio actually plays.
      -------------------------------------------------------------- */
-  var THICK_BOIL_AUDIO_FILE = 'audio/galley/thick_boil.mp3';
-  var THICK_BOIL_VOLUME = 0.5;
-  var THICK_BOIL_FADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
-  var THICK_BOIL_FALLBACK_SECONDS = 5; // safety net only, if the audio is unavailable/blocked -- matches the old fixed "MAKING" duration these six meals used before this
+  var GALLEY_AUDIO_FILES = {
+    thickBoil: 'audio/galley/thick_boil.mp3',
+  };
+  var GALLEY_AUDIO_VOLUME = {
+    thickBoil: 0.5,
+  };
+  var GALLEY_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+  var GALLEY_AUDIO_FALLBACK_SECONDS = 5; // failure-only safety net for ANY galley key -- see runAudioSyncedAction's own fallbackSeconds notes
 
-  var thickBoilAudioEl = null;
+  var galleyAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as sailsAudioEls
 
-  function getThickBoilAudioEl() {
-    if (thickBoilAudioEl) return thickBoilAudioEl;
-    thickBoilAudioEl = new Audio(THICK_BOIL_AUDIO_FILE);
-    thickBoilAudioEl.loop = false;
-    thickBoilAudioEl.preload = 'auto';
-    thickBoilAudioEl.volume = 0;
-    thickBoilAudioEl.addEventListener('error', function () {
-      console.warn('Galley audio failed to load: ' + THICK_BOIL_AUDIO_FILE + (thickBoilAudioEl.error ? ' -- error code ' + thickBoilAudioEl.error.code : ''));
+  function getGalleyAudioEl(key) {
+    var el = galleyAudioEls[key];
+    if (el) return el;
+    el = new Audio(GALLEY_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Galley audio failed to load (' + key + '): ' + GALLEY_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
     });
-    return thickBoilAudioEl;
+    galleyAudioEls[key] = el;
+    return el;
   }
 
-  function fadeThickBoilVolume(el, target, seconds, onComplete) {
+  // Identical in shape to fadeSailsVolume/fadeFishingVolume -- see
+  // those functions' own comments for why each audio system keeps its
+  // own independent copy rather than sharing one.
+  function fadeGalleyVolume(el, target, seconds, onComplete) {
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     var start = el.volume;
     if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
@@ -7756,22 +7779,24 @@
     }, stepMs);
   }
 
-  // Plays thick_boil.mp3 once from the beginning, with a quick fade-in,
+  // Plays a galley one-shot (thickBoil, or any future key added to
+  // GALLEY_AUDIO_FILES) once from the beginning, with a quick fade-in,
   // and fires onEnded (once) when it naturally finishes -- the exact
-  // onEnded wiring runAudioSyncedAction expects from its config.playAudio,
-  // so the MAKING busy-action for these six meals is driven off the real
-  // audio finishing, same as sail raise/lower (see performEat).
-  function playThickBoil(onEnded) {
+  // onEnded wiring runAudioSyncedAction expects from its
+  // config.playAudio, so the MAKING busy-action lasts exactly as long
+  // as the real audio file does, for this key and any future one,
+  // without ever hard-coding a duration in code.
+  function playGalleyOneShot(key, onEnded) {
     if (!audioUnlocked) { if (onEnded) onEnded(); return; }
-    var el = getThickBoilAudioEl();
+    var el = getGalleyAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     if (!el.paused) el.pause();
     el.currentTime = 0;
     el.volume = 0;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (thick_boil):', describeError(e)); if (onEnded) onEnded(); });
-    fadeThickBoilVolume(el, muted ? 0 : THICK_BOIL_VOLUME, THICK_BOIL_FADE_SECONDS);
+    if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    fadeGalleyVolume(el, muted ? 0 : GALLEY_AUDIO_VOLUME[key], GALLEY_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -7780,11 +7805,13 @@
     }
   }
 
-  function applyMuteToThickBoilAudio() {
-    var el = thickBoilAudioEl;
-    if (!el || el.paused) return;
-    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-    el.volume = muted ? 0 : THICK_BOIL_VOLUME;
+  function applyMuteToGalleyAudio() {
+    Object.keys(galleyAudioEls).forEach(function (key) {
+      var el = galleyAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : GALLEY_AUDIO_VOLUME[key];
+    });
   }
 
   /* --------------------------------------------------------------
