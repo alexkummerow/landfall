@@ -2703,9 +2703,11 @@
   // called, so it naturally keeps working correctly across a
   // beginCourseTurn retarget (see "RETARGETING MUST ALSO WORK WITH
   // LUFFING") without needing to know anything about targets at all.
-  // On exiting the zone: stop the loop, then immediately play
-  // sail_fill once -- no winch, ever, anywhere (see the module notes
-  // on this being removed completely).
+  // On exiting the zone: stop the loop, then immediately play sail_fill
+  // once -- deliberately never chained to winch here (see
+  // beginCourseTurn's own rotation timer for the ONLY place winch ever
+  // plays: the moment ACTUAL HEADING reaches the current target, a
+  // completely separate trigger from this zone-crossing sequence).
   function updateNoGoZoneAudio(state) {
     if (state.boat.sailConfig === 'furled') {
       if (isCurrentlyLuffing) { isCurrentlyLuffing = false; stopSailsLuffingLoop(); }
@@ -2812,6 +2814,18 @@
         activeTurn = null;
         if (currentOpts.onSettle) currentOpts.onSettle(state);
         saveGameState(state);
+        // The ONLY place winch.mp3 ever plays — right here, the exact
+        // instant ACTUAL HEADING reaches the CURRENT (latest) target,
+        // for both manual and autopilot turns alike, since both run
+        // through this same rotation timer. Reading currentOpts.target
+        // Heading here (not whatever the original opts.targetHeading
+        // was when this turn began) is what naturally makes an
+        // abandoned, retargeted-away-from intermediate heading never
+        // trigger it — only the target the boat actually settles on
+        // does. Fire and forget: never blocks anything, never shows
+        // ". .. ...", never chained to sail_fill (a completely separate
+        // trigger — see updateNoGoZoneAudio).
+        playSailsOneShot('winch', null, state);
       }
     }, HEADING_TURN_TICK_MS);
 
@@ -7656,16 +7670,19 @@
   }
 
   /* --------------------------------------------------------------
-     SAILS AUDIO -- raising/lowering one-shots and the luffing loop/fill
-     pair. Same lazy-per-key HTMLAudioElement shape as
-     FISHING_AUDIO_FILES/getFishingAudioEl just above (its own
-     independent copy, for the same "each system easy to reason about
-     on its own" reasoning given there), with one addition:
-     playSailsOneShot's onEnded hook is what lets a sail raise/lower
-     action last exactly as long as its own audio file rather than a
-     hardcoded timer (see runAudioSyncedAction below). winch.mp3 is
-     deliberately NOT referenced anywhere in this file — the file can
-     stay in /audio/sails/, but nothing here plays it.
+     SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
+     pair, and the winch one-shot for a completed heading change (see
+     the module notes on beginCourseTurn for exactly when winch fires —
+     ONLY once ACTUAL HEADING reaches the current final target, never
+     for sail raising/lowering/reefing, never at the start of a turn,
+     never while still turning, never chained to sail_fill). Same
+     lazy-per-key HTMLAudioElement shape as FISHING_AUDIO_FILES/
+     getFishingAudioEl just above (its own independent copy, for the
+     same "each system easy to reason about on its own" reasoning given
+     there), with one addition: playSailsOneShot's onEnded hook is what
+     lets a sail raise/lower action last exactly as long as its own
+     audio file rather than a hardcoded timer (see runAudioSyncedAction
+     below).
      -------------------------------------------------------------- */
   var SAILS_AUDIO_FILES = {
     raiseLong: 'audio/sails/raise_sail_long.mp3',
@@ -7674,16 +7691,18 @@
     lowerShort: 'audio/sails/lower_sail_short.mp3',
     fill: 'audio/sails/sail_fill.mp3',
     luffing: 'audio/sails/sails_luffing_loop.mp3',
+    winch: 'audio/sails/winch.mp3',
   };
   var SAILS_AUDIO_VOLUME = {
     raiseLong: 0.6, raiseShort: 0.6, lowerLong: 0.6, lowerShort: 0.6,
-    fill: 0.55, luffing: 0.4,
+    fill: 0.55, luffing: 0.4, winch: 0.55,
   };
-  // Only the sail-HANDLING sounds (the boat actually crossing the wind)
-  // are above-deck-only -- raising/lowering canvas is mechanical,
-  // ship-wide noise (winch/halyard work) audible below deck too, same
-  // as it always was; unaffected by this.
-  var SAILS_LOCATION_GATED_KEYS = { luffing: true, fill: true };
+  // Only the sail-HANDLING sounds (the boat actually crossing the wind,
+  // or the sheets being trimmed in once it arrives) are above-deck-only
+  // -- raising/lowering canvas is mechanical, ship-wide noise (halyard
+  // work) audible below deck too, same as it always was; unaffected by
+  // this.
+  var SAILS_LOCATION_GATED_KEYS = { luffing: true, fill: true, winch: true };
   var SAILS_CROSSFADE_SECONDS = 0.1; // quick fade-in every one-shot uses at its own start (click prevention only), same as fishing
   var SAILS_LUFFING_FADE_SECONDS = 0.35; // "a very short fade-in/fade-out" specifically for the loop, per the audio-transitions spec
 
@@ -7768,16 +7787,22 @@
 
   // The luffing loop: fresh from the beginning every time it starts
   // (never a resume), a short fade-in to avoid a click, looped (see
-  // getSailsAudioEl). No-ops if already playing -- callers never need
-  // to check this themselves, and it guarantees only one copy is ever
-  // running (see the module notes on never stacking the loop). Starts
-  // (silently, if below deck) regardless of audibility -- the loop
-  // tracks the boat's actual luffing condition, not whether anyone can
-  // hear it.
+  // getSailsAudioEl). isCurrentlyLuffing (checked by the sole caller,
+  // updateNoGoZoneAudio) is the authoritative "should this be playing"
+  // signal, NOT this element's own .paused -- that lags behind for the
+  // full SAILS_LUFFING_FADE_SECONDS while stopSailsLuffingLoop's fade-
+  // out is still in flight, so a guard here based on .paused would
+  // wrongly treat "still fading toward silence from the PREVIOUS exit"
+  // as "already looping" and skip restarting it -- exactly the bug
+  // behind luffing failing to restart if the boat re-enters the no-go
+  // zone shortly after leaving it (e.g. a quick direction reversal).
+  // Cancelling any in-flight fade and restarting cleanly every time is
+  // deliberate, not redundant. Starts (silently, if below deck)
+  // regardless of audibility -- the loop tracks the boat's actual
+  // luffing condition, not whether anyone can hear it.
   function startSailsLuffingLoop(state) {
     if (!audioUnlocked) return;
     var el = getSailsAudioEl('luffing');
-    if (!el.paused) return; // already looping -- never stack a second copy
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     el.currentTime = 0;
     el.volume = 0;
