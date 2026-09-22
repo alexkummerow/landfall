@@ -399,7 +399,7 @@
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // manually hand-steering (AUTOPILOT OFF only) — see cmdHelm/computeHeading; ends automatically on GO BELOW, SLEEP, autopilot re-engaging, or STEERING damage
-        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
+        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null, relax: null }, // voyageMinutes of last use, for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
@@ -909,7 +909,12 @@
 
   // Spontaneous thoughts — not tied to any phase or condition, just what
   // surfaces during solitude. Deliberately plain: present the thought and
-  // stop, never explain what it means.
+  // stop, never explain what it means. Plot-neutral by design (see
+  // RELAX below, where these now live) — memory, time, routine, and the
+  // ocean itself, never Solace's own history or family specifics.
+  // Tone is meant to range widely: some ordinary, some quietly funny,
+  // some thoughtful, some nearly nothing at all — not every one of
+  // these should land as profound.
   var PONDERINGS = [
     "You think of someone you haven't thought of in a long time.",
     "A room from your childhood comes back to you. You can't remember why.",
@@ -924,6 +929,25 @@
     "You realize you haven't heard your own name spoken aloud in days.",
     "For some reason, you wonder what your old neighbor is doing now.",
     "You remember a shirt you used to own.",
+    "Strange how quickly a routine becomes normal.",
+    "You wonder what day of the week it is.",
+    "There probably isn't a good reason you always choose the same side of the saloon.",
+    "Out here, an hour and a day start to feel like about the same size.",
+    "You're not entirely sure when you stopped counting the days.",
+    "Doing nothing for a while turns out to take some getting used to.",
+    "It occurs to you that no one knows exactly where you are right now.",
+    "The quiet down here has a shape to it, after a while.",
+    "You wonder if waiting counts as doing something.",
+    "Some habits only make sense once you notice you have them.",
+    "You could probably go a long time without saying a word out loud.",
+    "You've started talking to the boat a little. You're not going to mention that to anyone.",
+    "A lot of sailing turns out to just be waiting for something to change.",
+    "Some days out here feel long. Some feel like nothing happened at all.",
+    "You've developed opinions about which mug is the good mug.",
+    "The horizon doesn't really change, and somehow that's fine.",
+    "There's a particular kind of tired that has nothing to do with sleep.",
+    "You wonder what you'll actually remember about this, years from now.",
+    "The ocean looks a little different depending on what you were just thinking about.",
   ];
 
   // Picks from `pool`, preferring anything not in `recent` (so the same
@@ -973,6 +997,35 @@
     if (fatigue > 40) return 2;  // TIRED
     if (fatigue > 20) return 3;  // GOOD
     return 4;                     // RESTED
+  }
+
+  // HYGIENE — a qualitative read of hoursSinceWash (already tracked,
+  // see below), never a second tracked number. Forgiving thresholds:
+  // this is an offshore voyage, not a hotel — a day without washing is
+  // completely normal and still reads CLEAN, not a problem. NEEDS A
+  // WASH lines up with the point computeMoraleTarget's own wash pressure
+  // starts (48h), so the label and the actual consequence agree.
+  var HYGIENE_LABELS = ['FILTHY', 'GRIMY', 'NEEDS A WASH', 'CLEAN', 'FRESH'];
+  function hygieneLevel(hoursSinceWash) {
+    if (hoursSinceWash <= 6) return 4;   // FRESH
+    if (hoursSinceWash <= 24) return 3;  // CLEAN
+    if (hoursSinceWash <= 48) return 2;  // NEEDS A WASH
+    if (hoursSinceWash <= 84) return 1;  // GRIMY
+    return 0;                             // FILTHY
+  }
+
+  // COMFORT — the CABIN's qualitative read of the existing clothing-
+  // comfort system (clothingWarmthDelta/clothingComfortCategory,
+  // defined later in the CLOTHING section — available here via normal
+  // function hoisting), never a second independent temperature
+  // calculation. Wetness is already folded into that same delta, so it
+  // naturally influences this label too without a separate visible
+  // state.
+  var CLOTHING_COMFORT_CATEGORY_TO_LABEL = {
+    cold: 'COLD', slightlyCold: 'COOL', comfortable: 'COMFORTABLE', slightlyWarm: 'WARM', tooWarm: 'HOT',
+  };
+  function comfortLabel(state) {
+    return CLOTHING_COMFORT_CATEGORY_TO_LABEL[clothingComfortCategory(clothingWarmthDelta(state))];
   }
 
   // MORALE is a settling value, not a pool: every tick it drifts toward
@@ -1031,7 +1084,7 @@
     return (state.meta.voyageMinutes - since) / 60;
   }
 
-  // Thresholds/tuning for the dynamic CHORE system — see buildChoreOptions.
+  // Thresholds/tuning for the dynamic CHORE system — see choreOptionIfDue.
   var CABIN_STUFFY_HOURS = 14;     // accumulated hours below deck in bad weather before AIR OUT CABIN appears
   var CLUTTER_TIDY_THRESHOLD = 5;  // small accumulated actions before TIDY UP appears
   var WET_CLOTHES_SEASTATE = 4;    // seaState at/above which spray counts as "heavy" for wet clothes
@@ -3642,17 +3695,6 @@
     return true;
   }
 
-  function ponderingChance(state) {
-    var chance = 0.35; // observations are somewhat more common than ponderings overall
-    if (state.meta.voyageMinutes / 1440 > 4) chance += 0.15; // more likely after several days offshore
-    var tod = timeOfDayPhase(state);
-    if (tod === 'night' || tod === 'dawn' || tod === 'dusk') chance += 0.15; // solitude, routine, quiet hours
-    if (state.weather.seaState <= 2 && state.weather.condition !== 'rain') chance += 0.1; // calm sailing
-    var phase = voyagePhase(state);
-    if (phase === 'offshore' || phase === 'tropics') chance += 0.1; // extended solitude, long uneventful stretches
-    return clamp(chance, 0.1, 0.75);
-  }
-
   function checkAmbientEvent(state) {
     var f = state.flags;
     if (f.nextAmbientEventAt == null) {
@@ -3668,7 +3710,11 @@
     if (state._ambientEventsThisPass !== undefined && state._ambientEventsThisPass >= AMBIENT_CATCHUP_CAP) return;
     if (!ambientEventsAllowed(state)) return;
 
-    var text = Math.random() < ponderingChance(state) ? pickPondering(state) : pickObservation(state);
+    // PONDERINGS no longer fire here — they're now reached only
+    // deliberately, via SALOON -> RELAX (see performRelax), so a
+    // wandering thought feels chosen rather than intrusive. This slot
+    // is now purely observational.
+    var text = pickObservation(state);
     if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
     f.recentAmbientTexts.push(text);
     if (f.recentAmbientTexts.length > AMBIENT_HISTORY_LENGTH) f.recentAmbientTexts.shift();
@@ -4980,15 +5026,14 @@
     return Math.round(tempF) + '\u00B0F ' + cabinConditionLabel(tempF, fanOn);
   }
 
+  // STATUS is now purely about Solace herself — HUNGER/THIRST moved to
+  // GALLEY, ENERGY to CABIN, MORALE to SALOON (see those rooms), each
+  // reusing this exact same label/level logic in its new home rather
+  // than a duplicate.
   function cmdStatus(state) {
-    var b = state.boat, c = state.crew;
+    var b = state.boat;
     printBlank();
     printLine('STATUS', 'heading-label');
-    printBlank();
-    printLine(statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
-    printLine(statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
-    printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
-    printLine(statusLine('MORALE', moraleLevel(c.morale)));
     printBlank();
     printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
     printLine(statusLine('BATTERY', Math.round(b.battery) + '%'));
@@ -5678,27 +5723,41 @@
     flushNewLogEntries(state);
   }
 
-  function cmdWellbeing(state) {
+  // GALLEY — food, drink, and the dishes chore, all in one place. The
+  // menu itself never hides options based on darkness (matches the old
+  // WELLBEING screen's philosophy) — EAT/DRINK already check
+  // needsCabinLight at their own top, so the player discovers the
+  // restriction by trying the thing rather than never seeing it offered.
+  function cmdGalley(state) {
     printBlank();
-    printLine('WELLBEING', 'heading-label');
-    printLine('Taking care of yourself.', 'dim');
-    // The menu itself never hides options based on darkness — EAT,
-    // READ, WASH, and CLOTHING stay visible and clickable at night with
-    // the lights off. Each of those already checks needsCabinLight at
-    // its own top and shows TOO DARK TO SEE. via blockedByDarkness (the
-    // same function CHORES uses) rather than performing the action, so
-    // the player discovers the restriction by trying the thing rather
-    // than never seeing it offered.
+    printLine('GALLEY', 'heading-label');
+    printBlank();
+    var c = state.crew;
+    printLine(statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
+    printLine(statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
+    var options = [
+      { label: 'EAT', action: 'cmd:eat' },
+      { label: 'DRINK', action: 'cmd:drink' },
+    ];
+    var dishesOpt = choreOptionIfDue(state, 'dishes');
+    if (dishesOpt) options.push(dishesOpt);
+    options.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'galley-menu', options: options };
+  }
+
+  // HEAD — personal washing. HYGIENE is a pure read of the existing
+  // hoursSinceWash (see hygieneLevel) — no second cleanliness number.
+  // There's no shower aboard Solace; WASH is the wet head's sink/
+  // washcloth wash-up, unchanged from before.
+  function cmdHead(state) {
+    printBlank();
+    printLine('HEAD', 'heading-label');
+    printBlank();
+    printLine(statusLine('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]));
     state.pendingChoice = {
-      id: 'wellbeing-menu',
+      id: 'head-menu',
       options: [
-        { label: 'EAT', action: 'cmd:eat' },
-        { label: 'DRINK', action: 'cmd:drink' },
-        { label: 'SLEEP', action: 'cmd:sleep' },
-        { label: 'READ', action: 'cmd:bookshelf' },
-        { label: 'LISTEN', action: 'cmd:tape-player' },
         { label: 'WASH', action: 'cmd:wash' },
-        { label: 'CLOTHING', action: 'cmd:clothing' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -5781,38 +5840,28 @@
     bunk: 'MAKE BUNK', air: 'AIR OUT CABIN', tidy: 'TIDY UP',
   };
 
-  // What's actually available right now, oldest-pending first, capped at
-  // 3 so the player is never confronted with a checklist — a quiet boat
-  // usually has 0-1 of these true at once.
-  function buildChoreOptions(state) {
+  // Chores are now distributed across the physical rooms they belong
+  // to (see room-mapping comment above CHORE_DEFS's original home)
+  // rather than living in one combined CHORES screen — this replaces
+  // the old buildChoreOptions/cmdChore with a per-kind check each
+  // room's own command calls for itself. Same underlying triggers,
+  // same performChore dispatcher, same CHORE_DEFS — only how a due
+  // chore surfaces to the player has changed.
+  function choreOptionIfDue(state, kind) {
     var c = state.crew;
-    var candidates = [];
-    if (c.dishesDirtySinceMinutes != null) candidates.push({ kind: 'dishes', since: c.dishesDirtySinceMinutes });
-    if (c.clothesWetSinceMinutes != null) candidates.push({ kind: 'dryClothes', since: c.clothesWetSinceMinutes });
-    if (c.toolsOutSinceMinutes != null) candidates.push({ kind: 'tools', since: c.toolsOutSinceMinutes });
-    if (c.bunkUnmadeSinceMinutes != null) candidates.push({ kind: 'bunk', since: c.bunkUnmadeSinceMinutes });
-    if (c.cabinStuffySinceMinutes != null) candidates.push({ kind: 'air', since: c.cabinStuffySinceMinutes });
-    if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD) candidates.push({ kind: 'tidy', since: c.clutterSinceMinutes || 0 });
-    candidates.sort(function (a, b) { return a.since - b.since; });
-    return candidates.slice(0, 3).map(function (item) {
-      return { label: CHORE_LABELS[item.kind], action: 'chore:' + item.kind };
-    });
-  }
-
-  function cmdChore(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
-    printBlank();
-    printLine('CHORES', 'heading-label');
-    var options = buildChoreOptions(state);
-    if (options.length === 0) {
-      printLine('Nothing needs doing right now.', 'dim');
-      state.pendingChoice = { id: 'chore-menu', options: [{ label: 'BACK', action: 'cancel' }] };
-      return;
-    }
-    state.pendingChoice = { id: 'chore-menu', options: options.concat([{ label: 'BACK', action: 'cancel' }]) };
+    var due;
+    if (kind === 'dishes') due = c.dishesDirtySinceMinutes != null;
+    else if (kind === 'dryClothes') due = c.clothesWetSinceMinutes != null;
+    else if (kind === 'tools') due = c.toolsOutSinceMinutes != null;
+    else if (kind === 'bunk') due = c.bunkUnmadeSinceMinutes != null;
+    else if (kind === 'air') due = c.cabinStuffySinceMinutes != null;
+    else if (kind === 'tidy') due = c.clutterCount >= CLUTTER_TIDY_THRESHOLD;
+    else due = false;
+    return due ? { label: CHORE_LABELS[kind], action: 'chore:' + kind } : null;
   }
 
   function performChore(state, kind) {
+    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     var def = CHORE_DEFS[kind];
     if (!def) return;
     if (def.canDo && !def.canDo(state)) {
@@ -5834,6 +5883,120 @@
     });
   }
 
+  // SALOON — the quiet leisure/psychological center of the boat: READ,
+  // CASSETTES (the existing tape player, renamed only at this access
+  // point), and RELAX (see below). TIDY UP lands here as the most
+  // sensible home for general below-deck clutter, which comes from
+  // activity all over the boat (a book left out, a meal's wrappers),
+  // not one single room.
+  function cmdSaloon(state) {
+    printBlank();
+    printLine('SALOON', 'heading-label');
+    printBlank();
+    printLine(statusLine('MORALE', moraleLevel(state.crew.morale)));
+    var options = [
+      { label: 'READ', action: 'cmd:bookshelf' },
+      { label: 'CASSETTES', action: 'cmd:tape-player' },
+      { label: 'RELAX', action: 'cmd:relax' },
+    ];
+    var tidyOpt = choreOptionIfDue(state, 'tidy');
+    if (tidyOpt) options.push(tidyOpt);
+    options.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'saloon-menu', options: options };
+  }
+
+  // RELAX — sitting with nothing particular to do. Not meditation, not
+  // sleep, not a minigame: a short, understated beat (one of several
+  // varied setup lines, so it doesn't repeat verbatim) followed by one
+  // random PONDERING (see the PONDERINGS pool and pickPondering — this
+  // is now the ONLY place they surface; checkAmbientEvent no longer
+  // picks them). Small, diminishing-returns morale nudge via the same
+  // routineMoraleGain every other routine activity already uses, so
+  // it's not an efficient morale-farming loop.
+  var RELAX_SETUP_LINES = [
+    'You sit for a while and listen to the boat.',
+    'You settle into the saloon and let your mind wander.',
+    'You lean back and let the boat do the work for a while.',
+    'You let yourself do nothing in particular for a few minutes.',
+    'You sit quietly and watch the light move across the cabin.',
+  ];
+  function cmdRelax(state) {
+    runShortAction(state, {
+      label: 'RELAXING',
+      duration: 5,
+      action: function (s) {
+        var gain = routineMoraleGain(s, 'relax', 4);
+        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+        log(s, pickFromPool(RELAX_SETUP_LINES));
+        var thought = pickPondering(s);
+        var f = s.flags;
+        if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
+        f.recentAmbientTexts.push(thought);
+        if (f.recentAmbientTexts.length > AMBIENT_HISTORY_LENGTH) f.recentAmbientTexts.shift();
+        log(s, thought);
+        flushNewLogEntries(s);
+        cmdSaloon(s);
+      },
+    });
+  }
+
+  // CABIN — sleep, clothing, and their related chores. COMFORT is a
+  // pure read of the existing clothing-comfort system (comfortLabel,
+  // defined near HUNGER/THIRST/ENERGY above) — never a second
+  // temperature calculation.
+  function cmdCabin(state) {
+    printBlank();
+    printLine('CABIN', 'heading-label');
+    printBlank();
+    var c = state.crew;
+    printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
+    printLine(statusLine('COMFORT', comfortLabel(state)));
+    var options = [
+      { label: 'SLEEP', action: 'cmd:sleep' },
+      { label: 'CLOTHING', action: 'cmd:clothing' },
+    ];
+    var dryOpt = choreOptionIfDue(state, 'dryClothes');
+    if (dryOpt) options.push(dryOpt);
+    var bunkOpt = choreOptionIfDue(state, 'bunk');
+    if (bunkOpt) options.push(bunkOpt);
+    var airOpt = choreOptionIfDue(state, 'air');
+    if (airOpt) options.push(airOpt);
+    options.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'cabin-menu', options: options };
+  }
+
+  // NAV STATION — Solace herself: navigation, weather, resources,
+  // electrical, boat STATUS, and DISTRESS. PUT AWAY TOOLS lands here
+  // too (tools come out for REPAIR, itself reached from STATUS) rather
+  // than in a personal-living-space room. Preserves every existing
+  // nav/weather/inventory/electrical/status/rescue function exactly —
+  // this only changes where they're reached from.
+  function cmdNavStation(state) {
+    printBlank();
+    printLine('NAV STATION', 'heading-label');
+    var toolsOpt = choreOptionIfDue(state, 'tools');
+    var rescueItem = rescueMenuOption(state);
+    var extraGroup = [];
+    if (toolsOpt) extraGroup.push(toolsOpt);
+    if (rescueItem) extraGroup.push(rescueItem);
+    var options = groupedOptions([
+      [
+        { label: 'POSITION', action: 'cmd:position' },
+        { label: 'WEATHER', action: 'cmd:weather' },
+        { label: 'FORECAST', action: 'cmd:forecast' },
+        { label: 'INVENTORY', action: 'cmd:inventory' },
+      ],
+      [
+        { label: 'ELECTRICAL', action: 'cmd:electrical' },
+        { label: 'STATUS', action: 'cmd:status' },
+      ],
+      extraGroup,
+      [{ label: 'BACK', action: 'cancel' }],
+    ]);
+    state.pendingChoice = { id: 'nav-station-menu', options: options };
+  }
+
+
   // Small, quiet morale nudges for the four new routine activities. Full
   // value if it's genuinely been a while; doing the same thing again
   // soon after helps much less — these are small comforts, not a lever
@@ -5849,7 +6012,7 @@
   }
 
   function cmdWash(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:head'); return; }
     if (!hasEnoughWater(state, WATER_WASH_GAL)) {
       printBlank();
       printLine('Not enough water.', 'amber');
@@ -5891,7 +6054,7 @@
   // every other screen uses) so it can generate the one finished-outfit
   // observation — see performClothingLeave.
   function cmdClothing(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     printBlank();
     printLine('CLOTHING', 'heading-label');
     var clo = state.crew.clothing, wet = state.crew.wetClothing;
@@ -5926,7 +6089,7 @@
   var CLOTHING_CATEGORY_TITLE = { top: 'TOP', outer: 'OUTER', bottom: 'BOTTOM', feet: 'FEET' };
 
   function cmdClothingCategory(state, category) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     printBlank();
     printLine(CLOTHING_CATEGORY_TITLE[category], 'heading-label');
     var options = CLOTHING_CATEGORY_ORDER[category].map(function (value) {
@@ -5941,7 +6104,7 @@
   function cmdClothingFeet(state) { cmdClothingCategory(state, 'feet'); }
 
   function cmdClothingAccessories(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     printBlank();
     printLine('ACCESSORIES', 'heading-label');
     var clo = state.crew.clothing;
@@ -5973,7 +6136,7 @@
   // — the one moment of actual text happens when the player leaves via
   // BACK (performClothingLeave), not on every selection along the way.
   function performClothingChange(state, category, value) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     var c = state.crew;
     if (c.clothing[category] === value) {
       cmdClothing(state); // already wearing this -- nothing to change, back to the main CLOTHING screen same as any other pick
@@ -6002,7 +6165,7 @@
   }
 
   function performAccessoryToggle(state, key) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     var turningOn = !state.crew.clothing[key];
     runShortAction(state, {
       label: turningOn ? 'PUTTING ON' : 'TAKING OFF',
@@ -6043,12 +6206,12 @@
       var bs = state.books[b.id];
       return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
     });
-    opts.push({ label: 'BACK', action: 'cmd:wellbeing' });
+    opts.push({ label: 'BACK', action: 'cmd:saloon' });
     return opts;
   }
 
   function cmdBookshelf(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; }
     printBlank();
     printLine('BOOKSHELF', 'heading-label');
     state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
@@ -6064,7 +6227,7 @@
     if (!bookDef) return;
     var bookState = state.books[bookId];
     if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
     state.crew.readingBookId = bookId;
     state.crew.readingLastSyncedAt = currentGameMinutes(state); // starts the continuous clock fresh — nothing before this moment counts toward this session
     bumpClutter(state, 1); // the book itself, left out
@@ -6074,7 +6237,7 @@
   }
 
   function performStopReading(state) {
-    if (state.crew.readingBookId == null) { cmdWellbeing(state); return; } // defensive -- shouldn't be reachable otherwise
+    if (state.crew.readingBookId == null) { cmdSaloon(state); return; } // defensive -- shouldn't be reachable otherwise
     syncReadingProgress(state); // commit the final partial interval since the last sync before stopping, so it's never lost
     if (state.crew.readingBookId == null) { flushNewLogEntries(state); return; } // the sync itself already ended the session (completion or darkness) and set up its own next screen -- don't double-handle it
     state.crew.readingBookId = null;
@@ -6099,7 +6262,7 @@
       if (t.title === activeTapeTitle) return; // don't re-list the one already playing
       opts.push({ label: t.title.toUpperCase(), action: 'start-tape:' + t.title });
     });
-    opts.push({ label: 'BACK', action: 'cmd:wellbeing' });
+    opts.push({ label: 'BACK', action: 'cmd:saloon' });
     return opts;
   }
 
@@ -6287,7 +6450,7 @@
   }
 
   function cmdEat(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:galley'); return; }
     printBlank();
     printLine('PROVISIONS', 'heading-label');
     var anyMeal = FOOD_ITEMS.some(function (f) { return f.type === 'meal' && state.food[f.key] > 0; }) || !!heldFishAsMealItem(state);
@@ -6786,8 +6949,12 @@
     engine: cmdEngine,
     helm: cmdHelm,
     'change-course': cmdChangeCourse,
-    wellbeing: cmdWellbeing,
-    chore: cmdChore,
+    galley: cmdGalley,
+    head: cmdHead,
+    saloon: cmdSaloon,
+    relax: cmdRelax,
+    cabin: cmdCabin,
+    'nav-station': cmdNavStation,
     electrical: cmdElectrical,
     sleep: cmdSleep,
     eat: cmdEat,
@@ -7794,29 +7961,22 @@
     // REPAIR no longer lives here at all — it's reachable only from
     // STATUS now, and only while hasRepairableDamage(state) (or a
     // still-pending aft-locker event) is true; see cmdStatus. RADIO
-    // FOR RESCUE/RESCUE STATUS keeps its existing placement here,
-    // conditionally (see rescueMenuOption) — DISTRESS is gone; there
-    // is no unconditional rescue entry point anymore.
+    // FOR RESCUE/RESCUE STATUS keeps its existing placement above deck
+    // (aboveMiscGroup, below) — below deck it now lives inside NAV
+    // STATION only (see cmdNavStation), matching the stated design
+    // intent that dealing with an emergency, like everything else
+    // below, means going to the room where that's handled.
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
-    var belowMiscGroup = [
-      { label: 'STATUS', action: 'cmd:status' },
-      { label: 'ELECTRICAL PANEL', action: 'cmd:electrical' },
-    ];
-    if (rescueItem) belowMiscGroup.push(rescueItem);
 
     if (state.crew.location === 'below') {
       return groupedOptions([
         [
-          { label: 'WELLBEING', action: 'cmd:wellbeing' },
-          { label: 'CHORES', action: 'cmd:chore' },
+          { label: 'GALLEY', action: 'cmd:galley' },
+          { label: 'HEAD', action: 'cmd:head' },
+          { label: 'SALOON', action: 'cmd:saloon' },
+          { label: 'CABIN', action: 'cmd:cabin' },
+          { label: 'NAV STATION', action: 'cmd:nav-station' },
         ],
-        [
-          { label: 'POSITION', action: 'cmd:position' },
-          { label: 'WEATHER', action: 'cmd:weather' },
-          { label: 'FORECAST', action: 'cmd:forecast' },
-          { label: 'INVENTORY', action: 'cmd:inventory' },
-        ],
-        belowMiscGroup,
         [{ label: goLabel, action: 'go-above-below' }],
       ]);
     }
@@ -8755,6 +8915,7 @@
     if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
+    if (c.lastRoutineAt.relax === undefined) c.lastRoutineAt.relax = null;
     if (c.location === undefined) c.location = 'above';
     if (c.atHelm === undefined) c.atHelm = false;
     if (b.battery === undefined) b.battery = 100;
