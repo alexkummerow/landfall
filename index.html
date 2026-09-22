@@ -2646,23 +2646,29 @@
   /* --------------------------------------------------------------
      COURSE TURN — the boat physically comes around onto a new heading
      in real time (4 degrees/second — see HEADING_TURN_RATE_DEG_PER_SEC)
-     rather than snapping there instantly or over a fixed total
-     duration. Shared by CHANGE COURSE, SET FOR NĀWILIWILI (both open
-     water only), and re-engaging AUTOPILOT at the electrical panel
-     (which corrects back toward SET COURSE from wherever the boat
-     drifted to while it was off). Pure UI presentation — never
-     advances voyageMinutes, and nothing about it is persisted; if the
-     page reloads mid-turn it simply resumes as a fresh tick would.
+     rather than snapping there instantly. This is a LIVE, ongoing
+     background process, not a blocking action: it never touches
+     uiBusy, never clears the options panel, and never shows the
+     ". .. ..." activity indicator — the player stays fully at the helm
+     (or wherever else they navigate) the entire time, watching ACTUAL
+     HEADING and SPEED update live if they're looking at the AT THE
+     HELM screen (see printHelmAtHelmHeader's auto-attach below) and
+     free to pick a new heading at any point, which simply retargets
+     this same running turn rather than queuing or blocking (see
+     activeTurn.retarget). Shared by CHANGE COURSE, SET FOR NĀWILIWILI
+     (both open water only), TAKE THE HELM, and re-engaging AUTOPILOT
+     at the electrical panel. Never advances voyageMinutes and nothing
+     about it is persisted beyond nav.heading/setCourse themselves; if
+     the page reloads mid-turn it simply resumes as a fresh tick would.
      nav.heading is nudged directly by this function's own short-lived
      timer; computeHeading() stands down for the duration (see
      headingTurnActive, checked at its own top) so a live simTick
      landing mid-turn can't fight it. Every intermediate heading is fed
      straight into computeBoatSpeed (wind angle, no-go-zone, sail
-     effectiveness) each tick, so the boat genuinely behaves according
-     to wherever it's physically pointed right now, and into
-     isInNoGoZone for the winch/luffing/sail_fill audio below — never a
-     separate, only-visual heading animation layered over an instantly-
-     resolved simulation state.
+     effectiveness) each tick, and into updateNoGoZoneAudio for the
+     luffing/sail_fill pair below — never a separate, only-visual
+     heading animation layered over an instantly-resolved simulation
+     state.
      -------------------------------------------------------------- */
   var headingTurnActive = false;
   var HEADING_TURN_RATE_DEG_PER_SEC = 4;
@@ -2677,6 +2683,43 @@
   function isInNoGoZone(state, heading) {
     if (state.boat.sailConfig === 'furled') return false;
     return angleDiff(heading, state.weather.windDirection) < 35;
+  }
+
+  // Whether the boat is CURRENTLY luffing, per the state machine below
+  // -- deliberately its own tracked flag rather than reading the
+  // luffing audio element's raw .paused, since that lags behind during
+  // stopSailsLuffingLoop's fade-out (a repeat call mid-fade would
+  // otherwise see .paused still false and misread it as still luffing).
+  // This is the single source of truth shared by every caller.
+  var isCurrentlyLuffing = false;
+
+  // The ONE shared no-go-zone audio state machine -- called any time
+  // nav.heading may have just changed, for ANY reason (beginCourseTurn's
+  // own real-time interval, or an ordinary simTick's autopilot
+  // correction/auto-tack/drift/wobble alike, or a coastal leg change).
+  // Reuses isInNoGoZone (the existing 35 degree boundary, see above) as
+  // the only source of truth for the zone itself -- never a second one.
+  // Responds purely to the CURRENT actual heading each time it's
+  // called, so it naturally keeps working correctly across a
+  // beginCourseTurn retarget (see "RETARGETING MUST ALSO WORK WITH
+  // LUFFING") without needing to know anything about targets at all.
+  // On exiting the zone: stop the loop, then immediately play
+  // sail_fill once -- no winch, ever, anywhere (see the module notes
+  // on this being removed completely).
+  function updateNoGoZoneAudio(state) {
+    if (state.boat.sailConfig === 'furled') {
+      if (isCurrentlyLuffing) { isCurrentlyLuffing = false; stopSailsLuffingLoop(); }
+      return;
+    }
+    var nowLuffing = isInNoGoZone(state, state.nav.heading);
+    if (nowLuffing && !isCurrentlyLuffing) {
+      isCurrentlyLuffing = true;
+      startSailsLuffingLoop(state);
+    } else if (!nowLuffing && isCurrentlyLuffing) {
+      isCurrentlyLuffing = false;
+      stopSailsLuffingLoop();
+      playSailsOneShot('fill', null, state);
+    }
   }
 
   // The heading the boat should physically turn toward whenever
@@ -2694,12 +2737,15 @@
     return autopilotSteeringSolution(state, FINAL_DEST);
   }
 
-  // opts: firstLine (printed immediately), settleLine (printed once the
-  // turn finishes), targetHeading, onSettle(state) (optional — e.g.
-  // resuming drift from the new heading), redisplay(state) (redraws
-  // whichever screen asked for the turn — HELM or the ELECTRICAL
-  // PANEL). Text is temp-view, exactly like the screens it's launched
-  // from — this isn't a permanent voyage-log event, just menu browsing.
+  // opts: targetHeading, onSettle(state) (optional — e.g. resuming
+  // drift from the new heading once the boat actually arrives). This
+  // does NOT touch the screen at all — no printing, no redisplay, no
+  // uiBusy — see the module notes above. Each caller (CHANGE COURSE,
+  // SET FOR NĀWILIWILI, TAKE THE HELM, AUTOPILOT re-engage) is
+  // responsible for its own immediate redisplay right after calling
+  // this, exactly as it would for any other state change, since the
+  // player stays fully interactive throughout — there's no "turn
+  // finished, hand control back" moment to wait for.
   function beginCourseTurn(state, opts) {
     var nav = state.nav;
 
@@ -2707,110 +2753,26 @@
       // A turn is already physically underway — this is a NEW course-
       // change action (a different heading picked, or autopilot
       // recalculated), not a duplicate of the same one. Retarget the
-      // EXISTING real-time loop in place (never start a second,
-      // competing interpolation), and re-evaluate the winch decision
-      // fresh against wherever the boat is actually pointed right now
-      // — see "course changes can change while turning." In normal
-      // play this is unreachable anyway (no controls are shown while a
-      // turn is active — see below), but stays safe if it ever is.
+      // EXISTING real-time loop in place from wherever the boat is
+      // ACTUALLY pointed right now (never a second, competing
+      // interpolation) — this is now a routine, fully-expected path
+      // (the player can retarget at any moment while turning), not a
+      // rare defensive one.
       activeTurn.retarget(opts);
       return;
     }
 
-    var startHeading = nav.heading != null ? nav.heading : opts.targetHeading;
-    // AT THE HELM specifically (hand-steering, not autopilot correcting
-    // in the background) gets the persistent, live-updating SET COURSE/
-    // ACTUAL HEADING/WIND FROM/SPEED block for the whole maneuver — see
-    // printHelmAtHelmHeader. Decided once, here: atHelm can't change
-    // mid-turn (LEAVE THE HELM isn't offered while turning either).
-    var showHelmHeader = state.crew.atHelm;
-
-    function settleInstant() {
+    if (Math.abs(signedAngleDiff(opts.targetHeading, nav.heading)) < 0.5) {
+      // Already on (or confirmed) that heading — nothing to physically
+      // turn through.
       nav.heading = normalizeDeg(opts.targetHeading);
       state.boat.speed = computeBoatSpeed(state, nav.heading);
       if (opts.onSettle) opts.onSettle(state);
-      printBlank();
-      printLine(opts.settleLine, 'dim');
-      uiBusy = false;
-      opts.redisplay(state);
-      flushNewLogEntries(state); // resolveAutoTack (inside courseSteeringTarget, called before this turn began) may have logged a tack
-      renderOptions(state);
-      saveGameState(state);
-      updateAudioForState(state);
-      scrollToBottom();
-    }
-
-    if (Math.abs(signedAngleDiff(opts.targetHeading, startHeading)) < 0.5) {
-      // Already on (or confirmed) that heading — nothing to physically
-      // turn through, so settle immediately with no dots, no live
-      // header (redisplay's own cmdHelm call shows the static one
-      // right away), and no audio.
-      printBlank();
-      printLine(opts.firstLine, 'dim');
-      settleInstant();
       return;
     }
 
-    uiBusy = true;
-    optionsEl.innerHTML = '';
     headingTurnActive = true;
-
-    // The persistent header (when shown) is deliberately the very first
-    // thing printed — "the top should continue to show AT THE HELM..."
-    // — with the "Course set to X" confirmation appearing below it,
-    // never instead of it.
-    var headerRefs = null;
-    if (showHelmHeader) {
-      headerRefs = printHelmAtHelmHeader(state);
-      printBlank();
-    }
-    printLine(opts.firstLine, 'dim');
-
-    var dotsLine = document.createElement('p');
-    dotsLine.className = 'line dim';
-    dotsLine.textContent = '.';
-    tempViewEl.appendChild(dotsLine);
-    scrollToBottom();
-    var frames = ['.', '..', '...'];
-    var frameIndex = 0;
-    var dotTimer = setInterval(function () {
-      frameIndex = (frameIndex + 1) % frames.length;
-      dotsLine.textContent = frames[frameIndex];
-    }, DOT_FRAME_MS);
-
     var currentOpts = opts;
-    // Resuming mid-luffing (rare — only via retarget) picks the loop
-    // back up correctly; a fresh turn starting from a drawing heading
-    // stays silent until it actually enters the zone, below.
-    var wasLuffing = isInNoGoZone(state, nav.heading);
-    if (wasLuffing) startSailsLuffingLoop();
-
-    // Counts every part of THIS course-change action that must finish
-    // before the indicator stops and the turn settles — the rotation
-    // itself (1, always) plus a trailing sail_fill one-shot whenever
-    // one is actually triggered below. Winch is NOT counted here at
-    // all anymore (see shouldWinchOnSettle) — it no longer plays during
-    // the turn, so it can never hold the indicator open. Never counts
-    // the luffing LOOP itself either: an indefinite environmental
-    // condition (the boat just sitting in irons once the turn is over)
-    // must NOT keep ". .. ..." running forever.
-    var pendingOps = 1;
-
-    // Winch now represents trimming the sails for the heading the boat
-    // has actually ARRIVED at, not the steering itself — TURN FIRST,
-    // THEN ARRIVE, THEN TRIM. Decided once per course-change action (the
-    // initial call, or each retarget) by comparing wherever the boat is
-    // pointed right now against the freshly requested target, exactly
-    // as before, but the sound itself is deferred to maybeFinish below,
-    // fired only once the boat has fully settled and controls are back.
-    var shouldWinchOnSettle = false;
-    function evaluateWinch(fromHeading, toHeading) {
-      if (state.boat.sailConfig === 'furled') { shouldWinchOnSettle = false; return; } // no canvas up -- nothing to trim
-      var distFromCurrent = angleDiff(fromHeading, state.weather.windDirection);
-      var distFromTarget = angleDiff(toHeading, state.weather.windDirection);
-      shouldWinchOnSettle = distFromTarget < distFromCurrent;
-    }
-    evaluateWinch(nav.heading, opts.targetHeading);
 
     var rotationTimer = setInterval(function () {
       var target = currentOpts.targetHeading;
@@ -2827,56 +2789,36 @@
       // simulation waits for a final value.
       state.boat.speed = computeBoatSpeed(state, nav.heading);
 
-      if (headerRefs) {
-        headerRefs.headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0');
-        headerRefs.speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
+      // If the player is currently looking at the AT THE HELM screen,
+      // this updates its live ACTUAL HEADING/SPEED lines in place (see
+      // printHelmAtHelmHeader's auto-attach) — harmless no-op
+      // otherwise (headerRefs is only ever set while that screen is
+      // actually the one on display).
+      if (activeTurn.headerRefs) {
+        activeTurn.headerRefs.headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0');
+        activeTurn.headerRefs.speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
       }
+      updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
 
-      var nowLuffing = isInNoGoZone(state, nav.heading);
-      if (nowLuffing && !wasLuffing) {
-        startSailsLuffingLoop();
-      } else if (!nowLuffing && wasLuffing) {
-        stopSailsLuffingLoop();
-        pendingOps++;
-        playSailsOneShot('fill', function () { pendingOps--; maybeFinish(); });
-      }
-      wasLuffing = nowLuffing;
+      // Luffing/sail_fill driven purely off the actual heading this
+      // tick, via the one shared state machine every heading-change
+      // path uses — see updateNoGoZoneAudio's own notes, including why
+      // this naturally keeps working correctly through a retarget.
+      updateNoGoZoneAudio(state);
 
       if (Math.abs(signedAngleDiff(target, nav.heading)) < 0.05) {
         clearInterval(rotationTimer);
-        pendingOps--;
-        maybeFinish();
+        headingTurnActive = false;
+        activeTurn = null;
+        if (currentOpts.onSettle) currentOpts.onSettle(state);
+        saveGameState(state);
       }
     }, HEADING_TURN_TICK_MS);
 
-    function maybeFinish() {
-      if (pendingOps > 0) return; // rotation and/or a trailing sail_fill one-shot still going
-      clearInterval(dotTimer);
-      if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
-      headingTurnActive = false;
-      activeTurn = null;
-      if (currentOpts.onSettle) currentOpts.onSettle(state);
-      printBlank();
-      printLine(currentOpts.settleLine, 'dim');
-      uiBusy = false;
-      currentOpts.redisplay(state);
-      flushNewLogEntries(state);
-      renderOptions(state);
-      saveGameState(state);
-      updateAudioForState(state);
-      scrollToBottom();
-      // Only now — the indicator already stopped and controls already
-      // back — start trimming if it's actually called for on the
-      // heading just arrived at. Fire and forget: never reopens the
-      // indicator or blocks anything further.
-      if (shouldWinchOnSettle) playSailsOneShot('winch');
-    }
-
     activeTurn = {
+      headerRefs: null, // set/refreshed by printHelmAtHelmHeader whenever the AT THE HELM screen is actually the one being rendered
       retarget: function (newOpts) {
-        var fromHeading = nav.heading;
         currentOpts = newOpts;
-        evaluateWinch(fromHeading, newOpts.targetHeading);
       },
     };
   }
@@ -3058,6 +3000,14 @@
         }
       }
     }
+
+    // Drives the luffing/sail_fill sequence off the heading this tick
+    // actually settled on, regardless of WHY it moved (autopilot
+    // correction, auto-tack, drift/wobble, coastal leg change) -- see
+    // updateNoGoZoneAudio's own notes. Skipped while a real-time turn
+    // (beginCourseTurn) is actively managing this itself, to avoid the
+    // two fighting over the same loop/one-shot.
+    if (!activeTurn) updateNoGoZoneAudio(state);
 
     checkLandProximity(state);
 
@@ -4156,23 +4106,14 @@
       layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
     }
     updateBoatAudioForState(state);
-    syncSailsLuffingLoopToHeading(state);
-  }
-
-  // Safety net for the luffing loop OUTSIDE an active real-time turn --
-  // e.g. the heading drifting, auto-tacking, or wobbling via the
-  // ordinary simTick path (not beginCourseTurn's own interval) while
-  // the boat happens to be sitting in the no-go zone from an earlier
-  // turn. beginCourseTurn already manages start/stop (and the sail_fill
-  // one-shot) itself while it owns the loop, so this stays out of its
-  // way entirely whenever a turn is actually in progress (activeTurn),
-  // and never plays sail_fill on its own -- that transition belongs to
-  // an active turn's own real-time sequence, not this periodic catch-up.
-  function syncSailsLuffingLoopToHeading(state) {
-    if (activeTurn) return;
-    var el = sailsAudioEls.luffing;
-    if (!el || el.paused) return;
-    if (!isInNoGoZone(state, state.nav.heading)) stopSailsLuffingLoop();
+    // Defensive re-sync only (idempotent — see updateNoGoZoneAudio's own
+    // isCurrentlyLuffing guard) for any path that moved nav.heading
+    // without going through simTick or beginCourseTurn explicitly, and
+    // also re-applies the current above/below-deck audibility to
+    // whatever's already playing, covering GO ABOVE/GO BELOW (this runs
+    // after every action's own tail).
+    updateNoGoZoneAudio(state);
+    applyMuteToSailsAudio(state);
   }
 
   function toggleMute() {
@@ -5342,12 +5283,10 @@
         // boat actually is at that future moment — see the driftHeading
         // note in the nav state block.
         state.nav.driftHeading = null;
-        beginCourseTurn(state, {
-          firstLine: 'Autopilot engaged.',
-          settleLine: 'Correcting course.',
-          targetHeading: courseSteeringTarget(state),
-          redisplay: cmdElectrical,
-        });
+        printBlank();
+        printLine('Autopilot engaged.', 'dim');
+        beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+        cmdElectrical(state);
       } else {
         printBlank();
         printLine('Autopilot disengaged.', 'dim');
@@ -5700,13 +5639,18 @@
   }
 
   // The persistent "AT THE HELM" block — SET COURSE / ACTUAL HEADING /
-  // WIND FROM / SPEED — shared by cmdHelm's own atHelm branch,
-  // cmdChangeCourse (so it stays visible above the dial controls), and
-  // beginCourseTurn's real-time turn display (so it stays visible,
-  // live-updating, for the whole maneuver). Returns references to the
-  // ACTUAL HEADING and SPEED lines specifically, since those are the
-  // two values a live turn needs to update in place each tick without
-  // re-rendering the whole screen — see beginCourseTurn.
+  // WIND FROM / SPEED — shared by cmdHelm's own atHelm branch and
+  // cmdChangeCourse (so it stays visible above the dial controls).
+  // Whenever a real-time turn is currently running (activeTurn), this
+  // ALSO (re-)attaches that turn's live updates to whichever lines were
+  // just rendered here — see beginCourseTurn's own rotation timer,
+  // which writes into activeTurn.headerRefs each tick. This is what
+  // makes the header "live" regardless of how the player navigated
+  // back to it: every time this function runs while a turn is active,
+  // the turn's next tick starts updating THESE (currently on-screen)
+  // nodes, not whatever it had before. Returns the same refs, mainly
+  // for beginCourseTurn's own immediate use right after starting/
+  // retargeting a turn while this screen is already showing.
   function printHelmAtHelmHeader(state) {
     printLine('AT THE HELM', 'heading-label');
     printLine(inventoryLine('SET COURSE', Math.round(state.nav.setCourse) + '\u00B0'));
@@ -5719,7 +5663,9 @@
     speedEl.className = 'line';
     speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
     tempViewEl.appendChild(speedEl);
-    return { headingEl: headingEl, speedEl: speedEl };
+    var refs = { headingEl: headingEl, speedEl: speedEl };
+    if (activeTurn) activeTurn.headerRefs = refs;
+    return refs;
   }
 
   function cmdHelm(state) {
@@ -7710,14 +7656,16 @@
   }
 
   /* --------------------------------------------------------------
-     SAILS AUDIO -- raising/lowering one-shots, the winch cue, and the
-     luffing loop/fill pair. Same lazy-per-key HTMLAudioElement shape as
+     SAILS AUDIO -- raising/lowering one-shots and the luffing loop/fill
+     pair. Same lazy-per-key HTMLAudioElement shape as
      FISHING_AUDIO_FILES/getFishingAudioEl just above (its own
      independent copy, for the same "each system easy to reason about
      on its own" reasoning given there), with one addition:
      playSailsOneShot's onEnded hook is what lets a sail raise/lower
      action last exactly as long as its own audio file rather than a
-     hardcoded timer (see runAudioSyncedAction below).
+     hardcoded timer (see runAudioSyncedAction below). winch.mp3 is
+     deliberately NOT referenced anywhere in this file — the file can
+     stay in /audio/sails/, but nothing here plays it.
      -------------------------------------------------------------- */
   var SAILS_AUDIO_FILES = {
     raiseLong: 'audio/sails/raise_sail_long.mp3',
@@ -7726,12 +7674,16 @@
     lowerShort: 'audio/sails/lower_sail_short.mp3',
     fill: 'audio/sails/sail_fill.mp3',
     luffing: 'audio/sails/sails_luffing_loop.mp3',
-    winch: 'audio/sails/winch.mp3',
   };
   var SAILS_AUDIO_VOLUME = {
     raiseLong: 0.6, raiseShort: 0.6, lowerLong: 0.6, lowerShort: 0.6,
-    fill: 0.55, luffing: 0.4, winch: 0.55,
+    fill: 0.55, luffing: 0.4,
   };
+  // Only the sail-HANDLING sounds (the boat actually crossing the wind)
+  // are above-deck-only -- raising/lowering canvas is mechanical,
+  // ship-wide noise (winch/halyard work) audible below deck too, same
+  // as it always was; unaffected by this.
+  var SAILS_LOCATION_GATED_KEYS = { luffing: true, fill: true };
   var SAILS_CROSSFADE_SECONDS = 0.1; // quick fade-in every one-shot uses at its own start (click prevention only), same as fishing
   var SAILS_LUFFING_FADE_SECONDS = 0.35; // "a very short fade-in/fade-out" specifically for the loop, per the audio-transitions spec
 
@@ -7749,6 +7701,18 @@
     });
     sailsAudioEls[key] = el;
     return el;
+  }
+
+  // The volume a given sails sound SHOULD actually be heard at right
+  // now -- muted always wins, and the above-deck-only sounds (see
+  // SAILS_LOCATION_GATED_KEYS) go silent below deck specifically
+  // because the player isn't the one hearing the sails work, even
+  // though the underlying sail physics keep running identically either
+  // way (see isInNoGoZone/computeBoatSpeed, untouched by location).
+  function sailsAudibleVolume(state, key) {
+    if (muted) return 0;
+    if (SAILS_LOCATION_GATED_KEYS[key] && state.crew.location !== 'above') return 0;
+    return SAILS_AUDIO_VOLUME[key];
   }
 
   // Identical in shape to fadeFishingVolume -- see that function's own
@@ -7773,13 +7737,16 @@
     }, stepMs);
   }
 
-  // Plays a one-shot (raiseLong/raiseShort/lowerLong/lowerShort/fill/
-  // winch) from the beginning every time, with a quick fade-in to avoid
-  // a click at the start -- and fires onEnded (once) when it naturally
+  // Plays a one-shot (raiseLong/raiseShort/lowerLong/lowerShort/fill)
+  // from the beginning every time, with a quick fade-in to avoid a
+  // click at the start -- and fires onEnded (once) when it naturally
   // finishes, same wiring as playFishingOneShot. This natural 'ended'
   // event is what runAudioSyncedAction waits on for sail raise/lower
-  // actions, rather than a separately hardcoded duration.
-  function playSailsOneShot(key, onEnded) {
+  // actions, rather than a separately hardcoded duration. Runs (and
+  // still calls onEnded on schedule) even when sailsAudibleVolume
+  // resolves to 0 -- audibility is purely a volume question, never a
+  // reason to skip the underlying event or its timing.
+  function playSailsOneShot(key, onEnded, state) {
     if (!audioUnlocked) { if (onEnded) onEnded(); return; }
     var el = getSailsAudioEl(key);
     el.onended = null;
@@ -7790,7 +7757,7 @@
     el._baseVolume = SAILS_AUDIO_VOLUME[key];
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Sails audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
-    fadeSailsVolume(el, muted ? 0 : SAILS_AUDIO_VOLUME[key], SAILS_CROSSFADE_SECONDS);
+    fadeSailsVolume(el, sailsAudibleVolume(state, key), SAILS_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -7803,8 +7770,11 @@
   // (never a resume), a short fade-in to avoid a click, looped (see
   // getSailsAudioEl). No-ops if already playing -- callers never need
   // to check this themselves, and it guarantees only one copy is ever
-  // running (see the module notes on never stacking the loop).
-  function startSailsLuffingLoop() {
+  // running (see the module notes on never stacking the loop). Starts
+  // (silently, if below deck) regardless of audibility -- the loop
+  // tracks the boat's actual luffing condition, not whether anyone can
+  // hear it.
+  function startSailsLuffingLoop(state) {
     if (!audioUnlocked) return;
     var el = getSailsAudioEl('luffing');
     if (!el.paused) return; // already looping -- never stack a second copy
@@ -7814,7 +7784,7 @@
     el._baseVolume = SAILS_AUDIO_VOLUME.luffing;
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Sails audio failed to play (luffing):', describeError(e)); });
-    fadeSailsVolume(el, muted ? 0 : SAILS_AUDIO_VOLUME.luffing, SAILS_LUFFING_FADE_SECONDS);
+    fadeSailsVolume(el, sailsAudibleVolume(state, 'luffing'), SAILS_LUFFING_FADE_SECONDS);
   }
 
   // Fades out then pauses -- unlike stopFishingReelLoop's instant cut,
@@ -7828,15 +7798,21 @@
     });
   }
 
-  // Applies the current mute state to whichever sails element(s) are
-  // actually audible right now, instantly -- called from toggleMute,
-  // same pattern as applyMuteToFishingAudio.
-  function applyMuteToSailsAudio() {
+  // Applies the current mute state AND the current above/below-deck
+  // audibility to whichever sails element(s) are actually playing right
+  // now, instantly -- called from toggleMute (mute changing, no state
+  // in scope there, falls back to GAME) and from updateAudioForState
+  // (location possibly changing, e.g. GO ABOVE/GO BELOW -- passes its
+  // own state explicitly), same pattern as applyMuteToFishingAudio
+  // otherwise. Never starts, stops, or restarts anything -- purely a
+  // volume sync for whatever's already playing.
+  function applyMuteToSailsAudio(state) {
+    var s = state || GAME;
     Object.keys(sailsAudioEls).forEach(function (key) {
       var el = sailsAudioEls[key];
       if (!el || el.paused) return;
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : (el._baseVolume || 0);
+      el.volume = s ? sailsAudibleVolume(s, key) : (muted ? 0 : (el._baseVolume || 0));
     });
   }
 
@@ -7935,7 +7911,7 @@
     runAudioSyncedAction(state, {
       label: SAIL_CHANGE_WORKING_LABEL[targetConfig],
       fallbackSeconds: SAIL_CHANGE_FALLBACK_SECONDS[audioKey],
-      playAudio: function (onEnded) { playSailsOneShot(audioKey, onEnded); },
+      playAudio: function (onEnded) { playSailsOneShot(audioKey, onEnded, state); },
       action: function (s) {
         s.boat.sailConfig = targetConfig;
         log(s, SAIL_CHANGE_LOG_LINES[targetConfig]);
@@ -8865,13 +8841,13 @@
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
         state.nav.courseDraft = null;
+        printBlank();
+        printLine('Course set to ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
         beginCourseTurn(state, {
-          firstLine: 'Course set to ' + Math.round(state.nav.setCourse) + '\u00B0.',
-          settleLine: 'Coming around.',
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
-          redisplay: cmdHelm,
         });
+        cmdHelm(state);
         break;
       case 'course-draft-cancel':
         state.nav.courseDraft = null;
@@ -8880,24 +8856,22 @@
       case 'set-for-nawiliwili':
         if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
+        printBlank();
+        printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
         beginCourseTurn(state, {
-          firstLine: 'Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.',
-          settleLine: 'Coming around.',
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
-          redisplay: cmdHelm,
         });
+        cmdHelm(state);
         break;
       case 'take-helm':
         if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.crew.atHelm = true;
         state.nav.driftHeading = null; // stale drift value from any earlier unattended period shouldn't carry into the next one -- see the same pattern for autopilot re-engaging
-        beginCourseTurn(state, {
-          firstLine: 'You take the helm.',
-          settleLine: 'Bringing her back on course.',
-          targetHeading: courseSteeringTarget(state),
-          redisplay: cmdHelm,
-        });
+        printBlank();
+        printLine('You take the helm.', 'dim');
+        beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+        cmdHelm(state);
         break;
       case 'leave-helm':
         state.crew.atHelm = false;
