@@ -402,7 +402,16 @@
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
-        clothesWetSinceMinutes: null, // voyageMinutes clothes were first noticed wet (above deck in rain/spray), or null — cleared by DRY CLOTHES or CHANGE
+        clothesWetSinceMinutes: null, // voyageMinutes the OLDEST currently-hung-up wet item was taken off, or null if nothing's pending — this is the DRY CLOTHES trigger; NOT the same as wetClothing below (what's actively worn), see CLOTHING
+        clothing: { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false }, // currently worn -- see CLOTHING section; default is a sensible cool-weather Seattle outfit
+        wetClothing: { torso: false, bottom: false, feet: false }, // hidden per-category wet state of what's CURRENTLY WORN -- never barefoot (see FEET logic); changing out of a wet item clears the relevant flag and stamps clothesWetSinceMinutes above instead
+        aboveDeckSinceMinutes: null, // voyageMinutes GO ABOVE most recently happened, or null while below -- continuous above-deck duration for the one-minute exposure grace period; reset (to null) by GO BELOW, and restamped fresh by GO ABOVE
+        torsoWetExposureMinutes: 0,   // hidden accumulator toward wetClothing.torso -- see updateClothingExposure; resets on GO BELOW same as aboveDeckSinceMinutes
+        bottomWetExposureMinutes: 0,  // hidden accumulator toward wetClothing.bottom
+        feetWetExposureMinutes: 0,    // hidden accumulator toward wetClothing.feet -- never accumulates while barefoot
+        clothingMismatchKind: null, // null | 'cold' | 'warm' -- which comfort mismatch is CURRENTLY active, for the gradual gated consequence and staged text prompts; resets whenever the mismatch resolves or flips
+        clothingMismatchSinceMinutes: null, // voyageMinutes the CURRENT clothingMismatchKind began
+        lastClothingPromptAt: null,   // voyageMinutes of the last clothing text prompt (any kind), for a shared cooldown so these stay infrequent
         toolsOutSinceMinutes: null,   // voyageMinutes since a completed repair left tools out, or null — cleared by PUT AWAY TOOLS
         bunkUnmadeSinceMinutes: null, // voyageMinutes since last waking, or null once made — cleared by MAKE BUNK
         dampCabinHours: 0,            // accumulates while below deck in bad weather; resets when the cabin is aired out
@@ -1067,14 +1076,21 @@
     var dishHours = dishesDirtyHours(state);
     if (dishHours > 30) target -= clamp((dishHours - 30) * 0.15, 0, 8);
 
-    // The rest of the "lived-in boat" pressure — wet gear, tools left
-    // out, an unmade bunk, a stuffy cabin, general clutter. Each is
-    // small and capped on its own, same shape as wash/dishes above:
-    // no consequence for a while, then a gentle, bounded drag. This is
-    // atmosphere, not a survival mechanic — even with everything
-    // neglected at once the total stays modest next to hunger/thirst.
+    // The rest of the "lived-in boat" pressure — wet gear left hanging
+    // unaddressed, tools left out, an unmade bunk, a stuffy cabin,
+    // general clutter. Each is small and capped on its own, same shape
+    // as wash/dishes above: no consequence for a while, then a gentle,
+    // bounded drag. This is atmosphere, not a survival mechanic — even
+    // with everything neglected at once the total stays modest next to
+    // hunger/thirst.
     var wetHours = clothesWetHours(state);
     if (wetHours > 10) target -= clamp((wetHours - 10) * 0.2, 0, 6);
+
+    // CLOTHING — being actively dressed wrong for the moment (as opposed
+    // to the hanging-gear pressure just above, which is about laundry
+    // sitting around, not what's currently worn). See
+    // clothingComfortPenalty for the full gated, capped model.
+    target += clothingComfortPenalty(state);
 
     var toolHours = toolsOutHours(state);
     if (toolHours > 20) target -= clamp((toolHours - 20) * 0.1, 0, 4);
@@ -2018,6 +2034,240 @@
   var CABIN_HEATER_TARGET_F = 68;          // the heater's fixed ceiling — it never pushes the cabin above this, and never adds heat once ambient is already warmer
   var CABIN_TEMP_CHANGE_PER_MINUTE_F = 1;  // flat rate the actual cabin temperature moves toward its current target, warming or cooling alike — see syncCabinTemperature
 
+  /* --------------------------------------------------------------
+     CLOTHING
+     ------------------------------------------------------------
+     A lightweight, entirely hidden comfort model — no meter, no body-
+     temperature number, ever shown to the player. Internally, every
+     worn combination reduces to one number (computeClothingWarmth)
+     compared against what the CURRENT location/temperature calls for
+     (idealClothingWarmth); the gap between them is all downstream logic
+     needs. Wetness (see minutesToWetUnprotected / updateClothingExposure
+     in updateCrew) is tracked separately per category and interacts
+     with — but never substitutes for — that same warmth gap, per the
+     COLD+WET vs WARM+WET distinction in clothingComfortPenalty.
+     -------------------------------------------------------------- */
+  var CLOTHING_LABELS = {
+    top: { tshirt: 'T-SHIRT', sweater: 'SWEATER', none: 'NONE' },
+    outer: { waterproofJacket: 'WATERPROOF JACKET', windbreaker: 'WINDBREAKER', none: 'NONE' },
+    bottom: { pants: 'PANTS', shorts: 'SHORTS', underwear: 'UNDERWEAR' },
+    feet: { boots: 'BOOTS', socks: 'SOCKS', barefoot: 'BAREFOOT' },
+  };
+
+  // Relative warmth points — never shown to the player, only ever
+  // compared against idealClothingWarmth's own output. The exact
+  // numbers matter far less than their ordering (sweater > tshirt,
+  // boots > socks > barefoot, etc.) and the resulting comfort bands
+  // below, tuned directly against this task's own worked examples.
+  var CLOTHING_WARMTH = {
+    top: { tshirt: 1, sweater: 3, none: 0 },
+    outer: { waterproofJacket: 1.5, windbreaker: 1.5, none: 0 },
+    bottom: { pants: 2, shorts: 0.5, underwear: 0 },
+    feet: { boots: 2, socks: 1, barefoot: 0 },
+  };
+  var BEANIE_WARMTH = 0.5;
+  var GLOVES_WARMTH_BELOW = 0.5;
+  var GLOVES_WARMTH_ABOVE = 1.0; // "somewhat more useful above deck in cold/wind"
+
+  // How much of the "ideal" garment warmth a given ambient temperature
+  // calls for — decreases as it gets warmer, floored at 0 (nothing
+  // extra needed once it's genuinely hot) and capped at 10 (never asks
+  // for more than the warmest realistic combination provides). Tuned so
+  // sweater+pants (warmth 6) reads COMFORTABLE at 62°F but drifts to
+  // SLIGHTLY WARM by 72°F, and T-shirt+pants (warmth 4) reads SLIGHTLY
+  // COLD at 62°F but COMFORTABLE at 72°F — this section's own examples.
+  function idealClothingWarmth(tempF) {
+    if (tempF == null) return 5;
+    return clamp(6 - 0.25 * (tempF - 62), 0, 10);
+  }
+
+  // Total worn warmth right now, including the location-aware gloves
+  // bonus (gloves matter more above deck in the cold/wind than they do
+  // sitting below).
+  function computeClothingWarmth(state) {
+    var c = state.crew.clothing;
+    var warmth = CLOTHING_WARMTH.top[c.top] + CLOTHING_WARMTH.outer[c.outer]
+      + CLOTHING_WARMTH.bottom[c.bottom] + CLOTHING_WARMTH.feet[c.feet];
+    if (c.beanie) warmth += BEANIE_WARMTH;
+    if (c.gloves) warmth += (state.crew.location === 'above' ? GLOVES_WARMTH_ABOVE : GLOVES_WARMTH_BELOW);
+    return warmth;
+  }
+
+  // The reference temperature comfort is judged against: cabin
+  // temperature below deck, outside air temperature above deck — never
+  // a second weather/temperature system of its own.
+  function clothingReferenceTempF(state) {
+    return state.crew.location === 'below' ? state.boat.cabinTemperatureF : state.weather.temperatureF;
+  }
+
+  // Positive = overdressed for current conditions, negative =
+  // underdressed. This one number is the basis for the comfort
+  // category, the morale/fatigue/thirst penalty, and which text-prompt
+  // pool applies — nothing downstream recomputes warmth independently.
+  function clothingWarmthDelta(state) {
+    return computeClothingWarmth(state) - idealClothingWarmth(clothingReferenceTempF(state));
+  }
+
+  // Five broad internal bands — never exposed as a meter or label
+  // anywhere the player can see. 'comfortable' deliberately spans a
+  // real window (+/-1.5), not a single point, so nearby-but-not-exact
+  // combinations don't read as mismatched.
+  function clothingComfortCategory(delta) {
+    if (delta <= -3.5) return 'cold';
+    if (delta <= -1.5) return 'slightlyCold';
+    if (delta >= 3.5) return 'tooWarm';
+    if (delta >= 1.5) return 'slightlyWarm';
+    return 'comfortable';
+  }
+
+  // How much a protective item cuts INTO the exposure-minutes needed to
+  // reach minutesToWetUnprotected below -- e.g. 0.85 means only 15% of
+  // real elapsed minutes above deck actually count toward getting wet, so
+  // it takes roughly 1/0.15 (~6-7x) longer than unprotected. Never 100%:
+  // "not magic in prolonged severe conditions."
+  var RAIN_PROTECTION = {
+    outer: { waterproofJacket: 0.85, windbreaker: 0.15, none: 0 },
+    feet: { boots: 0.85 }, // socks/barefoot get no entry -- 0 and "skip entirely" respectively, handled directly in updateClothingExposure
+  };
+
+  // Minutes of UNPROTECTED exposure before a category becomes
+  // meaningfully wet, by weather severity -- feel targets, not rigid UI
+  // promises: light/moderate rain ~10-20min, heavy rain/rough spray
+  // ~5-10min, squall/very heavy spray ~2-5min. Null means no meaningful
+  // rain/spray exposure at all right now (dry weather, calm-ish seas).
+  function minutesToWetUnprotected(weather) {
+    if (weather.condition === 'squall') return 3.5;
+    if (weather.condition === 'rain') return weather.seaState >= 4 ? 7 : 15;
+    if (weather.seaState >= 5) return 7; // rough spray with no rain falling
+    if (weather.seaState >= 4) return 15;
+    return null;
+  }
+
+  var ABOVE_DECK_GRACE_MINUTES = 1; // see updateClothingExposure -- a brief errand above deck in bad weather shouldn't cost anything at all
+
+  // Continuous above-deck exposure — wetness accumulation and the
+  // clothing-mismatch clock both live here, called once per tick from
+  // updateCrew (both locations; mismatch tracking applies below deck
+  // too, wetness accumulation is above-deck only, and everything above-
+  // deck-specific resets the instant the player goes below — "returning
+  // below deck should end/reset the active outside-exposure duration").
+  function updateClothingExposure(state, hrs) {
+    var c = state.crew;
+    var minutes = hrs * 60;
+
+    if (c.location === 'above') {
+      if (c.aboveDeckSinceMinutes == null) c.aboveDeckSinceMinutes = state.meta.voyageMinutes;
+      var continuousMinutes = state.meta.voyageMinutes - c.aboveDeckSinceMinutes;
+
+      if (continuousMinutes > ABOVE_DECK_GRACE_MINUTES) {
+        var threshold = minutesToWetUnprotected(state.weather);
+        if (threshold != null) {
+          var clothing = c.clothing;
+          // TORSO: protected by whichever layer is actually exposed to
+          // the weather -- the outer garment if one's worn, otherwise
+          // the top itself goes straight through with no protection.
+          if (!c.wetClothing.torso) {
+            var torsoProtection = clothing.outer !== 'none' ? RAIN_PROTECTION.outer[clothing.outer] : 0;
+            c.torsoWetExposureMinutes += minutes * (1 - torsoProtection);
+            if (c.torsoWetExposureMinutes >= threshold) { c.wetClothing.torso = true; c.torsoWetExposureMinutes = 0; }
+          }
+          // BOTTOM: nothing protects it at all -- no rain-pants item exists.
+          if (!c.wetClothing.bottom) {
+            c.bottomWetExposureMinutes += minutes;
+            if (c.bottomWetExposureMinutes >= threshold) { c.wetClothing.bottom = true; c.bottomWetExposureMinutes = 0; }
+          }
+          // FEET: barefoot never creates a stored wet-feet problem at all.
+          if (!c.wetClothing.feet && clothing.feet !== 'barefoot') {
+            var feetProtection = clothing.feet === 'boots' ? RAIN_PROTECTION.feet.boots : 0;
+            c.feetWetExposureMinutes += minutes * (1 - feetProtection);
+            if (c.feetWetExposureMinutes >= threshold) { c.wetClothing.feet = true; c.feetWetExposureMinutes = 0; }
+          }
+        }
+      }
+    } else {
+      c.aboveDeckSinceMinutes = null;
+      c.torsoWetExposureMinutes = 0;
+      c.bottomWetExposureMinutes = 0;
+      c.feetWetExposureMinutes = 0;
+    }
+
+    // Comfort-mismatch clock: tracked in both locations (being badly
+    // dressed below deck is just as real as above), deliberately with NO
+    // grace period of its own -- the one-minute grace above is
+    // specifically about brief errands in bad weather, not a free pass
+    // on a genuinely mismatched outfit generally. Still fully gated
+    // downstream (see clothingComfortPenalty/clothingFatigueRateBonus)
+    // before any real consequence kicks in.
+    var kind = null;
+    var category = clothingComfortCategory(clothingWarmthDelta(state));
+    if (category === 'cold' || category === 'slightlyCold') kind = 'cold';
+    else if (category === 'tooWarm' || category === 'slightlyWarm') kind = 'warm';
+    if (kind !== c.clothingMismatchKind) {
+      c.clothingMismatchKind = kind;
+      c.clothingMismatchSinceMinutes = kind ? state.meta.voyageMinutes : null;
+    }
+  }
+
+  function clothingMismatchHours(state) {
+    var since = state.crew.clothingMismatchSinceMinutes;
+    if (since == null) return 0;
+    return (state.meta.voyageMinutes - since) / 60;
+  }
+
+  // Gate before ANY real consequence (morale/fatigue/thirst) engages --
+  // matches this section's own staged NOTICE/NUDGE/CONSEQUENCE idea:
+  // text prompts (see maybeNarrateClothing) can start well before this,
+  // but nothing the player actually FEELS happens until the mismatch has
+  // genuinely persisted a little while.
+  var CLOTHING_CONSEQUENCE_GATE_HOURS = 0.4; // ~24 minutes
+
+  // Morale-target adjustment from clothing comfort — same "no penalty
+  // for a while, then a gentle capped drag" shape as wash/dishes/wetClothes
+  // elsewhere in computeMoraleTarget. WET amplifies this only when the
+  // environment is actually cool/cold (see the module notes up top) —
+  // WET+COLD is deliberately one of the stronger clothing mistakes, WET+
+  // WARM stays modest. Capped well under hunger/thirst's own scale —
+  // clothing is atmosphere here, never the dominant survival mechanic.
+  function clothingComfortPenalty(state) {
+    var c = state.crew;
+    var hours = clothingMismatchHours(state);
+    var penalty = 0;
+    if (hours > CLOTHING_CONSEQUENCE_GATE_HOURS) {
+      if (c.clothingMismatchKind === 'cold') penalty -= clamp((hours - CLOTHING_CONSEQUENCE_GATE_HOURS) * 6, 0, 7);
+      else if (c.clothingMismatchKind === 'warm') penalty -= clamp((hours - CLOTHING_CONSEQUENCE_GATE_HOURS) * 5, 0, 6);
+    }
+    var wet = c.wetClothing;
+    if (wet.torso || wet.bottom || wet.feet) {
+      var coldEnvironment = clothingWarmthDelta(state) < -1.5;
+      penalty -= coldEnvironment ? 6 : 2;
+    }
+    return clamp(penalty, -12, 0);
+  }
+
+  // Additional fatigue-rate points/hour from clothing mismatch — added
+  // straight into updateCrew's existing fatigueRate alongside hunger/
+  // thirst/sea-state's own bumps. WET+COLD is explicitly called out as
+  // one of the stronger mistakes, so it stacks rather than just picking
+  // the larger of the two.
+  function clothingFatigueRateBonus(state) {
+    var c = state.crew;
+    if (clothingMismatchHours(state) <= CLOTHING_CONSEQUENCE_GATE_HOURS) return 0;
+    var bonus = 0;
+    if (c.clothingMismatchKind === 'cold') bonus += 0.3;
+    else if (c.clothingMismatchKind === 'warm') bonus += 0.2;
+    var wet = c.wetClothing;
+    if ((wet.torso || wet.bottom || wet.feet) && clothingWarmthDelta(state) < -1.5) bonus += 0.4;
+    return bonus;
+  }
+
+  // Slightly faster thirst while genuinely overdressed for the heat —
+  // never applies to the cold/underdressed side.
+  function clothingThirstRateBonus(state) {
+    if (state.crew.clothingMismatchKind !== 'warm') return 0;
+    if (clothingMismatchHours(state) <= CLOTHING_CONSEQUENCE_GATE_HOURS) return 0;
+    return 0.15;
+  }
+
   // Canonical departure quantities — the stable ORIGINAL half of every
   // CURRENT / ORIGINAL supply display throughout INVENTORY, EAT, DRINK,
   // and ENGINE. These are plain constants, not part of saved state:
@@ -2393,6 +2643,7 @@
       if (hungerLevel(c.hoursSinceMeal) >= 3) fatigueRate += 0.6;
       if (thirstLevel(c.hoursSinceWater) >= 3) fatigueRate += 0.8;
       if (c.morale < 30) fatigueRate += 0.3; // a discouraged crew tires faster
+      fatigueRate += clothingFatigueRateBonus(state);
       if (c.watchState === 'trying') fatigueRate *= 0.5; // lying down helps a little even without real sleep
       c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
       if (c.watchState !== 'trying') c.hoursSinceRest += hrs;
@@ -2407,23 +2658,24 @@
     if (state.weather.temperatureF >= 82) waterRate += 0.5;
     else if (state.weather.temperatureF >= 72) waterRate += 0.2;
     if (state.weather.seaState >= 4) waterRate += 0.3;
+    waterRate += clothingThirstRateBonus(state);
     c.hoursSinceWater += hrs * waterRate;
 
-    // Being above deck in genuinely bad weather leaves clothes wet — set
-    // once, not continuously restamped, so DRY CLOTHES's clock reflects
-    // how long they've actually been wet. Being below deck in the same
-    // conditions instead lets damp/condensation build up in the cabin,
-    // tracked as an accumulating total (it's the CUMULATIVE time shut up
-    // in bad weather that matters, not any single tick of it).
+    // CLOTHING — gradual wetness accumulation (past the one-minute
+    // above-deck grace period) and the comfort-mismatch clock; see
+    // updateClothingExposure for the full model. Entirely separate from
+    // the damp-cabin tracking just below, which is about the CABIN
+    // itself getting stuffy, not what's worn.
+    updateClothingExposure(state, hrs);
+
+    // Below deck in bad weather, damp/condensation builds up in the
+    // cabin, tracked as an accumulating total (it's the CUMULATIVE time
+    // shut up in bad weather that matters, not any single tick of it).
     var badWeather = state.weather.condition === 'rain' || state.weather.condition === 'squall' || state.weather.seaState >= WET_CLOTHES_SEASTATE;
-    if (badWeather) {
-      if (c.location === 'above' && c.clothesWetSinceMinutes == null) {
-        c.clothesWetSinceMinutes = state.meta.voyageMinutes;
-      } else if (c.location === 'below') {
-        c.dampCabinHours += hrs;
-        if (c.dampCabinHours >= CABIN_STUFFY_HOURS && c.cabinStuffySinceMinutes == null) {
-          c.cabinStuffySinceMinutes = state.meta.voyageMinutes;
-        }
+    if (badWeather && c.location === 'below') {
+      c.dampCabinHours += hrs;
+      if (c.dampCabinHours >= CABIN_STUFFY_HOURS && c.cabinStuffySinceMinutes == null) {
+        c.cabinStuffySinceMinutes = state.meta.voyageMinutes;
       }
     }
 
@@ -2562,6 +2814,7 @@
     checkHungerNarration(state);
     checkCleanlinessNarration(state);
     checkGalleyNarration(state);
+    checkClothingNarration(state);
     checkSpoilage(state);
     checkMilestones(state);
     checkAmbientEvent(state);
@@ -3157,6 +3410,74 @@
       log(state, "Your mouth feels like the inside of a sail bag. Water, before anything else.");
     }
     if (thirstLevel(state.crew.hoursSinceWater) < 2) f.thirstNarrated = false;
+  }
+
+  // CLOTHING TEXT PROMPTS — small, restrained observations teaching the
+  // player whether their outfit is working, not a checklist. Everything
+  // here shares one cooldown (lastClothingPromptAt) so it can never
+  // spam, and reuses clothingMismatchHours' own gated staging (see the
+  // CLOTHING section) for NOTICE -> NUDGE -> CONSEQUENCE rather than a
+  // second timer of its own: brand new mismatch reads as an early
+  // observation, one that's persisted a little reads as a nudge, one
+  // that's crossed the real consequence gate reads as stronger language.
+  // WET takes priority when present -- it's the more physical, more
+  // urgent of the two. Good clothing gets an occasional quiet
+  // confirmation and otherwise stays silent, exactly as intended.
+  var CLOTHING_PROMPT_COOLDOWN_MINUTES = 45;
+
+  var CLOTHING_LINES_COLD_EARLY = {
+    above: ['The wind is cutting through what you\u2019re wearing.', 'The cold finds its way through what you\u2019re wearing.'],
+    below: ['The cabin feels cooler than you expected.', 'The air is cool enough to notice.'],
+  };
+  var CLOTHING_LINES_COLD_NUDGE = ['You could use another layer.', 'Your arms are starting to feel the chill.'];
+  var CLOTHING_LINES_COLD_CONSEQUENCE = ['The cold has started to wear on you.'];
+
+  var CLOTHING_LINES_WARM_EARLY = ['The sweater feels like a bit much down here.', 'You\u2019re getting warm in all these layers.'];
+  var CLOTHING_LINES_WARM_NUDGE = ['You could lose a layer.', 'The cabin feels close with what you\u2019re wearing.'];
+
+  var CLOTHING_LINES_GOOD = ['The sweater is just enough.', 'The air is cool, but you\u2019re comfortable.', 'Shorts feel right in the warmer air.'];
+
+  var CLOTHING_LINES_WET_WARM = ['Your clothes are still damp and uncomfortable.', 'The wet fabric clings to you.'];
+  var CLOTHING_LINES_WET_COLD = ['The wet fabric is starting to feel cold.'];
+  var CLOTHING_LINES_WET_IGNORED = ['You should change out of these clothes.'];
+
+  function checkClothingNarration(state) {
+    var c = state.crew;
+    var last = c.lastClothingPromptAt;
+    if (last != null && (state.meta.voyageMinutes - last) < CLOTHING_PROMPT_COOLDOWN_MINUTES) return;
+
+    var wet = c.wetClothing;
+    var anyWet = wet.torso || wet.bottom || wet.feet;
+    var line = null;
+
+    if (anyWet) {
+      var coldLeaning = clothingWarmthDelta(state) < -1.5;
+      var longIgnored = clothingMismatchHours(state) > CLOTHING_CONSEQUENCE_GATE_HOURS * 2;
+      if (longIgnored) {
+        line = pickFromPool(CLOTHING_LINES_WET_IGNORED);
+      } else {
+        line = pickFromPool(coldLeaning ? CLOTHING_LINES_WET_COLD : CLOTHING_LINES_WET_WARM);
+      }
+    } else if (c.clothingMismatchKind) {
+      var hours = clothingMismatchHours(state);
+      var stage = hours > CLOTHING_CONSEQUENCE_GATE_HOURS ? 'consequence' : (hours > 0.15 ? 'nudge' : 'early');
+      if (c.clothingMismatchKind === 'cold') {
+        if (stage === 'consequence') line = pickFromPool(CLOTHING_LINES_COLD_CONSEQUENCE);
+        else if (stage === 'nudge') line = pickFromPool(CLOTHING_LINES_COLD_NUDGE);
+        else line = pickFromPool(CLOTHING_LINES_COLD_EARLY[c.location === 'above' ? 'above' : 'below']);
+      } else {
+        line = pickFromPool(stage === 'early' ? CLOTHING_LINES_WARM_EARLY : CLOTHING_LINES_WARM_NUDGE);
+      }
+    } else if (Math.random() < 0.1) {
+      // Comfortable and dry: rare, quiet confirmation -- mostly silence,
+      // by design (see this section's "good clothing generates less
+      // text" note).
+      line = pickFromPool(CLOTHING_LINES_GOOD);
+    }
+
+    if (!line) return;
+    c.lastClothingPromptAt = state.meta.voyageMinutes;
+    log(state, line);
   }
 
   function checkHungerNarration(state) {
@@ -5244,7 +5565,7 @@
     printLine('WELLBEING', 'heading-label');
     printLine('Taking care of yourself.', 'dim');
     // The menu itself never hides options based on darkness — EAT,
-    // READ, WASH, and CHANGE stay visible and clickable at night with
+    // READ, WASH, and CLOTHING stay visible and clickable at night with
     // the lights off. Each of those already checks needsCabinLight at
     // its own top and shows TOO DARK TO SEE. via blockedByDarkness (the
     // same function CHORES uses) rather than performing the action, so
@@ -5259,7 +5580,7 @@
         { label: 'READ', action: 'cmd:bookshelf' },
         { label: 'LISTEN', action: 'cmd:tape-player' },
         { label: 'WASH', action: 'cmd:wash' },
-        { label: 'CHANGE', action: 'cmd:dress' },
+        { label: 'CLOTHING', action: 'cmd:clothing' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -5429,15 +5750,135 @@
     });
   }
 
-  function cmdDress(state) {
+  // CLOTHING — see the CLOTHING section (near CABIN_TEMP_COLD_MAX_F) for
+  // the hidden warmth/wetness model this menu is a thin front end for.
+  // No numbers or GOOD/BAD meter shown here — just what's worn, and
+  // WET tags where it matters.
+  function clothingWetDisplayCategory(state) {
+    // Torso wetness displays on whichever layer is actually exposed —
+    // the outer garment if one's worn, otherwise the top itself.
+    return state.crew.clothing.outer !== 'none' ? 'outer' : 'top';
+  }
+
+  function clothingLine(name, valueLabel, isWet) {
+    return inventoryLine(name, valueLabel + (isWet ? ' \u2014 WET' : ''));
+  }
+
+  function cmdClothing(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    printBlank();
+    printLine('CLOTHING', 'heading-label');
+    var clo = state.crew.clothing, wet = state.crew.wetClothing;
+    var wetDisplayCat = clothingWetDisplayCategory(state);
+    printLine(clothingLine('TOP', CLOTHING_LABELS.top[clo.top], wetDisplayCat === 'top' && wet.torso));
+    printLine(clothingLine('OUTER', CLOTHING_LABELS.outer[clo.outer], wetDisplayCat === 'outer' && wet.torso));
+    printLine(clothingLine('BOTTOM', CLOTHING_LABELS.bottom[clo.bottom], wet.bottom));
+    printLine(clothingLine('FEET', CLOTHING_LABELS.feet[clo.feet], wet.feet));
+    printLine(inventoryLine('BEANIE', clo.beanie ? 'ON' : 'OFF'));
+    printLine(inventoryLine('GLOVES', clo.gloves ? 'ON' : 'OFF'));
+    state.pendingChoice = {
+      id: 'clothing-menu',
+      options: [
+        { label: 'TOP', action: 'cmd:clothing-top' },
+        { label: 'OUTER', action: 'cmd:clothing-outer' },
+        { label: 'BOTTOM', action: 'cmd:clothing-bottom' },
+        { label: 'FEET', action: 'cmd:clothing-feet' },
+        { label: 'ACCESSORIES', action: 'cmd:clothing-accessories' },
+        { label: 'BACK', action: 'cancel' },
+      ],
+    };
+  }
+
+  // TOP/OUTER/BOTTOM/FEET are all the same shape — three choices plus
+  // BACK — so one generic submenu builder covers all four.
+  var CLOTHING_CATEGORY_ORDER = {
+    top: ['tshirt', 'sweater', 'none'],
+    outer: ['waterproofJacket', 'windbreaker', 'none'],
+    bottom: ['pants', 'shorts', 'underwear'],
+    feet: ['boots', 'socks', 'barefoot'],
+  };
+  var CLOTHING_CATEGORY_TITLE = { top: 'TOP', outer: 'OUTER', bottom: 'BOTTOM', feet: 'FEET' };
+
+  function cmdClothingCategory(state, category) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    printBlank();
+    printLine(CLOTHING_CATEGORY_TITLE[category], 'heading-label');
+    var options = CLOTHING_CATEGORY_ORDER[category].map(function (value) {
+      return { label: CLOTHING_LABELS[category][value], action: 'wear:' + category + ':' + value };
+    });
+    options.push({ label: 'BACK', action: 'cmd:clothing' });
+    state.pendingChoice = { id: 'clothing-category-menu', options: options };
+  }
+  function cmdClothingTop(state) { cmdClothingCategory(state, 'top'); }
+  function cmdClothingOuter(state) { cmdClothingCategory(state, 'outer'); }
+  function cmdClothingBottom(state) { cmdClothingCategory(state, 'bottom'); }
+  function cmdClothingFeet(state) { cmdClothingCategory(state, 'feet'); }
+
+  function cmdClothingAccessories(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    printBlank();
+    printLine('ACCESSORIES', 'heading-label');
+    var clo = state.crew.clothing;
+    printLine(inventoryLine('BEANIE', clo.beanie ? 'ON' : 'OFF'));
+    printLine(inventoryLine('GLOVES', clo.gloves ? 'ON' : 'OFF'));
+    state.pendingChoice = {
+      id: 'clothing-accessories-menu',
+      options: [
+        { label: 'BEANIE', action: 'toggle-accessory:beanie' },
+        { label: 'GLOVES', action: 'toggle-accessory:gloves' },
+        { label: 'BACK', action: 'cmd:clothing' },
+      ],
+    };
+  }
+
+  // Which hidden wet-state bucket each worn category feeds — TOP and
+  // OUTER share one (torso), since only one of them is ever actually
+  // exposed to the weather at a time; see clothingWetDisplayCategory.
+  var CLOTHING_WET_KEY = { top: 'torso', outer: 'torso', bottom: 'bottom', feet: 'feet' };
+  var CLOTHING_WET_EXPOSURE_FIELD = { torso: 'torsoWetExposureMinutes', bottom: 'bottomWetExposureMinutes', feet: 'feetWetExposureMinutes' };
+
+  // No flat morale bonus for changing clothes — the reward for dressing
+  // right is avoiding the discomfort penalties above, not a free lever
+  // to pull. Putting on something dry over a WORN-wet item retires that
+  // item to the existing DRY CLOTHES chore (clothesWetSinceMinutes)
+  // rather than magically drying it on the spot — see performChore's
+  // dryClothes definition.
+  function performClothingChange(state, category, value) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    var c = state.crew;
+    if (c.clothing[category] === value) {
+      cmdClothingCategory(state, category); // already wearing this -- nothing to change
+      return;
+    }
+    var wetKey = CLOTHING_WET_KEY[category];
+    var wasWet = c.wetClothing[wetKey];
     runShortAction(state, {
       label: 'CHANGING',
       duration: 2,
       action: function (s) {
-        var gain = routineMoraleGain(s, 'dress', 3);
-        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'Dry layers on. Feels like a fresh start to the watch.');
+        var cc = s.crew;
+        cc.clothing[category] = value;
+        cc.wetClothing[wetKey] = false;
+        cc[CLOTHING_WET_EXPOSURE_FIELD[wetKey]] = 0;
+        if (wasWet && cc.clothesWetSinceMinutes == null) {
+          cc.clothesWetSinceMinutes = s.meta.voyageMinutes;
+        }
+        log(s, wasWet ? 'Out of the wet gear and into something dry.' : 'Dry layers on. Feels like a fresh start to the watch.');
+        flushNewLogEntries(s);
+      },
+    });
+  }
+
+  function performAccessoryToggle(state, key) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:wellbeing'); return; }
+    var turningOn = !state.crew.clothing[key];
+    var itemWord = key === 'beanie' ? 'Beanie' : 'Gloves';
+    runShortAction(state, {
+      label: turningOn ? 'PUTTING ON' : 'TAKING OFF',
+      duration: 1,
+      action: function (s) {
+        s.crew.clothing[key] = turningOn;
+        log(s, itemWord + (turningOn ? ' on.' : ' off.'));
         flushNewLogEntries(s);
       },
     });
@@ -6193,7 +6634,12 @@
     snacks: cmdSnacks,
     drink: cmdDrink,
     wash: cmdWash,
-    dress: cmdDress,
+    clothing: cmdClothing,
+    'clothing-top': cmdClothingTop,
+    'clothing-outer': cmdClothingOuter,
+    'clothing-bottom': cmdClothingBottom,
+    'clothing-feet': cmdClothingFeet,
+    'clothing-accessories': cmdClothingAccessories,
     bookshelf: cmdBookshelf,
     'tape-player': cmdTapePlayer,
     repair: cmdRepair,
@@ -7485,6 +7931,11 @@
 
     if (action.indexOf('eat:') === 0) {
       performEat(state, action.slice(4));
+    } else if (action.indexOf('wear:') === 0) {
+      var wearParts = action.slice(5).split(':');
+      performClothingChange(state, wearParts[0], wearParts[1]);
+    } else if (action.indexOf('toggle-accessory:') === 0) {
+      performAccessoryToggle(state, action.slice(17));
     } else if (action.indexOf('chore:') === 0) {
       performChore(state, action.slice(6));
     } else if (action.indexOf('electrical:') === 0) {
@@ -8103,6 +8554,23 @@
     if (c.dishesDirtySinceMinutes === undefined) c.dishesDirtySinceMinutes = null;
     if (c.lastChocolateAt === undefined) c.lastChocolateAt = null;
     if (c.clothesWetSinceMinutes === undefined) c.clothesWetSinceMinutes = null;
+    // CLOTHING — old saves get the same default outfit a new voyage
+    // starts in; nothing about an existing voyage's progress, supplies,
+    // or other crew state is touched. A save whose only clothing-related
+    // field was the old (now repurposed) clothesWetSinceMinutes is
+    // handled for free above: it's simply read as "something's already
+    // hanging, awaiting DRY CLOTHES" under the new meaning, per this
+    // section's own note on treating legacy wet-clothes state
+    // conservatively rather than trying to infer an old outfit.
+    if (!c.clothing) c.clothing = { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false };
+    if (!c.wetClothing) c.wetClothing = { torso: false, bottom: false, feet: false };
+    if (c.aboveDeckSinceMinutes === undefined) c.aboveDeckSinceMinutes = null;
+    if (c.torsoWetExposureMinutes === undefined) c.torsoWetExposureMinutes = 0;
+    if (c.bottomWetExposureMinutes === undefined) c.bottomWetExposureMinutes = 0;
+    if (c.feetWetExposureMinutes === undefined) c.feetWetExposureMinutes = 0;
+    if (c.clothingMismatchKind === undefined) c.clothingMismatchKind = null;
+    if (c.clothingMismatchSinceMinutes === undefined) c.clothingMismatchSinceMinutes = null;
+    if (c.lastClothingPromptAt === undefined) c.lastClothingPromptAt = null;
     if (c.toolsOutSinceMinutes === undefined) c.toolsOutSinceMinutes = null;
     if (c.bunkUnmadeSinceMinutes === undefined) c.bunkUnmadeSinceMinutes = null;
     if (c.dampCabinHours === undefined) c.dampCabinHours = 0;
