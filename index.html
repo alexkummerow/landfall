@@ -2710,15 +2710,20 @@
       // EXISTING real-time loop in place (never start a second,
       // competing interpolation), and re-evaluate the winch decision
       // fresh against wherever the boat is actually pointed right now
-      // — see "course changes can change while turning."
+      // — see "course changes can change while turning." In normal
+      // play this is unreachable anyway (no controls are shown while a
+      // turn is active — see below), but stays safe if it ever is.
       activeTurn.retarget(opts);
       return;
     }
 
     var startHeading = nav.heading != null ? nav.heading : opts.targetHeading;
-
-    printBlank();
-    printLine(opts.firstLine, 'dim');
+    // AT THE HELM specifically (hand-steering, not autopilot correcting
+    // in the background) gets the persistent, live-updating SET COURSE/
+    // ACTUAL HEADING/WIND FROM/SPEED block for the whole maneuver — see
+    // printHelmAtHelmHeader. Decided once, here: atHelm can't change
+    // mid-turn (LEAVE THE HELM isn't offered while turning either).
+    var showHelmHeader = state.crew.atHelm;
 
     function settleInstant() {
       nav.heading = normalizeDeg(opts.targetHeading);
@@ -2737,7 +2742,11 @@
 
     if (Math.abs(signedAngleDiff(opts.targetHeading, startHeading)) < 0.5) {
       // Already on (or confirmed) that heading — nothing to physically
-      // turn through, so settle immediately with no dots and no audio.
+      // turn through, so settle immediately with no dots, no live
+      // header (redisplay's own cmdHelm call shows the static one
+      // right away), and no audio.
+      printBlank();
+      printLine(opts.firstLine, 'dim');
       settleInstant();
       return;
     }
@@ -2745,6 +2754,17 @@
     uiBusy = true;
     optionsEl.innerHTML = '';
     headingTurnActive = true;
+
+    // The persistent header (when shown) is deliberately the very first
+    // thing printed — "the top should continue to show AT THE HELM..."
+    // — with the "Course set to X" confirmation appearing below it,
+    // never instead of it.
+    var headerRefs = null;
+    if (showHelmHeader) {
+      headerRefs = printHelmAtHelmHeader(state);
+      printBlank();
+    }
+    printLine(opts.firstLine, 'dim');
 
     var dotsLine = document.createElement('p');
     dotsLine.className = 'line dim';
@@ -2767,26 +2787,28 @@
 
     // Counts every part of THIS course-change action that must finish
     // before the indicator stops and the turn settles — the rotation
-    // itself (1, always) plus a winch and/or sail_fill one-shot
-    // whenever either is actually triggered below. Never counts the
-    // luffing LOOP itself: an indefinite environmental condition (the
-    // boat just sitting in irons once the turn is over) must NOT keep
-    // ". .. ..." running forever — see the module notes on the
-    // activity indicator.
+    // itself (1, always) plus a trailing sail_fill one-shot whenever
+    // one is actually triggered below. Winch is NOT counted here at
+    // all anymore (see shouldWinchOnSettle) — it no longer plays during
+    // the turn, so it can never hold the indicator open. Never counts
+    // the luffing LOOP itself either: an indefinite environmental
+    // condition (the boat just sitting in irons once the turn is over)
+    // must NOT keep ". .. ..." running forever.
     var pendingOps = 1;
 
-    // One winch decision per course-change action (the initial call, or
-    // each retarget) — never retriggered by the interpolation ticking
-    // below. Comparing wherever the boat is ACTUALLY pointed right now
-    // against the freshly requested target, per the spec.
+    // Winch now represents trimming the sails for the heading the boat
+    // has actually ARRIVED at, not the steering itself — TURN FIRST,
+    // THEN ARRIVE, THEN TRIM. Decided once per course-change action (the
+    // initial call, or each retarget) by comparing wherever the boat is
+    // pointed right now against the freshly requested target, exactly
+    // as before, but the sound itself is deferred to maybeFinish below,
+    // fired only once the boat has fully settled and controls are back.
+    var shouldWinchOnSettle = false;
     function evaluateWinch(fromHeading, toHeading) {
-      if (state.boat.sailConfig === 'furled') return; // no canvas up -- nothing to trim in
+      if (state.boat.sailConfig === 'furled') { shouldWinchOnSettle = false; return; } // no canvas up -- nothing to trim
       var distFromCurrent = angleDiff(fromHeading, state.weather.windDirection);
       var distFromTarget = angleDiff(toHeading, state.weather.windDirection);
-      if (distFromTarget < distFromCurrent) {
-        pendingOps++;
-        playSailsOneShot('winch', function () { pendingOps--; maybeFinish(); });
-      }
+      shouldWinchOnSettle = distFromTarget < distFromCurrent;
     }
     evaluateWinch(nav.heading, opts.targetHeading);
 
@@ -2804,6 +2826,11 @@
       // — the boat is never just visually rotating while the
       // simulation waits for a final value.
       state.boat.speed = computeBoatSpeed(state, nav.heading);
+
+      if (headerRefs) {
+        headerRefs.headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0');
+        headerRefs.speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
+      }
 
       var nowLuffing = isInNoGoZone(state, nav.heading);
       if (nowLuffing && !wasLuffing) {
@@ -2823,7 +2850,7 @@
     }, HEADING_TURN_TICK_MS);
 
     function maybeFinish() {
-      if (pendingOps > 0) return; // rotation and/or a trailing winch/sail_fill one-shot still going
+      if (pendingOps > 0) return; // rotation and/or a trailing sail_fill one-shot still going
       clearInterval(dotTimer);
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
       headingTurnActive = false;
@@ -2838,6 +2865,11 @@
       saveGameState(state);
       updateAudioForState(state);
       scrollToBottom();
+      // Only now — the indicator already stopped and controls already
+      // back — start trimming if it's actually called for on the
+      // heading just arrived at. Fire and forget: never reopens the
+      // indicator or blocks anything further.
+      if (shouldWinchOnSettle) playSailsOneShot('winch');
     }
 
     activeTurn = {
@@ -5667,6 +5699,29 @@
     state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { label: 'BACK', action: 'cancel' }] };
   }
 
+  // The persistent "AT THE HELM" block — SET COURSE / ACTUAL HEADING /
+  // WIND FROM / SPEED — shared by cmdHelm's own atHelm branch,
+  // cmdChangeCourse (so it stays visible above the dial controls), and
+  // beginCourseTurn's real-time turn display (so it stays visible,
+  // live-updating, for the whole maneuver). Returns references to the
+  // ACTUAL HEADING and SPEED lines specifically, since those are the
+  // two values a live turn needs to update in place each tick without
+  // re-rendering the whole screen — see beginCourseTurn.
+  function printHelmAtHelmHeader(state) {
+    printLine('AT THE HELM', 'heading-label');
+    printLine(inventoryLine('SET COURSE', Math.round(state.nav.setCourse) + '\u00B0'));
+    var headingEl = document.createElement('p');
+    headingEl.className = 'line';
+    headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(state.nav.heading) + '\u00B0');
+    tempViewEl.appendChild(headingEl);
+    printLine(inventoryLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
+    var speedEl = document.createElement('p');
+    speedEl.className = 'line';
+    speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
+    tempViewEl.appendChild(speedEl);
+    return { headingEl: headingEl, speedEl: speedEl };
+  }
+
   function cmdHelm(state) {
     var nav = state.nav;
     printBlank();
@@ -5739,11 +5794,7 @@
       // actually settles vs. wind vs. how fast that combination is
       // going), rather than the navigational BEARING/DISTANCE fields
       // that matter more when something else is doing the steering.
-      printLine('AT THE HELM', 'heading-label');
-      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
-      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
-      printLine(inventoryLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
-      printLine(inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT'));
+      printHelmAtHelmHeader(state);
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -5814,15 +5865,26 @@
   // The player's way of picking any of 000-359 through a button-only
   // interface: dial a draft value up or down from the current course,
   // then confirm. Only ever reachable once open ocean unlocks it (the
-  // HELM screen doesn't offer CHANGE COURSE before then).
+  // HELM screen doesn't offer CHANGE COURSE before then). Also reachable
+  // while autopilot is steering (not just AT THE HELM) — the persistent
+  // AT THE HELM header only makes sense for the latter, so it appears
+  // here only when state.crew.atHelm; the autopilot-driven path keeps
+  // its previous CURRENT COURSE/NEW COURSE-only display unchanged.
   function cmdChangeCourse(state) {
     var nav = state.nav;
     if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
-    printLine('CHANGE COURSE', 'heading-label');
-    printLine('CURRENT COURSE ' + Math.round(nav.setCourse) + '\u00B0');
-    printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
+    if (state.crew.atHelm) {
+      printHelmAtHelmHeader(state);
+      printBlank();
+      printLine('CHANGE COURSE', 'heading-label');
+      printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
+    } else {
+      printLine('CHANGE COURSE', 'heading-label');
+      printLine('CURRENT COURSE ' + Math.round(nav.setCourse) + '\u00B0');
+      printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
+    }
     var opts = COURSE_DIAL_STEPS.map(function (step) {
       return { label: (step > 0 ? '+' : '') + step + '\u00B0', action: 'course-draft:' + step };
     });
