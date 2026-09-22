@@ -2814,7 +2814,7 @@
         activeTurn = null;
         if (currentOpts.onSettle) currentOpts.onSettle(state);
         saveGameState(state);
-        // The ONLY place winch.mp3 ever plays — right here, the exact
+        // The ONLY place winch_short.mp3 ever plays — right here, the exact
         // instant ACTUAL HEADING reaches the CURRENT (latest) target,
         // for both manual and autopilot turns alike, since both run
         // through this same rotation timer. Reading currentOpts.target
@@ -7691,7 +7691,7 @@
     lowerShort: 'audio/sails/lower_sail_short.mp3',
     fill: 'audio/sails/sail_fill.mp3',
     luffing: 'audio/sails/sails_luffing_loop.mp3',
-    winch: 'audio/sails/winch.mp3',
+    winch: 'audio/sails/winch_short.mp3',
   };
   var SAILS_AUDIO_VOLUME = {
     raiseLong: 0.6, raiseShort: 0.6, lowerLong: 0.6, lowerShort: 0.6,
@@ -7765,9 +7765,21 @@
   // still calls onEnded on schedule) even when sailsAudibleVolume
   // resolves to 0 -- audibility is purely a volume question, never a
   // reason to skip the underlying event or its timing.
+  //
+  // ONE deliberate exception to "restart fresh every time": winch is
+  // structurally guaranteed to never be extended, restarted, or looped
+  // -- if it is somehow asked to play again while a previous play of it
+  // hasn't finished yet, this call is simply dropped rather than
+  // cutting off and restarting the current one-shot. Nothing in this
+  // codebase currently calls it that way (beginCourseTurn's rotation
+  // timer only ever calls it once, at the instant ACTUAL HEADING
+  // reaches the current target -- see its own notes), but winch is
+  // singled out here as a hard, structural floor under that guarantee
+  // rather than relying solely on the call site being correct.
   function playSailsOneShot(key, onEnded, state) {
     if (!audioUnlocked) { if (onEnded) onEnded(); return; }
     var el = getSailsAudioEl(key);
+    if (key === 'winch' && !el.paused) return; // never restarts/extends a winch play already in progress
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     if (!el.paused) el.pause();
