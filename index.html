@@ -4137,6 +4137,7 @@
     applyMuteToFishingAudio(); // FISHING HOOK -- same reasoning as engine audio
     applyMuteToCabinSwitchAudio(); // ELECTRICAL HOOK -- same reasoning as engine audio
     applyMuteToSailsAudio(); // SAILS HOOK -- same reasoning as engine audio
+    applyMuteToThickBoilAudio(); // GALLEY HOOK -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -6667,6 +6668,22 @@
     return lines[Math.floor(Math.random() * lines.length)];
   }
 
+  // The six meals that get the thick_boil.mp3 cooking sound instead of
+  // the plain fixed-duration MAKING dots — see the GALLEY AUDIO section
+  // above. Matched by item.name, since that's the one thing both a
+  // FOOD_ITEMS entry (Chili Rice, Oatmeal) and a held-fish meal
+  // (Rockfish Stew, Lingcod Stew, Bonito Curry, Mahi Coconut Curry, via
+  // heldFishAsMealItem/FISH_MEAL_BY_SPECIES) share. No other meal uses
+  // this sound.
+  var THICK_BOIL_MEAL_NAMES = {
+    'Chili Rice': true,
+    'Oatmeal': true,
+    'Rockfish Stew': true,
+    'Lingcod Stew': true,
+    'Bonito Curry': true,
+    'Mahi Coconut Curry': true,
+  };
+
   function performEat(state, key) {
     var isHeldFish = key === HELD_FISH_KEY;
     var item = isHeldFish ? heldFishAsMealItem(state) : FOOD_ITEMS_BY_KEY[key];
@@ -6713,57 +6730,75 @@
     }
     // Gates passed (or there weren't any) — the actual preparing/eating
     // takes a few real seconds. Cooking takes longer than grabbing
-    // something ready to eat.
+    // something ready to eat. This same mutation logic runs regardless
+    // of which busy-action runner wraps it below — only the wrapper
+    // (and therefore what determines the duration) differs.
     var label = (item.cooked ? 'MAKING ' : 'PREPARING ') + item.name.toUpperCase();
-    runShortAction(state, {
-      label: label,
-      duration: item.cooked ? 5 : 2,
-      action: function (s) {
-        var c = s.crew;
-        if (waterNeeded > 0) consumeWater(s, waterNeeded);
-        // FISHING HOOK -- the held catch is consumed whole, species and
-        // all, rather than decrementing a food[] count — only one can
-        // ever be held at a time. Clearing it here (rather than leaving
-        // it to checkSpoilage) is what stops an eaten fish from later
-        // being logged as spoiled.
-        if (isHeldFish) {
-          s.fishing.heldFish = null;
-        } else {
-          s.food[key] -= 1;
-        }
+    var doEat = function (s) {
+      var c = s.crew;
+      if (waterNeeded > 0) consumeWater(s, waterNeeded);
+      // FISHING HOOK -- the held catch is consumed whole, species and
+      // all, rather than decrementing a food[] count — only one can
+      // ever be held at a time. Clearing it here (rather than leaving
+      // it to checkSpoilage) is what stops an eaten fish from later
+      // being logged as spoiled.
+      if (isHeldFish) {
+        s.fishing.heldFish = null;
+      } else {
+        s.food[key] -= 1;
+      }
 
-        // Hunger: a real meal genuinely holds longer than a snack, so
-        // this resets to a type-dependent offset rather than always
-        // snapping to a flat zero.
-        c.hoursSinceMeal = HUNGER_RESET_HOURS_BY_TYPE[item.type] || 0;
+      // Hunger: a real meal genuinely holds longer than a snack, so
+      // this resets to a type-dependent offset rather than always
+      // snapping to a flat zero.
+      c.hoursSinceMeal = HUNGER_RESET_HOURS_BY_TYPE[item.type] || 0;
 
-        // Meal-history monotony (hidden, never shown): an exponential
-        // moving average nudged toward 1 by a snack, toward 0 by a real
-        // meal. One item barely moves it; several days the same way
-        // clearly does — see computeMoraleTarget's snackMealRatio
-        // pressure.
-        var snackWeight = item.type === 'snack' ? 1 : 0;
-        c.snackMealRatio = c.snackMealRatio * 0.7 + snackWeight * 0.3;
+      // Meal-history monotony (hidden, never shown): an exponential
+      // moving average nudged toward 1 by a snack, toward 0 by a real
+      // meal. One item barely moves it; several days the same way
+      // clearly does — see computeMoraleTarget's snackMealRatio
+      // pressure.
+      var snackWeight = item.type === 'snack' ? 1 : 0;
+      c.snackMealRatio = c.snackMealRatio * 0.7 + snackWeight * 0.3;
 
-        // A cooked meal leaves dishes behind — stamped once, not
-        // re-stamped by a second meal before they're washed, so the
-        // clock reflects how long they've ACTUALLY been sitting.
-        if (item.cooked && c.dishesDirtySinceMinutes == null) {
-          c.dishesDirtySinceMinutes = s.meta.voyageMinutes;
-        }
-        bumpClutter(s, 1); // wrappers, crumbs, a bowl left out — any meal leaves a little something
+      // A cooked meal leaves dishes behind — stamped once, not
+      // re-stamped by a second meal before they're washed, so the
+      // clock reflects how long they've ACTUALLY been sitting.
+      if (item.cooked && c.dishesDirtySinceMinutes == null) {
+        c.dishesDirtySinceMinutes = s.meta.voyageMinutes;
+      }
+      bumpClutter(s, 1); // wrappers, crumbs, a bowl left out — any meal leaves a little something
 
-        var fatigueGain = item.type === 'meal' ? 3 : 1;
-        var moraleGain = item.type === 'meal' ? 3 : 1;
-        // Finally breaking a run of snack-heavy eating with something
-        // proper feels genuinely restorative, on top of the flat amount.
-        if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
-        c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
-        c.morale = clamp(c.morale + moraleGain, 0, 100);
-        log(s, eatFlavorLine(s, item));
-        flushNewLogEntries(s);
-      },
-    });
+      var fatigueGain = item.type === 'meal' ? 3 : 1;
+      var moraleGain = item.type === 'meal' ? 3 : 1;
+      // Finally breaking a run of snack-heavy eating with something
+      // proper feels genuinely restorative, on top of the flat amount.
+      if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
+      c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
+      c.morale = clamp(c.morale + moraleGain, 0, 100);
+      log(s, eatFlavorLine(s, item));
+      flushNewLogEntries(s);
+    };
+
+    if (item.cooked && THICK_BOIL_MEAL_NAMES[item.name]) {
+      // One of the six simmer/boil meals — the MAKING dots run for the
+      // actual length of thick_boil.mp3 (see runAudioSyncedAction and
+      // playThickBoil) rather than a fixed duration; everything else
+      // about the action (gates already checked above, the mutation
+      // itself, the resulting log line) is identical to any other meal.
+      runAudioSyncedAction(state, {
+        label: label,
+        playAudio: function (onEnded) { playThickBoil(onEnded); },
+        fallbackSeconds: THICK_BOIL_FALLBACK_SECONDS,
+        action: doEat,
+      });
+    } else {
+      runShortAction(state, {
+        label: label,
+        duration: item.cooked ? 5 : 2,
+        action: doEat,
+      });
+    }
   }
 
   // DRINK — its own ROUTINE submenu (matching the existing submenu
@@ -7667,6 +7702,89 @@
     if (!fishingLandingAudio.paused) {
       fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
     }
+  }
+
+  /* --------------------------------------------------------------
+     GALLEY AUDIO -- a single cooking sound, thick_boil.mp3, for the
+     six meals that involve an actual simmer/boil (see performEat's
+     THICK_BOIL_MEAL_NAMES below): Chili Rice, Oatmeal, Rockfish Stew,
+     Lingcod Stew, Bonito Curry, Mahi Coconut Curry. One-shot, not
+     looped -- a finite sound meant to play out fully once per
+     preparation, so this mirrors playSailsOneShot's shape (lazy
+     element, quick fade-in only to avoid a click, onEnded wiring) but
+     scoped to just the one file, since there's nothing else in this
+     small system to warrant a multi-key map. Its own independent fade
+     helper, same reasoning as fadeFishingVolume/fadeSailsVolume each
+     being their own copy rather than a shared one.
+     -------------------------------------------------------------- */
+  var THICK_BOIL_AUDIO_FILE = 'audio/galley/thick_boil.mp3';
+  var THICK_BOIL_VOLUME = 0.5;
+  var THICK_BOIL_FADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+  var THICK_BOIL_FALLBACK_SECONDS = 5; // safety net only, if the audio is unavailable/blocked -- matches the old fixed "MAKING" duration these six meals used before this
+
+  var thickBoilAudioEl = null;
+
+  function getThickBoilAudioEl() {
+    if (thickBoilAudioEl) return thickBoilAudioEl;
+    thickBoilAudioEl = new Audio(THICK_BOIL_AUDIO_FILE);
+    thickBoilAudioEl.loop = false;
+    thickBoilAudioEl.preload = 'auto';
+    thickBoilAudioEl.volume = 0;
+    thickBoilAudioEl.addEventListener('error', function () {
+      console.warn('Galley audio failed to load: ' + THICK_BOIL_AUDIO_FILE + (thickBoilAudioEl.error ? ' -- error code ' + thickBoilAudioEl.error.code : ''));
+    });
+    return thickBoilAudioEl;
+  }
+
+  function fadeThickBoilVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays thick_boil.mp3 once from the beginning, with a quick fade-in,
+  // and fires onEnded (once) when it naturally finishes -- the exact
+  // onEnded wiring runAudioSyncedAction expects from its config.playAudio,
+  // so the MAKING busy-action for these six meals is driven off the real
+  // audio finishing, same as sail raise/lower (see performEat).
+  function playThickBoil(onEnded) {
+    if (!audioUnlocked) { if (onEnded) onEnded(); return; }
+    var el = getThickBoilAudioEl();
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (thick_boil):', describeError(e)); if (onEnded) onEnded(); });
+    fadeThickBoilVolume(el, muted ? 0 : THICK_BOIL_VOLUME, THICK_BOIL_FADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+  }
+
+  function applyMuteToThickBoilAudio() {
+    var el = thickBoilAudioEl;
+    if (!el || el.paused) return;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    el.volume = muted ? 0 : THICK_BOIL_VOLUME;
   }
 
   /* --------------------------------------------------------------
