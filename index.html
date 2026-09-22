@@ -6001,6 +6001,15 @@
     return due ? { label: CHORE_LABELS[kind], action: 'chore:' + kind } : null;
   }
 
+  // Which GALLEY_AUDIO_FILES key (if any) plays for a given chore kind
+  // — currently just dishes (dishes.mp3); every other CHORE_DEFS kind
+  // stays on the plain fixed-duration dots, as before. Same map-based
+  // shape as FOOD_PREP_AUDIO_KEY, so adding a sound for another chore
+  // later is one entry here, not a new branch.
+  var CHORE_AUDIO_KEY = {
+    dishes: 'dishes',
+  };
+
   function performChore(state, kind) {
     if (needsCabinLight(state)) { blockedByDarkness(state); return; }
     var def = CHORE_DEFS[kind];
@@ -6010,18 +6019,28 @@
       printLine('Not enough water.', 'amber');
       return;
     }
-    runShortAction(state, {
-      label: def.label,
-      duration: def.duration,
-      action: function (s) {
-        if (def.consume) def.consume(s);
-        def.clear(s);
-        var gain = routineMoraleGain(s, def.moraleKey, def.moraleGain);
-        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, pickChoreLine(kind));
-        flushNewLogEntries(s);
-      },
-    });
+    var doChore = function (s) {
+      if (def.consume) def.consume(s);
+      def.clear(s);
+      var gain = routineMoraleGain(s, def.moraleKey, def.moraleGain);
+      s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+      log(s, pickChoreLine(kind));
+      flushNewLogEntries(s);
+    };
+    var choreAudioKey = CHORE_AUDIO_KEY[kind];
+    if (choreAudioKey) {
+      runAudioSyncedAction(state, {
+        label: def.label,
+        playAudio: function (onEnded) { return playGalleyOneShot(choreAudioKey, onEnded); },
+        action: doChore,
+      });
+    } else {
+      runShortAction(state, {
+        label: def.label,
+        duration: def.duration,
+        action: doChore,
+      });
+    }
   }
 
   // SALOON — the quiet leisure/psychological center of the boat: READ,
@@ -6669,22 +6688,53 @@
   }
 
   // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
-  // plays while a given meal is being made, keyed by item.name since
-  // that's the one thing both a FOOD_ITEMS entry (Chili Rice, Oatmeal)
-  // and a held-fish meal (Rockfish Stew, Lingcod Stew, Bonito Curry,
-  // Mahi Coconut Curry, via heldFishAsMealItem/FISH_MEAL_BY_SPECIES)
-  // share. A meal absent from this map (or any non-cooked item) just
-  // uses the plain fixed-duration MAKING/PREPARING dots below, as
-  // before. Adding a new preparation sound for a new or existing meal
-  // later is one line here plus one entry in GALLEY_AUDIO_FILES/
-  // GALLEY_AUDIO_VOLUME — nothing else in performEat changes.
-  var MEAL_PREP_AUDIO_KEY = {
+  // plays while a given food item is being prepared, keyed by
+  // item.name since that's the one thing every source (a FOOD_ITEMS
+  // entry, a held-fish meal via heldFishAsMealItem/
+  // FISH_MEAL_BY_SPECIES, and Chocolate's own type:'chocolate' entry)
+  // shares. Covers meals, snacks, and chocolate alike -- this is not
+  // gated on item.cooked, since several mapped items (Energy Bar,
+  // Mixed Nuts, Dried Mangos, Tuna on Crackers, Chocolate) are
+  // uncooked. An item absent from this map just uses the plain fixed-
+  // duration EATING/MAKING/PREPARING dots, as before. Adding a new
+  // preparation sound for a new or existing item later is one line
+  // here plus one entry in GALLEY_AUDIO_FILES/GALLEY_AUDIO_VOLUME —
+  // nothing else in performEat changes.
+  var FOOD_PREP_AUDIO_KEY = {
+    // THICK BOIL
     'Chili Rice': 'thickBoil',
     'Oatmeal': 'thickBoil',
     'Rockfish Stew': 'thickBoil',
     'Lingcod Stew': 'thickBoil',
     'Bonito Curry': 'thickBoil',
     'Mahi Coconut Curry': 'thickBoil',
+    // THIN BOIL
+    'Mac & Cheese': 'thinBoil',
+    'Chicken Noodle Soup': 'thinBoil',
+    // BOIL + SIZZLE
+    'Salmon + Mashed Potatoes': 'boilSizzle',
+    'Salmon Rice Bowl': 'boilSizzle',
+    'Mackerel Rice Bowl': 'boilSizzle',
+    'Albacore Over Pasta': 'boilSizzle',
+    'Ono Rice Bowl': 'boilSizzle',
+    'Herring Rice Bowl': 'boilSizzle',
+    'Salmon + Roasted Potatoes': 'boilSizzle',
+    // SIZZLE
+    'Pancakes': 'sizzle',
+    // BOIL + CHOP
+    'Aku Poke Bowl': 'boilChop',
+    'Ahi Poke Bowl': 'boilChop',
+    // POPCORN
+    'Popcorn': 'popcorn',
+    // WRAPPER
+    'Energy Bar': 'wrapper',
+    'Chocolate': 'wrapper',
+    // NUTS
+    'Mixed Nuts': 'nuts',
+    // MANGO
+    'Dried Mangos': 'mango',
+    // TUNA ON CRACKERS
+    'Tuna on Crackers': 'tunaCrackers',
   };
 
   function performEat(state, key) {
@@ -6697,18 +6747,28 @@
     }
 
     if (item.type === 'chocolate') {
-      runShortAction(state, {
-        label: 'EATING CHOCOLATE',
-        duration: 2,
-        action: function (s) {
-          s.food[key] -= 1;
-          var gain = chocolateMoraleGain(s);
-          s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-          s.crew.lastChocolateAt = s.meta.voyageMinutes;
-          log(s, eatChocolateLine(s));
-          flushNewLogEntries(s);
-        },
-      });
+      var doEatChocolate = function (s) {
+        s.food[key] -= 1;
+        var gain = chocolateMoraleGain(s);
+        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
+        s.crew.lastChocolateAt = s.meta.voyageMinutes;
+        log(s, eatChocolateLine(s));
+        flushNewLogEntries(s);
+      };
+      var chocolatePrepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
+      if (chocolatePrepAudioKey) {
+        runAudioSyncedAction(state, {
+          label: 'EATING CHOCOLATE',
+          playAudio: function (onEnded) { return playGalleyOneShot(chocolatePrepAudioKey, onEnded); },
+          action: doEatChocolate,
+        });
+      } else {
+        runShortAction(state, {
+          label: 'EATING CHOCOLATE',
+          duration: 2,
+          action: doEatChocolate,
+        });
+      }
       return;
     }
 
@@ -6783,20 +6843,20 @@
       flushNewLogEntries(s);
     };
 
-    // A cooked meal with a mapped preparation sound (see
-    // MEAL_PREP_AUDIO_KEY above) runs the MAKING dots for the actual
+    // Any item with a mapped preparation sound (see FOOD_PREP_AUDIO_KEY
+    // above — covers meals, snacks, and chocolate alike, not gated on
+    // item.cooked) runs the EATING/MAKING/PREPARING dots for the actual
     // length of that audio file (see runAudioSyncedAction and
     // playGalleyOneShot) rather than a fixed duration — this is the
     // one general hook point every current and future galley
     // preparation sound goes through; everything else about the
     // action (gates already checked above, the mutation itself, the
-    // resulting log line) is identical to any other meal.
-    var prepAudioKey = item.cooked ? MEAL_PREP_AUDIO_KEY[item.name] : null;
+    // resulting log line) is identical to any other item.
+    var prepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
     if (prepAudioKey) {
       runAudioSyncedAction(state, {
         label: label,
-        playAudio: function (onEnded) { playGalleyOneShot(prepAudioKey, onEnded); },
-        fallbackSeconds: GALLEY_AUDIO_FALLBACK_SECONDS,
+        playAudio: function (onEnded) { return playGalleyOneShot(prepAudioKey, onEnded); },
         action: doEat,
       });
     } else {
@@ -6838,9 +6898,9 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    runShortAction(state, {
+    runAudioSyncedAction(state, {
       label: 'POURING WATER',
-      duration: 2,
+      playAudio: function (onEnded) { return playGalleyOneShot('water', onEnded); },
       action: function (s) {
         consumeWater(s, WATER_DRINK_GAL);
         s.crew.hoursSinceWater = 0;
@@ -6871,9 +6931,9 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    runShortAction(state, {
+    runAudioSyncedAction(state, {
       label: 'MAKING COFFEE',
-      duration: 3,
+      playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
         s.drinks.coffee -= 1;
         consumeWater(s, WATER_COFFEE_GAL);
@@ -6905,9 +6965,9 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    runShortAction(state, {
+    runAudioSyncedAction(state, {
       label: 'MAKING TEA',
-      duration: 3,
+      playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
         s.drinks.tea -= 1;
         consumeWater(s, WATER_TEA_GAL);
@@ -7716,29 +7776,45 @@
      physically doing something at the stove), as opposed to anything
      ambient/reactive. Same lazy-per-key HTMLAudioElement shape as
      SAILS_AUDIO_FILES/getSailsAudioEl below -- adding a future
-     preparation sound (chopping, stirring, sizzling, etc.), for a new
-     or existing meal, is just one new GALLEY_AUDIO_FILES/
-     GALLEY_AUDIO_VOLUME entry here plus one new MEAL_PREP_AUDIO_KEY
-     mapping in performEat, nothing structural. Currently one sound,
-     thickBoil (thick_boil.mp3), used for the six simmer/boil meals --
-     see MEAL_PREP_AUDIO_KEY. Every key here is a one-shot (none
-     currently loop; loop is only ever set true for an explicitly
-     reactive/ambient sound, matching sails' own luffing flag) and is
-     played via runAudioSyncedAction, so the existing ". .. ..." busy
+     preparation sound is just one new GALLEY_AUDIO_FILES/
+     GALLEY_AUDIO_VOLUME entry here plus one new FOOD_PREP_AUDIO_KEY
+     (food/snacks/chocolate), CHORE_AUDIO_KEY (chores), or drink call
+     site mapping, nothing structural. Covers food prep (thickBoil,
+     thinBoil, boilSizzle, sizzle, boilChop, popcorn, wrapper, nuts,
+     mango, tunaCrackers -- see FOOD_PREP_AUDIO_KEY), hot drinks
+     (hotDrink) and water (water) in performDrink*, and dishes
+     (dishes) in performChore/CHORE_AUDIO_KEY. Every key here is a
+     one-shot (none currently loop; loop is only ever set true for an
+     explicitly reactive/ambient sound, matching sails' own luffing
+     flag) and is played via runAudioSyncedAction, so the existing
+     ". .. ..." busy
      indicator lasts exactly as long as the real file does, whatever
-     that turns out to be -- see playGalleyOneShot's onEnded wiring and
-     performEat's own use of it. fallbackSeconds there is a failure-
-     only safety net (missing/blocked/unplayable file), never the
-     normal path when the audio actually plays.
+     that turns out to be -- see playGalleyOneShot's onEnded wiring
+     (and its returned element, which runAudioSyncedAction's own
+     duration-derived watchdog uses as a failure-only safety net, never
+     the normal path when the audio actually plays).
      -------------------------------------------------------------- */
   var GALLEY_AUDIO_FILES = {
     thickBoil: 'audio/galley/thick_boil.mp3',
+    thinBoil: 'audio/galley/thin_boil.mp3',
+    boilSizzle: 'audio/galley/boil_sizzle.mp3',
+    sizzle: 'audio/galley/sizzle.mp3',
+    boilChop: 'audio/galley/boil_chop.mp3',
+    popcorn: 'audio/galley/popcorn.mp3',
+    wrapper: 'audio/galley/wrapper.mp3',
+    nuts: 'audio/galley/nuts.mp3',
+    mango: 'audio/galley/mango.mp3',
+    tunaCrackers: 'audio/galley/tuna_crakers.mp3', // exact filename spelling per the mapping spec -- "crakers", not "crackers"
+    hotDrink: 'audio/galley/hot_drink.mp3',
+    water: 'audio/galley/water.mp3',
+    dishes: 'audio/galley/dishes.mp3',
   };
   var GALLEY_AUDIO_VOLUME = {
-    thickBoil: 0.5,
+    thickBoil: 0.5, thinBoil: 0.5, boilSizzle: 0.5, sizzle: 0.5, boilChop: 0.5,
+    popcorn: 0.5, wrapper: 0.5, nuts: 0.5, mango: 0.5, tunaCrackers: 0.5,
+    hotDrink: 0.5, water: 0.5, dishes: 0.5,
   };
   var GALLEY_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
-  var GALLEY_AUDIO_FALLBACK_SECONDS = 5; // failure-only safety net for ANY galley key -- see runAudioSyncedAction's own fallbackSeconds notes
 
   var galleyAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as sailsAudioEls
 
@@ -7785,9 +7861,12 @@
   // onEnded wiring runAudioSyncedAction expects from its
   // config.playAudio, so the MAKING busy-action lasts exactly as long
   // as the real audio file does, for this key and any future one,
-  // without ever hard-coding a duration in code.
+  // without ever hard-coding a duration in code. Returns the audio
+  // element itself (or null if audio is locked) so
+  // runAudioSyncedAction's watchdog can size itself off the real file's
+  // own duration rather than a fixed number.
   function playGalleyOneShot(key, onEnded) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return; }
+    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
     var el = getGalleyAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -7803,6 +7882,7 @@
         onEnded();
       };
     }
+    return el;
   }
 
   function applyMuteToGalleyAudio() {
@@ -7909,9 +7989,12 @@
   // actions, rather than a separately hardcoded duration. Runs (and
   // still calls onEnded on schedule) even when sailsAudibleVolume
   // resolves to 0 -- audibility is purely a volume question, never a
-  // reason to skip the underlying event or its timing.
+  // reason to skip the underlying event or its timing. Returns the
+  // audio element itself (or null if audio is locked) so
+  // runAudioSyncedAction's watchdog can size itself off the real
+  // file's own duration rather than a fixed number.
   function playSailsOneShot(key, onEnded, state) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return; }
+    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
     var el = getSailsAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -7928,6 +8011,7 @@
         onEnded();
       };
     }
+    return el;
   }
 
   // The luffing loop: fresh from the beginning every time it starts
@@ -7991,11 +8075,29 @@
   // actual audio file's natural end (see playSailsOneShot's onEnded
   // hook) rather than a fixed timer, per "whenever possible, use the
   // audio element's actual playback/end state." config: label,
-  // playAudio(onEnded) (must eventually call onEnded exactly once),
-  // fallbackSeconds (a safety net only -- covers audio being
-  // unavailable, blocked, or otherwise never firing 'ended', so the
-  // game is never stuck; normally the real audio finishes first and
-  // this timer is simply cleared), action(state).
+  // playAudio(onEnded) (must eventually call onEnded exactly once, and
+  // should return the HTMLAudioElement it's playing so the watchdog
+  // below can size itself off the real file), action(state).
+  //
+  // FAILSAFE, not a competing timer: a fixed setTimeout racing the real
+  // audio (the old design) meant any file longer than that fixed number
+  // finished the ACTION early even while still audibly playing --
+  // exactly backwards from "the audio file itself determines how long
+  // the action takes." Instead: start with a generous, config-optional
+  // startupFallbackSeconds (default 10) that only covers "we don't know
+  // anything yet" -- audio that never even begins, or whose metadata
+  // never loads at all (playSailsOneShot/playGalleyOneShot already call
+  // onEnded immediately on a play() rejection or while audio is locked,
+  // so this rarely needs to fire for that). The instant the returned
+  // element reports a real, finite duration -- synchronously if already
+  // known from an earlier play of the same (reused, lazy-loaded)
+  // element, or via 'loadedmetadata'/'durationchange' once it becomes
+  // known -- that startup timer is replaced with one sized to the
+  // ACTUAL file: duration + a generous watchdogMarginSeconds (default
+  // 5). That derived watchdog is itself only a guard against 'ended'
+  // somehow never firing on a genuinely broken playback; it is not
+  // the normal path, and normal playback always resolves via the real
+  // 'ended' event, which fires first.
   function runAudioSyncedAction(state, config) {
     uiBusy = true;
     var choiceAtStart = state.pendingChoice;
@@ -8018,12 +8120,31 @@
     }, DOT_FRAME_MS);
 
     var settled = false;
-    var fallbackTimer = setTimeout(function () { onAudioDone(); }, (config.fallbackSeconds || 5) * 1000);
+    // Last-resort ceiling while we don't yet know anything about the
+    // audio (see the function-level notes) -- replaced the moment a
+    // real duration is known, below.
+    var watchdogTimer = setTimeout(onAudioDone, (config.startupFallbackSeconds || 10) * 1000);
+
+    function armDurationWatchdog(el) {
+      if (settled || !el) return;
+      function arm() {
+        if (settled) return;
+        var d = el.duration;
+        if (!isFinite(d) || d <= 0) return; // not known yet -- stay on the startup ceiling until it is
+        el.removeEventListener('loadedmetadata', arm);
+        el.removeEventListener('durationchange', arm);
+        clearTimeout(watchdogTimer);
+        watchdogTimer = setTimeout(onAudioDone, (d + (config.watchdogMarginSeconds || 5)) * 1000);
+      }
+      arm(); // synchronous check first -- covers the common case where this (reused) element already knows its duration from an earlier play
+      el.addEventListener('loadedmetadata', arm);
+      el.addEventListener('durationchange', arm);
+    }
 
     function onAudioDone() {
-      if (settled) return; // guards against the real 'ended' event and the fallback timer both eventually firing
+      if (settled) return; // guards against the real 'ended' event and the watchdog both eventually firing
       settled = true;
-      clearTimeout(fallbackTimer);
+      clearTimeout(watchdogTimer);
       clearInterval(dotTimer);
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
       if (config.action) config.action(state);
@@ -8035,7 +8156,8 @@
       scrollToBottom();
     }
 
-    config.playAudio(onAudioDone);
+    var playingEl = config.playAudio(onAudioDone);
+    armDurationWatchdog(playingEl);
   }
 
   // Sail area ordering, used only to classify a change as a raise or a
@@ -8069,19 +8191,13 @@
     minimal: "Reduced to minimal canvas. Slow, but she's not fighting the wind anymore.",
     furled: "Sails furled. No canvas up at all.",
   };
-  // Safety-net durations only (see runAudioSyncedAction) -- roughly the
-  // old fixed durations these actions used before being driven by real
-  // audio, so a failed/blocked/unavailable sound still resolves in
-  // about the time the action always felt like it took.
-  var SAIL_CHANGE_FALLBACK_SECONDS = { raiseLong: 7, raiseShort: 4, lowerLong: 7, lowerShort: 4 };
 
   function performSailChange(state, targetConfig) {
     var fromConfig = state.boat.sailConfig;
     var audioKey = sailChangeAudioKey(fromConfig, targetConfig);
     runAudioSyncedAction(state, {
       label: SAIL_CHANGE_WORKING_LABEL[targetConfig],
-      fallbackSeconds: SAIL_CHANGE_FALLBACK_SECONDS[audioKey],
-      playAudio: function (onEnded) { playSailsOneShot(audioKey, onEnded, state); },
+      playAudio: function (onEnded) { return playSailsOneShot(audioKey, onEnded, state); },
       action: function (s) {
         s.boat.sailConfig = targetConfig;
         log(s, SAIL_CHANGE_LOG_LINES[targetConfig]);
