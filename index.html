@@ -4162,43 +4162,43 @@
   /* ============================================================
      6. AMBIENT AUDIO
      ------------------------------------------------------------
-     Two independent systems share this one AudioContext/masterGain:
+     Three independent recorded-file systems share this one
+     AudioContext/masterGain, each its own pair of crossfading
+     exterior/interior channels:
 
-     - Weather texture (rain), still synthesized here since it doesn't
-       duplicate what the recorded boat-ambience files below are for --
-       rain is precipitation, an orthogonal phenomenon to wind speed.
-       (There is deliberately no synthesized hum/oscillator layer here
-       any more -- an earlier version had a constant 55Hz sine tone,
-       which is exactly the kind of old procedural boat-ambience sound
-       the new recordings replace, and it was audible as a continuous
-       low tone competing with them. Removed entirely, not just muted.)
+     - MARINE AMBIENCE (audio/sea_state/) -- wind-driven calm/chop/
+       heavy. See getBoatAudioState/updateBoatAudioForState further
+       down: state.crew.location and state.weather.windSpeed are the
+       only inputs.
 
-     - BOAT AMBIENCE (recorded, from audio/sea_state/): replaces what
-       used to be synthesized wind/wave/rigging noise and the hum
-       entirely -- these recordings are primarily wind/environment
-       ambience around the boat, with some corresponding water/boat
-       sound mixed in, so layering the old procedural versions
-       underneath them would just be duplicated/competing sound. See
-       getBoatAudioState/updateBoatAudioForState further down:
-       state.crew.location and state.weather.windSpeed are the only
-       inputs, matching the game's existing state directly rather than
-       inventing a parallel audio-only weather variable. The folder is
-       still named audio/sea_state/ (deliberately not renamed) even
-       though selection is driven by WIND SPEED, not
-       state.weather.seaState -- sea state itself is untouched and
-       keeps governing everything it always has (mechanics, display,
-       risk); this system alone just doesn't read it anymore.
+     - RAIN (audio/weather/) -- a separate environmental layer on top
+       of marine ambience, driven by state.weather.condition (see
+       rainLevelForCondition/getRainAudioState/updateRainAudioForState
+       just below the marine-ambience system). The two layer
+       naturally: rain never replaces or silences marine ambience, and
+       marine ambience never ducks for rain. There is deliberately no
+       synthesized noise-based rain layer any more -- an earlier
+       version generated filtered white noise for this instead of
+       using recorded files, which is exactly the kind of old
+       procedural ambience the new recordings replace; layering the
+       old procedural version underneath these would just be
+       duplicated/competing sound. Future THUNDER/SPRAY layers are
+       meant to follow this same independent-channel-pair pattern
+       later; nothing here assumes rain is the only such layer.
 
-     masterGain feeds audioCtx.destination once; every layer, old or
-     new, is just a source -> (filter/gain) chain into that one
-     master, so the global mute toggle (toggleMute) affects everything
-     uniformly with no per-system special-casing.
+     No synthesized layers of any kind remain in this section any
+     more (there was also once a constant 55Hz hum/oscillator, removed
+     even earlier, for the same reason).
+
+     masterGain feeds audioCtx.destination once; every layer is just a
+     source -> gain chain into that one master, so the global mute
+     toggle (toggleMute) affects everything uniformly with no
+     per-system special-casing.
      ============================================================ */
   var audioCtx = null;
   var audioUnlocked = false;
   var masterGain = null;
   var muted = false;
-  var layers = {};
 
   function unlockAudio() {
     if (audioUnlocked) return;
@@ -4211,40 +4211,10 @@
     }
   }
 
-  function makeNoiseBuffer(ctx, seconds) {
-    var bufferSize = Math.floor(ctx.sampleRate * seconds);
-    var buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    var data = buffer.getChannelData(0);
-    var last = 0;
-    for (var i = 0; i < bufferSize; i++) {
-      var white = Math.random() * 2 - 1;
-      last = (last + 0.02 * white) / 1.02; // lightly filtered ("brown-ish") noise reads as rain, not static
-      data[i] = last * 3.5;
-    }
-    return buffer;
-  }
-
-  function makeNoiseLayer(ctx, seconds, filterType, freq, q) {
-    var source = ctx.createBufferSource();
-    source.buffer = makeNoiseBuffer(ctx, seconds);
-    source.loop = true;
-    var filter = ctx.createBiquadFilter();
-    filter.type = filterType;
-    filter.frequency.value = freq;
-    if (q) filter.Q.value = q;
-    var gainNode = ctx.createGain();
-    gainNode.gain.value = 0;
-    source.connect(filter).connect(gainNode).connect(masterGain);
-    source.start();
-    return { source: source, filter: filter, gain: gainNode, targetGain: 0 };
-  }
-
   function buildAudioGraph() {
     masterGain = audioCtx.createGain();
     masterGain.gain.value = muted ? 0 : 0.5;
     masterGain.connect(audioCtx.destination);
-
-    layers.rain = makeNoiseLayer(audioCtx, 4, 'highpass', 3500, 0.7);
 
     if (GAME) updateAudioForState(GAME);
     if (GAME && GAME.boat.engineOn) {
@@ -4260,19 +4230,16 @@
   }
 
   // The single top-level "sync all ambient audio to current state" entry
-  // point -- rain here, and boat ambience (recorded exterior/
-  // interior/creak tracks) delegated to updateBoatAudioForState.
-  // Engine audio is NOT synced here -- it's triggered directly from the
-  // actual engine-start/engine-stop actions (see beginEngineStartAudio/
+  // point -- marine ambience (recorded exterior/interior tracks) and
+  // rain (its own separate recorded exterior/interior pair) each
+  // delegated to their own updateXAudioForState. Engine audio is NOT
+  // synced here -- it's triggered directly from the actual
+  // engine-start/engine-stop actions (see beginEngineStartAudio/
   // beginEngineStopAudio) and the GO ABOVE/GO BELOW handler
   // (transitionEngineLocationAudio), not inferred from render state.
   function updateAudioForState(state) {
-    if (audioCtx && layers.rain) {
-      var now = audioCtx.currentTime;
-      var rainOn = (state.weather.condition === 'rain' || state.weather.condition === 'squall') ? 1 : 0;
-      layers.rain.gain.gain.linearRampToValueAtTime(rainOn * 0.12, now + 2);
-    }
     updateBoatAudioForState(state);
+    updateRainAudioForState(state);
     // Defensive re-sync only (idempotent — see updateNoGoZoneAudio's own
     // isCurrentlyLuffing guard) for any path that moved nav.heading
     // without going through simTick or beginCourseTurn explicitly, and
@@ -4292,6 +4259,7 @@
     applyMuteToSailsAudio(); // SAILS HOOK -- same reasoning as engine audio
     applyMuteToGalleyAudio(); // GALLEY HOOK -- same reasoning as engine audio
     applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
+    applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -4551,6 +4519,238 @@
   // click and makes both directions genuinely the same code path.
   function transitionBoatAudioToLocation(state, targetLocation) {
     applyBoatAudioDesiredState(getBoatAudioStateFor(targetLocation, state.weather.windSpeed || 0));
+  }
+
+  /* --------------------------------------------------------------
+     RAIN AUDIO (recorded, from audio/weather/) -- a separate
+     environmental layer on top of marine ambience, its own pair of
+     crossfading exterior/interior channels, exactly the same
+     architecture as MARINE AMBIENCE just above (independently
+     duplicated rather than shared, matching how every other audio
+     subsystem in this file -- engine, sails, galley, cabin, fishing --
+     each keeps its own copy of this kind of machinery rather than a
+     single generic version several systems reach into). Driven by
+     state.weather.condition via rainLevelForCondition below -- no
+     second weather/rain simulation, no independent rain randomness:
+     'rain' reads as LIGHT (drizzle/rain/showers in Landfall's
+     four-condition model) and 'squall' reads as HEAVY (thunderstorm,
+     or heavy wind plus precipitation); 'clear'/'overcast' are NONE.
+     RAIN_LAYER_VOLUME is the one place this layer's level lives, so
+     it can be rebalanced later without touching any of the logic
+     below. Exterior and interior are mutually exclusive by location,
+     same as marine ambience; the two systems otherwise know nothing
+     about each other and layer purely by both feeding the same
+     masterGain independently.
+     -------------------------------------------------------------- */
+  var RAIN_AUDIO_FILES = {
+    exteriorLight: 'audio/weather/exterior_light_rain.mp3',
+    exteriorHeavy: 'audio/weather/exterior_heavy_rain.mp3',
+    interiorLight: 'audio/weather/interior_light_rain.mp3',
+    interiorHeavy: 'audio/weather/interior_heavy_rain.mp3',
+  };
+  var RAIN_AMBIENCE_CROSSFADE_SECONDS = 2; // matches BOAT_AMBIENCE_CROSSFADE_SECONDS -- shared by location transitions, rain starting/stopping, and intensity changes alike
+  var RAIN_LAYER_VOLUME = 0.45; // the ONE gain value for this whole layer (both exterior and interior channels) -- see the section comment above
+
+  // state.weather.condition -> 'none' | 'light' | 'heavy'. The only
+  // place this mapping is made -- everything else here just asks for
+  // the resulting level, never re-derives it from condition directly.
+  function rainLevelForCondition(condition) {
+    if (condition === 'rain') return 'light';
+    if (condition === 'squall') return 'heavy';
+    return 'none';
+  }
+
+  // location/rainLevel -> which file (if any) each channel wants. Pure
+  // function of explicit values, exactly like getBoatAudioStateFor.
+  // Staying at the same rain level naturally keeps returning the SAME
+  // file, so setRainChannelTrack's skip-if-unchanged/healthy check
+  // means the recording is never restarted for that (see "DO NOT
+  // RESTART UNNECESSARILY"). Takes location as a parameter (rather
+  // than reading state.crew.location directly) for the same reason
+  // getBoatAudioStateFor does -- a transition in progress can ask
+  // "what should play for the location the player is headed TO."
+  function getRainAudioStateFor(location, rainLevel) {
+    var exteriorTrack = null, interiorTrack = null;
+    if (rainLevel !== 'none') {
+      var suffix = rainLevel === 'light' ? 'Light' : 'Heavy';
+      if (location === 'above') exteriorTrack = RAIN_AUDIO_FILES['exterior' + suffix];
+      else interiorTrack = RAIN_AUDIO_FILES['interior' + suffix];
+    }
+    return { location: location, rainLevel: rainLevel, exteriorTrack: exteriorTrack, interiorTrack: interiorTrack };
+  }
+
+  function getRainAudioState(state) {
+    return getRainAudioStateFor(state.crew.location, rainLevelForCondition(state.weather.condition));
+  }
+
+  function makeRainChannel(name, targetGain) {
+    return {
+      name: name,
+      targetGain: targetGain,
+      slots: [null, null],    // each becomes { el, gain, pendingPath, pendingGeneration } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
+      activeIndex: -1,        // which slot we're currently pointing at (loading OR confirmed-playing), or -1 if silent
+      desiredPath: null,      // the LATEST path this channel has been asked for -- recorded synchronously on every call, regardless of anything else; async callbacks compare against this (plus generation) to detect staleness
+      loadingPath: null,      // path an in-flight play() attempt is currently for, or null if nothing in flight
+      currentPath: null,      // CONFIRMED actually playing, or null. ONLY ever set once playback is confirmed -- the play() Promise resolves and/or the element's 'playing' event fires -- AND that path is still desired at that moment. Never set merely because play() was called without throwing.
+      generation: 0,          // bumped every time a genuinely new attempt begins; closures/slots capture their own generation so a slow or stale async result can recognize it's been superseded and refuse to resurrect old state
+    };
+  }
+  var rainChannels = {
+    exterior: makeRainChannel('exterior', RAIN_LAYER_VOLUME),
+    interior: makeRainChannel('interior', RAIN_LAYER_VOLUME),
+  };
+
+  function ensureRainChannelSlot(channel, index) {
+    if (channel.slots[index] || !audioCtx) return;
+    try {
+      var el = new Audio();
+      el.loop = true;
+      el.preload = 'auto';
+      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0 };
+      el.addEventListener('error', function () {
+        var path = el.currentSrc || el.src;
+        console.error('RAIN AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+      });
+      el.addEventListener('loadeddata', function () {
+        var path = el.currentSrc || el.src;
+        console.log('RAIN AUDIO LOADED', 'path:', path, 'duration:', el.duration);
+      });
+      el.addEventListener('playing', function () {
+        var path = el.currentSrc || el.src;
+        console.log('RAIN AUDIO PLAYING', 'path:', path);
+        // Confirmation path #2 (alongside the play() Promise below) --
+        // only commit if this slot's most recent attempt is still the
+        // channel's most recent attempt overall AND still what's
+        // actually desired; otherwise this is a stale signal from a
+        // track that's since been superseded.
+        if (slot.pendingGeneration === channel.generation && channel.desiredPath === slot.pendingPath) {
+          channel.currentPath = slot.pendingPath;
+          channel.loadingPath = null;
+        }
+      });
+      var source = audioCtx.createMediaElementSource(el);
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain).connect(masterGain);
+      slot.gain = gain;
+      channel.slots[index] = slot;
+    } catch (e) {
+      console.warn('Rain ambience unavailable:', describeError(e));
+    }
+  }
+
+  // "Healthy" -- same meaning and same reasoning as boatChannelIsHealthy.
+  function rainChannelIsHealthy(channel) {
+    if (channel.currentPath === null) return channel.activeIndex === -1;
+    if (channel.activeIndex === -1) return false;
+    var slot = channel.slots[channel.activeIndex];
+    if (!slot) return false;
+    var el = slot.el;
+    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === channel.targetGain);
+  }
+
+  // Crossfades `channel` toward `desiredPath` (or silence if null) --
+  // identical shape and reasoning to setBoatChannelTrack; see its own
+  // comments for the full explanation of the generation/confirmation
+  // logic. When desiredPath is null (rain has stopped), the outgoing
+  // slot fades to silence and is paused via the same pauseTimer
+  // mechanism, which is exactly "pause/reset the rain audio so it's
+  // ready for the next rain event" -- no separate reset step needed.
+  function setRainChannelTrack(channel, desiredPath, locationForLog, rainLevelForLog) {
+    channel.desiredPath = desiredPath;
+
+    if (!audioCtx) return;
+    if (channel.currentPath === desiredPath && rainChannelIsHealthy(channel)) return;
+    if (desiredPath != null && channel.loadingPath === desiredPath) return;
+
+    channel.generation++;
+    var myGeneration = channel.generation;
+    var now = audioCtx.currentTime;
+    var outgoingIndex = channel.activeIndex;
+
+    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
+      var outgoing = channel.slots[outgoingIndex];
+      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; }
+      outgoing.gainTarget = 0;
+      outgoing.gain.gain.cancelScheduledValues(now);
+      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + RAIN_AMBIENCE_CROSSFADE_SECONDS);
+      outgoing.pauseTimer = setTimeout(function () {
+        outgoing.pauseTimer = null;
+        outgoing.el.pause();
+      }, RAIN_AMBIENCE_CROSSFADE_SECONDS * 1000 + 100);
+    }
+
+    if (desiredPath == null) {
+      channel.activeIndex = -1;
+      channel.currentPath = null;
+      channel.loadingPath = null;
+      return;
+    }
+
+    channel.loadingPath = desiredPath;
+    console.log('RAIN AUDIO REQUEST', 'location:', locationForLog, 'rainLevel:', rainLevelForLog, 'desiredPath:', desiredPath);
+
+    try {
+      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+      ensureRainChannelSlot(channel, incomingIndex);
+      var incoming = channel.slots[incomingIndex];
+      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; }
+
+      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; }
+      incoming.pendingPath = desiredPath;
+      incoming.pendingGeneration = myGeneration;
+      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
+      if (!alreadyLoaded) {
+        incoming.el.src = desiredPath;
+        incoming.el.currentTime = 0;
+      }
+      incoming.gainTarget = channel.targetGain;
+      incoming.gain.gain.cancelScheduledValues(now);
+      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
+      incoming.gain.gain.linearRampToValueAtTime(channel.targetGain, now + RAIN_AMBIENCE_CROSSFADE_SECONDS);
+      channel.activeIndex = incomingIndex;
+
+      var playPromise = incoming.el.play();
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(function () {
+          if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
+          channel.currentPath = desiredPath;
+          channel.loadingPath = null;
+          console.log('RAIN AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
+            'volume:', incoming.el.volume, 'muted:', incoming.el.muted, 'currentTime:', incoming.el.currentTime);
+        }, function (error) {
+          console.error('RAIN AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
+        });
+      }
+    } catch (e) {
+      console.error('Rain audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
+    }
+  }
+
+  // Hands a {location, rainLevel, exteriorTrack, interiorTrack} shape
+  // to setRainChannelTrack for both channels -- same shared-by-both-
+  // entry-points reasoning as applyBoatAudioDesiredState.
+  function applyRainAudioDesiredState(desired) {
+    setRainChannelTrack(rainChannels.exterior, desired.exteriorTrack, desired.location, desired.rainLevel);
+    setRainChannelTrack(rainChannels.interior, desired.interiorTrack, desired.location, desired.rainLevel);
+  }
+
+  // The state-driven entry point -- the live loop, restart, offline
+  // catch-up, sound-on, and rain starting/stopping/changing intensity
+  // while the player stays put. Called from updateAudioForState and
+  // directly from renderOptions, same as updateBoatAudioForState.
+  function updateRainAudioForState(state) {
+    applyRainAudioDesiredState(getRainAudioState(state));
+  }
+
+  // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- not when
+  // it finishes, same reasoning as transitionBoatAudioToLocation.
+  function transitionRainAudioToLocation(state, targetLocation) {
+    applyRainAudioDesiredState(getRainAudioStateFor(targetLocation, rainLevelForCondition(state.weather.condition)));
   }
 
   /* --------------------------------------------------------------
@@ -6345,9 +6545,9 @@
       printLine('Not enough water.', 'amber');
       return;
     }
-    runShortAction(state, {
-      label: 'WASHING UP',
-      duration: 3,
+    runAudioSyncedAction(state, {
+      label: 'WASHING',
+      playAudio: function (onEnded) { return playHeadOneShot('wash', onEnded); },
       action: function (s) {
         consumeWater(s, WATER_WASH_GAL);
         var gain = routineMoraleGain(s, 'wash', 4);
@@ -8302,6 +8502,138 @@
   }
 
   /* --------------------------------------------------------------
+     HEAD AUDIO -- the physical WASH sound (see cmdWash). Same lazy-
+     element/fade-in/onEnded shape as CABIN AUDIO just above, kept as
+     its own small section since this is a HEAD action, not a cabin
+     one; a future head sound (if any) would join it here the same
+     way. One-shot, not looped. playHeadOneShot still runs its onEnded
+     callback correctly (via the existing audioUnlocked/play-rejection
+     handling) if the file is missing, so the busy action can never get
+     stuck waiting on it -- see runAudioSyncedAction's own duration-
+     derived watchdog for the belt-and-suspenders failure case.
+     -------------------------------------------------------------- */
+  var HEAD_AUDIO_FILES = {
+    wash: 'audio/head/wash.mp3',
+  };
+  var HEAD_AUDIO_VOLUME = {
+    wash: 0.5,
+  };
+  var HEAD_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+
+  var headAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as cabinAudioEls/galleyAudioEls/sailsAudioEls
+
+  // MediaError.code -> a readable label, purely for the diagnostic log
+  // line below -- 4 (SRC_NOT_SUPPORTED) is exactly what a browser
+  // reports when the server returns something that isn't actually
+  // audio (an HTML 404/index page in place of the real file being the
+  // classic GitHub Pages case), which is why this is spelled out
+  // rather than left as a bare number.
+  var MEDIA_ERROR_LABELS = { 1: 'MEDIA_ERR_ABORTED', 2: 'MEDIA_ERR_NETWORK', 3: 'MEDIA_ERR_DECODE', 4: 'MEDIA_ERR_SRC_NOT_SUPPORTED' };
+
+  function getHeadAudioEl(key) {
+    var el = headAudioEls[key];
+    if (el) return el;
+    el = new Audio(HEAD_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      var code = el.error ? el.error.code : null;
+      console.warn('HEAD AUDIO ELEMENT ERROR', 'key:', key, 'requested src:', HEAD_AUDIO_FILES[key],
+        'resolved src:', el.currentSrc || el.src, 'error code:', code, 'meaning:', code != null ? (MEDIA_ERROR_LABELS[code] || 'unknown') : null);
+    });
+    headAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeCabinVolume/fadeGalleyVolume/fadeSailsVolume
+  // -- see those functions' own comments for why each audio system
+  // keeps its own independent copy rather than sharing one.
+  function fadeHeadVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a head one-shot (currently just wash) once from the
+  // beginning, with a quick fade-in, and fires onEnded (once) when it
+  // naturally finishes -- the exact onEnded wiring runAudioSyncedAction
+  // expects from its config.playAudio, and returns the element itself
+  // so its own duration-derived watchdog can size itself off the real
+  // file rather than a fixed number, same as cabin/galley/sails.
+  //
+  // TEMPORARY DIAGNOSTIC LOGGING (kept in, not stripped out, because
+  // wash.mp3 has been reported silent and there is no way to confirm
+  // from here whether the deployed file at HEAD_AUDIO_FILES[key]
+  // actually resolves to a playable MP3 -- this is the only way to see
+  // that from the browser's own console. Safe to remove once the
+  // underlying cause (almost certainly the file/path on the deployed
+  // site, not this function -- see the file's own investigation notes
+  // above) is confirmed fixed.
+  function playHeadOneShot(key, onEnded) {
+    var tag = 'HEAD ' + key.toUpperCase() + ' AUDIO';
+    if (!audioUnlocked) { console.warn(tag + ' REQUESTED', 'audioUnlocked: false -- audio not yet unlocked, skipping playback entirely'); if (onEnded) onEnded(); return null; }
+    var el = getHeadAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    console.log(tag + ' REQUESTED', 'audioUnlocked:', audioUnlocked, 'muted:', muted,
+      'resolved src:', el.currentSrc || el.src, 'readyState:', el.readyState, 'networkState:', el.networkState,
+      'duration:', el.duration, 'volume:', el.volume);
+    var p = el.play();
+    if (p && p.then) {
+      // Single chain, both outcomes handled on the SAME promise (the
+      // two-argument form of .then) -- calling .then(onSuccess) and
+      // .catch(onFailure) as two SEPARATE chains off the same p, as an
+      // earlier version of this function did, leaves the promise
+      // .then(onSuccess) itself produces (which rejects right through
+      // whenever p rejects, since only a success handler was attached
+      // to it) with no rejection handler of its own -- an unhandled
+      // rejection every time playback fails, independent of the
+      // handling below. This is the one true handler for both cases.
+      p.then(function () {
+        console.log(tag + ' PLAY STARTED', 'paused:', el.paused, 'readyState:', el.readyState, 'volume:', el.volume);
+      }, function (e) {
+        console.warn(tag + ' PLAY FAILED', describeError(e));
+        if (onEnded) onEnded();
+      });
+    }
+    fadeHeadVolume(el, muted ? 0 : HEAD_AUDIO_VOLUME[key], HEAD_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  function applyMuteToHeadAudio() {
+    Object.keys(headAudioEls).forEach(function (key) {
+      var el = headAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : HEAD_AUDIO_VOLUME[key];
+    });
+  }
+
+  /* --------------------------------------------------------------
      SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
      pair, and the winch one-shot for a completed heading change (see
      the module notes on beginCourseTurn for exactly when winch fires —
@@ -9108,6 +9440,7 @@
     applyCabinLighting(state);
     applyTapeLocationAudio(state);
     updateBoatAudioForState(state);
+    updateRainAudioForState(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
@@ -9440,6 +9773,7 @@
           // to be worth a permanent log line every time.
           var goingBelow = state.crew.location !== 'below';
           transitionBoatAudioToLocation(state, goingBelow ? 'below' : 'above');
+          transitionRainAudioToLocation(state, goingBelow ? 'below' : 'above');
           transitionEngineLocationAudio(state, goingBelow ? 'below' : 'above');
           transitionTapeLocationAudio(state, goingBelow ? 'below' : 'above');
           runShortAction(state, {
