@@ -4845,8 +4845,9 @@
   var TAPE_MORALE_FIRST = 5;          // first qualifying listen this voyage day -- comparable to a wash/change
   var TAPE_MORALE_SECOND = 2;         // second: noticeably smaller, matching a single reading-morale chunk
   var TAPE_MORALE_DAILY_LIMIT = 2;    // third and beyond: no further benefit, but never blocks listening itself
-  var TAPE_VOLUME_ABOVE = 0;          // above deck: completely inaudible -- the cassette mechanism keeps running below, the player just can't hear it from up there
   var TAPE_VOLUME_BELOW = 1;          // below deck: the MP3's own normal supplied level, unmodified
+  var TAPE_VOLUME_ABOVE = TAPE_VOLUME_BELOW * 0.5; // above deck: half the normal configured level, NEVER a hardcoded literal -- the cassette player is physically below deck, so its music is still audible above, just noticeably quieter; derived so a future change to TAPE_VOLUME_BELOW automatically keeps this at exactly half of it
+  var TAPE_LOCATION_FADE_SECONDS = 1.5; // smooth crossfade for the GO ABOVE/GO BELOW transition specifically -- see transitionTapeLocationAudio; comfortably inside the 2-second GO ABOVE/GO BELOW busy action so it always finishes before that action's own final render re-syncs (applyTapeLocationAudio below), never abruptly cut short by it
 
   // Called from the player's own explicit tape-selection click (never
   // proactively/on load). Lazily creates the one persistent <audio>
@@ -4871,11 +4872,57 @@
   // filter, no playbackRate touch, no seek. Safe to call whether or
   // not a tape is currently playing (harmless either way, since it
   // always applies to whatever's loaded); safe to call before the
-  // element exists (no-op).
+  // element exists (no-op). This is the defensive per-render re-sync
+  // (called from renderOptions) and the "tape just started" case,
+  // where an instant snap is correct -- there's no prior audible level
+  // to fade FROM. The GO ABOVE/GO BELOW transition itself uses a
+  // smooth fade instead; see transitionTapeLocationAudio just below.
   function applyTapeLocationAudio(state) {
     if (!tapeAudioEl) return;
     var above = !!(state && state.crew.location === 'above');
     tapeAudioEl.volume = above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
+  }
+
+  // Same shape as fadeEngineVolume/fadeSailsVolume/etc. elsewhere in
+  // this file -- a plain HTMLAudioElement has no linearRampToValueAtTime
+  // of its own, so every plain-audio subsystem here steps .volume by
+  // hand on a short interval instead. Never touches anything but
+  // .volume: no pause, no seek, no playbackRate/pitch change, so the
+  // track itself is never disturbed by this.
+  function fadeTapeVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- same
+  // "act on the TARGET location, not state.crew.location" reasoning as
+  // transitionBoatAudioToLocation/transitionEngineLocationAudio just
+  // below/above: state.crew.location doesn't flip until the short
+  // action's dots finish running, several seconds later. A no-op
+  // whenever there's no element yet or no track actually playing right
+  // now (tape_off.mp3, a stopped player, or silence between tapes) --
+  // nothing to smoothly fade in those cases, and applyTapeLocationAudio
+  // above still correctly sets whatever DOES start playing later to the
+  // right level for wherever the player ends up.
+  function transitionTapeLocationAudio(state, targetLocation) {
+    if (!tapeAudioEl || tapeAudioRole !== 'track') return;
+    var target = targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
+    fadeTapeVolume(tapeAudioEl, target, TAPE_LOCATION_FADE_SECONDS);
   }
 
   // Awards the qualifying-listen morale, once per session, respecting
@@ -9483,6 +9530,7 @@
           var goingBelow = state.crew.location !== 'below';
           transitionBoatAudioToLocation(state, goingBelow ? 'below' : 'above');
           transitionEngineLocationAudio(state, goingBelow ? 'below' : 'above');
+          transitionTapeLocationAudio(state, goingBelow ? 'below' : 'above');
           runShortAction(state, {
             label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
             transientLabel: true,
