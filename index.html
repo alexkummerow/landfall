@@ -382,6 +382,7 @@
         fanOn: false,
         heaterOn: false,
         cabinLightsOn: false,
+        exteriorLightsOn: false,    // NAV STATION / ELECTRICAL PANEL — separate circuit from cabinLightsOn, same BATTERY_DRAIN_LIGHTS_PER_HOUR drain; no gameplay effect yet beyond battery draw (deck-visibility mechanics are a future addition, not this one)
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
         hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears heat-stuffiness immediately (isCabinHeatStuffy), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateBoatAudioForState/updateRainAudioForState)
@@ -2052,12 +2053,22 @@
 
   // 0 outside dawn-through-dusk daylight (see timeOfDayPhase); otherwise
   // the weather-tiered rate above. Read by both updateBattery (the
-  // actual charge) and cmdElectrical (the qualitative CHARGING/OFF
-  // display), so the two always agree.
+  // actual charge) and solarOutputWatts (the player-facing watt
+  // display, on the NAV STATION SOLAR line), so the two always agree.
   function solarChargeRate(state) {
     if (timeOfDayPhase(state) === 'night') return 0;
     var rate = SOLAR_RATE_BY_CONDITION[state.weather.condition];
     return rate != null ? rate : SOLAR_RATE_FALLBACK;
+  }
+
+  var SOLAR_NOMINAL_WATTS = 100; // the boat's nominal solar installation size -- purely a physical-looking display number; the 1.0 multiplier solarChargeRate already produces in CLEAR daylight maps directly to this
+  // Player-facing watt figure for the NAV STATION SOLAR line -- derived
+  // directly from solarChargeRate, the SAME rate updateBattery actually
+  // charges with, so the two can never drift out of sync (no second
+  // weather/solar rule set). 1.0 -> 100W, 0.5 -> 50W, 0.25 -> 25W,
+  // 0.1 -> 10W, 0 (night, or anything unrecognized) -> 0W.
+  function solarOutputWatts(state) {
+    return Math.round(solarChargeRate(state) * SOLAR_NOMINAL_WATTS);
   }
 
   // Cabin temperature — comfort/morale only, never a survival mechanic.
@@ -3267,6 +3278,7 @@
       if (b.heaterOn) drain += BATTERY_DRAIN_HEATER_PER_HOUR;
       if (b.fanOn) drain += BATTERY_DRAIN_FAN_PER_HOUR;
       if (b.cabinLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR;
+      if (b.exteriorLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR; // same rate as cabin lights -- see its own state-field comment
       // ACCESSORY HOOK -- the circuit itself draws nothing just being
       // switched on; only an actually-playing cassette (activeTapeTitle
       // set) draws anything at all, and only for as long as it's
@@ -5642,17 +5654,19 @@
       && state.boat.cabinTemperatureF != null && state.boat.cabinTemperatureF > CABIN_STUFFY_TEMP_F;
   }
 
-  // The NAV STATION cabin status line -- temperature, the existing
-  // COLD/COMFORTABLE/HOT read, and STUFFY appended only when
-  // isCabinHeatStuffy is true. A separate function from formatCabinTemp
-  // (used as-is, unmodified, by STATUS/ELECTRICAL) specifically so nothing
-  // else that reads cabinConditionLabel's bare 'HOT'/'COLD'/'COMFORTABLE'
+  // The NAV STATION "CABIN" status word -- COLD/COMFORTABLE/HOT from the
+  // existing cabinConditionLabel, but STUFFY (isCabinHeatStuffy) takes
+  // precedence over whatever that would otherwise read, matching the
+  // spec's flat four-way enumeration (COLD/COMFORTABLE/STUFFY/HOT) for
+  // this one status word. Temperature itself is shown on its own
+  // separate CABIN TEMP line now (see cmdNavStation) -- this function
+  // returns only the word. A separate function from formatCabinTemp
+  // (used as-is, unmodified, by STATUS) specifically so nothing else
+  // that reads cabinConditionLabel's bare 'HOT'/'COLD'/'COMFORTABLE'
   // string is ever affected by this addition.
-  function cabinStatusLine(state) {
-    var b = state.boat;
-    if (b.cabinTemperatureF == null) return 'COMFORTABLE';
-    var base = Math.round(b.cabinTemperatureF) + '\u00B0F ' + cabinConditionLabel(b.cabinTemperatureF, b.fanOn);
-    return isCabinHeatStuffy(state) ? base + ' / STUFFY' : base;
+  function cabinStatusWord(state) {
+    if (isCabinHeatStuffy(state)) return 'STUFFY';
+    return cabinConditionLabel(state.boat.cabinTemperatureF, state.boat.fanOn);
   }
 
   // STATUS is now purely about Solace herself — HUNGER/THIRST moved to
@@ -5687,36 +5701,10 @@
     state.pendingChoice = { id: 'status-view', options: opts };
   }
 
-  function cmdElectrical(state) {
-    var b = state.boat;
-    printBlank();
-    printLine('ELECTRICAL PANEL', 'heading-label');
-    printBlank();
-    var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
-    printLine(statusLine('BATTERY', batteryLabel));
-    printLine(statusLine('SOLAR', solarChargeRate(state) > 0 ? 'CHARGING' : 'OFF'));
-    if (b.electrical === 'DAMAGED') {
-      printBlank();
-      printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
-    }
-    state.pendingChoice = {
-      id: 'electrical-panel',
-      options: [
-        { label: 'AUTOPILOT \u2014 ' + (b.autopilotOn ? 'ON' : 'OFF'), action: 'electrical:autopilot' },
-        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
-        { label: 'FAN \u2014 ' + (b.fanOn ? 'ON' : 'OFF'), action: 'electrical:fan' },
-        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
-        { label: 'ACCESSORY \u2014 ' + (b.accessoryOn ? 'ON' : 'OFF'), action: 'electrical:accessory' },
-        { label: 'BACK', action: 'cancel' },
-      ],
-    };
-  }
-
   var ELECTRICAL_TOGGLE_FIELDS = {
     cabinLights: 'cabinLightsOn',
+    exteriorLights: 'exteriorLightsOn',
     heater: 'heaterOn',
-    fan: 'fanOn',
-    autopilot: 'autopilotOn',
     accessory: 'accessoryOn',
   };
 
@@ -5782,7 +5770,14 @@
   // prompt, no delay, and deliberately no permanent-log entry for the
   // routine flip itself (these can be switched often; logging every one
   // would clutter the log fast). A dead battery can't power anything
-  // new on, though it can still be switched off.
+  // new on, though it can still be switched off. Covers the four
+  // controls still on the ELECTRICAL PANEL (embedded in NAV STATION) --
+  // CABIN LIGHTS, EXTERIOR LIGHTS, HEATER, ACCESSORY POWER. AUTOPILOT
+  // and FAN have their own dedicated toggle functions now (see
+  // performAutopilotToggle at the HELM, performFanToggle at the
+  // SALOON) since each returns to a different screen and (for
+  // autopilot) has its own extra side effects -- this function no
+  // longer needs to special-case anything.
   function performElectricalToggle(state, key) {
     var field = ELECTRICAL_TOGGLE_FIELDS[key];
     if (!field) return;
@@ -5790,10 +5785,10 @@
     if (!b[field] && b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged.', 'amber');
-      cmdElectrical(state);
+      cmdNavStation(state);
       return;
     }
-    // ACCESSORY HOOK -- unlike the other four, the circuit itself draws
+    // ACCESSORY HOOK -- unlike the others, the circuit itself draws
     // nothing just being switched on (only an actually-playing cassette
     // does — see updateBattery), so a dead battery doesn't stop the
     // player from flipping it on; playing a tape is what's actually
@@ -5801,36 +5796,13 @@
     if (!b[field] && b.battery <= 0 && key !== 'accessory') {
       printBlank();
       printLine('No power.', 'amber');
-      cmdElectrical(state);
+      cmdNavStation(state);
       return;
     }
     var turningOn = !b[field];
     b[field] = turningOn;
     playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through, never on a blocked attempt above
 
-    if (key === 'autopilot') {
-      if (turningOn) {
-        // If the player was AT THE HELM, the autopilot takes over from
-        // them — end manual helming before the turn begins, same as it
-        // would end from any other incompatible activity (see
-        // performGoAboveBelow/cmdSleep).
-        state.crew.atHelm = false;
-        // Clear any stale value from an earlier OFF period so the NEXT
-        // disengagement (if any) re-initializes drift from wherever the
-        // boat actually is at that future moment — see the driftHeading
-        // note in the nav state block.
-        state.nav.driftHeading = null;
-        printBlank();
-        printLine('Autopilot engaged.', 'dim');
-        beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
-        cmdElectrical(state);
-      } else {
-        printBlank();
-        printLine('Autopilot disengaged.', 'dim');
-        cmdElectrical(state);
-      }
-      return;
-    }
     // ACCESSORY HOOK -- switching the circuit off mid-playback cuts the
     // cassette player the same way losing power outright would; see the
     // matching hook in updateBattery for when the battery itself dies.
@@ -5838,7 +5810,82 @@
       stopCurrentTapeTrackImmediately();
       playTapeOffSound();
     }
-    cmdElectrical(state);
+    cmdNavStation(state);
+  }
+
+  // AUTOPILOT — moved here from the old combined toggle above so it can
+  // return to the HELM (where it's now controlled) instead of NAV
+  // STATION. Same damaged/battery gating and switch-click sound as
+  // every other electrical toggle, and the exact same side effects as
+  // before the move: engaging it ends manual helming and clears any
+  // stale drift heading before starting the turn toward the current
+  // steering target; disengaging it is announced the same way. Nothing
+  // about autopilot battery draw, course holding, or steering behavior
+  // changes here — this is the same state flip and the same
+  // beginCourseTurn call, just relocated.
+  function performAutopilotToggle(state) {
+    var b = state.boat;
+    if (!b.autopilotOn && b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('Electrical system damaged.', 'amber');
+      cmdHelm(state);
+      return;
+    }
+    if (!b.autopilotOn && b.battery <= 0) {
+      printBlank();
+      printLine('No power.', 'amber');
+      cmdHelm(state);
+      return;
+    }
+    var turningOn = !b.autopilotOn;
+    b.autopilotOn = turningOn;
+    playElectricalSwitchSound(turningOn);
+    if (turningOn) {
+      // If the player was AT THE HELM, the autopilot takes over from
+      // them — end manual helming before the turn begins, same as it
+      // would end from any other incompatible activity (see
+      // performGoAboveBelow/cmdSleep).
+      state.crew.atHelm = false;
+      // Clear any stale value from an earlier OFF period so the NEXT
+      // disengagement (if any) re-initializes drift from wherever the
+      // boat actually is at that future moment — see the driftHeading
+      // note in the nav state block.
+      state.nav.driftHeading = null;
+      printBlank();
+      printLine('Autopilot engaged.', 'dim');
+      beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+    } else {
+      printBlank();
+      printLine('Autopilot disengaged.', 'dim');
+    }
+    cmdHelm(state);
+  }
+
+  // FAN — moved here from the old combined toggle above so it can
+  // return to the SALOON (where it's now controlled). Same damaged/
+  // battery gating and switch-click sound as every other electrical
+  // toggle; no other side effects before or after the move -- the fan
+  // never did anything but flip its own flag (comfort perception reads
+  // it live via cabinConditionLabel, and it was never part of the
+  // physical temperature calculation).
+  function performFanToggle(state) {
+    var b = state.boat;
+    if (!b.fanOn && b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('Electrical system damaged.', 'amber');
+      cmdSaloon(state);
+      return;
+    }
+    if (!b.fanOn && b.battery <= 0) {
+      printBlank();
+      printLine('No power.', 'amber');
+      cmdSaloon(state);
+      return;
+    }
+    var turningOn = !b.fanOn;
+    b.fanOn = turningOn;
+    playElectricalSwitchSound(turningOn);
+    cmdSaloon(state);
   }
 
   function cmdPosition(state) {
@@ -6258,14 +6305,19 @@
       printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
       printBlank();
       printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-      printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
       }
       printBlank();
       printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      state.pendingChoice = { id: 'helm-menu', options: [{ label: 'BACK', action: 'cancel' }] };
+      state.pendingChoice = {
+        id: 'helm-menu',
+        options: [
+          { label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' },
+          { label: 'BACK', action: 'cancel' },
+        ],
+      };
       return;
     }
 
@@ -6303,7 +6355,6 @@
       printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
       printBlank();
       printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-      printLine(inventoryLine('AUTOPILOT', 'ON'));
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -6313,6 +6364,7 @@
         options: [
           { label: 'CHANGE COURSE', action: 'cmd:change-course' },
           { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+          { label: 'AUTOPILOT \u2014 ON', action: 'toggle-autopilot' },
           { label: 'BACK', action: 'cancel' },
         ],
       };
@@ -6329,7 +6381,6 @@
     printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
     printBlank();
     printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-    printLine(inventoryLine('AUTOPILOT', 'OFF'));
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -6338,6 +6389,7 @@
       id: 'helm-menu',
       options: [
         { label: 'TAKE THE HELM', action: 'take-helm' },
+        { label: 'AUTOPILOT \u2014 OFF', action: 'toggle-autopilot' },
         { label: 'BACK', action: 'cancel' },
       ],
     };
@@ -6591,6 +6643,7 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
+      { label: 'FAN \u2014 ' + (state.boat.fanOn ? 'ON' : 'OFF'), action: 'toggle-fan' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
         : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -6659,11 +6712,31 @@
   // than in a personal-living-space room. Preserves every existing
   // nav/weather/inventory/electrical/status/rescue function exactly —
   // this only changes where they're reached from.
+  // NAV STATION -- the boat's operational center: cabin/power status at
+  // a glance, the electrical panel embedded directly (no separate
+  // ELECTRICAL screen any more -- see the removed cmdElectrical),
+  // navigation information, then inventory/status. Only two headings
+  // (NAV STATION itself and ELECTRICAL PANEL) -- the remaining three
+  // groups (cabin/power, navigation, inventory/vessel) are separated by
+  // blank lines alone, which is enough to read as distinct sections
+  // without adding more heading noise.
   function cmdNavStation(state) {
+    var b = state.boat;
     printBlank();
     printLine('NAV STATION', 'heading-label');
     printBlank();
-    printLine(statusLine('CABIN', cabinStatusLine(state)));
+    var cabinTempDisplay = b.cabinTemperatureF != null ? Math.round(b.cabinTemperatureF) + '\u00B0F' : '\u2014';
+    printLine(statusLine('CABIN TEMP', cabinTempDisplay));
+    printLine(statusLine('CABIN', cabinStatusWord(state)));
+    var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
+    printLine(statusLine('BATTERY', batteryLabel));
+    printLine(statusLine('SOLAR', solarOutputWatts(state) + ' W'));
+    printBlank();
+    printLine('ELECTRICAL PANEL', 'heading-label');
+    if (b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
+    }
     var toolsOpt = choreOptionIfDue(state, 'tools');
     var rescueItem = rescueMenuOption(state);
     var extraGroup = [];
@@ -6671,13 +6744,18 @@
     if (rescueItem) extraGroup.push(rescueItem);
     var options = groupedOptions([
       [
+        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
+        { label: 'EXTERIOR LIGHTS \u2014 ' + (b.exteriorLightsOn ? 'ON' : 'OFF'), action: 'electrical:exteriorLights' },
+        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
+        { label: 'ACCESSORY POWER \u2014 ' + (b.accessoryOn ? 'ON' : 'OFF'), action: 'electrical:accessory' },
+      ],
+      [
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
         { label: 'FORECAST', action: 'cmd:forecast' },
-        { label: 'INVENTORY', action: 'cmd:inventory' },
       ],
       [
-        { label: 'ELECTRICAL', action: 'cmd:electrical' },
+        { label: 'INVENTORY', action: 'cmd:inventory' },
         { label: 'STATUS', action: 'cmd:status' },
       ],
       extraGroup,
@@ -7863,7 +7941,6 @@
     saloon: cmdSaloon,
     cabin: cmdCabin,
     'nav-station': cmdNavStation,
-    electrical: cmdElectrical,
     sleep: cmdSleep,
     eat: cmdEat,
     meals: cmdMeals,
@@ -9949,6 +10026,10 @@
       cmdOpenHatch(state);
     } else if (action === 'close-hatch') {
       cmdCloseHatch(state);
+    } else if (action === 'toggle-autopilot') {
+      performAutopilotToggle(state);
+    } else if (action === 'toggle-fan') {
+      performFanToggle(state);
     } else if (action.indexOf('chore:') === 0) {
       performChore(state, action.slice(6));
     } else if (action.indexOf('electrical:') === 0) {
@@ -10605,6 +10686,7 @@
     if (b.fanOn === undefined) b.fanOn = false;
     if (b.heaterOn === undefined) b.heaterOn = false;
     if (b.cabinLightsOn === undefined) b.cabinLightsOn = false;
+    if (b.exteriorLightsOn === undefined) b.exteriorLightsOn = false;
     if (b.accessoryOn === undefined) b.accessoryOn = false;
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
