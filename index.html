@@ -5888,14 +5888,27 @@
     state.pendingChoice = { id: 'change-course-menu', options: opts };
   }
 
+  // The physical act of getting into the bunk (sleep.mp3) is a real
+  // busy action, same architecture as everything else in this file --
+  // only once it actually finishes does the EXISTING sleep/time-
+  // passing mechanic begin (the whole prior body of this function,
+  // untouched, now the action callback below). watchState only
+  // becomes 'trying' once that happens, so GET UP/the trying-to-sleep
+  // screen can't appear mid-audio.
   function cmdSleep(state) {
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
-    state.crew.watchState = 'trying';
-    state.crew.sleepAttemptStartedAt = state.meta.voyageMinutes;
-    state.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and GET UP never actually appears
-    clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
-    log(state, tryingToSleepNarrative());
-    flushNewLogEntries(state);
+    runAudioSyncedAction(state, {
+      label: 'GETTING INTO BED',
+      playAudio: function (onEnded) { return playCabinOneShot('sleep', onEnded); },
+      action: function (s) {
+        s.crew.watchState = 'trying';
+        s.crew.sleepAttemptStartedAt = s.meta.voyageMinutes;
+        s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and GET UP never actually appears
+        clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
+        log(s, tryingToSleepNarrative());
+        flushNewLogEntries(s);
+      },
+    });
   }
 
   // GALLEY — food, drink, and the dishes chore, all in one place. The
@@ -6035,13 +6048,17 @@
     return due ? { label: CHORE_LABELS[kind], action: 'chore:' + kind } : null;
   }
 
-  // Which GALLEY_AUDIO_FILES key (if any) plays for a given chore kind
-  // — currently just dishes (dishes.mp3); every other CHORE_DEFS kind
-  // stays on the plain fixed-duration dots, as before. Same map-based
-  // shape as FOOD_PREP_AUDIO_KEY, so adding a sound for another chore
-  // later is one entry here, not a new branch.
-  var CHORE_AUDIO_KEY = {
-    dishes: 'dishes',
+  // Which one-shot (if any) plays for a given chore kind, and which
+  // domain's player function it belongs to (galley's playGalleyOneShot
+  // vs cabin's playCabinOneShot -- structurally identical, just
+  // separate element maps/files by domain, same as the rest of this
+  // file keeps each audio system independent). Every other CHORE_DEFS
+  // kind stays on the plain fixed-duration dots, as before. Same
+  // general shape as FOOD_PREP_AUDIO_KEY, so adding a sound for
+  // another chore later is one entry here, not a new branch.
+  var CHORE_AUDIO = {
+    dishes: { play: playGalleyOneShot, key: 'dishes' },
+    bunk: { play: playCabinOneShot, key: 'makeBunk' },
   };
 
   function performChore(state, kind) {
@@ -6061,11 +6078,11 @@
       log(s, pickChoreLine(kind));
       flushNewLogEntries(s);
     };
-    var choreAudioKey = CHORE_AUDIO_KEY[kind];
-    if (choreAudioKey) {
+    var choreAudio = CHORE_AUDIO[kind];
+    if (choreAudio) {
       runAudioSyncedAction(state, {
         label: def.label,
-        playAudio: function (onEnded) { return playGalleyOneShot(choreAudioKey, onEnded); },
+        playAudio: function (onEnded) { return choreAudio.play(choreAudio.key, onEnded); },
         action: doChore,
       });
     } else {
@@ -7974,24 +7991,28 @@
   }
 
   /* --------------------------------------------------------------
-     CABIN AUDIO -- the physical clothing-change sound (CHANGE, in the
-     CABIN's redesigned outfit screen -- see cmdClothing/
-     performClothingCommit). Same lazy-element/fade-in/onEnded shape as
-     GALLEY AUDIO just above, kept as its own small section since this
-     is a cabin action, not a galley one; a future cabin sound (if any)
-     would join it here the same way. One-shot, not looped. The file
-     itself doesn't exist yet -- this is the defined hook/path for it;
-     playClothingChangeAudio still runs its onEnded callback correctly
-     (via the existing audioUnlocked/play-rejection handling) if the
-     file is missing, so the busy action can never get stuck waiting on
-     it -- see runAudioSyncedAction's own duration-derived watchdog for
-     the belt-and-suspenders failure case.
+     CABIN AUDIO -- physical cabin action sounds: CHANGE (committing a
+     new outfit -- see cmdClothing/performClothingCommit), SLEEP
+     (getting into the bunk -- see cmdSleep), and MAKE BUNK (see
+     CHORE_AUDIO for the dishes/bunk domain dispatch in performChore).
+     Same lazy-element/fade-in/onEnded shape as GALLEY AUDIO just
+     above, kept as its own small section since these are cabin
+     actions, not galley ones. One-shot, not looped. playCabinOneShot
+     still runs its onEnded callback correctly (via the existing
+     audioUnlocked/play-rejection handling) if a file is missing, so
+     the busy action can never get stuck waiting on it -- see
+     runAudioSyncedAction's own duration-derived watchdog for the
+     belt-and-suspenders failure case.
      -------------------------------------------------------------- */
   var CABIN_AUDIO_FILES = {
-    changeClothes: 'audio/cabin/change_clothes.mp3',
+    changeClothes: 'audio/cabin/change.mp3',
+    sleep: 'audio/cabin/sleep.mp3',
+    makeBunk: 'audio/cabin/make_bed.mp3', // player-facing action is MAKE BUNK; the file itself keeps its existing name
   };
   var CABIN_AUDIO_VOLUME = {
     changeClothes: 0.5,
+    sleep: 0.5,
+    makeBunk: 0.5,
   };
   var CABIN_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
