@@ -404,7 +404,7 @@
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
         clothesWetSinceMinutes: null, // voyageMinutes the OLDEST currently-hung-up wet item was taken off, or null if nothing's pending — this is the DRY CLOTHES trigger; NOT the same as wetClothing below (what's actively worn), see CLOTHING
-        clothing: { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false }, // currently worn -- see CLOTHING section; default is a sensible cool-weather Seattle outfit
+        clothing: { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false, sunglasses: false }, // currently worn -- see CLOTHING section; default is a sensible cool-weather Seattle outfit
         wetClothing: { torso: false, bottom: false, feet: false }, // hidden per-category wet state of what's CURRENTLY WORN -- never barefoot (see FEET logic); changing out of a wet item clears the relevant flag and stamps clothesWetSinceMinutes above instead
         aboveDeckSinceMinutes: null, // voyageMinutes GO ABOVE most recently happened, or null while below -- continuous above-deck duration for the one-minute exposure grace period; reset (to null) by GO BELOW, and restamped fresh by GO ABOVE
         torsoWetExposureMinutes: 0,   // hidden accumulator toward wetClothing.torso -- see updateClothingExposure; resets on GO BELOW same as aboveDeckSinceMinutes
@@ -2342,7 +2342,7 @@
 
   // Gate before ANY real consequence (morale/fatigue/thirst) engages --
   // the ambient narration (checkClothingNarration) and the single
-  // post-dressing observation (performClothingLeave) can both describe
+  // post-change observation (performClothingCommit) can both describe
   // a mismatch before this, but nothing the player actually FEELS
   // happens until it has genuinely persisted a little while.
   var CLOTHING_CONSEQUENCE_GATE_HOURS = 0.4; // ~24 minutes
@@ -3651,13 +3651,14 @@
 
   // CLOTHING OBSERVATIONS — one shared pool of short, sensory lines and
   // one shared selector (clothingObservationLine) used by BOTH the
-  // single post-dressing observation when the player leaves CLOTHING
-  // (see performClothingLeave) and the occasional ambient narration
-  // during normal play (checkClothingNarration below) — one consistent
-  // voice for what Landfall says about clothing, not two parallel
-  // systems. Selection is driven entirely by clothingComfortCategory
-  // (itself driven by clothingWarmthDelta, which already folds in wind
-  // and wetness) plus the wet flags themselves — nothing here
+  // single post-change observation when the player actually commits a
+  // new outfit (see performClothingCommit) and the occasional ambient
+  // narration during normal play (checkClothingNarration below) — one
+  // consistent voice for what Landfall says about clothing, not two
+  // parallel systems. Selection is driven entirely by
+  // clothingComfortCategory (itself driven by clothingWarmthDelta,
+  // which already folds in wind and wetness) plus the wet flags
+  // themselves — nothing here
   // recomputes comfort on its own. State names are never shown; only
   // the resulting sentence is.
   var CLOTHING_LINES_COMFORTABLE = ['Comfortable enough.', 'Nothing to complain about.', 'Feels about right.', 'Better.'];
@@ -3675,6 +3676,30 @@
   var CLOTHING_LINES_WET_COLD = ['The wet fabric is starting to feel cold.', 'Damp and chilled through.'];
   var CLOTHING_LINES_WET_MILD = ['Your clothes are still damp and uncomfortable.', 'The wet fabric clings to you.'];
   var CLOTHING_LINES_WET_IGNORED = ['You should change out of these clothes.'];
+
+  // SUNGLASSES — glare/sunlight comfort only, entirely separate from
+  // the thermal warmth model above (see computeClothingWarmth, which
+  // deliberately never reads clothing.sunglasses). Reuses the existing
+  // location, timeOfDayPhase, and weather.condition signals as the
+  // only source of "how much glare is there right now" — no second
+  // daylight or weather system. Above deck, clear conditions, daytime:
+  // glare either bothers the eyes (no sunglasses) or doesn't
+  // (sunglasses on). Overcast/rain/squall: glare is negligible either
+  // way. Night above deck: sunglasses become mildly counterproductive
+  // rather than helpful. Below deck, or no sunglasses at night: no
+  // effect at all. Kept to these four possible states deliberately —
+  // this is meant to stay subtle texture, not a real survival lever.
+  function sunglassesGlareState(state) {
+    if (state.crew.location !== 'above') return 'none';
+    if (timeOfDayPhase(state) === 'night') {
+      return state.crew.clothing.sunglasses ? 'nightUnneeded' : 'none';
+    }
+    if (state.weather.condition !== 'clear') return 'none'; // overcast/rain/squall -- little to no glare
+    return state.crew.clothing.sunglasses ? 'glareProtected' : 'glareUnprotected';
+  }
+  var CLOTHING_LINES_GLARE_UNPROTECTED = ['The glare off the water is hard on my eyes.', 'Could use sunglasses out here.', 'Squinting against the glare off the water.'];
+  var CLOTHING_LINES_GLARE_PROTECTED = ['The sunglasses cut the glare off the water.', 'Good thing I have these on.'];
+  var CLOTHING_LINES_NIGHT_SUNGLASSES = ["It's too dark for these.", "Hard to see much with these on right now."];
 
   function clothingObservationLine(state) {
     var c = state.crew;
@@ -3694,9 +3719,17 @@
     if (category === 'slightlyWarm') return pickFromPool(CLOTHING_LINES_SLIGHTLY_WARM);
     if (category === 'tooWarm') return pickFromPool(CLOTHING_LINES_TOO_WARM);
 
-    // Comfortable: call out the windbreaker specifically when it's
-    // actually doing something (above deck, in real wind) -- otherwise
-    // a plain, quiet confirmation.
+    // Comfortable: call out glare/sunglasses or the windbreaker
+    // specifically when either is actually doing something meaningful
+    // right now -- otherwise a plain, quiet confirmation. Neither is a
+    // competing priority signal (both only ever speak up once there's
+    // no real thermal/wetness problem to report), so simple order
+    // between the two is fine -- glare checked first since it's the
+    // newer of the two, windbreaker as it always was.
+    var glareState = sunglassesGlareState(state);
+    if (glareState === 'glareUnprotected') return pickFromPool(CLOTHING_LINES_GLARE_UNPROTECTED);
+    if (glareState === 'glareProtected') return pickFromPool(CLOTHING_LINES_GLARE_PROTECTED);
+    if (glareState === 'nightUnneeded') return pickFromPool(CLOTHING_LINES_NIGHT_SUNGLASSES);
     if (above && c.clothing.outer === 'windbreaker' && (state.weather.windSpeed || 0) > 8) {
       return pickFromPool(CLOTHING_LINES_WINDBREAKER_WORKING);
     }
@@ -4138,6 +4171,7 @@
     applyMuteToCabinSwitchAudio(); // ELECTRICAL HOOK -- same reasoning as engine audio
     applyMuteToSailsAudio(); // SAILS HOOK -- same reasoning as engine audio
     applyMuteToGalleyAudio(); // GALLEY HOOK -- same reasoning as engine audio
+    applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -6197,7 +6231,10 @@
   // WET tags where it matters.
   function clothingWetDisplayCategory(state) {
     // Torso wetness displays on whichever layer is actually exposed —
-    // the outer garment if one's worn, otherwise the top itself.
+    // the outer garment if one's worn, otherwise the top itself. This
+    // reads the WORN outfit specifically (never the pending draft
+    // below) — wetness is a property of what's actually on the
+    // player's body right now.
     return state.crew.clothing.outer !== 'none' ? 'outer' : 'top';
   }
 
@@ -6205,36 +6242,71 @@
     return inventoryLine(name, valueLabel + (isWet ? ' \u2014 WET' : ''));
   }
 
-  // CLOTHING MENU NAVIGATION — every submenu (TOP/OUTER/BOTTOM/FEET/
-  // ACCESSORIES) redisplays this same screen, freshly reflecting
-  // whatever just changed, rather than dropping back to the contextual
-  // BELOW DECK menu — see performClothingChange/performAccessoryToggle.
-  // The player only ever leaves CLOTHING by explicitly choosing BACK,
-  // which is its own action ('clothing-done', not the generic 'cancel'
-  // every other screen uses) so it can generate the one finished-outfit
-  // observation — see performClothingLeave.
+  // PENDING OUTFIT — the CHANGE screen assembles a full outfit before
+  // anything is actually worn; see cmdClothing/performClothingCommit.
+  // Deliberately a module-level variable, never part of state (and so
+  // never persisted) — same "transient, not saved" pattern as
+  // activeTurn/isCurrentlyLuffing elsewhere in this file. null
+  // whenever the player isn't inside the CHANGE screen; cmdClothing
+  // initializes it fresh from whatever's currently worn the moment
+  // it's null, and both leaving via BACK (performClothingDiscard) and
+  // committing via CHANGE (performClothingCommit) clear it back to
+  // null on their way out, so the next visit always starts fresh.
+  var pendingClothing = null;
+
+  function cloneClothing(clo) {
+    return { top: clo.top, outer: clo.outer, bottom: clo.bottom, feet: clo.feet, beanie: clo.beanie, gloves: clo.gloves, sunglasses: clo.sunglasses };
+  }
+  function clothingOutfitsEqual(a, b) {
+    return a.top === b.top && a.outer === b.outer && a.bottom === b.bottom && a.feet === b.feet
+      && a.beanie === b.beanie && a.gloves === b.gloves && a.sunglasses === b.sunglasses;
+  }
+
+  // CLOTHING MENU NAVIGATION — every submenu (TOP/OUTER/BOTTOM/FEET)
+  // redisplays this same screen, freshly reflecting whatever just
+  // changed in the PENDING outfit, rather than dropping back to the
+  // contextual BELOW DECK menu — see performSetPendingClothing/
+  // performTogglePendingClothing. Nothing here touches what's actually
+  // worn. The player leaves CHANGE one of two ways: BACK
+  // ('clothing-discard', discarding the pending outfit with no audio/
+  // observation — see performClothingDiscard) or CHANGE
+  // ('commit-clothing', which actually applies it — see
+  // performClothingCommit). Neither is the generic 'cancel' every
+  // other screen uses, since both need their own specific behavior.
   function cmdClothing(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
+    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
     printBlank();
     printLine('CHANGE', 'heading-label');
-    var clo = state.crew.clothing, wet = state.crew.wetClothing;
+    var clo = pendingClothing, worn = state.crew.clothing, wet = state.crew.wetClothing;
     var wetDisplayCat = clothingWetDisplayCategory(state);
-    printLine(clothingLine('TOP', CLOTHING_LABELS.top[clo.top], wetDisplayCat === 'top' && wet.torso));
-    printLine(clothingLine('OUTER', CLOTHING_LABELS.outer[clo.outer], wetDisplayCat === 'outer' && wet.torso));
-    printLine(clothingLine('BOTTOM', CLOTHING_LABELS.bottom[clo.bottom], wet.bottom));
-    printLine(clothingLine('FEET', CLOTHING_LABELS.feet[clo.feet], wet.feet));
-    printLine(inventoryLine('BEANIE', clo.beanie ? 'ON' : 'OFF'));
-    printLine(inventoryLine('GLOVES', clo.gloves ? 'ON' : 'OFF'));
+    // A WET tag only makes sense while the pending selection for that
+    // slot still matches what's actually worn (and that worn item is
+    // itself wet) — a garment merely selected, not yet put on, can't
+    // be wet.
+    var topWet = clo.top === worn.top && wetDisplayCat === 'top' && wet.torso;
+    var outerWet = clo.outer === worn.outer && wetDisplayCat === 'outer' && wet.torso;
+    var bottomWet = clo.bottom === worn.bottom && wet.bottom;
+    var feetWet = clo.feet === worn.feet && wet.feet;
     state.pendingChoice = {
       id: 'clothing-menu',
-      options: [
-        { label: 'TOP', action: 'cmd:clothing-top' },
-        { label: 'OUTER', action: 'cmd:clothing-outer' },
-        { label: 'BOTTOM', action: 'cmd:clothing-bottom' },
-        { label: 'FEET', action: 'cmd:clothing-feet' },
-        { label: 'ACCESSORIES', action: 'cmd:clothing-accessories' },
-        { label: 'BACK', action: 'clothing-done' },
-      ],
+      options: groupedOptions([
+        [
+          { label: clothingLine('TOP', CLOTHING_LABELS.top[clo.top], topWet), action: 'cmd:clothing-top' },
+          { label: clothingLine('OUTER', CLOTHING_LABELS.outer[clo.outer], outerWet), action: 'cmd:clothing-outer' },
+          { label: clothingLine('BOTTOM', CLOTHING_LABELS.bottom[clo.bottom], bottomWet), action: 'cmd:clothing-bottom' },
+          { label: clothingLine('FEET', CLOTHING_LABELS.feet[clo.feet], feetWet), action: 'cmd:clothing-feet' },
+        ],
+        [
+          { label: inventoryLine('KNIT CAP', clo.beanie ? 'ON' : 'OFF'), action: 'toggle-pending:beanie' },
+          { label: inventoryLine('GLOVES', clo.gloves ? 'ON' : 'OFF'), action: 'toggle-pending:gloves' },
+          { label: inventoryLine('SUNGLASSES', clo.sunglasses ? 'ON' : 'OFF'), action: 'toggle-pending:sunglasses' },
+        ],
+        [
+          { label: 'CHANGE', action: 'commit-clothing' },
+          { label: 'BACK', action: 'clothing-discard' },
+        ],
+      ]),
     };
   }
 
@@ -6263,93 +6335,101 @@
   function cmdClothingBottom(state) { cmdClothingCategory(state, 'bottom'); }
   function cmdClothingFeet(state) { cmdClothingCategory(state, 'feet'); }
 
-  function cmdClothingAccessories(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
-    printBlank();
-    printLine('ACCESSORIES', 'heading-label');
-    var clo = state.crew.clothing;
-    printLine(inventoryLine('BEANIE', clo.beanie ? 'ON' : 'OFF'));
-    printLine(inventoryLine('GLOVES', clo.gloves ? 'ON' : 'OFF'));
-    state.pendingChoice = {
-      id: 'clothing-accessories-menu',
-      options: [
-        { label: 'BEANIE', action: 'toggle-accessory:beanie' },
-        { label: 'GLOVES', action: 'toggle-accessory:gloves' },
-        { label: 'BACK', action: 'cmd:clothing' },
-      ],
-    };
-  }
-
   // Which hidden wet-state bucket each worn category feeds — TOP and
   // OUTER share one (torso), since only one of them is ever actually
   // exposed to the weather at a time; see clothingWetDisplayCategory.
   var CLOTHING_WET_KEY = { top: 'torso', outer: 'torso', bottom: 'bottom', feet: 'feet' };
   var CLOTHING_WET_EXPOSURE_FIELD = { torso: 'torsoWetExposureMinutes', bottom: 'bottomWetExposureMinutes', feet: 'feetWetExposureMinutes' };
 
-  // No flat morale bonus for changing clothes — the reward for dressing
-  // right is avoiding the discomfort penalties above, not a free lever
-  // to pull. Putting on something dry over a WORN-wet item retires that
-  // item to the existing DRY CLOTHES chore (clothesWetSinceMinutes)
-  // rather than magically drying it on the spot — see performChore's
-  // dryClothes definition. No per-item prose either: picking individual
-  // garments just changes them and refreshes the menu (see cmdClothing)
-  // — the one moment of actual text happens when the player leaves via
-  // BACK (performClothingLeave), not on every selection along the way.
-  function performClothingChange(state, category, value) {
+  // Picking a TOP/OUTER/BOTTOM/FEET value only ever updates the
+  // PENDING outfit and returns to the main CHANGE screen — no busy
+  // action, no audio, nothing actually worn changes yet. See
+  // performClothingCommit for the one place that's true.
+  function performSetPendingClothing(state, category, value) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
-    var c = state.crew;
-    if (c.clothing[category] === value) {
-      cmdClothing(state); // already wearing this -- nothing to change, back to the main CLOTHING screen same as any other pick
+    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
+    pendingClothing[category] = value;
+    cmdClothing(state);
+  }
+
+  // KNIT CAP/GLOVES/SUNGLASSES are independent ON/OFF toggles right on
+  // the main CHANGE screen (no ACCESSORIES submenu) — tapping one just
+  // flips the pending value in place and redraws the same screen, same
+  // "pending only" rule as the four category pickers above.
+  function performTogglePendingClothing(state, key) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
+    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
+    pendingClothing[key] = !pendingClothing[key];
+    cmdClothing(state);
+  }
+
+  // BACK — the player decided not to change clothes. Discards the
+  // pending outfit entirely; nothing worn is touched, no audio, no
+  // busy state, no observation. Same immediate, synchronous style and
+  // generic "Left as it was." text as the plain 'cancel' action every
+  // other screen uses, since that's exactly what this means here too.
+  function performClothingDiscard(state) {
+    pendingClothing = null;
+    printBlank();
+    printLine('Left as it was.', 'dim');
+  }
+
+  // CHANGE — the only command that actually changes what's worn.
+  // Compares the pending outfit against what's currently worn; if
+  // nothing differs, resolves instantly with no audio/busy state/
+  // observation (the player just confirmed what they already have on).
+  // Otherwise runs ONE physical clothing-changing action through the
+  // same audio-synced architecture as galley prep and sail raising/
+  // lowering (see runAudioSyncedAction, playCabinOneShot) — the entire
+  // pending outfit is applied simultaneously only once that audio
+  // actually finishes, never garment-by-garment while it plays.
+  function performClothingCommit(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
+    var outfit = pendingClothing || cloneClothing(state.crew.clothing);
+    if (clothingOutfitsEqual(outfit, state.crew.clothing)) {
+      pendingClothing = null;
+      cmdCabin(state);
       return;
     }
-    var wetKey = CLOTHING_WET_KEY[category];
-    var wasWet = c.wetClothing[wetKey];
-    runShortAction(state, {
+    runAudioSyncedAction(state, {
       label: 'CHANGING',
-      duration: 2,
+      playAudio: function (onEnded) { return playCabinOneShot('changeClothes', onEnded); },
       action: function (s) {
-        var cc = s.crew;
-        cc.clothing[category] = value;
-        cc.wetClothing[wetKey] = false;
-        cc[CLOTHING_WET_EXPOSURE_FIELD[wetKey]] = 0;
-        if (wasWet && cc.clothesWetSinceMinutes == null) {
-          cc.clothesWetSinceMinutes = s.meta.voyageMinutes;
+        var c = s.crew;
+        var worn = c.clothing;
+        // Any wetness bucket fed by a category that actually changed
+        // clears, exactly as a single-item change always did — just
+        // generalized across however many categories changed at once
+        // in this one commit, without double-clearing torso if BOTH
+        // top and outer changed together.
+        var changedWetKeys = {};
+        ['top', 'outer', 'bottom', 'feet'].forEach(function (cat) {
+          if (outfit[cat] !== worn[cat]) changedWetKeys[CLOTHING_WET_KEY[cat]] = true;
+        });
+        var anyWasWet = false;
+        Object.keys(changedWetKeys).forEach(function (wetKey) {
+          if (c.wetClothing[wetKey]) anyWasWet = true;
+          c.wetClothing[wetKey] = false;
+          c[CLOTHING_WET_EXPOSURE_FIELD[wetKey]] = 0;
+        });
+        if (anyWasWet && c.clothesWetSinceMinutes == null) {
+          c.clothesWetSinceMinutes = s.meta.voyageMinutes;
         }
-        // Stay in CLOTHING (refreshed) rather than dropping back to the
-        // contextual BELOW DECK menu — lets the player make several
-        // changes in a row without re-opening CLOTHING each time; see
-        // the CLOTHING MENU NAVIGATION note above cmdClothing.
-        cmdClothing(s);
+        // The whole outfit commits at once -- see the function-level
+        // notes above.
+        worn.top = outfit.top;
+        worn.outer = outfit.outer;
+        worn.bottom = outfit.bottom;
+        worn.feet = outfit.feet;
+        worn.beanie = outfit.beanie;
+        worn.gloves = outfit.gloves;
+        worn.sunglasses = outfit.sunglasses;
+        pendingClothing = null;
+        cmdCabin(s);
+        printBlank();
+        printLine(clothingObservationLine(s), 'dim');
       },
     });
-  }
-
-  function performAccessoryToggle(state, key) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
-    var turningOn = !state.crew.clothing[key];
-    runShortAction(state, {
-      label: turningOn ? 'PUTTING ON' : 'TAKING OFF',
-      duration: 1,
-      action: function (s) {
-        s.crew.clothing[key] = turningOn;
-        // Same "stay put, refreshed, no per-item prose" behavior as a
-        // full clothing change above — accessories are equally covered
-        // by "any clothing item, including things like sweaters and
-        // windbreakers."
-        cmdClothing(s);
-      },
-    });
-  }
-
-  // The one moment real clothing feedback happens — see the module
-  // notes on clothingObservationLine. Mirrors the plain 'cancel'
-  // action's immediate, synchronous style (and its fall-through to
-  // whatever menu sits behind CLOTHING) but replaces the generic "Left
-  // as it was." with one genuine observation about the outfit just
-  // finished.
-  function performClothingLeave(state) {
-    printBlank();
-    printLine(clothingObservationLine(state), 'dim');
   }
 
 
@@ -7209,7 +7289,6 @@
     'clothing-outer': cmdClothingOuter,
     'clothing-bottom': cmdClothingBottom,
     'clothing-feet': cmdClothingFeet,
-    'clothing-accessories': cmdClothingAccessories,
     bookshelf: cmdBookshelf,
     'tape-player': cmdTapePlayer,
     repair: cmdRepair,
@@ -7891,6 +7970,102 @@
       if (!el || el.paused) return;
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       el.volume = muted ? 0 : GALLEY_AUDIO_VOLUME[key];
+    });
+  }
+
+  /* --------------------------------------------------------------
+     CABIN AUDIO -- the physical clothing-change sound (CHANGE, in the
+     CABIN's redesigned outfit screen -- see cmdClothing/
+     performClothingCommit). Same lazy-element/fade-in/onEnded shape as
+     GALLEY AUDIO just above, kept as its own small section since this
+     is a cabin action, not a galley one; a future cabin sound (if any)
+     would join it here the same way. One-shot, not looped. The file
+     itself doesn't exist yet -- this is the defined hook/path for it;
+     playClothingChangeAudio still runs its onEnded callback correctly
+     (via the existing audioUnlocked/play-rejection handling) if the
+     file is missing, so the busy action can never get stuck waiting on
+     it -- see runAudioSyncedAction's own duration-derived watchdog for
+     the belt-and-suspenders failure case.
+     -------------------------------------------------------------- */
+  var CABIN_AUDIO_FILES = {
+    changeClothes: 'audio/cabin/change_clothes.mp3',
+  };
+  var CABIN_AUDIO_VOLUME = {
+    changeClothes: 0.5,
+  };
+  var CABIN_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+
+  var cabinAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as galleyAudioEls/sailsAudioEls
+
+  function getCabinAudioEl(key) {
+    var el = cabinAudioEls[key];
+    if (el) return el;
+    el = new Audio(CABIN_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Cabin audio failed to load (' + key + '): ' + CABIN_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
+    cabinAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeGalleyVolume/fadeSailsVolume -- see those
+  // functions' own comments for why each audio system keeps its own
+  // independent copy rather than sharing one.
+  function fadeCabinVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a cabin one-shot (currently just changeClothes) once from the
+  // beginning, with a quick fade-in, and fires onEnded (once) when it
+  // naturally finishes -- the exact onEnded wiring runAudioSyncedAction
+  // expects from its config.playAudio, and returns the element itself
+  // so its own duration-derived watchdog can size itself off the real
+  // file rather than a fixed number, same as galley/sails.
+  function playCabinOneShot(key, onEnded) {
+    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    var el = getCabinAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Cabin audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    fadeCabinVolume(el, muted ? 0 : CABIN_AUDIO_VOLUME[key], CABIN_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  function applyMuteToCabinAudio() {
+    Object.keys(cabinAudioEls).forEach(function (key) {
+      var el = cabinAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : CABIN_AUDIO_VOLUME[key];
     });
   }
 
@@ -8931,9 +9106,9 @@
       performEat(state, action.slice(4));
     } else if (action.indexOf('wear:') === 0) {
       var wearParts = action.slice(5).split(':');
-      performClothingChange(state, wearParts[0], wearParts[1]);
-    } else if (action.indexOf('toggle-accessory:') === 0) {
-      performAccessoryToggle(state, action.slice(17));
+      performSetPendingClothing(state, wearParts[0], wearParts[1]);
+    } else if (action.indexOf('toggle-pending:') === 0) {
+      performTogglePendingClothing(state, action.slice(15));
     } else if (action.indexOf('chore:') === 0) {
       performChore(state, action.slice(6));
     } else if (action.indexOf('electrical:') === 0) {
@@ -8997,8 +9172,11 @@
           printBlank();
           printLine('Left as it was.', 'dim');
           break;
-        case 'clothing-done':
-          performClothingLeave(state);
+        case 'clothing-discard':
+          performClothingDiscard(state);
+          break;
+        case 'commit-clothing':
+          performClothingCommit(state);
           break;
         case 'give-up-trying':
           state.crew.watchState = 'awake';
@@ -9529,7 +9707,8 @@
     // hanging, awaiting DRY CLOTHES" under the new meaning, per this
     // section's own note on treating legacy wet-clothes state
     // conservatively rather than trying to infer an old outfit.
-    if (!c.clothing) c.clothing = { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false };
+    if (!c.clothing) c.clothing = { top: 'tshirt', outer: 'windbreaker', bottom: 'pants', feet: 'socks', beanie: false, gloves: false, sunglasses: false };
+    if (c.clothing.sunglasses === undefined) c.clothing.sunglasses = false; // SUNGLASSES — added later; existing saves default to not wearing them, same conservative approach as every other clothing backfill here
     if (!c.wetClothing) c.wetClothing = { torso: false, bottom: false, feet: false };
     if (c.aboveDeckSinceMinutes === undefined) c.aboveDeckSinceMinutes = null;
     if (c.torsoWetExposureMinutes === undefined) c.torsoWetExposureMinutes = 0;
