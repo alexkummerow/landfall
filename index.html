@@ -399,7 +399,7 @@
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // manually hand-steering (AUTOPILOT OFF only) — see cmdHelm/computeHeading; ends automatically on GO BELOW, SLEEP, autopilot re-engaging, or STEERING damage
-        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null, relax: null }, // voyageMinutes of last use, for gentle diminishing returns
+        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
@@ -934,49 +934,6 @@
     },
   };
 
-  // Spontaneous thoughts — not tied to any phase or condition, just what
-  // surfaces during solitude. Deliberately plain: present the thought and
-  // stop, never explain what it means. Plot-neutral by design (see
-  // RELAX below, where these now live) — memory, time, routine, and the
-  // ocean itself, never Solace's own history or family specifics.
-  // Tone is meant to range widely: some ordinary, some quietly funny,
-  // some thoughtful, some nearly nothing at all — not every one of
-  // these should land as profound.
-  var PONDERINGS = [
-    "You think of someone you haven't thought of in a long time.",
-    "A room from your childhood comes back to you. You can't remember why.",
-    "You remember the sound of someone's laugh, but not what they were laughing about.",
-    "A name comes to you. It takes a moment to remember who it belonged to.",
-    "You wonder what everyone at home is doing right now.",
-    "You remember an ordinary afternoon from years ago with surprising clarity.",
-    "You try to remember the layout of a house you haven't been inside for years.",
-    "You think about a conversation differently than you did at the time.",
-    "You remember being driven somewhere as a child. You can't remember where you were going.",
-    "You wonder how many things you've done for the last time without realizing it.",
-    "You realize you haven't heard your own name spoken aloud in days.",
-    "For some reason, you wonder what your old neighbor is doing now.",
-    "You remember a shirt you used to own.",
-    "Strange how quickly a routine becomes normal.",
-    "You wonder what day of the week it is.",
-    "There probably isn't a good reason you always choose the same side of the saloon.",
-    "Out here, an hour and a day start to feel like about the same size.",
-    "You're not entirely sure when you stopped counting the days.",
-    "Doing nothing for a while turns out to take some getting used to.",
-    "It occurs to you that no one knows exactly where you are right now.",
-    "The quiet down here has a shape to it, after a while.",
-    "You wonder if waiting counts as doing something.",
-    "Some habits only make sense once you notice you have them.",
-    "You could probably go a long time without saying a word out loud.",
-    "You've started talking to the boat a little. You're not going to mention that to anyone.",
-    "A lot of sailing turns out to just be waiting for something to change.",
-    "Some days out here feel long. Some feel like nothing happened at all.",
-    "You've developed opinions about which mug is the good mug.",
-    "The horizon doesn't really change, and somehow that's fine.",
-    "There's a particular kind of tired that has nothing to do with sleep.",
-    "You wonder what you'll actually remember about this, years from now.",
-    "The ocean looks a little different depending on what you were just thinking about.",
-  ];
-
   // Picks from `pool`, preferring anything not in `recent` (so the same
   // line doesn't repeat too soon) — falls back to the full pool once the
   // "fresh" set is exhausted rather than getting stuck with nothing to pick.
@@ -984,10 +941,6 @@
     var candidates = pool.filter(function (t) { return recent.indexOf(t) === -1; });
     if (!candidates.length) candidates = pool;
     return candidates[Math.floor(Math.random() * candidates.length)];
-  }
-
-  function pickPondering(state) {
-    return pickFromPoolAvoidingRecent(PONDERINGS, state.flags.recentAmbientTexts || []);
   }
 
   /* --------------------------------------------------------------
@@ -3964,12 +3917,10 @@
      PASSIVE AMBIENT EVENTS
 
      Observations ("something the sailor notices outside themselves")
-     and ponderings ("something that surfaces in the sailor's mind")
-     both flow through here — chosen at random, on a single schedule
-     that reschedules itself every time, so the two never label
-     themselves and never compete for airtime by running on separate
-     clocks. Nothing about this touches the voyage clock; it only
-     ever decides whether THIS tick is the one that writes a log line.
+     surface here — chosen at random, on a schedule that reschedules
+     itself every time. Nothing about this touches the voyage clock; it
+     only ever decides whether THIS tick is the one that writes a log
+     line.
      -------------------------------------------------------------- */
   var AMBIENT_MIN_GAP_MINUTES = 90;   // at least 1.5h between ambient events
   var AMBIENT_MAX_GAP_MINUTES = 300;  // at most 5h — "substantial stretches" without one
@@ -4004,10 +3955,8 @@
     if (state._ambientEventsThisPass !== undefined && state._ambientEventsThisPass >= AMBIENT_CATCHUP_CAP) return;
     if (!ambientEventsAllowed(state)) return;
 
-    // PONDERINGS no longer fire here — they're now reached only
-    // deliberately, via SALOON -> RELAX (see performRelax), so a
-    // wandering thought feels chosen rather than intrusive. This slot
-    // is now purely observational.
+    // This slot is purely observational — picks and logs one ambient
+    // observation, nothing more.
     var text = pickObservation(state);
     if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
     f.recentAmbientTexts.push(text);
@@ -6299,12 +6248,11 @@
     }
   }
 
-  // SALOON — the quiet leisure/psychological center of the boat: READ,
-  // LISTEN (the existing tape player, renamed only at this access
-  // point), and RELAX (see below). TIDY UP lands here as the most
-  // sensible home for general below-deck clutter, which comes from
-  // activity all over the boat (a book left out, a meal's wrappers),
-  // not one single room.
+  // SALOON — the quiet leisure/psychological center of the boat: READ
+  // and LISTEN (the existing tape player, renamed only at this access
+  // point). TIDY UP lands here as the most sensible home for general
+  // below-deck clutter, which comes from activity all over the boat (a
+  // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
     printBlank();
     printLine('SALOON', 'heading-label');
@@ -6313,47 +6261,11 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
-      { label: 'RELAX', action: 'cmd:relax' },
     ];
     var tidyOpt = choreOptionIfDue(state, 'tidy');
     if (tidyOpt) options.push(tidyOpt);
     options.push({ label: 'BACK', action: 'cancel' });
     state.pendingChoice = { id: 'saloon-menu', options: options };
-  }
-
-  // RELAX — sitting with nothing particular to do. Not meditation, not
-  // sleep, not a minigame: a short, understated beat (one of several
-  // varied setup lines, so it doesn't repeat verbatim) followed by one
-  // random PONDERING (see the PONDERINGS pool and pickPondering — this
-  // is now the ONLY place they surface; checkAmbientEvent no longer
-  // picks them). Small, diminishing-returns morale nudge via the same
-  // routineMoraleGain every other routine activity already uses, so
-  // it's not an efficient morale-farming loop.
-  var RELAX_SETUP_LINES = [
-    'You sit for a while and listen to the boat.',
-    'You settle into the saloon and let your mind wander.',
-    'You lean back and let the boat do the work for a while.',
-    'You let yourself do nothing in particular for a few minutes.',
-    'You sit quietly and watch the light move across the cabin.',
-  ];
-  function cmdRelax(state) {
-    runShortAction(state, {
-      label: 'RELAXING',
-      duration: 5,
-      action: function (s) {
-        var gain = routineMoraleGain(s, 'relax', 4);
-        s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, pickFromPool(RELAX_SETUP_LINES));
-        var thought = pickPondering(s);
-        var f = s.flags;
-        if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
-        f.recentAmbientTexts.push(thought);
-        if (f.recentAmbientTexts.length > AMBIENT_HISTORY_LENGTH) f.recentAmbientTexts.shift();
-        log(s, thought);
-        flushNewLogEntries(s);
-        cmdSaloon(s);
-      },
-    });
   }
 
   // CABIN — sleep, clothing, and their related chores. COMFORT is a
@@ -7586,7 +7498,6 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
-    relax: cmdRelax,
     cabin: cmdCabin,
     'nav-station': cmdNavStation,
     electrical: cmdElectrical,
@@ -10085,7 +9996,7 @@
     if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
-    if (c.lastRoutineAt.relax === undefined) c.lastRoutineAt.relax = null;
+    delete c.lastRoutineAt.relax; // RELAX removed entirely -- clears any lingering field from an older save rather than leaving it as dead state
     if (c.location === undefined) c.location = 'above';
     if (c.atHelm === undefined) c.atHelm = false;
     if (b.battery === undefined) b.battery = 100;
