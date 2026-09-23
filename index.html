@@ -311,6 +311,8 @@
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
         autopilotWobble: 0,        // open ocean, whenever something is ACTIVELY holding course — AUTOPILOT ON or AT THE HELM — small bounded correction oscillation around the steering solution; see computeHeading
+        sailTrimState: 'good',     // 'good' | 'needsTrim' — see updateSailTrimForHeading (called from computeHeading's three open-ocean branches, against the CLEAN pre-wobble/pre-noise steered value so ordinary steering jitter alone can never trip it) and TRIM SAILS (cmdTrimSails/performTrimSails), the only thing that ever sets this back to 'good'
+        lastTrimHeading: startBearing, // the heading the sails were last actually, properly trimmed for — see SAIL_TRIM_THRESHOLD_DEG in updateSailTrimForHeading
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
@@ -1860,6 +1862,31 @@
   // branch, the only place this is read.
   var DRIFT_SAIL_FACTOR = { full: 1.00, reefed: 0.60, minimal: 0.30, furled: 0.12 };
 
+  // SAIL TRIM — a simple GOOD/NEEDS TRIM state, entirely separate from
+  // steering. See cmdTrimSails/performTrimSails for the only place this
+  // ever resets to 'good'; here it's a one-way trip to 'needsTrim' once
+  // the CLEAN steered value (see the three call sites in computeHeading
+  // below) has moved SAIL_TRIM_THRESHOLD_DEG or more from
+  // nav.lastTrimHeading. Deliberately checked against the pre-wobble,
+  // pre-noise steered value in each branch (nav.setCourse while AT THE
+  // HELM, the autopilot steering solution while AUTOPILOT ON, or
+  // nav.driftHeading while genuinely drifting) rather than the final
+  // nav.heading the player sees — nav.heading always carries a little
+  // per-tick steering wobble/noise on top even while properly holding
+  // course (see computeHeading's own notes), and none of that ordinary
+  // jitter should ever look like a "meaningful heading change" on its
+  // own. Idempotent and cheap to call every tick.
+  var SAIL_TRIM_THRESHOLD_DEG = 5;
+  var SAIL_TRIM_PENALTY_FRACTION = 0.1; // ~10% off the SAIL component of speed specifically while NEEDS TRIM -- see computeBoatSpeed. Never catastrophic, never affects the engine component at all.
+  function updateSailTrimForHeading(state, referenceHeading) {
+    var nav = state.nav;
+    if (nav.lastTrimHeading == null) { nav.lastTrimHeading = referenceHeading; return; }
+    if (nav.sailTrimState === 'needsTrim') return;
+    if (Math.abs(signedAngleDiff(referenceHeading, nav.lastTrimHeading)) >= SAIL_TRIM_THRESHOLD_DEG) {
+      nav.sailTrimState = 'needsTrim';
+    }
+  }
+
   function computeHeading(state) {
     var nav = state.nav;
     // While a course-turn animation (beginCourseTurn) is actively
@@ -1892,6 +1919,7 @@
 
       if (state.boat.autopilotOn && state.boat.steering !== 'DAMAGED') {
         steered = autopilotSteeringSolution(state, targetPoint);
+        updateSailTrimForHeading(state, steered); // against the CLEAN solution, before the oscillation below -- see the function's own notes
 
         // Small bounded correction oscillation: whoever's actively
         // holding course — the autopilot here, or a human AT THE HELM
@@ -1917,6 +1945,7 @@
         // keeping would). Same bounded correction oscillation as
         // autopilot, above, standing in for imperfect human steering.
         steered = nav.setCourse;
+        updateSailTrimForHeading(state, steered); // against the CLEAN set course, before the oscillation below
         var helmOscBound = 1 + state.weather.seaState;
         var helmOscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
         if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
@@ -1971,6 +2000,7 @@
 
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
+        updateSailTrimForHeading(state, steered); // nav.driftHeading itself never carries the wobble/noise terms, so this is already the clean value
       }
     }
     // Small per-tick heading noise: imperfect helming, wave action, minor
@@ -2752,6 +2782,11 @@
       return +computeDriftSpeed(state).toFixed(2);
     }
     var sailSpeed = computeSailSpeed(state, heading);
+    // SAIL TRIM PENALTY — applied to the sail component specifically,
+    // never the engine's, so a motoring/furled boat is never touched by
+    // this at all (sailSpeed is already ~0 there, and 90% of ~0 is
+    // still ~0) — see SAIL_TRIM_PENALTY_FRACTION's own notes.
+    if (state.nav.sailTrimState === 'needsTrim') sailSpeed *= (1 - SAIL_TRIM_PENALTY_FRACTION);
     var engineSpeed = computeEngineSpeed(state, heading);
     var primary = Math.max(sailSpeed, engineSpeed);
     var secondary = Math.min(sailSpeed, engineSpeed);
@@ -2843,10 +2878,10 @@
   // beginCourseTurn retarget (see "RETARGETING MUST ALSO WORK WITH
   // LUFFING") without needing to know anything about targets at all.
   // On exiting the zone: stop the loop, then immediately play sail_fill
-  // once -- deliberately never chained to winch here (see
-  // beginCourseTurn's own rotation timer for the ONLY place winch ever
-  // plays: the moment ACTUAL HEADING reaches the current target, a
-  // completely separate trigger from this zone-crossing sequence).
+  // once -- deliberately never chained to winch here. Winch now plays
+  // ONLY from TRIM SAILS (cmdTrimSails/performTrimSails) -- steering
+  // events of any kind (beginCourseTurn completing, autopilot, drift)
+  // never trigger it any more; see that function's own notes.
   function updateNoGoZoneAudio(state) {
     if (state.boat.sailConfig === 'furled') {
       if (isCurrentlyLuffing) { isCurrentlyLuffing = false; stopSailsLuffingLoop(); }
@@ -2953,18 +2988,11 @@
         activeTurn = null;
         if (currentOpts.onSettle) currentOpts.onSettle(state);
         saveGameState(state);
-        // The ONLY place winch_short.mp3 ever plays — right here, the exact
-        // instant ACTUAL HEADING reaches the CURRENT (latest) target,
-        // for both manual and autopilot turns alike, since both run
-        // through this same rotation timer. Reading currentOpts.target
-        // Heading here (not whatever the original opts.targetHeading
-        // was when this turn began) is what naturally makes an
-        // abandoned, retargeted-away-from intermediate heading never
-        // trigger it — only the target the boat actually settles on
-        // does. Fire and forget: never blocks anything, never shows
-        // ". .. ...", never chained to sail_fill (a completely separate
-        // trigger — see updateNoGoZoneAudio).
-        playSailsOneShot('winch', null, state);
+        // winch_short.mp3 no longer plays here at all -- steering and
+        // sail trim are now separate actions. It plays ONLY from TRIM
+        // SAILS now (see cmdTrimSails/performTrimSails); arriving on a
+        // new heading, whether by SET COURSE, autopilot, or otherwise,
+        // never auto-trims the sails any more.
       }
     }, HEADING_TURN_TICK_MS);
 
@@ -6235,6 +6263,13 @@
   // nodes, not whatever it had before. Returns the same refs, mainly
   // for beginCourseTurn's own immediate use right after starting/
   // retargeting a turn while this screen is already showing.
+  // 'GOOD' | 'NEEDS TRIM' -- the one place this string is derived, so
+  // every HELM display and cmdTrimSails' own gating all read the exact
+  // same word.
+  function sailTrimLabel(state) {
+    return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
+  }
+
   function printHelmAtHelmHeader(state) {
     printLine('AT THE HELM', 'heading-label');
     printLine(inventoryLine('SET COURSE', Math.round(state.nav.setCourse) + '\u00B0'));
@@ -6247,6 +6282,7 @@
     speedEl.className = 'line';
     speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
     tempViewEl.appendChild(speedEl);
+    printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
     var refs = { headingEl: headingEl, speedEl: speedEl };
     if (activeTurn) activeTurn.headerRefs = refs;
     return refs;
@@ -6305,19 +6341,18 @@
       printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
       printBlank();
       printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+      printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
       }
       printBlank();
       printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      state.pendingChoice = {
-        id: 'helm-menu',
-        options: [
-          { label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' },
-          { label: 'BACK', action: 'cancel' },
-        ],
-      };
+      var damagedHelmOpts = [];
+      if (nav.sailTrimState === 'needsTrim') damagedHelmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
+      damagedHelmOpts.push({ label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' });
+      damagedHelmOpts.push({ label: 'BACK', action: 'cancel' });
+      state.pendingChoice = { id: 'helm-menu', options: damagedHelmOpts };
       return;
     }
 
@@ -6334,14 +6369,13 @@
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
       }
-      state.pendingChoice = {
-        id: 'helm-menu',
-        options: [
-          { label: 'CHANGE COURSE', action: 'cmd:change-course' },
-          { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
-          { label: 'LEAVE THE HELM', action: 'leave-helm' },
-        ],
-      };
+      var atHelmOpts = [
+        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
+        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+      ];
+      if (nav.sailTrimState === 'needsTrim') atHelmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
+      atHelmOpts.push({ label: 'LEAVE THE HELM', action: 'leave-helm' });
+      state.pendingChoice = { id: 'helm-menu', options: atHelmOpts };
       return;
     }
 
@@ -6355,19 +6389,19 @@
       printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
       printBlank();
       printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+      printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
       }
-      state.pendingChoice = {
-        id: 'helm-menu',
-        options: [
-          { label: 'CHANGE COURSE', action: 'cmd:change-course' },
-          { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
-          { label: 'AUTOPILOT \u2014 ON', action: 'toggle-autopilot' },
-          { label: 'BACK', action: 'cancel' },
-        ],
-      };
+      var autopilotOnOpts = [
+        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
+        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
+      ];
+      if (nav.sailTrimState === 'needsTrim') autopilotOnOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
+      autopilotOnOpts.push({ label: 'AUTOPILOT \u2014 ON', action: 'toggle-autopilot' });
+      autopilotOnOpts.push({ label: 'BACK', action: 'cancel' });
+      state.pendingChoice = { id: 'helm-menu', options: autopilotOnOpts };
       return;
     }
 
@@ -6381,18 +6415,41 @@
     printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
     printBlank();
     printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
+    printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    state.pendingChoice = {
-      id: 'helm-menu',
-      options: [
-        { label: 'TAKE THE HELM', action: 'take-helm' },
-        { label: 'AUTOPILOT \u2014 OFF', action: 'toggle-autopilot' },
-        { label: 'BACK', action: 'cancel' },
-      ],
-    };
+    var unattendedOpts = [{ label: 'TAKE THE HELM', action: 'take-helm' }];
+    if (nav.sailTrimState === 'needsTrim') unattendedOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
+    unattendedOpts.push({ label: 'AUTOPILOT \u2014 OFF', action: 'toggle-autopilot' });
+    unattendedOpts.push({ label: 'BACK', action: 'cancel' });
+    state.pendingChoice = { id: 'helm-menu', options: unattendedOpts };
+  }
+
+  // TRIM SAILS — audio-synced, same architecture as WASH/CHANGE/MAKE
+  // BUNK/hatch (runAudioSyncedAction), using the existing winch_short
+  // one-shot (playSailsOneShot), which no longer plays automatically
+  // for any steering event -- see the removed call in beginCourseTurn's
+  // rotation timer. Only reachable when sailTrimState is actually
+  // 'needsTrim' (the HELM screens only ever show the button then), but
+  // defensively re-checks that here too rather than trusting the caller
+  // alone. Records the heading at the moment the action actually
+  // COMPLETES (not when it started) as the new lastTrimHeading, per the
+  // task's own "when the audio finishes... record the CURRENT heading"
+  // wording -- consistent with every other audio-synced action in this
+  // file applying its effect only once the audio actually ends.
+  function cmdTrimSails(state) {
+    if (state.nav.sailTrimState !== 'needsTrim') { cmdHelm(state); return; }
+    runAudioSyncedAction(state, {
+      label: 'TRIMMING SAILS',
+      playAudio: function (onEnded) { return playSailsOneShot('winch', onEnded, state); },
+      action: function (s) {
+        s.nav.sailTrimState = 'good';
+        s.nav.lastTrimHeading = s.nav.heading;
+        cmdHelm(s);
+      },
+    });
   }
 
   var COURSE_DIAL_STEPS = [-10, -1, 1, 10];
@@ -8975,13 +9032,13 @@
 
   /* --------------------------------------------------------------
      SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
-     pair, and the winch one-shot for a completed heading change (see
-     the module notes on beginCourseTurn for exactly when winch fires —
-     ONLY once ACTUAL HEADING reaches the current final target, never
-     for sail raising/lowering/reefing, never at the start of a turn,
-     never while still turning, never chained to sail_fill). Same
-     lazy-per-key HTMLAudioElement shape as FISHING_AUDIO_FILES/
-     getFishingAudioEl just above (its own independent copy, for the
+     pair, and the winch one-shot, which now specifically represents the
+     player physically trimming the sails (see cmdTrimSails/
+     performTrimSails) -- never played for steering/heading events of
+     any kind (SET COURSE completing, autopilot, drift), only for TRIM
+     SAILS itself. Same lazy-per-key HTMLAudioElement shape as
+     FISHING_AUDIO_FILES/getFishingAudioEl just above (its own
+     independent copy, for the
      same "each system easy to reason about on its own" reasoning given
      there), with one addition: playSailsOneShot's onEnded hook is what
      lets a sail raise/lower action last exactly as long as its own
@@ -10030,6 +10087,8 @@
       performAutopilotToggle(state);
     } else if (action === 'toggle-fan') {
       performFanToggle(state);
+    } else if (action === 'trim-sails') {
+      cmdTrimSails(state);
     } else if (action.indexOf('chore:') === 0) {
       performChore(state, action.slice(6));
     } else if (action.indexOf('electrical:') === 0) {
@@ -10450,6 +10509,8 @@
     if (nav.courseDraft === undefined) nav.courseDraft = null;
     if (nav.landWarningLevel === undefined) nav.landWarningLevel = 'none';
     if (nav.groundedOn === undefined) nav.groundedOn = null;
+    if (nav.sailTrimState === undefined) nav.sailTrimState = 'good';
+    if (nav.lastTrimHeading === undefined || nav.lastTrimHeading === null) nav.lastTrimHeading = nav.heading;
     if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
     if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
     var legacyTotal = 2850; // the flat distance old saves' progress was measured against
