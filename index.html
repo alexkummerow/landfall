@@ -148,6 +148,23 @@
     text-shadow: 0 0 6px rgba(143,215,172,0.22);
   }
 
+  /* NAV STATION only -- #output's ordinary flex:1 above stretches it
+     to fill whatever vertical space is left over after #controls
+     claims its own, regardless of whether this screen's actual
+     content needs that much room -- on a roomy viewport that unused
+     stretch showed up as a large empty gap between this screen's last
+     status line and the first electrical control below it. Sizing
+     #output by its own content instead (flex-shrink:1 still lets it
+     yield -- and fall back to its normal internal scroll -- if the
+     viewport is too short to fit it) removes that gap outright rather
+     than papering over it. The precise height itself is computed and
+     set inline by cmdNavStation's own scroll-positioning logic, then
+     cleared by clearTempView the moment the player leaves this
+     screen -- this rule only supplies the flex-basis behavior. */
+  #output.nav-station-fitted {
+    flex: 0 1 auto;
+  }
+
   .line {
     margin: 0 0 0.35rem;
     line-height: 1.55;
@@ -155,22 +172,6 @@
   }
 
   .gap { height: 0.7rem; margin: 0; }
-
-  /* An invisible trailing spacer NAV STATION sometimes appends after
-     its own content (see cmdNavStation) purely to guarantee #output
-     has somewhere to scroll to, so the first status line can actually
-     reach the top of #output even when this screen's real content
-     alone is shorter than #output's visible height and would
-     otherwise give the browser nothing to scroll through at all. Its
-     height is computed and set inline at the moment it's created --
-     precisely how much extra scroll range is still needed, no more --
-     rather than a fixed CSS size, so it never leaves a large empty
-     scrollable region below the real content. This rule intentionally
-     carries no height of its own.
-  */
-  .nav-station-scroll-spacer {
-    height: 0;
-  }
 
   .heading-label {
     color: var(--phosphor);
@@ -5550,6 +5551,12 @@
 
   function clearTempView() {
     tempViewEl.innerHTML = '';
+    // NAV STATION's own #output sizing (see its CSS notes and
+    // cmdNavStation) -- reset here, at the start of every screen
+    // transition, so neither the class nor the inline height it sets
+    // ever lingers onto any other screen.
+    outputEl.classList.remove('nav-station-fitted');
+    outputEl.style.maxHeight = '';
   }
 
   function printPersistentLine(text, cls) {
@@ -6977,12 +6984,14 @@
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
 
-    // Scroll #output so the first status line above sits at the very
-    // top of the visible area -- reclaiming the vertical space the "> 
-    // NAV STATION" echo line (printed just before this command ran)
-    // and the blank line above it would otherwise occupy, rather than
-    // compressing this screen's own row spacing to make room. Deferred
-    // to the next animation frame: runCommand's generic tail
+    // Position #output so the first status line above sits at the very
+    // top of the visible area (reclaiming the vertical space the "> 
+    // NAV STATION" echo line and the blank line above it would
+    // otherwise occupy) AND so #output's own visible box ends exactly
+    // where this screen's real content ends -- no further, so nothing
+    // separates SOLAR from CABIN LIGHTS below but the ordinary section
+    // gap already built into #controls' own layout. Deferred to the
+    // next animation frame: runCommand's generic tail
     // (renderOptions/scrollToBottom) runs synchronously right after
     // this function returns and would otherwise immediately overwrite
     // any scroll position set here, and the deferral also ensures
@@ -6993,33 +7002,30 @@
       // runCommand's own generic tail already ran scrollToBottom()
       // synchronously before this frame, which may have moved scrollTop
       // to some non-zero value -- reset to a known baseline (fully
-      // scrolled to top) first, so the measurement just below reflects
-      // this line's true position rather than wherever that left it.
+      // scrolled to top) first, so the measurements below reflect this
+      // line's true position rather than wherever that left it.
       outputEl.scrollTop = 0;
-      // #output can only scroll as far as its content genuinely
-      // extends past its own visible height. When this screen's real
-      // content (echo + blank + status lines) is shorter than that --
-      // the common case, especially at the normal, uncompressed row
-      // spacing -- there is nothing for the browser to scroll through
-      // at all, and it clamps right back to 0 no matter what's asked
-      // for, leaving the echo line stuck in view. Rather than a large
-      // fixed spacer (which leaves a big empty scrollable region below
-      // the real content once scrolled -- exactly the "empty scroll
-      // abyss" this replaced), measure precisely how much extra scroll
-      // range is still needed -- the gap between where this line
-      // already sits and #output's own current scrollable range -- and
-      // add only that much. Zero extra height, and no spacer element at
-      // all, on any screen where the real content is already tall
-      // enough on its own.
+      // #output is normally flex:1, which stretches it to fill however
+      // much vertical space happens to be left over once #controls
+      // claims its own -- regardless of whether this screen's actual
+      // content needs that much room. On a tall viewport (or once
+      // #controls needs less room than #output's flex share leaves
+      // behind) that unused stretch shows up as a large, empty gap
+      // between the last real line here and the first electrical
+      // control below -- the bug this fixes. nav-station-fitted (see
+      // its own CSS notes) switches #output to size itself by its own
+      // content instead. What's left is sizing that content-box to
+      // show exactly the real lines (CABIN TEMP through SOLAR, or the
+      // DAMAGED note) and nothing above them: naturalScrollHeight is
+      // this screen's full content height including the echo+blank
+      // above; subtracting how far down this first real line already
+      // sits (neededScroll) leaves precisely the real content's own
+      // height, with no slack to show up as blank space at either end.
+      outputEl.classList.add('nav-station-fitted');
+      var naturalScrollHeight = outputEl.scrollHeight;
       var neededScroll = firstLineEl.getBoundingClientRect().top - outputEl.getBoundingClientRect().top;
-      var currentRange = Math.max(0, outputEl.scrollHeight - outputEl.clientHeight);
-      var shortfall = neededScroll - currentRange;
-      if (shortfall > 0) {
-        var spacer = document.createElement('div');
-        spacer.className = 'nav-station-scroll-spacer';
-        spacer.style.height = Math.ceil(shortfall) + 'px';
-        tempViewEl.appendChild(spacer);
-      }
+      var desiredClientHeight = Math.max(0, naturalScrollHeight - neededScroll);
+      outputEl.style.maxHeight = Math.ceil(desiredClientHeight) + 'px';
       firstLineEl.scrollIntoView({ block: 'start' });
     });
   }
