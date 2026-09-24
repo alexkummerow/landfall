@@ -6197,6 +6197,11 @@
   // state.weather.trend, matching the two-strand NEXT 12 HOURS
   // structure. real.forecastLine, when available, is already
   // summarized from actual forecast data and is used as-is instead.
+  //
+  // Retired by the NOAA-style written forecast below (see
+  // buildForecastPeriods) — kept only because nothing else reads
+  // them and removing unused, harmless constants isn't part of this
+  // change.
   var WIND_TREND_LINES = {
     building: 'Wind expected to build further.',
     easing: 'Wind easing over the next several hours.',
@@ -6208,13 +6213,119 @@
     steady: 'Seas holding at their present state.',
   };
 
-  // FORECAST — what's coming, distinct from WEATHER's what's-happening-
-  // now: a forward-looking trend (the real API-derived forecastLine
-  // when available, otherwise the wind/sea trend lines above — either
-  // way driven by actual simulation state, never hardcoded per call),
-  // plus a strategically meaningful current observation when one
-  // exists (see currentStrategicNote — never a recommendation, purely
-  // what the data shows), then the external OPEN IN WINDY link.
+  // FORECAST — a concise, WRITTEN NOAA/marine-radio-style report: two
+  // upcoming periods (TONIGHT or TODAY, then the following calendar
+  // day), each with a terse WIND line, SEAS line, and one or two
+  // condition lines. Renders in a single pass the instant the screen
+  // opens — no action lock, no menu-hiding, no typewriter animation,
+  // no audio. Built entirely from state.weather's own current
+  // windSpeed/windDirection/seaState/condition/trend — the SAME
+  // blended (real-or-synthetic, see the REAL-WORLD WEATHER notes
+  // above driftWeather) fields WEATHER itself reads — never
+  // state.weather.realWx.forecastLine's own loose prose summary,
+  // which has no ranged/terse structure to build a NOAA-style line
+  // from. WEATHER stays the place for exact current instrument
+  // readings; FORECAST only ever shows rounded ranges for what's
+  // expected next, never duplicating WEATHER's own readout.
+  var FORECAST_WEEKDAY_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+  var FORECAST_ISSUANCE_HOURS = [0, 6, 12, 18]; // scheduled forecast issuance slots
+
+  // The most recent scheduled 0000/0600/1200/1800 issuance at or
+  // before the current GAME time (never the player's real-world
+  // clock) — e.g. 1345 -> 1200, 1930 -> 1800.
+  function forecastIssuedHHMM(state) {
+    var now = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
+    var slot = FORECAST_ISSUANCE_HOURS[0];
+    FORECAST_ISSUANCE_HOURS.forEach(function (h) { if (now.getHours() >= h) slot = h; });
+    return String(slot).padStart(2, '0') + '00';
+  }
+
+  // Condition severity ladder Landfall's four-condition weather model
+  // (see wmoCodeToCondition/driftWeather) moves along one step at a
+  // time; buildForecastPeriods walks it forward for a building trend
+  // and backward for an easing one to project the far period's own
+  // condition, and to phrase a one-line hint of that shift on
+  // whichever period it's still approaching in.
+  var FORECAST_CONDITION_ORDER = ['clear', 'overcast', 'rain', 'squall'];
+  var FORECAST_CONDITION_LINES = {
+    clear: ['FAIR'],
+    overcast: ['OVERCAST'],
+    rain: ['RAIN'],
+    squall: ['SQUALLY', 'HEAVY RAIN AT TIMES'],
+  };
+  // Keyed by the condition being moved TOWARD, not away from.
+  var FORECAST_DEVELOPING_TOWARD = { overcast: 'CLOUDS INCREASING LATE', rain: 'RAIN DEVELOPING LATE', squall: 'SQUALLS DEVELOPING LATE' };
+  var FORECAST_CLEARING_TOWARD = { clear: 'CLEARING LATE', overcast: 'IMPROVING LATE', rain: 'EASING LATE' };
+
+  // Two periods (TONIGHT/TODAY, then the following calendar day),
+  // each with a compass direction, ranged WIND/SEAS values, and terse
+  // condition lines — see the module notes above cmdForecast for the
+  // full picture. Ranges follow the task's own "don't expose
+  // unrealistically precise future values" rule: wind floors to the
+  // nearest 5 KT band, seas use the SAME per-tier feet Landfall
+  // already shows in WEATHER (see SEA_STATE_WAVE_HEIGHT_FT) as the
+  // band's low end, +2 FT as its high end.
+  function buildForecastPeriods(state) {
+    var w = state.weather;
+    var now = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
+    var isNight = now.getHours() >= 18 || now.getHours() < 6;
+    var nearLabel, farLabel;
+    if (isNight) {
+      nearLabel = 'TONIGHT';
+      var tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      farLabel = FORECAST_WEEKDAY_NAMES[tomorrow.getDay()];
+    } else {
+      nearLabel = 'TODAY';
+      farLabel = 'TONIGHT';
+    }
+
+    var windDir = compassPoint(w.windDirection);
+    var nearWindLow = Math.floor(w.windSpeed / 5) * 5;
+    var nearWindHigh = nearWindLow + 5;
+    var nearSeaLow = seaStateWaveHeightFt(w.seaState);
+    var nearSeaHigh = nearSeaLow + 2;
+
+    var farWindLow = nearWindLow;
+    if (w.trend === 'building') farWindLow = nearWindLow + 5;
+    if (w.trend === 'easing') farWindLow = Math.max(0, nearWindLow - 5);
+    var farWindHigh = farWindLow + 5;
+    var farSeaLow = nearSeaLow;
+    if (w.trend === 'building') farSeaLow = nearSeaLow + 2;
+    if (w.trend === 'easing') farSeaLow = Math.max(1, nearSeaLow - 2);
+    var farSeaHigh = farSeaLow + 2;
+
+    var nearIdx = FORECAST_CONDITION_ORDER.indexOf(w.condition);
+    if (nearIdx < 0) nearIdx = 1; // unrecognized condition (shouldn't happen) -- treat as overcast, the model's own default
+    var farIdx = nearIdx;
+    if (w.trend === 'building') farIdx = Math.min(nearIdx + 1, FORECAST_CONDITION_ORDER.length - 1);
+    if (w.trend === 'easing') farIdx = Math.max(nearIdx - 1, 0);
+    var farCondition = FORECAST_CONDITION_ORDER[farIdx];
+
+    var nearConditionLines = FORECAST_CONDITION_LINES[w.condition].slice();
+    if (w.trend === 'building' && farCondition !== w.condition) nearConditionLines.push(FORECAST_DEVELOPING_TOWARD[farCondition]);
+    if (w.trend === 'easing' && farCondition !== w.condition) nearConditionLines.push(FORECAST_CLEARING_TOWARD[farCondition]);
+
+    var farConditionLines = FORECAST_CONDITION_LINES[farCondition].slice();
+    // The same trend projected one step further, same as WIND/SEAS
+    // keep moving the same direction across both periods rather than
+    // snapping back once the far period starts.
+    if (w.trend === 'building') {
+      var beyondIdx = Math.min(farIdx + 1, FORECAST_CONDITION_ORDER.length - 1);
+      var beyondCondition = FORECAST_CONDITION_ORDER[beyondIdx];
+      if (beyondCondition !== farCondition) farConditionLines.push(FORECAST_DEVELOPING_TOWARD[beyondCondition]);
+    }
+    if (w.trend === 'easing') {
+      var beyondIdxE = Math.max(farIdx - 1, 0);
+      var beyondConditionE = FORECAST_CONDITION_ORDER[beyondIdxE];
+      if (beyondConditionE !== farCondition) farConditionLines.push(FORECAST_CLEARING_TOWARD[beyondConditionE]);
+    }
+
+    return [
+      { label: nearLabel, windDir: windDir, windLow: nearWindLow, windHigh: nearWindHigh, seaLow: nearSeaLow, seaHigh: nearSeaHigh, conditionLines: nearConditionLines },
+      { label: farLabel, windDir: windDir, windLow: farWindLow, windHigh: farWindHigh, seaLow: farSeaLow, seaHigh: farSeaHigh, conditionLines: farConditionLines },
+    ];
+  }
+
   function cmdForecast(state) {
     if (state.boat.battery <= 0 || state.boat.electrical === 'DAMAGED') {
       printBlank();
@@ -6222,33 +6333,18 @@
       state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
       return;
     }
-    var real = state.weather.realWx;
     printBlank();
-    printLine('NEXT 12 HOURS', 'heading-label');
-    if (real && real.forecastLine) {
-      printLine(real.forecastLine);
-    } else {
-      var trend = state.weather.trend;
-      printLine(WIND_TREND_LINES[trend] || WIND_TREND_LINES.steady);
-      printLine(SEA_TREND_LINES[trend] || SEA_TREND_LINES.steady);
-    }
-    var currentNote = currentStrategicNote(state);
-    if (currentNote) {
+    printLine('MARINE FORECAST', 'heading-label');
+    printLine('ISSUED ' + forecastIssuedHHMM(state));
+    buildForecastPeriods(state).forEach(function (period) {
       printBlank();
-      printLine(currentNote);
-    }
-    var seamanshipNote = seamanshipForecastNote(state);
-    if (seamanshipNote) {
+      printLine(period.label);
       printBlank();
-      printLine(seamanshipNote, 'amber');
-    }
-    state.pendingChoice = {
-      id: 'forecast-menu',
-      options: [
-        { label: 'OPEN IN WINDY', action: 'open-in-windy' },
-        { label: 'BACK', action: 'cmd:nav-station' },
-      ],
-    };
+      printLine('WIND ' + period.windDir + ' ' + period.windLow + ' TO ' + period.windHigh + ' KT');
+      printLine('SEAS ' + period.seaLow + ' TO ' + period.seaHigh + ' FT');
+      period.conditionLines.forEach(function (line) { printLine(line); });
+    });
+    state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
   }
 
 
@@ -10407,11 +10503,30 @@
           // wakeUp() mechanics (state/log effects, unchanged) only run
           // once the audio actually finishes, as the action callback
           // below, rather than instantly when WAKE UP is clicked.
-          runAudioSyncedAction(state, {
-            label: 'GETTING UP',
-            playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
-            action: function (s) { wakeUp(s, 'You wake and go above.'); },
-          });
+          //
+          // Under SOUND OFF, runAudioSyncedAction's own onEnded still
+          // fires eventually (playCabinOneShot keeps playing, just
+          // silently, at volume 0 -- the same established pattern every
+          // other muted sound in this game uses), but only after the
+          // audio file's full real duration -- never actually STUCK,
+          // just not the short, event-independent completion a muted
+          // player should get. So muted takes a completely separate,
+          // fixed-duration path here instead: no audio at all, a brief
+          // GETTING UP . .. ... (matching GOING ABOVE/BELOW's own short
+          // physical-action pacing), done.
+          if (muted) {
+            runShortAction(state, {
+              label: 'GETTING UP',
+              duration: 2,
+              action: function (s) { wakeUp(s, 'You wake and go above.'); },
+            });
+          } else {
+            runAudioSyncedAction(state, {
+              label: 'GETTING UP',
+              playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
+              action: function (s) { wakeUp(s, 'You wake and go above.'); },
+            });
+          }
           break;
         case 'go-above-below':
           // A physical place, tracked independently of any menu — the
