@@ -156,6 +156,18 @@
 
   .gap { height: 0.7rem; margin: 0; }
 
+  /* An invisible trailing spacer NAV STATION appends after its own
+     content (see cmdNavStation) purely to guarantee #output has
+     somewhere to scroll to. Never shown -- it exists below the bottom
+     of the screen so the browser always has enough scrollable range to
+     actually carry the NAV STATION heading up to the top of #output,
+     even when this screen's real content alone is shorter than
+     #output's visible height (the common case) and would otherwise
+     give the browser nothing to scroll through at all. */
+  .nav-station-scroll-spacer {
+    height: 100vh;
+  }
+
   .heading-label {
     color: var(--phosphor);
     letter-spacing: 0.08em;
@@ -193,6 +205,22 @@
     gap: 0.3rem;
     max-height: 48vh;
     overflow-y: auto;
+  }
+
+  /* NAV STATION only -- see the scroll-repositioning notes in
+     cmdNavStation for the main fix (reclaiming the echo line's space).
+     This is the small, secondary piece section 7 allows: on the very
+     tightest phone viewports, this screen's OWN row spacing (fully
+     back to normal -- untouched here) still doesn't leave quite enough
+     room for its 11-control list at the standard 48vh cap. Raising the
+     cap a little (never row gaps, padding, or divider margins) lets
+     #options claim a bit more of #output's unused space -- unused
+     because #output only needs enough room for the heading + four
+     status lines once its own screen has been scrolled to the top.
+     Applied the same way as elsewhere on this screen: renderOptions
+     toggles this class based on state.pendingChoice.id. */
+  #options.nav-station-fit {
+    max-height: 52vh;
   }
 
   .option-divider {
@@ -5500,6 +5528,7 @@
     p.className = 'line' + (cls ? ' ' + cls : '');
     p.textContent = text;
     tempViewEl.appendChild(p);
+    return p; // most callers ignore this; NAV STATION uses it to scroll its own heading to the top of #output -- see cmdNavStation
   }
 
   function printBlank() {
@@ -6899,7 +6928,7 @@
   function cmdNavStation(state) {
     var b = state.boat;
     printBlank();
-    printLine('NAV STATION', 'heading-label');
+    var headingEl = printLine('NAV STATION', 'heading-label');
     printBlank();
     var cabinTempDisplay = b.cabinTemperatureF != null ? Math.round(b.cabinTemperatureF) + '\u00B0F' : '\u2014';
     printLine(statusLine('CABIN TEMP', cabinTempDisplay));
@@ -6959,6 +6988,47 @@
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
+
+    // A trailing spacer, invisible off the bottom of the screen --
+    // exists purely so #output HAS somewhere to scroll to. Without it,
+    // whenever this screen's own content (echo line + heading + status
+    // lines) is shorter than #output's visible height -- the common
+    // case, especially once the surrounding spacing is back to its
+    // normal size -- the browser has literally nothing to scroll
+    // through and clamps scrollTop back to 0 no matter what's set
+    // below, leaving the echo line stuck in view. 100vh comfortably
+    // exceeds #output's own (smaller) share of the viewport in every
+    // realistic case, so there's always enough scrollable range for
+    // the heading to actually reach the top. clearTempView() wipes it
+    // away with everything else the moment the player leaves this
+    // screen -- nothing to clean up separately.
+    var scrollSpacer = document.createElement('div');
+    scrollSpacer.className = 'nav-station-scroll-spacer';
+    tempViewEl.appendChild(scrollSpacer);
+
+    // Scroll #output so the heading above sits at the very top of the
+    // visible area -- reclaiming the vertical space the "> NAV
+    // STATION" echo line (printed just before this command ran) and
+    // the blank line above the heading would otherwise occupy, rather
+    // than compressing this screen's own row spacing to make room.
+    // Deferred to the next animation frame: runCommand's generic tail
+    // (renderOptions/scrollToBottom) runs synchronously right after
+    // this function returns and would otherwise immediately overwrite
+    // any scroll position set here, and the deferral also ensures
+    // #options has already re-rendered with its final size before this
+    // reads #output's settled layout. scrollIntoView (not
+    // headingEl.offsetTop) deliberately -- offsetTop is relative to
+    // the nearest POSITIONED ancestor, which is #crt here (position:
+    // relative), not #output itself, so it doesn't actually describe
+    // this heading's position within #output's own scrollable content;
+    // scrollIntoView finds and scrolls the right ancestor correctly
+    // regardless of that. NAV STATION only -- no other screen in
+    // Landfall repositions the scroll like this.
+    requestAnimationFrame(function () {
+      if (headingEl && headingEl.parentNode) {
+        headingEl.scrollIntoView({ block: 'start' });
+      }
+    });
   }
 
 
@@ -9982,6 +10052,10 @@
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
+    // NAV STATION only -- see the CSS notes on #options.nav-station-fit
+    // for why. Toggled here, every render, the same way #controls'
+    // content itself is decided.
+    optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
       if (opt.divider) {
