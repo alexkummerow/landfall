@@ -6008,9 +6008,17 @@
     // ACCESSORY HOOK -- switching the circuit off mid-playback cuts the
     // cassette player the same way losing power outright would; see the
     // matching hook in updateBattery for when the battery itself dies.
+    // Same for the fan: it runs off this exact circuit too (see
+    // performFanToggle), so losing ACCESSORY POWER kills it immediately,
+    // just like a fan whose circuit breaker has tripped -- it does NOT
+    // come back on its own once ACCESSORY is restored; the player has
+    // to return to the SALOON and switch it on again themselves.
     if (key === 'accessory' && !turningOn && activeTapeTitle != null) {
       stopCurrentTapeTrackImmediately();
       playTapeOffSound();
+    }
+    if (key === 'accessory' && !turningOn && b.fanOn) {
+      b.fanOn = false;
     }
     cmdNavStation(state);
   }
@@ -6078,9 +6086,20 @@
   // toggle; no other side effects before or after the move -- the fan
   // never did anything but flip its own flag (comfort perception reads
   // it live via cabinConditionLabel, and it was never part of the
-  // physical temperature calculation).
+  // physical temperature calculation). ACCESSORY HOOK -- the fan now
+  // runs off the same ACCESSORY circuit as the cassette player (see
+  // performStartTape's own identical check); turning the fan on is
+  // gated on it exactly the same way, and the matching hook in
+  // performElectricalToggle cuts the fan the moment ACCESSORY itself
+  // is switched off, the same way it already cuts a playing tape.
   function performFanToggle(state) {
     var b = state.boat;
+    if (!b.fanOn && !b.accessoryOn) {
+      printBlank();
+      printLine('Accessory power is off.', 'amber');
+      cmdSaloon(state);
+      return;
+    }
     if (!b.fanOn && b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged.', 'amber');
@@ -6811,6 +6830,7 @@
   var CHORE_AUDIO = {
     dishes: { play: playGalleyOneShot, key: 'dishes' },
     bunk: { play: playCabinOneShot, key: 'makeBunk' },
+    tidy: { play: playSaloonOneShot, key: 'tidyUp' },
   };
 
   function performChore(state, kind) {
@@ -6857,7 +6877,7 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
-      { label: state.boat.fanOn ? 'TURN FAN OFF' : 'TURN FAN ON', action: 'toggle-fan' },
+      { label: state.boat.fanOn ? 'TURN OFF FAN' : 'TURN ON FAN', action: 'toggle-fan' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
         : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -8894,12 +8914,14 @@
   var CABIN_AUDIO_FILES = {
     changeClothes: 'audio/cabin/change.mp3',
     sleep: 'audio/cabin/sleep.mp3',
+    wakeUp: 'audio/cabin/wake_up.mp3', // physically getting out of the bunk at the end of a sleep session -- see the 'wake-up' action
     makeBunk: 'audio/cabin/make_bed.mp3', // player-facing action is MAKE BUNK; the file itself keeps its existing name
     hangClothes: 'audio/cabin/hang_clothes.mp3', // file not added yet -- this is the defined hook/path for it, same as the others were before their files existed
   };
   var CABIN_AUDIO_VOLUME = {
     changeClothes: 0.5,
     sleep: 0.5,
+    wakeUp: 0.5,
     makeBunk: 0.5,
     hangClothes: 0.5,
   };
@@ -9125,10 +9147,12 @@
   var SALOON_AUDIO_FILES = {
     hatchOpen: 'audio/saloon/hatch_open.mp3',
     hatchClose: 'audio/saloon/hatch_close.mp3',
+    tidyUp: 'audio/saloon/tidy_up.mp3', // TIDY UP chore -- see CHORE_AUDIO.tidy
   };
   var SALOON_AUDIO_VOLUME = {
     hatchOpen: 0.5,
     hatchClose: 0.5,
+    tidyUp: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -10377,8 +10401,17 @@
           printLine('You give up on it and get up.', 'dim');
           break;
         case 'wake-up':
-          printBlank();
-          wakeUp(state, 'You wake and go above.');
+          // The physical act of getting out of the bunk (wake_up.mp3) is
+          // a real busy action, same architecture as cmdSleep's own
+          // sleep.mp3 at the other end of the same session: the existing
+          // wakeUp() mechanics (state/log effects, unchanged) only run
+          // once the audio actually finishes, as the action callback
+          // below, rather than instantly when WAKE UP is clicked.
+          runAudioSyncedAction(state, {
+            label: 'GETTING UP',
+            playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
+            action: function (s) { wakeUp(s, 'You wake and go above.'); },
+          });
           break;
         case 'go-above-below':
           // A physical place, tracked independently of any menu — the
