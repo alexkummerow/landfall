@@ -11089,6 +11089,35 @@
     if (w.oceanCurrent.southSample === undefined) w.oceanCurrent.southSample = null;
   }
 
+  // A handful of automatic sequences (the fishing bite prompt, the
+  // fishing reel-in narration, the moment right after committing to
+  // RESCUE before its own ending text begins) deliberately set
+  // state.pendingChoice to an object with an EMPTY options array for a
+  // brief window — "nothing is clickable right now" — while an
+  // in-memory setTimeout (tied to a variable that is never part of
+  // state, e.g. fishingSession) carries it forward to the next real
+  // menu a moment later. getContextualOptions gives state.pendingChoice
+  // total priority over the normal location-based menu, and this
+  // module's visibilitychange/pagehide handlers save immediately and
+  // unconditionally whenever the tab is backgrounded or closed — so if
+  // the page was ever saved during exactly one of those windows, the
+  // in-memory timer that was supposed to carry it forward is gone on
+  // the next load (it was never part of state), and the save is left
+  // pointing at a pendingChoice with zero options forever: every
+  // location-based menu the player could legitimately be looking at
+  // has at least one option (even if it's just BACK), so an empty
+  // options array can only ever be one of these interrupted automatic
+  // windows, never a real decision in progress. Clearing pendingChoice
+  // back to null here — the same value a brand-new game starts with —
+  // is therefore safe: it can't discard an actual pending choice, and
+  // it simply lets the normal contextual menu (wherever the player
+  // physically is) take back over on the very next render.
+  function migrateStalePendingChoiceIfNeeded(state) {
+    if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
+      state.pendingChoice = null;
+    }
+  }
+
   function boot() {
     var saved = loadGameState();
     if (!saved) {
@@ -11101,6 +11130,7 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateStalePendingChoiceIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
