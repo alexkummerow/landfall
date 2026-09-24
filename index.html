@@ -459,16 +459,6 @@
           northSample: null,     // { speedKt, directionDeg } roughly CURRENT_SAMPLE_OFFSET_NM north of the boat, or null — see maybeRefreshOceanCurrent/currentStrategicNote
           southSample: null,     // same, to the south
         },
-        // The player's own saved copy of the last marine forecast they
-        // actually RECEIVED over the weather radio (see cmdForecast/
-        // performReceiveForecast) -- deliberately separate from the raw
-        // simulated wind/seaState/condition/trend fields above, which
-        // keep changing underneath this on their own. null until the
-        // player has successfully received at least one broadcast.
-        // issuedLabel/lines are the exact transcript as written down;
-        // receivedAtVoyageMinutes is state.meta.voyageMinutes at the
-        // moment reception completed, for the LAST RECEIVED display.
-        lastForecast: null, // { issuedLabel, lines: [...], receivedAtVoyageMinutes }
       },
       boat: {
         sailConfig: 'furled',       // full | reefed | minimal | furled — starts furled; nothing raises sails but the player
@@ -4495,7 +4485,6 @@
     applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
     applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
     applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
-    applyMuteToNavStationAudio(); // NAV STATION HOOK (weather-radio static) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -6203,580 +6192,63 @@
     };
   }
 
-  /* ============================================================
-     MARINE WEATHER RADIO — FORECAST replaces its old plain trend-line
-     display with an old-school VHF marine-weather-radio experience:
-     the player selects RECEIVE FORECAST, static crackles in, a
-     synthesized announcer reads a two-period marine forecast, and the
-     terminal transcribes it word-by-word in sync with the voice (see
-     performReceiveForecast below). Everything the broadcast SAYS is
-     still derived directly from the SAME underlying simulated weather
-     state (state.weather's windDirection/windSpeed/seaState/condition/
-     trend) that WEATHER itself reads — this only changes HOW the
-     player receives it, not the simulation generating it.
-     real.forecastLine (the optional real-world-API text) is
-     deliberately NOT used here anymore: it's unstructured prose that
-     can't be split into the two-period WINDS/SEAS format or spoken
-     word-by-word against it, so the structured fields below are now
-     the sole source for FORECAST.
-     ============================================================ */
-
-  // Believable forecast issuance times follow real marine-radio
-  // convention: four fixed daily slots, never "whatever time it
-  // happens to be." Returns the most recent one that has already
-  // passed, as a real Date in ship time.
-  function mostRecentForecastIssuance(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var issued = new Date(d);
-    var slot = Math.floor(d.getHours() / 6) * 6;
-    issued.setHours(slot, 0, 0, 0);
-    return issued;
-  }
-  function hhmmFromDate(d) {
-    return String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
-  }
-  function hhmmFromVoyageMinutes(state, voyageMinutes) {
-    return hhmmFromDate(new Date(state.meta.departedAt + voyageMinutes * 60000));
-  }
-
-  // TONIGHT/TODAY for the near period, the following calendar day's
-  // weekday name for the far one — same day/night boundary as
-  // isNavLightsNight, for a consistent feel with the rest of the game.
-  var FORECAST_WEEKDAYS = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-  function forecastPeriodLabels(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var isNight = d.getHours() >= 19 || d.getHours() < 6;
-    var nearLabel = isNight ? 'TONIGHT' : 'TODAY';
-    var farDate = new Date(d);
-    farDate.setDate(farDate.getDate() + 1);
-    return [nearLabel, FORECAST_WEEKDAYS[farDate.getDay()]];
-  }
-
-  // Rounds a value DOWN to the nearest multiple of step, giving a
-  // [low, low+span] range that always contains the real value — e.g.
-  // windSpeed 18 with step 5/span 5 becomes 15-20 — a believable
-  // marine-forecast band rather than exposing an exact simulated
-  // number (see SHOULD NOT BE PERFECT in the task notes this
-  // implements).
-  function forecastRange(value, step, span) {
-    var low = Math.max(0, Math.floor(value / step) * step);
-    return { low: low, high: low + span };
-  }
-
-  var FORECAST_CONDITION_LINES = {
-    clear: ['CLEAR'],
-    overcast: ['OVERCAST'],
-    rain: ['OVERCAST', 'RAIN'],
-    squall: ['SQUALLY', 'HEAVY RAIN AT TIMES'],
+  // Fallback trend lines when no real forecastLine is cached — two
+  // lines (wind, then seas), both derived from the SAME underlying
+  // state.weather.trend, matching the two-strand NEXT 12 HOURS
+  // structure. real.forecastLine, when available, is already
+  // summarized from actual forecast data and is used as-is instead.
+  var WIND_TREND_LINES = {
+    building: 'Wind expected to build further.',
+    easing: 'Wind easing over the next several hours.',
+    steady: 'No significant wind change expected.',
+  };
+  var SEA_TREND_LINES = {
+    building: 'Seas building to match.',
+    easing: 'Seas gradually subsiding.',
+    steady: 'Seas holding at their present state.',
   };
 
-  // What the FAR period's sky/precip looks like, given the NEAR
-  // period's actual condition and the simulation's own trend flag —
-  // steady carries the same condition forward unchanged; building/
-  // easing step it one notch worse/better, the same direction
-  // WEATHER's own trend already implies, just translated into words
-  // here instead of numbers.
-  function projectedConditionLines(condition, trend) {
-    if (trend === 'building') {
-      if (condition === 'clear' || condition === 'overcast') return ['OVERCAST', 'RAIN DEVELOPING'];
-      return ['SQUALLY', 'HEAVY RAIN AT TIMES'];
-    }
-    if (trend === 'easing') {
-      if (condition === 'squall' || condition === 'rain') return ['RAIN', 'CLEARING LATE'];
-      if (condition === 'overcast') return ['CLEARING'];
-      return ['CLEAR'];
-    }
-    return FORECAST_CONDITION_LINES[condition] || FORECAST_CONDITION_LINES.overcast;
-  }
-
-  // The two-period marine forecast itself, built fresh from the SAME
-  // live state.weather fields WEATHER reads — never a separate
-  // forecast simulation. Wind direction is held constant across both
-  // periods (the simulation doesn't model a projected direction
-  // shift, only trend's building/easing/steady magnitude), and wind/
-  // seas both widen by trend into the far period.
-  function buildForecastPeriods(state) {
-    var w = state.weather;
-    var labels = forecastPeriodLabels(state);
-    var windDir = compassPoint(w.windDirection);
-    var windRange = forecastRange(w.windSpeed, 5, 5);
-    var seaHeight = seaStateWaveHeightFt(w.seaState);
-    var seaRange = { low: seaHeight, high: seaHeight + 2 };
-    var nearPeriod = {
-      label: labels[0], windDir: windDir,
-      windLow: windRange.low, windHigh: windRange.high,
-      seaLow: seaRange.low, seaHigh: seaRange.high,
-      conditionLines: FORECAST_CONDITION_LINES[w.condition] || FORECAST_CONDITION_LINES.overcast,
-    };
-    var trend = w.trend;
-    var farWindLow = windRange.low, farWindHigh = windRange.high;
-    var farSeaLow = seaRange.low, farSeaHigh = seaRange.high;
-    if (trend === 'building') {
-      farWindLow += 5; farWindHigh += 5;
-      farSeaLow += 2; farSeaHigh += 2;
-    } else if (trend === 'easing') {
-      farWindLow = Math.max(0, farWindLow - 5); farWindHigh = Math.max(farWindLow + 5, farWindHigh - 5);
-      farSeaLow = Math.max(1, farSeaLow - 2); farSeaHigh = Math.max(farSeaLow + 2, farSeaHigh - 2);
-    }
-    var farPeriod = {
-      label: labels[1], windDir: windDir,
-      windLow: farWindLow, windHigh: farWindHigh,
-      seaLow: farSeaLow, seaHigh: farSeaHigh,
-      conditionLines: projectedConditionLines(w.condition, trend),
-    };
-    return [nearPeriod, farPeriod];
-  }
-
-  // Small, bounded number-to-words table — every value FORECAST can
-  // actually produce (wind speed rounds to a multiple of 5 up to 45;
-  // sea height is a small fixed tier table topping out at 14) fits
-  // within 0-59, so this direct lookup covers the full range without
-  // a general-purpose number-to-words algorithm.
-  var FORECAST_NUMBER_WORDS = {
-    0: 'zero', 1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine',
-    10: 'ten', 11: 'eleven', 12: 'twelve', 13: 'thirteen', 14: 'fourteen', 15: 'fifteen', 16: 'sixteen',
-    17: 'seventeen', 18: 'eighteen', 19: 'nineteen', 20: 'twenty', 30: 'thirty', 40: 'forty', 50: 'fifty',
-  };
-  // Spoken words for n, space-joined — e.g. 15 -> "fifteen", 25 ->
-  // "twenty five". buildLineScript below treats each space-separated
-  // spoken word as its own boundary-event unit, so a two-word number
-  // like this only reveals its displayed digits once BOTH spoken
-  // words have been heard — see that function's own notes.
-  function spokenNumber(n) {
-    if (FORECAST_NUMBER_WORDS[n] != null) return FORECAST_NUMBER_WORDS[n];
-    var tens = Math.floor(n / 10) * 10, ones = n % 10;
-    if (FORECAST_NUMBER_WORDS[tens] != null && FORECAST_NUMBER_WORDS[ones] != null) {
-      return FORECAST_NUMBER_WORDS[tens] + ' ' + FORECAST_NUMBER_WORDS[ones];
-    }
-    return String(n); // defensive fallback, not expected given the bounded ranges above
-  }
-
-  var FORECAST_COMPASS_SPOKEN = {
-    N: 'north', NNE: 'north northeast', NE: 'northeast', ENE: 'east northeast',
-    E: 'east', ESE: 'east southeast', SE: 'southeast', SSE: 'south southeast',
-    S: 'south', SSW: 'south southwest', SW: 'southwest', WSW: 'west southwest',
-    W: 'west', WNW: 'west northwest', NW: 'northwest', NNW: 'north northwest',
-  };
-  var FORECAST_ISSUANCE_SPOKEN = {
-    '0000': 'zero zero hundred', '0600': 'zero six hundred', '1200': 'twelve hundred', '1800': 'eighteen hundred',
-  };
-
-  // How long the voice (and the static-alone gap) pauses after each
-  // kind of forecast line finishes speaking/transcribing -- see PAUSE
-  // TIMING in the task notes. The "transition" pause doubles as the
-  // end-of-transmission static tail when it falls on the very last
-  // line of the whole broadcast (see performReceiveForecast).
-  var FORECAST_PAUSE_NORMAL = 500;
-  var FORECAST_PAUSE_HEADING = 700;
-  var FORECAST_PAUSE_ISSUED = 1000;
-  var FORECAST_PAUSE_TRANSITION = 1000;
-
-  // Splits a plain phrase into per-word tokens, each spoken exactly as
-  // written (lowercased) with a period appended to the phrase's own
-  // last word -- the natural, terminal-sentence intonation every
-  // spoken LINE in this broadcast ends with (see SPEAK ABBREVIATIONS
-  // NATURALLY / the task's own "Tonight." "Overcast." examples).
-  function lineWordsFromPhrase(phrase) {
-    var words = phrase.split(' ');
-    return words.map(function (w, i) {
-      var spoken = w.toLowerCase() + (i === words.length - 1 ? '.' : '');
-      return { display: w, spoken: spoken };
-    });
-  }
-
-  // The marine forecast broken into its own DISPLAY LINES, each with
-  // the words that make it up (display token + natural spoken form)
-  // and how long to pause once that line finishes -- see ADD PAUSES
-  // AFTER EVERY FORECAST LINE / PAUSE TIMING in the task notes. Speech
-  // is now driven per-LINE (one utterance each), never one utterance
-  // for the whole forecast -- see DO NOT USE PUNCTUATION AS THE ONLY
-  // PAUSE SYSTEM. blankAfter marks a line followed by a blank row in
-  // the WRITTEN report (reconstructed once the broadcast completes --
-  // see performReceiveForecast's own finish()); it's a display-
-  // formatting detail, independent of the spoken pause duration, though
-  // the two always line up in practice (a blank row's preceding line is
-  // always the one that also gets the longer transition/issued pause).
-  function buildForecastLines(state) {
-    var periods = buildForecastPeriods(state);
-    var issuedHHMM = hhmmFromDate(mostRecentForecastIssuance(state));
-    var lines = [];
-
-    lines.push({ words: lineWordsFromPhrase('MARINE FORECAST'), pauseAfterMs: FORECAST_PAUSE_HEADING, blankAfter: false });
-    lines.push({
-      words: [
-        { display: 'ISSUED', spoken: 'issued' },
-        { display: issuedHHMM, spoken: (FORECAST_ISSUANCE_SPOKEN[issuedHHMM] || issuedHHMM) + '.' },
-      ],
-      pauseAfterMs: FORECAST_PAUSE_ISSUED,
-      blankAfter: true,
-    });
-
-    periods.forEach(function (period, idx) {
-      lines.push({ words: lineWordsFromPhrase(period.label), pauseAfterMs: FORECAST_PAUSE_HEADING, blankAfter: true });
-
-      // Wind direction spelled out in full (SOUTHWEST, not SW) to match
-      // the task's own DISPLAY FORMAT VS SPOKEN FORMAT example, with a
-      // comma after it for the same natural cadence as "Winds
-      // southwest, fifteen to twenty knots." -- a compound direction
-      // like NORTH NORTHEAST becomes two separate word-tokens here,
-      // each still revealing on its own spoken word.
-      var dirWords = (FORECAST_COMPASS_SPOKEN[period.windDir] || period.windDir).toUpperCase().split(' ');
-      var windWords = [{ display: 'WINDS', spoken: 'winds' }].concat(
-        dirWords.map(function (w, i) { return { display: w, spoken: w.toLowerCase() + (i === dirWords.length - 1 ? ',' : '') }; })
-      ).concat([
-        { display: String(period.windLow), spoken: spokenNumber(period.windLow) },
-        { display: 'TO', spoken: 'to' },
-        { display: String(period.windHigh), spoken: spokenNumber(period.windHigh) },
-        { display: 'KT', spoken: 'knots.' },
-      ]);
-      lines.push({ words: windWords, pauseAfterMs: FORECAST_PAUSE_NORMAL, blankAfter: false });
-
-      var seaWords = [
-        { display: 'SEAS', spoken: 'seas' },
-        { display: String(period.seaLow), spoken: spokenNumber(period.seaLow) },
-        { display: 'TO', spoken: 'to' },
-        { display: String(period.seaHigh), spoken: spokenNumber(period.seaHigh) },
-        { display: 'FT', spoken: 'feet.' },
-      ];
-      lines.push({ words: seaWords, pauseAfterMs: FORECAST_PAUSE_NORMAL, blankAfter: false });
-
-      var isLastPeriod = idx === periods.length - 1;
-      period.conditionLines.forEach(function (line, lineIdx) {
-        var isLastConditionLine = lineIdx === period.conditionLines.length - 1;
-        lines.push({
-          words: lineWordsFromPhrase(line),
-          pauseAfterMs: isLastConditionLine ? FORECAST_PAUSE_TRANSITION : FORECAST_PAUSE_NORMAL,
-          blankAfter: isLastConditionLine && !isLastPeriod,
-        });
-      });
-    });
-
-    return lines;
-  }
-
-  // Converts ONE line's words into what that line's own utterance
-  // needs: the plain spoken-text string, and a parallel array of
-  // "snapshots" -- the exact display text for JUST this line once
-  // each successive spoken word has been heard, ready to index
-  // straight from a boundary-event word count (see
-  // performReceiveForecast). A word whose spoken form is more than one
-  // word itself (e.g. "25" spoken as "twenty five") only reveals its
-  // display token once ALL of its spoken words have been heard — the
-  // display simply doesn't advance on the intermediate word, exactly
-  // like a real transcriber waiting to hear the whole number before
-  // writing it down.
-  function buildLineScript(line) {
-    var spokenWords = [];
-    var snapshots = [];
-    var displayText = '';
-    line.words.forEach(function (w) {
-      var subWords = w.spoken.split(' ');
-      subWords.forEach(function (sw, i) {
-        spokenWords.push(sw);
-        if (i === subWords.length - 1) {
-          displayText = displayText ? displayText + ' ' + w.display : w.display;
-        }
-        snapshots.push(displayText);
-      });
-    });
-    return { spokenText: spokenWords.join(' '), snapshots: snapshots, finalLineText: displayText };
-  }
-
-  // Waits (briefly) for speechSynthesis to finish loading its voice
-  // list asynchronously before calling back — getVoices() can return
-  // an empty array on the very first call after page load. Resolves
-  // immediately if voices are already available, and gives up after a
-  // short ceiling either way so a slow/absent voiceschanged event
-  // never delays the broadcast noticeably — see VOICE SELECTION in the
-  // task notes.
-  function ensureForecastVoicesLoaded(callback) {
-    if (!window.speechSynthesis) { callback(); return; }
-    if (window.speechSynthesis.getVoices().length) { callback(); return; }
-    var settled = false;
-    function done() {
-      if (settled) return;
-      settled = true;
-      window.speechSynthesis.onvoiceschanged = null;
-      callback();
-    }
-    window.speechSynthesis.onvoiceschanged = done;
-    setTimeout(done, 300);
-  }
-
-  // Prefers a calm, neutral, slightly-mechanical American voice for
-  // the weather-radio announcer, without depending on any one named
-  // system voice (voices vary by device/browser — see the task notes).
-  // Cascade: 1) a preferred, announcer-like en-US voice, 2) any other
-  // en-US voice, 3) a preferred-or-any other English voice, 4) null,
-  // which callers treat as "leave utterance.voice unset, using the
-  // browser/device default."
-  var FORECAST_PREFERRED_VOICE_NAMES = /Daniel|Alex|Fred|Google UK English Male|Microsoft David|Microsoft Mark|Microsoft Guy/i;
-  function pickWeatherRadioVoice() {
-    if (!window.speechSynthesis) return null;
-    var voices = window.speechSynthesis.getVoices() || [];
-    if (!voices.length) return null;
-    var enUS = voices.filter(function (v) { return /^en-US/i.test(v.lang); });
-    var enOther = voices.filter(function (v) { return /^en/i.test(v.lang) && !/^en-US/i.test(v.lang); });
-    var preferredUS = enUS.filter(function (v) { return FORECAST_PREFERRED_VOICE_NAMES.test(v.name); })[0];
-    if (preferredUS) return preferredUS;
-    if (enUS.length) return enUS[0];
-    if (enOther.length) {
-      var preferredOther = enOther.filter(function (v) { return FORECAST_PREFERRED_VOICE_NAMES.test(v.name); })[0];
-      return preferredOther || enOther[0];
-    }
-    return null;
-  }
-
-  // FORECAST — the weather radio itself. If the player has a
-  // previously received report saved (state.weather.lastForecast), show
-  // that exact transcript with its own received time; otherwise show
-  // the "nothing received yet" state. Either way RECEIVE FORECAST is
-  // the only way to hear/transcribe a new one — this screen never
-  // auto-plays or silently refreshes the saved report on its own (see
-  // RETURN TO FORECAST/RECEIVING A NEW FORECAST in the task notes).
+  // FORECAST — what's coming, distinct from WEATHER's what's-happening-
+  // now: a forward-looking trend (the real API-derived forecastLine
+  // when available, otherwise the wind/sea trend lines above — either
+  // way driven by actual simulation state, never hardcoded per call),
+  // plus a strategically meaningful current observation when one
+  // exists (see currentStrategicNote — never a recommendation, purely
+  // what the data shows), then the external OPEN IN WINDY link.
   function cmdForecast(state) {
-    var saved = state.weather.lastForecast;
+    if (state.boat.battery <= 0 || state.boat.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('NO POWER', 'amber');
+      state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      return;
+    }
+    var real = state.weather.realWx;
     printBlank();
-    if (saved) {
-      printLine('LAST RECEIVED ' + hhmmFromVoyageMinutes(state, saved.receivedAtVoyageMinutes), 'heading-label');
-      printBlank();
-      saved.lines.forEach(function (line) {
-        if (line === '') printBlank(); else printLine(line);
-      });
+    printLine('NEXT 12 HOURS', 'heading-label');
+    if (real && real.forecastLine) {
+      printLine(real.forecastLine);
     } else {
-      printLine('WEATHER RADIO', 'heading-label');
+      var trend = state.weather.trend;
+      printLine(WIND_TREND_LINES[trend] || WIND_TREND_LINES.steady);
+      printLine(SEA_TREND_LINES[trend] || SEA_TREND_LINES.steady);
+    }
+    var currentNote = currentStrategicNote(state);
+    if (currentNote) {
       printBlank();
-      printLine('NO FORECAST RECEIVED');
+      printLine(currentNote);
+    }
+    var seamanshipNote = seamanshipForecastNote(state);
+    if (seamanshipNote) {
+      printBlank();
+      printLine(seamanshipNote, 'amber');
     }
     state.pendingChoice = {
       id: 'forecast-menu',
       options: [
-        { label: 'RECEIVE FORECAST', action: 'receive-forecast' },
+        { label: 'OPEN IN WINDY', action: 'open-in-windy' },
         { label: 'BACK', action: 'cmd:nav-station' },
       ],
     };
-  }
-
-  // Non-null exactly while a broadcast is actively playing/
-  // transcribing — guards against two overlapping broadcasts (see
-  // SPEECH CANCELLATION / NAVIGATION SAFETY in the task notes) and
-  // gives cancelActiveForecastBroadcast something to tear down.
-  var activeForecastBroadcast = null;
-
-  // Stops everything a broadcast might have in flight -- the
-  // synthesized utterance, the fallback reveal timer, and the static
-  // loop -- WITHOUT saving anything, since this is for aborting, not
-  // completing, a reception. performReceiveForecast calls this first
-  // as a defensive guard against a stale prior broadcast before
-  // starting a new one; also the hook a future interruption (a
-  // restart, say) should call so nothing is left playing orphaned.
-  function cancelActiveForecastBroadcast() {
-    if (!activeForecastBroadcast) return;
-    var b = activeForecastBroadcast;
-    activeForecastBroadcast = null;
-    if (b.fallbackTimer) clearInterval(b.fallbackTimer);
-    if (b.boundaryCheckTimer) clearTimeout(b.boundaryCheckTimer);
-    if (b.pauseTimer) clearTimeout(b.pauseTimer);
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    stopRadioStatic(true);
-  }
-
-  // RECEIVE FORECAST — see the module notes above cmdForecast, and the
-  // task's own FINAL EXPERIENCE section this is built to match: static
-  // begins once and keeps running, uninterrupted, through the entire
-  // broadcast (including every pause below -- it is never stopped or
-  // restarted between lines); a short pause; then the synthesized
-  // announcer reads the SAME forecast buildForecastLines just derived
-  // from live state.weather, ONE DISPLAY LINE AT A TIME (never the
-  // whole report as one utterance -- see DO NOT USE PUNCTUATION AS THE
-  // ONLY PAUSE SYSTEM), each line transcribed word-by-word in sync via
-  // speech boundary events (or, when those aren't reliably available --
-  // muted, no speechSynthesis support, or boundary events never arrive
-  // for that line -- an estimated-timing fallback that still ends at
-  // exactly the same complete, saved report), followed by that line's
-  // own pause (voice silent, static alone) before the next line begins.
-  // uiBusy is set here by hand (not via runShortAction/
-  // runAudioSyncedAction) because this screen deliberately does NOT
-  // use the normal "." ".." "..." dots -- the progressive transcription
-  // IS the waiting feedback (see ACTION LOCK DURING BROADCAST).
-  function performReceiveForecast(state) {
-    var b = state.boat;
-    if (!b.accessoryOn) {
-      printBlank();
-      printLine('Accessory power is off.', 'amber');
-      cmdForecast(state);
-      return;
-    }
-    if (b.battery <= 0) {
-      printBlank();
-      printLine('No power.', 'amber');
-      cmdForecast(state);
-      return;
-    }
-
-    cancelActiveForecastBroadcast(); // defensive -- guard against a stale overlapping broadcast
-
-    var lines = buildForecastLines(state);
-    var lineScripts = lines.map(buildLineScript);
-    var issuedLabel = 'ISSUED ' + hhmmFromDate(mostRecentForecastIssuance(state));
-
-    uiBusy = true;
-    clearTempView();
-    printLine('WEATHER RADIO', 'heading-label');
-    printBlank();
-    var reportEl = printLine('');
-    reportEl.style.whiteSpace = 'pre-line'; // the built-up report has real newlines in it
-    state.pendingChoice = { id: 'forecast-receiving', options: [] }; // no options while receiving -- ACTION LOCK DURING BROADCAST
-    renderOptions(state);
-    scrollToBottom();
-
-    var completedLines = [];
-    var finished = false;
-
-    function updateDisplay(partialCurrentLineText) {
-      var shown = completedLines.slice();
-      if (partialCurrentLineText != null) shown.push(partialCurrentLineText);
-      if (reportEl.parentNode) reportEl.textContent = shown.join('\n');
-      scrollToBottom();
-    }
-
-    function finish() {
-      if (finished) return;
-      finished = true;
-      activeForecastBroadcast = null;
-      stopRadioStatic(false);
-      // Reconstructs the same blank-row-separated written format as
-      // before from the per-line blankAfter flags — see LAST RECEIVED/
-      // ISSUED behavior, unchanged.
-      var savedLines = [];
-      completedLines.forEach(function (text, i) {
-        savedLines.push(text);
-        if (lines[i].blankAfter) savedLines.push('');
-      });
-      state.weather.lastForecast = {
-        issuedLabel: issuedLabel,
-        lines: savedLines,
-        receivedAtVoyageMinutes: state.meta.voyageMinutes,
-      };
-      uiBusy = false;
-      clearTempView(); // the just-finished broadcast's own DOM (reportEl included) must go before cmdForecast prints its own fresh content, or the two end up stacked in #temp-view together
-      cmdForecast(state);
-      renderOptions(state);
-      saveGameState(state);
-      updateAudioForState(state);
-      scrollToBottom();
-    }
-
-    activeForecastBroadcast = {};
-
-    // Static begins once, before the first line, and is never stopped
-    // or restarted again until the whole broadcast finishes -- see
-    // STATIC CONTINUES THROUGH PAUSES in the task notes.
-    startRadioStatic();
-
-    var canSpeak = !muted && audioUnlocked && !!window.speechSynthesis && typeof SpeechSynthesisUtterance === 'function';
-
-    // Speaks/transcribes lines[idx], then waits that line's own
-    // pauseAfterMs (static alone, voice silent, no new words appearing
-    // -- see WORD-BY-WORD TRANSCRIPTION + PAUSES) before moving on to
-    // the next line. The very last line's own pause doubles as the END
-    // OF TRANSMISSION static tail: once it elapses, finish() runs
-    // directly rather than advancing to a next line.
-    function speakLine(idx) {
-      if (!activeForecastBroadcast || finished) return;
-      var ls = lineScripts[idx];
-      var wordIndex = -1;
-
-      function revealNextWord() {
-        wordIndex++;
-        if (wordIndex >= ls.snapshots.length) wordIndex = ls.snapshots.length - 1;
-        updateDisplay(ls.snapshots[wordIndex]);
-      }
-
-      function lineComplete() {
-        if (!activeForecastBroadcast || finished) return;
-        completedLines.push(ls.finalLineText);
-        updateDisplay(null); // this line is done; nothing partial to show until the NEXT line starts speaking -- do NOT begin typing it during the pause
-        var pauseTimer = setTimeout(function () {
-          if (!activeForecastBroadcast || finished) return;
-          if (idx + 1 < lineScripts.length) {
-            speakLine(idx + 1);
-          } else {
-            finish();
-          }
-        }, lines[idx].pauseAfterMs);
-        activeForecastBroadcast.pauseTimer = pauseTimer;
-      }
-
-      function runFallbackForLine() {
-        // No usable speech for THIS line (SOUND OFF, no
-        // speechSynthesis support, or boundary events never arrived) --
-        // estimate timing from roughly the same deliberate pace speech
-        // would have used, and reveal this line's words on a plain
-        // timer instead. Still the SAME snapshots/lineComplete path
-        // (pause included), so the completed, saved report ends up
-        // identical either way -- see SOUND OFF BEHAVIOR / SPEECH
-        // BOUNDARY FALLBACK / FALLBACK BEHAVIOR in the task notes.
-        var msPerWord = 460; // ~130 words/minute, matching utter.rate's own deliberate pace
-        var total = ls.snapshots.length;
-        var fallbackTimer = setInterval(function () {
-          if (!activeForecastBroadcast || finished) { clearInterval(fallbackTimer); return; }
-          revealNextWord();
-          if (wordIndex >= total - 1) {
-            clearInterval(fallbackTimer);
-            lineComplete();
-          }
-        }, msPerWord);
-        activeForecastBroadcast.fallbackTimer = fallbackTimer;
-      }
-
-      if (canSpeak) {
-        var utter = new SpeechSynthesisUtterance(ls.spokenText);
-        var voice = pickWeatherRadioVoice();
-        if (voice) utter.voice = voice;
-        utter.rate = 0.85; // slightly slower/more deliberate than conversational default (1.0) -- see SPEECH CHARACTER
-        utter.pitch = 0.9;
-        utter.volume = 0.4; // the synthesized VOICE only -- static.mp3's own volume, and every other sound in the game, is completely untouched (see VOICE VOLUME)
-
-        var gotAnyBoundary = false;
-        var boundaryCheckTimer = setTimeout(function () {
-          if (!gotAnyBoundary && activeForecastBroadcast && !finished) {
-            window.speechSynthesis.cancel();
-            runFallbackForLine();
-          }
-        }, 1500);
-        activeForecastBroadcast.boundaryCheckTimer = boundaryCheckTimer;
-
-        utter.onboundary = function (event) {
-          if (event.name && event.name !== 'word') return;
-          gotAnyBoundary = true;
-          clearTimeout(boundaryCheckTimer);
-          revealNextWord();
-        };
-        utter.onend = function () {
-          clearTimeout(boundaryCheckTimer);
-          if (!activeForecastBroadcast || finished) return;
-          lineComplete();
-        };
-        utter.onerror = function () {
-          clearTimeout(boundaryCheckTimer);
-          if (!activeForecastBroadcast || finished) return;
-          runFallbackForLine();
-        };
-
-        window.speechSynthesis.cancel(); // safety: clear any stray prior utterance first
-        window.speechSynthesis.speak(utter);
-      } else {
-        runFallbackForLine();
-      }
-    }
-
-    ensureForecastVoicesLoaded(function () {
-      setTimeout(function () {
-        if (!activeForecastBroadcast || finished) return;
-        speakLine(0);
-      }, 700); // short pause after static begins, before the voice starts
-    });
   }
 
 
@@ -9764,115 +9236,6 @@
   }
 
   /* --------------------------------------------------------------
-     NAV STATION AUDIO -- the marine weather-radio static (see
-     cmdForecast/performReceiveForecast). Unlike every one-shot above,
-     this is a SUSTAINED LOOP with no natural end of its own: a
-     broadcast's length depends on the synthesized speech, which this
-     file has no way to know in advance, so static.mp3 just loops
-     (el.loop = true) until performReceiveForecast explicitly stops it
-     once the voice is done. startRadioStatic/stopRadioStatic fade in/
-     out rather than snap, matching the click-prevention fades used
-     everywhere else in this file, just a bit longer (a sustained
-     ambience starting/stopping, not a short mechanical click) -- see
-     NAV_STATION_CROSSFADE_SECONDS below.
-     -------------------------------------------------------------- */
-  var NAV_STATION_AUDIO_FILES = {
-    static: 'audio/nav_station/static.mp3',
-  };
-  var NAV_STATION_AUDIO_VOLUME = {
-    static: 0.35, // quiet enough that the synthesized voice stays clearly intelligible over it
-  };
-  var NAV_STATION_CROSSFADE_SECONDS = 0.3;
-
-  var navStationAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as saloonAudioEls/cabinAudioEls/etc
-
-  function getNavStationAudioEl(key) {
-    var el = navStationAudioEls[key];
-    if (el) return el;
-    el = new Audio(NAV_STATION_AUDIO_FILES[key]);
-    el.loop = true;
-    el.preload = 'auto';
-    el.volume = 0;
-    el.addEventListener('error', function () {
-      console.warn('Nav Station audio failed to load (' + key + '): ' + NAV_STATION_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
-    });
-    navStationAudioEls[key] = el;
-    return el;
-  }
-
-  // Identical in shape to fadeSaloonVolume/fadeCabinVolume/etc -- see
-  // those functions' own comments for why each audio system keeps its
-  // own independent copy rather than sharing one.
-  function fadeNavStationVolume(el, target, seconds, onComplete) {
-    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-    var start = el.volume;
-    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
-    var stepMs = 20;
-    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
-    var stepIndex = 0;
-    el._fadeTimer = setInterval(function () {
-      stepIndex++;
-      if (stepIndex >= steps) {
-        el.volume = target;
-        clearInterval(el._fadeTimer);
-        el._fadeTimer = null;
-        if (onComplete) onComplete();
-      } else {
-        el.volume = start + (target - start) * (stepIndex / steps);
-      }
-    }, stepMs);
-  }
-
-  // Starts (or, if already playing, simply re-confirms) the static
-  // loop, faded in. If SOUND is OFF, still actually starts the loop
-  // (silently, at volume 0, exactly like every other one-shot's muted
-  // behavior) rather than skipping it -- keeps the mix consistent if
-  // the player un-mutes mid-broadcast, and keeps this function's own
-  // behavior uniform regardless of audioUnlocked (guarded below) vs
-  // muted (a completely separate, later concern).
-  function startRadioStatic() {
-    if (!audioUnlocked) return null;
-    var el = getNavStationAudioEl('static');
-    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-    if (el.paused) {
-      el.currentTime = 0;
-      el.volume = 0;
-      var p = el.play();
-      if (p && p.catch) p.catch(function (e) { console.warn('Nav Station audio failed to play (static):', describeError(e)); });
-    }
-    fadeNavStationVolume(el, muted ? 0 : NAV_STATION_AUDIO_VOLUME.static, NAV_STATION_CROSSFADE_SECONDS);
-    return el;
-  }
-
-  // immediate=true skips the fade entirely (used when the player has
-  // navigated away mid-broadcast and there's no screen left for a fade
-  // to be perceptible on -- see performReceiveForecast's cancellation
-  // path); otherwise fades out cleanly, matching every other audio
-  // transition in this file, then pauses once fully silent.
-  function stopRadioStatic(immediate) {
-    var el = navStationAudioEls.static;
-    if (!el || el.paused) return;
-    if (immediate) {
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.pause();
-      el.volume = 0;
-      return;
-    }
-    fadeNavStationVolume(el, 0, NAV_STATION_CROSSFADE_SECONDS, function () {
-      el.pause();
-    });
-  }
-
-  function applyMuteToNavStationAudio() {
-    Object.keys(navStationAudioEls).forEach(function (key) {
-      var el = navStationAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : NAV_STATION_AUDIO_VOLUME[key];
-    });
-  }
-
-  /* --------------------------------------------------------------
      SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
      pair, and the winch one-shot, which now specifically represents the
      player physically trimming the sails (see cmdTrimSails/
@@ -10959,8 +10322,6 @@
       performAutopilotToggle(state, cmdNavStation);
     } else if (action === 'toggle-fan') {
       performFanToggle(state);
-    } else if (action === 'receive-forecast') {
-      performReceiveForecast(state);
     } else if (action === 'trim-sails') {
       cmdTrimSails(state);
     } else if (action.indexOf('chore:') === 0) {
@@ -11636,7 +10997,6 @@
     }
     delete b.exteriorLightsOn;
     if (b.accessoryOn === undefined) b.accessoryOn = false;
-    if (state.weather.lastForecast === undefined) state.weather.lastForecast = null;
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
     if (b.hatchOpen === undefined) b.hatchOpen = false;
