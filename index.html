@@ -187,6 +187,18 @@
     margin: 0.35rem 0;
   }
 
+  /* A visible panel-bracketing line (e.g. the NAV STATION electrical
+     panel) -- distinct from the plain invisible spacer above, which
+     every other group-to-group gap still uses unchanged. MEDIUM
+     phosphor, per the panel's own text-brightness rule -- a reduced-
+     opacity version of the base --phosphor tone, clearly more visible
+     than the very faint structural --rule borders elsewhere but well
+     short of full-brightness text. */
+  .option-divider-line {
+    margin: 0.5rem 0;
+    border-top: 1px solid rgba(143, 215, 172, 0.55);
+  }
+
   .option {
     background: none;
     appearance: none;
@@ -202,6 +214,22 @@
   }
   .option:hover, .option:focus-visible { text-decoration: underline; }
   .option:focus-visible { outline: 1px dashed var(--phosphor); outline-offset: 2px; }
+
+  /* Indicator lamps (e.g. the NAV STATION electrical panel) -- the one
+     deliberate exception to the green phosphor palette everywhere else
+     in Landfall. OFF is a dark, muted red: clearly visible against the
+     near-black background but plainly unlit. ON is a bright, saturated
+     red with a very subtle glow, echoing the same soft text-shadow
+     treatment #output already uses for the phosphor text itself. Never
+     used for ordinary text -- only these small circular state lamps. */
+  .lamp {
+    display: inline-block;
+  }
+  .lamp-off { color: #5a2420; }
+  .lamp-on {
+    color: #ff4b36;
+    text-shadow: 0 0 4px rgba(255, 75, 54, 0.5);
+  }
 
   @media (max-width: 480px) {
     .line, .entry-text, .option { font-size: 0.98rem; }
@@ -5850,14 +5878,14 @@
   // prompt, no delay, and deliberately no permanent-log entry for the
   // routine flip itself (these can be switched often; logging every one
   // would clutter the log fast). A dead battery can't power anything
-  // new on, though it can still be switched off. Covers the four
-  // controls still on the ELECTRICAL PANEL (embedded in NAV STATION) --
-  // CABIN LIGHTS, EXTERIOR LIGHTS, HEATER, ACCESSORY POWER. AUTOPILOT
-  // and FAN have their own dedicated toggle functions now (see
-  // performAutopilotToggle at the HELM, performFanToggle at the
-  // SALOON) since each returns to a different screen and (for
-  // autopilot) has its own extra side effects -- this function no
-  // longer needs to special-case anything.
+  // new on, though it can still be switched off. Covers four of the
+  // five NAV STATION electrical panel rows -- CABIN LIGHTS, EXTERIOR
+  // LIGHTS, HEATER, ACCESSORY. AUTOPILOT (also on this panel, but
+  // reachable from the HELM too) and FAN (reachable from the SALOON)
+  // have their own dedicated toggle functions instead (see
+  // performAutopilotToggle, performFanToggle) since each can return to
+  // more than one screen and (for autopilot) has its own extra side
+  // effects -- this function only ever redraws NAV STATION.
   function performElectricalToggle(state, key) {
     var field = ELECTRICAL_TOGGLE_FIELDS[key];
     if (!field) return;
@@ -5893,28 +5921,34 @@
     cmdNavStation(state);
   }
 
-  // AUTOPILOT — moved here from the old combined toggle above so it can
-  // return to the HELM (where it's now controlled) instead of NAV
-  // STATION. Same damaged/battery gating and switch-click sound as
-  // every other electrical toggle, and the exact same side effects as
-  // before the move: engaging it ends manual helming and clears any
-  // stale drift heading before starting the turn toward the current
-  // steering target; disengaging it is announced the same way. Nothing
-  // about autopilot battery draw, course holding, or steering behavior
-  // changes here — this is the same state flip and the same
-  // beginCourseTurn call, just relocated.
-  function performAutopilotToggle(state) {
+  // AUTOPILOT — reachable from both the HELM and the NAV STATION
+  // electrical panel now (see the 'toggle-autopilot'/'toggle-autopilot-
+  // nav' actions below); returnTo says which screen to redraw when this
+  // finishes, defaulting to cmdHelm so the original HELM call sites
+  // don't need to change. One shared autopilot flag either way — never
+  // a second variable — so a toggle from either screen is immediately
+  // visible on the other the next time it's opened. Same damaged/
+  // battery gating and switch-click sound as every other electrical
+  // toggle, and the exact same side effects regardless of which screen
+  // it was toggled from: engaging it clears any stale drift heading
+  // before starting the turn toward the current steering target;
+  // disengaging it is announced the same way. Nothing about autopilot
+  // battery draw, course holding, or steering behavior changes here —
+  // this is the same state flip and the same beginCourseTurn call
+  // every time.
+  function performAutopilotToggle(state, returnTo) {
+    var render = returnTo || cmdHelm;
     var b = state.boat;
     if (!b.autopilotOn && b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged.', 'amber');
-      cmdHelm(state);
+      render(state);
       return;
     }
     if (!b.autopilotOn && b.battery <= 0) {
       printBlank();
       printLine('No power.', 'amber');
-      cmdHelm(state);
+      render(state);
       return;
     }
     var turningOn = !b.autopilotOn;
@@ -5940,8 +5974,9 @@
       printBlank();
       printLine('Autopilot disengaged.', 'dim');
     }
-    cmdHelm(state);
+    render(state);
   }
+
 
   // FAN — moved here from the old combined toggle above so it can
   // return to the SALOON (where it's now controlled). Same damaged/
@@ -6731,7 +6766,7 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
-      { label: 'FAN \u2014 ' + (state.boat.fanOn ? 'ON' : 'OFF'), action: 'toggle-fan' },
+      { label: state.boat.fanOn ? 'TURN FAN OFF' : 'TURN FAN ON', action: 'toggle-fan' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
         : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -6794,20 +6829,11 @@
     state.pendingChoice = { id: 'cabin-menu', options: options };
   }
 
-  // NAV STATION — Solace herself: navigation, weather, resources,
-  // electrical, boat STATUS, and DISTRESS. PUT AWAY TOOLS lands here
-  // too (tools come out for REPAIR, itself reached from STATUS) rather
-  // than in a personal-living-space room. Preserves every existing
-  // nav/weather/inventory/electrical/status/rescue function exactly —
-  // this only changes where they're reached from.
   // NAV STATION -- the boat's operational center: cabin/power status at
-  // a glance, the electrical panel embedded directly (no separate
-  // ELECTRICAL screen any more -- see the removed cmdElectrical),
-  // navigation information, then inventory/status. Only two headings
-  // (NAV STATION itself and ELECTRICAL PANEL) -- the remaining three
-  // groups (cabin/power, navigation, inventory/vessel) are separated by
-  // blank lines alone, which is enough to read as distinct sections
-  // without adding more heading noise.
+  // a glance, the electrical panel embedded directly (no heading of its
+  // own -- the panel format itself, bracketed by thin phosphor lines,
+  // is enough to read as a distinct physical panel), navigation
+  // information, then inventory/status.
   function cmdNavStation(state) {
     var b = state.boat;
     printBlank();
@@ -6819,8 +6845,6 @@
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
     printLine(statusLine('SOLAR', solarOutputWatts(state) + ' W'));
-    printBlank();
-    printLine('ELECTRICAL PANEL', 'heading-label');
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
@@ -6830,25 +6854,48 @@
     var extraGroup = [];
     if (toolsOpt) extraGroup.push(toolsOpt);
     if (rescueItem) extraGroup.push(rescueItem);
-    var options = groupedOptions([
-      [
-        { label: 'CABIN LIGHTS \u2014 ' + (b.cabinLightsOn ? 'ON' : 'OFF'), action: 'electrical:cabinLights' },
-        { label: 'EXTERIOR LIGHTS \u2014 ' + (b.exteriorLightsOn ? 'ON' : 'OFF'), action: 'electrical:exteriorLights' },
-        { label: 'HEATER \u2014 ' + (b.heaterOn ? 'ON' : 'OFF'), action: 'electrical:heater' },
-        { label: 'ACCESSORY POWER \u2014 ' + (b.accessoryOn ? 'ON' : 'OFF'), action: 'electrical:accessory' },
-      ],
-      [
-        { label: 'POSITION', action: 'cmd:position' },
-        { label: 'WEATHER', action: 'cmd:weather' },
-        { label: 'FORECAST', action: 'cmd:forecast' },
-      ],
-      [
-        { label: 'INVENTORY', action: 'cmd:inventory' },
-        { label: 'STATUS', action: 'cmd:status' },
-      ],
-      extraGroup,
-      [{ label: 'BACK', action: 'cancel' }],
-    ]);
+
+    // The electrical panel itself: no ELECTRICAL heading (the controls
+    // are self-explanatory), bracketed instead by a visible thin
+    // phosphor line above and below (.option-divider-line -- MEDIUM
+    // phosphor, distinct from the plain invisible spacer every other
+    // group gap on this screen still uses). Every row is BRIGHT
+    // phosphor (the standard .option treatment, unchanged) ending in a
+    // small red lamp -- never written ON/OFF text -- that reflects the
+    // REAL underlying circuit flag directly, so a dead battery or
+    // DAMAGED electrical forcing something off is automatically
+    // correct here too, with no separate UI-only state to keep in
+    // sync. AUTOPILOT reuses the exact same performAutopilotToggle/
+    // state.boat.autopilotOn as the HELM -- one shared autopilot state,
+    // never a second variable -- via its own 'toggle-autopilot-nav'
+    // action, which only differs from HELM's 'toggle-autopilot' in
+    // which screen it returns to afterward.
+    var electricalRows = [
+      { label: 'CABIN LIGHTS', on: b.cabinLightsOn, action: 'electrical:cabinLights' },
+      { label: 'EXTERIOR LIGHTS', on: b.exteriorLightsOn, action: 'electrical:exteriorLights' },
+      { label: 'AUTOPILOT', on: b.autopilotOn, action: 'toggle-autopilot-nav' },
+      { label: 'HEATER', on: b.heaterOn, action: 'electrical:heater' },
+      { label: 'ACCESSORY', on: b.accessoryOn, action: 'electrical:accessory' },
+    ].map(function (row) {
+      return { label: inventoryLine(row.label, ''), action: row.action, indicator: row.on ? 'on' : 'off' };
+    });
+
+    var options = [{ divider: true, line: true }]
+      .concat(electricalRows)
+      .concat([{ divider: true, line: true }])
+      .concat(groupedOptions([
+        [
+          { label: 'POSITION', action: 'cmd:position' },
+          { label: 'WEATHER', action: 'cmd:weather' },
+          { label: 'FORECAST', action: 'cmd:forecast' },
+        ],
+        [
+          { label: 'INVENTORY', action: 'cmd:inventory' },
+          { label: 'STATUS', action: 'cmd:status' },
+        ],
+        extraGroup,
+        [{ label: 'BACK', action: 'cancel' }],
+      ]));
     state.pendingChoice = { id: 'nav-station-menu', options: options };
   }
 
@@ -9876,14 +9923,29 @@
     opts.forEach(function (opt) {
       if (opt.divider) {
         var div = document.createElement('div');
-        div.className = 'option-divider';
+        div.className = opt.line ? 'option-divider-line' : 'option-divider';
         optionsEl.appendChild(div);
         return;
       }
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'option';
-      btn.textContent = '> ' + opt.label;
+      if (opt.indicator) {
+        // A lamp-bearing row (e.g. the NAV STATION electrical panel):
+        // the label text and the colored ● lamp are separate DOM nodes
+        // (never string-concatenated HTML) so the lamp gets its own
+        // color/glow without touching the row's own bright phosphor
+        // text -- and since both live inside this same <button>, the
+        // entire row (lamp included) is still one single click target,
+        // exactly like every other option here.
+        btn.appendChild(document.createTextNode('> ' + opt.label));
+        var lamp = document.createElement('span');
+        lamp.className = 'lamp ' + (opt.indicator === 'on' ? 'lamp-on' : 'lamp-off');
+        lamp.textContent = '\u25CF';
+        btn.appendChild(lamp);
+      } else {
+        btn.textContent = '> ' + opt.label;
+      }
       btn.addEventListener('click', function () {
         if (opt.action === 'open-map' || opt.action === 'open-in-windy') {
           // Pure external side effect: opens a new tab and changes
@@ -10116,6 +10178,8 @@
       cmdCloseHatch(state);
     } else if (action === 'toggle-autopilot') {
       performAutopilotToggle(state);
+    } else if (action === 'toggle-autopilot-nav') {
+      performAutopilotToggle(state, cmdNavStation);
     } else if (action === 'toggle-fan') {
       performFanToggle(state);
     } else if (action === 'trim-sails') {
