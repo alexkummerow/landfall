@@ -6338,10 +6338,10 @@
     17: 'seventeen', 18: 'eighteen', 19: 'nineteen', 20: 'twenty', 30: 'thirty', 40: 'forty', 50: 'fifty',
   };
   // Spoken words for n, space-joined — e.g. 15 -> "fifteen", 25 ->
-  // "twenty five". buildForecastScript below treats each space-
-  // separated spoken word as its own boundary-event unit, so a two-
-  // word number like this only reveals its displayed digits once BOTH
-  // spoken words have been heard — see that function's own notes.
+  // "twenty five". buildLineScript below treats each space-separated
+  // spoken word as its own boundary-event unit, so a two-word number
+  // like this only reveals its displayed digits once BOTH spoken
+  // words have been heard — see that function's own notes.
   function spokenNumber(n) {
     if (FORECAST_NUMBER_WORDS[n] != null) return FORECAST_NUMBER_WORDS[n];
     var tens = Math.floor(n / 10) * 10, ones = n % 10;
@@ -6361,112 +6361,170 @@
     '0000': 'zero zero hundred', '0600': 'zero six hundred', '1200': 'twelve hundred', '1800': 'eighteen hundred',
   };
 
-  // A "segment" is either a displayed/spoken word ({ display, spoken })
-  // or a pure layout marker ({ newline: true } / { blank: true }) that
-  // consumes no spoken word at all. spoken defaults to display's own
-  // lowercase text when omitted — most plain words (RAIN, DEVELOPING,
-  // CLEARING...) read naturally as-is; only the handful of nautical
-  // abbreviations (KT/FT/compass points/numbers/the issued time) need
-  // an explicit override — see DISPLAY FORMAT VS SPOKEN FORMAT in the
-  // task notes this implements.
-  function pushWordSegments(segs, phrase) {
-    phrase.split(' ').forEach(function (w) { segs.push({ display: w }); });
+  // How long the voice (and the static-alone gap) pauses after each
+  // kind of forecast line finishes speaking/transcribing -- see PAUSE
+  // TIMING in the task notes. The "transition" pause doubles as the
+  // end-of-transmission static tail when it falls on the very last
+  // line of the whole broadcast (see performReceiveForecast).
+  var FORECAST_PAUSE_NORMAL = 500;
+  var FORECAST_PAUSE_HEADING = 700;
+  var FORECAST_PAUSE_ISSUED = 1000;
+  var FORECAST_PAUSE_TRANSITION = 1000;
+
+  // Splits a plain phrase into per-word tokens, each spoken exactly as
+  // written (lowercased) with a period appended to the phrase's own
+  // last word -- the natural, terminal-sentence intonation every
+  // spoken LINE in this broadcast ends with (see SPEAK ABBREVIATIONS
+  // NATURALLY / the task's own "Tonight." "Overcast." examples).
+  function lineWordsFromPhrase(phrase) {
+    var words = phrase.split(' ');
+    return words.map(function (w, i) {
+      var spoken = w.toLowerCase() + (i === words.length - 1 ? '.' : '');
+      return { display: w, spoken: spoken };
+    });
   }
 
-  function buildForecastSegments(state) {
+  // The marine forecast broken into its own DISPLAY LINES, each with
+  // the words that make it up (display token + natural spoken form)
+  // and how long to pause once that line finishes -- see ADD PAUSES
+  // AFTER EVERY FORECAST LINE / PAUSE TIMING in the task notes. Speech
+  // is now driven per-LINE (one utterance each), never one utterance
+  // for the whole forecast -- see DO NOT USE PUNCTUATION AS THE ONLY
+  // PAUSE SYSTEM. blankAfter marks a line followed by a blank row in
+  // the WRITTEN report (reconstructed once the broadcast completes --
+  // see performReceiveForecast's own finish()); it's a display-
+  // formatting detail, independent of the spoken pause duration, though
+  // the two always line up in practice (a blank row's preceding line is
+  // always the one that also gets the longer transition/issued pause).
+  function buildForecastLines(state) {
     var periods = buildForecastPeriods(state);
     var issuedHHMM = hhmmFromDate(mostRecentForecastIssuance(state));
-    var segs = [];
-    pushWordSegments(segs, 'MARINE FORECAST');
-    segs.push({ newline: true });
-    segs.push({ display: 'ISSUED' });
-    segs.push({ display: issuedHHMM, spoken: FORECAST_ISSUANCE_SPOKEN[issuedHHMM] || issuedHHMM });
-    segs.push({ blank: true });
-    periods.forEach(function (period, idx) {
-      pushWordSegments(segs, period.label);
-      segs.push({ blank: true });
-      segs.push({ display: 'WINDS' });
-      // Spelled out in full (SOUTHWEST, not SW) to match the task's own
-      // DISPLAY FORMAT VS SPOKEN FORMAT example -- a compound direction
-      // like NORTH NORTHEAST becomes two separate word-segments here,
-      // each revealing on its own spoken word same as any other line.
-      pushWordSegments(segs, (FORECAST_COMPASS_SPOKEN[period.windDir] || period.windDir).toUpperCase());
-      segs.push({ display: String(period.windLow), spoken: spokenNumber(period.windLow) });
-      segs.push({ display: 'TO' });
-      segs.push({ display: String(period.windHigh), spoken: spokenNumber(period.windHigh) });
-      segs.push({ display: 'KT', spoken: 'knots' });
-      segs.push({ newline: true });
-      segs.push({ display: 'SEAS' });
-      segs.push({ display: String(period.seaLow), spoken: spokenNumber(period.seaLow) });
-      segs.push({ display: 'TO' });
-      segs.push({ display: String(period.seaHigh), spoken: spokenNumber(period.seaHigh) });
-      segs.push({ display: 'FT', spoken: 'feet' });
-      segs.push({ newline: true });
-      // No newline after the LAST condition line -- a trailing blank
-      // marker already supplies its own line break (plus the blank
-      // row itself) before the next period, so adding one here too
-      // would double the gap between periods.
-      period.conditionLines.forEach(function (line, lineIdx) {
-        pushWordSegments(segs, line);
-        if (lineIdx < period.conditionLines.length - 1) segs.push({ newline: true });
-      });
-      if (idx < periods.length - 1) segs.push({ blank: true });
+    var lines = [];
+
+    lines.push({ words: lineWordsFromPhrase('MARINE FORECAST'), pauseAfterMs: FORECAST_PAUSE_HEADING, blankAfter: false });
+    lines.push({
+      words: [
+        { display: 'ISSUED', spoken: 'issued' },
+        { display: issuedHHMM, spoken: (FORECAST_ISSUANCE_SPOKEN[issuedHHMM] || issuedHHMM) + '.' },
+      ],
+      pauseAfterMs: FORECAST_PAUSE_ISSUED,
+      blankAfter: true,
     });
-    return segs;
+
+    periods.forEach(function (period, idx) {
+      lines.push({ words: lineWordsFromPhrase(period.label), pauseAfterMs: FORECAST_PAUSE_HEADING, blankAfter: true });
+
+      // Wind direction spelled out in full (SOUTHWEST, not SW) to match
+      // the task's own DISPLAY FORMAT VS SPOKEN FORMAT example, with a
+      // comma after it for the same natural cadence as "Winds
+      // southwest, fifteen to twenty knots." -- a compound direction
+      // like NORTH NORTHEAST becomes two separate word-tokens here,
+      // each still revealing on its own spoken word.
+      var dirWords = (FORECAST_COMPASS_SPOKEN[period.windDir] || period.windDir).toUpperCase().split(' ');
+      var windWords = [{ display: 'WINDS', spoken: 'winds' }].concat(
+        dirWords.map(function (w, i) { return { display: w, spoken: w.toLowerCase() + (i === dirWords.length - 1 ? ',' : '') }; })
+      ).concat([
+        { display: String(period.windLow), spoken: spokenNumber(period.windLow) },
+        { display: 'TO', spoken: 'to' },
+        { display: String(period.windHigh), spoken: spokenNumber(period.windHigh) },
+        { display: 'KT', spoken: 'knots.' },
+      ]);
+      lines.push({ words: windWords, pauseAfterMs: FORECAST_PAUSE_NORMAL, blankAfter: false });
+
+      var seaWords = [
+        { display: 'SEAS', spoken: 'seas' },
+        { display: String(period.seaLow), spoken: spokenNumber(period.seaLow) },
+        { display: 'TO', spoken: 'to' },
+        { display: String(period.seaHigh), spoken: spokenNumber(period.seaHigh) },
+        { display: 'FT', spoken: 'feet.' },
+      ];
+      lines.push({ words: seaWords, pauseAfterMs: FORECAST_PAUSE_NORMAL, blankAfter: false });
+
+      var isLastPeriod = idx === periods.length - 1;
+      period.conditionLines.forEach(function (line, lineIdx) {
+        var isLastConditionLine = lineIdx === period.conditionLines.length - 1;
+        lines.push({
+          words: lineWordsFromPhrase(line),
+          pauseAfterMs: isLastConditionLine ? FORECAST_PAUSE_TRANSITION : FORECAST_PAUSE_NORMAL,
+          blankAfter: isLastConditionLine && !isLastPeriod,
+        });
+      });
+    });
+
+    return lines;
   }
 
-  // Converts a flat segment list into everything the broadcast needs:
-  // the plain-text string fed to SpeechSynthesisUtterance, and a
-  // parallel array of "snapshots" — the exact display text that should
-  // be showing once each successive spoken word has been heard, ready
-  // to index straight from a boundary-event word count (see
-  // performReceiveForecast). A segment whose spoken form is more than
-  // one word (e.g. "25" spoken as "twenty five") only reveals its
+  // Converts ONE line's words into what that line's own utterance
+  // needs: the plain spoken-text string, and a parallel array of
+  // "snapshots" -- the exact display text for JUST this line once
+  // each successive spoken word has been heard, ready to index
+  // straight from a boundary-event word count (see
+  // performReceiveForecast). A word whose spoken form is more than one
+  // word itself (e.g. "25" spoken as "twenty five") only reveals its
   // display token once ALL of its spoken words have been heard — the
   // display simply doesn't advance on the intermediate word, exactly
   // like a real transcriber waiting to hear the whole number before
   // writing it down.
-  function buildForecastScript(segments) {
+  function buildLineScript(line) {
     var spokenWords = [];
     var snapshots = [];
-    var lines = [''];
-    segments.forEach(function (seg) {
-      if (seg.blank) { lines.push(''); lines.push(''); return; }
-      if (seg.newline) { lines.push(''); return; }
-      var spokenPhrase = seg.spoken != null ? seg.spoken : seg.display.toLowerCase();
-      var subWords = spokenPhrase.split(' ');
+    var displayText = '';
+    line.words.forEach(function (w) {
+      var subWords = w.spoken.split(' ');
       subWords.forEach(function (sw, i) {
         spokenWords.push(sw);
         if (i === subWords.length - 1) {
-          var last = lines[lines.length - 1];
-          lines[lines.length - 1] = last ? last + ' ' + seg.display : seg.display;
+          displayText = displayText ? displayText + ' ' + w.display : w.display;
         }
-        snapshots.push(lines.join('\n'));
+        snapshots.push(displayText);
       });
     });
-    return { spokenText: spokenWords.join(' '), snapshots: snapshots, finalText: lines.join('\n') };
+    return { spokenText: spokenWords.join(' '), snapshots: snapshots, finalLineText: displayText };
   }
 
-  // Prefers a clear, neutral, slightly-mechanical-sounding English
-  // voice for the weather-radio announcer, without depending on any
-  // one named system voice (voices vary by device/browser — see the
-  // task notes). getVoices() can return an empty list on first call
-  // before the browser has finished loading them asynchronously;
-  // callers handle a null return by falling back to the default voice
-  // (omitting utterance.voice entirely) rather than failing outright.
+  // Waits (briefly) for speechSynthesis to finish loading its voice
+  // list asynchronously before calling back — getVoices() can return
+  // an empty array on the very first call after page load. Resolves
+  // immediately if voices are already available, and gives up after a
+  // short ceiling either way so a slow/absent voiceschanged event
+  // never delays the broadcast noticeably — see VOICE SELECTION in the
+  // task notes.
+  function ensureForecastVoicesLoaded(callback) {
+    if (!window.speechSynthesis) { callback(); return; }
+    if (window.speechSynthesis.getVoices().length) { callback(); return; }
+    var settled = false;
+    function done() {
+      if (settled) return;
+      settled = true;
+      window.speechSynthesis.onvoiceschanged = null;
+      callback();
+    }
+    window.speechSynthesis.onvoiceschanged = done;
+    setTimeout(done, 300);
+  }
+
+  // Prefers a calm, neutral, slightly-mechanical American voice for
+  // the weather-radio announcer, without depending on any one named
+  // system voice (voices vary by device/browser — see the task notes).
+  // Cascade: 1) a preferred, announcer-like en-US voice, 2) any other
+  // en-US voice, 3) a preferred-or-any other English voice, 4) null,
+  // which callers treat as "leave utterance.voice unset, using the
+  // browser/device default."
+  var FORECAST_PREFERRED_VOICE_NAMES = /Daniel|Alex|Fred|Google UK English Male|Microsoft David|Microsoft Mark|Microsoft Guy/i;
   function pickWeatherRadioVoice() {
     if (!window.speechSynthesis) return null;
     var voices = window.speechSynthesis.getVoices() || [];
     if (!voices.length) return null;
-    var english = voices.filter(function (v) { return /^en/i.test(v.lang); });
-    if (!english.length) return null;
-    // A loose preference toward names that tend to sound more neutral/
-    // announcer-like than the warmest "assistant" voices, when
-    // present; falls through to just the first available English
-    // voice otherwise.
-    var preferredNamePattern = /Daniel|Alex|Fred|Google UK English Male|Microsoft David|Microsoft Mark/i;
-    var preferred = english.filter(function (v) { return preferredNamePattern.test(v.name); })[0];
-    return preferred || english[0];
+    var enUS = voices.filter(function (v) { return /^en-US/i.test(v.lang); });
+    var enOther = voices.filter(function (v) { return /^en/i.test(v.lang) && !/^en-US/i.test(v.lang); });
+    var preferredUS = enUS.filter(function (v) { return FORECAST_PREFERRED_VOICE_NAMES.test(v.name); })[0];
+    if (preferredUS) return preferredUS;
+    if (enUS.length) return enUS[0];
+    if (enOther.length) {
+      var preferredOther = enOther.filter(function (v) { return FORECAST_PREFERRED_VOICE_NAMES.test(v.name); })[0];
+      return preferredOther || enOther[0];
+    }
+    return null;
   }
 
   // FORECAST — the weather radio itself. If the player has a
@@ -6518,23 +6576,29 @@
     activeForecastBroadcast = null;
     if (b.fallbackTimer) clearInterval(b.fallbackTimer);
     if (b.boundaryCheckTimer) clearTimeout(b.boundaryCheckTimer);
+    if (b.pauseTimer) clearTimeout(b.pauseTimer);
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     stopRadioStatic(true);
   }
 
   // RECEIVE FORECAST — see the module notes above cmdForecast, and the
   // task's own FINAL EXPERIENCE section this is built to match: static
-  // begins, a short pause, the synthesized announcer reads the SAME
-  // two-period forecast buildForecastSegments just derived from live
-  // state.weather, and the terminal transcribes it word-by-word in
-  // sync via speech boundary events (or, when those aren't reliably
-  // available -- muted, no speechSynthesis support, or boundary events
-  // never arrive -- an estimated-timing fallback that still ends at
-  // exactly the same complete, saved report). uiBusy is set here by
-  // hand (not via runShortAction/runAudioSyncedAction) because this
-  // screen deliberately does NOT use the normal "." ".." "..." dots --
-  // the progressive transcription IS the waiting feedback (see ACTION
-  // LOCK DURING BROADCAST in the task notes).
+  // begins once and keeps running, uninterrupted, through the entire
+  // broadcast (including every pause below -- it is never stopped or
+  // restarted between lines); a short pause; then the synthesized
+  // announcer reads the SAME forecast buildForecastLines just derived
+  // from live state.weather, ONE DISPLAY LINE AT A TIME (never the
+  // whole report as one utterance -- see DO NOT USE PUNCTUATION AS THE
+  // ONLY PAUSE SYSTEM), each line transcribed word-by-word in sync via
+  // speech boundary events (or, when those aren't reliably available --
+  // muted, no speechSynthesis support, or boundary events never arrive
+  // for that line -- an estimated-timing fallback that still ends at
+  // exactly the same complete, saved report), followed by that line's
+  // own pause (voice silent, static alone) before the next line begins.
+  // uiBusy is set here by hand (not via runShortAction/
+  // runAudioSyncedAction) because this screen deliberately does NOT
+  // use the normal "." ".." "..." dots -- the progressive transcription
+  // IS the waiting feedback (see ACTION LOCK DURING BROADCAST).
   function performReceiveForecast(state) {
     var b = state.boat;
     if (!b.accessoryOn) {
@@ -6552,8 +6616,8 @@
 
     cancelActiveForecastBroadcast(); // defensive -- guard against a stale overlapping broadcast
 
-    var segments = buildForecastSegments(state);
-    var script = buildForecastScript(segments);
+    var lines = buildForecastLines(state);
+    var lineScripts = lines.map(buildLineScript);
     var issuedLabel = 'ISSUED ' + hhmmFromDate(mostRecentForecastIssuance(state));
 
     uiBusy = true;
@@ -6566,13 +6630,13 @@
     renderOptions(state);
     scrollToBottom();
 
-    var wordIndex = -1;
+    var completedLines = [];
     var finished = false;
 
-    function revealNextWord() {
-      wordIndex++;
-      if (wordIndex >= script.snapshots.length) wordIndex = script.snapshots.length - 1;
-      if (reportEl.parentNode) reportEl.textContent = script.snapshots[wordIndex];
+    function updateDisplay(partialCurrentLineText) {
+      var shown = completedLines.slice();
+      if (partialCurrentLineText != null) shown.push(partialCurrentLineText);
+      if (reportEl.parentNode) reportEl.textContent = shown.join('\n');
       scrollToBottom();
     }
 
@@ -6581,9 +6645,17 @@
       finished = true;
       activeForecastBroadcast = null;
       stopRadioStatic(false);
+      // Reconstructs the same blank-row-separated written format as
+      // before from the per-line blankAfter flags — see LAST RECEIVED/
+      // ISSUED behavior, unchanged.
+      var savedLines = [];
+      completedLines.forEach(function (text, i) {
+        savedLines.push(text);
+        if (lines[i].blankAfter) savedLines.push('');
+      });
       state.weather.lastForecast = {
         issuedLabel: issuedLabel,
-        lines: script.finalText.split('\n'),
+        lines: savedLines,
         receivedAtVoyageMinutes: state.meta.voyageMinutes,
       };
       uiBusy = false;
@@ -6597,78 +6669,114 @@
 
     activeForecastBroadcast = {};
 
-    // Static begins first, a short beat before the voice -- see RADIO
-    // STATIC in the task notes.
+    // Static begins once, before the first line, and is never stopped
+    // or restarted again until the whole broadcast finishes -- see
+    // STATIC CONTINUES THROUGH PAUSES in the task notes.
     startRadioStatic();
 
     var canSpeak = !muted && audioUnlocked && !!window.speechSynthesis && typeof SpeechSynthesisUtterance === 'function';
 
-    function speakForecast() {
-      var utter = new SpeechSynthesisUtterance(script.spokenText);
-      var voice = pickWeatherRadioVoice();
-      if (voice) utter.voice = voice;
-      utter.rate = 0.85; // slightly slower/more deliberate than conversational default (1.0)
-      utter.pitch = 1;
-
-      var gotAnyBoundary = false;
-      // If boundary events never fire at all (some browsers/voices
-      // don't support them -- see SPEECH BOUNDARY FALLBACK in the task
-      // notes), fall back to estimated timing instead of leaving the
-      // display stuck on nothing.
-      var boundaryCheckTimer = setTimeout(function () {
-        if (!gotAnyBoundary && activeForecastBroadcast && !finished) {
-          window.speechSynthesis.cancel();
-          runFallbackTranscription();
-        }
-      }, 1500);
-      activeForecastBroadcast.boundaryCheckTimer = boundaryCheckTimer;
-
-      utter.onboundary = function (event) {
-        if (event.name && event.name !== 'word') return;
-        gotAnyBoundary = true;
-        clearTimeout(boundaryCheckTimer);
-        revealNextWord();
-      };
-      utter.onend = function () {
-        clearTimeout(boundaryCheckTimer);
-        if (!activeForecastBroadcast || finished) return;
-        setTimeout(finish, 500); // brief static tail before stopping -- see RADIO STATIC
-      };
-      utter.onerror = function () {
-        clearTimeout(boundaryCheckTimer);
-        if (!activeForecastBroadcast || finished) return;
-        runFallbackTranscription();
-      };
-
-      window.speechSynthesis.cancel(); // safety: clear any stray prior utterance first
-      window.speechSynthesis.speak(utter);
-    }
-
-    function runFallbackTranscription() {
-      // No usable speech at all (SOUND OFF, no speechSynthesis
-      // support, or boundary events never arrived) -- estimate timing
-      // from roughly the same deliberate pace speech would have used,
-      // and reveal words on a plain timer instead. Still the SAME
-      // snapshots/finish path, so the completed, saved report ends up
-      // identical either way -- see SOUND OFF BEHAVIOR / SPEECH
-      // BOUNDARY FALLBACK in the task notes.
-      var msPerWord = 460; // ~130 words/minute, matching utter.rate's own deliberate pace
-      var total = script.snapshots.length;
-      var fallbackTimer = setInterval(function () {
-        if (!activeForecastBroadcast || finished) { clearInterval(fallbackTimer); return; }
-        revealNextWord();
-        if (wordIndex >= total - 1) {
-          clearInterval(fallbackTimer);
-          setTimeout(finish, 500);
-        }
-      }, msPerWord);
-      activeForecastBroadcast.fallbackTimer = fallbackTimer;
-    }
-
-    setTimeout(function () {
+    // Speaks/transcribes lines[idx], then waits that line's own
+    // pauseAfterMs (static alone, voice silent, no new words appearing
+    // -- see WORD-BY-WORD TRANSCRIPTION + PAUSES) before moving on to
+    // the next line. The very last line's own pause doubles as the END
+    // OF TRANSMISSION static tail: once it elapses, finish() runs
+    // directly rather than advancing to a next line.
+    function speakLine(idx) {
       if (!activeForecastBroadcast || finished) return;
-      if (canSpeak) speakForecast(); else runFallbackTranscription();
-    }, 700); // short pause after static begins, before the voice starts
+      var ls = lineScripts[idx];
+      var wordIndex = -1;
+
+      function revealNextWord() {
+        wordIndex++;
+        if (wordIndex >= ls.snapshots.length) wordIndex = ls.snapshots.length - 1;
+        updateDisplay(ls.snapshots[wordIndex]);
+      }
+
+      function lineComplete() {
+        if (!activeForecastBroadcast || finished) return;
+        completedLines.push(ls.finalLineText);
+        updateDisplay(null); // this line is done; nothing partial to show until the NEXT line starts speaking -- do NOT begin typing it during the pause
+        var pauseTimer = setTimeout(function () {
+          if (!activeForecastBroadcast || finished) return;
+          if (idx + 1 < lineScripts.length) {
+            speakLine(idx + 1);
+          } else {
+            finish();
+          }
+        }, lines[idx].pauseAfterMs);
+        activeForecastBroadcast.pauseTimer = pauseTimer;
+      }
+
+      function runFallbackForLine() {
+        // No usable speech for THIS line (SOUND OFF, no
+        // speechSynthesis support, or boundary events never arrived) --
+        // estimate timing from roughly the same deliberate pace speech
+        // would have used, and reveal this line's words on a plain
+        // timer instead. Still the SAME snapshots/lineComplete path
+        // (pause included), so the completed, saved report ends up
+        // identical either way -- see SOUND OFF BEHAVIOR / SPEECH
+        // BOUNDARY FALLBACK / FALLBACK BEHAVIOR in the task notes.
+        var msPerWord = 460; // ~130 words/minute, matching utter.rate's own deliberate pace
+        var total = ls.snapshots.length;
+        var fallbackTimer = setInterval(function () {
+          if (!activeForecastBroadcast || finished) { clearInterval(fallbackTimer); return; }
+          revealNextWord();
+          if (wordIndex >= total - 1) {
+            clearInterval(fallbackTimer);
+            lineComplete();
+          }
+        }, msPerWord);
+        activeForecastBroadcast.fallbackTimer = fallbackTimer;
+      }
+
+      if (canSpeak) {
+        var utter = new SpeechSynthesisUtterance(ls.spokenText);
+        var voice = pickWeatherRadioVoice();
+        if (voice) utter.voice = voice;
+        utter.rate = 0.85; // slightly slower/more deliberate than conversational default (1.0) -- see SPEECH CHARACTER
+        utter.pitch = 0.9;
+        utter.volume = 0.4; // the synthesized VOICE only -- static.mp3's own volume, and every other sound in the game, is completely untouched (see VOICE VOLUME)
+
+        var gotAnyBoundary = false;
+        var boundaryCheckTimer = setTimeout(function () {
+          if (!gotAnyBoundary && activeForecastBroadcast && !finished) {
+            window.speechSynthesis.cancel();
+            runFallbackForLine();
+          }
+        }, 1500);
+        activeForecastBroadcast.boundaryCheckTimer = boundaryCheckTimer;
+
+        utter.onboundary = function (event) {
+          if (event.name && event.name !== 'word') return;
+          gotAnyBoundary = true;
+          clearTimeout(boundaryCheckTimer);
+          revealNextWord();
+        };
+        utter.onend = function () {
+          clearTimeout(boundaryCheckTimer);
+          if (!activeForecastBroadcast || finished) return;
+          lineComplete();
+        };
+        utter.onerror = function () {
+          clearTimeout(boundaryCheckTimer);
+          if (!activeForecastBroadcast || finished) return;
+          runFallbackForLine();
+        };
+
+        window.speechSynthesis.cancel(); // safety: clear any stray prior utterance first
+        window.speechSynthesis.speak(utter);
+      } else {
+        runFallbackForLine();
+      }
+    }
+
+    ensureForecastVoicesLoaded(function () {
+      setTimeout(function () {
+        if (!activeForecastBroadcast || finished) return;
+        speakLine(0);
+      }, 700); // short pause after static begins, before the voice starts
+    });
   }
 
 
