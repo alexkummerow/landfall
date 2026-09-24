@@ -402,7 +402,7 @@
         coffeeCount: 0,
         inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
-        atHelm: false,              // manually hand-steering (AUTOPILOT OFF only) — see cmdHelm/computeHeading; ends automatically on GO BELOW, SLEEP, autopilot re-engaging, or STEERING damage
+        atHelm: false,              // physically at the Helm -- a pure presence flag now, independent of AUTOPILOT (see cmdHelm/computeHeading: autopilot still wins the actual steering whenever both are true); ends automatically on GO BELOW, SLEEP, BACK (leave-helm), or STEERING damage -- no longer on autopilot re-engaging
         lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
@@ -2026,6 +2026,50 @@
     return 0.65;
   }
 
+  // Player-facing point-of-sail LABEL for the HELM display -- reads the
+  // exact same wind-angle-diff pointOfSailFactor already computes for
+  // the physics, just bucketed into the conventional named points
+  // rather than a speed multiplier. Never a second point-of-sail model:
+  // the 35/50/150 boundaries are pointOfSailFactor's own; the only new
+  // boundary is 80, splitting its single "1.0" efficient band into
+  // CLOSE REACH/BEAM REACH for display only (both still the same 1.0
+  // physics factor either side of it).
+  function pointOfSailLabel(headingDeg, windFromDeg) {
+    var diff = angleDiff(headingDeg, windFromDeg);
+    if (diff < 35) return 'LUFFING';
+    if (diff < 50) return 'CLOSE HAULED';
+    if (diff < 80) return 'CLOSE REACH';
+    if (diff < 100) return 'BEAM REACH';
+    if (diff < 150) return 'BROAD REACH';
+    return 'RUNNING';
+  }
+
+  // Every HELM-display figure that depends on the boat's CURRENT
+  // heading, computed fresh each time from the existing simulation
+  // functions -- never a stored/cached value, so it's always correct
+  // whether called for the initial render or, mid-turn, every rotation-
+  // timer tick. STW: computeBoatSpeed (through-water). SOG/courseOverGround:
+  // combineWithCurrent (existing current-drift math). VMG: the
+  // existing-style along-course projection (see alongCourseComponent's
+  // own notes for the same pattern applied to current) of the boat's
+  // actual over-ground velocity onto the bearing to Nāwiliwili -- the
+  // portion of its real movement actually carrying it toward the
+  // destination, not a duplicate of SOG.
+  function computeHelmLiveFigures(state, heading) {
+    var nav = state.nav;
+    var stw = computeBoatSpeed(state, heading);
+    var cog = combineWithCurrent(heading, stw, state.weather.oceanCurrent);
+    var bearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    var vmg = cog.speedOverGround * Math.cos(signedAngleDiff(cog.courseOverGround, bearingToDest) * Math.PI / 180);
+    return {
+      stw: stw,
+      sog: cog.speedOverGround,
+      bearingToDest: bearingToDest,
+      vmg: vmg,
+      pointOfSail: pointOfSailLabel(heading, state.weather.windDirection),
+    };
+  }
+
   function baseSpeedForWind(speedKt) {
     if (speedKt < 6) return 2.5;
     if (speedKt < 12) return 4.5;
@@ -2966,13 +3010,21 @@
       state.boat.speed = computeBoatSpeed(state, nav.heading);
 
       // If the player is currently looking at the AT THE HELM screen,
-      // this updates its live ACTUAL HEADING/SPEED lines in place (see
-      // printHelmAtHelmHeader's auto-attach) — harmless no-op
-      // otherwise (headerRefs is only ever set while that screen is
-      // actually the one on display).
+      // this updates its live HEADING/SPEED THROUGH WATER/SOG/POINT OF
+      // SAIL/VMG lines in place (see printHelmAtHelmHeader's auto-
+      // attach) — harmless no-op otherwise (headerRefs is only ever set
+      // while that screen is actually the one on display). All five are
+      // heading-dependent, recomputed together via the same
+      // computeHelmLiveFigures the initial render itself uses, so a
+      // mid-turn view is never stale or inconsistent with what's shown
+      // once the turn settles.
       if (activeTurn.headerRefs) {
-        activeTurn.headerRefs.headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0');
-        activeTurn.headerRefs.speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
+        var liveFigures = computeHelmLiveFigures(state, nav.heading);
+        activeTurn.headerRefs.headingEl.textContent = inventoryLine('HEADING', Math.round(nav.heading) + '\u00B0');
+        activeTurn.headerRefs.stwEl.textContent = inventoryLine('SPEED THROUGH WATER', liveFigures.stw.toFixed(1) + ' KT');
+        activeTurn.headerRefs.sogEl.textContent = inventoryLine('SOG', liveFigures.sog.toFixed(1) + ' KT');
+        activeTurn.headerRefs.pointOfSailEl.textContent = inventoryLine('POINT OF SAIL', liveFigures.pointOfSail);
+        activeTurn.headerRefs.vmgEl.textContent = inventoryLine('VMG', liveFigures.vmg.toFixed(1) + ' KT');
       }
       updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
 
@@ -5869,15 +5921,17 @@
     b.autopilotOn = turningOn;
     playElectricalSwitchSound(turningOn);
     if (turningOn) {
-      // If the player was AT THE HELM, the autopilot takes over from
-      // them — end manual helming before the turn begins, same as it
-      // would end from any other incompatible activity (see
-      // performGoAboveBelow/cmdSleep).
-      state.crew.atHelm = false;
-      // Clear any stale value from an earlier OFF period so the NEXT
-      // disengagement (if any) re-initializes drift from wherever the
-      // boat actually is at that future moment — see the driftHeading
-      // note in the nav state block.
+      // Being AT THE HELM is now a pure physical-presence concept,
+      // independent of what's actually driving the heading (autopilot
+      // always wins over manual hand-steering in computeHeading's
+      // priority order regardless), so toggling autopilot ON from this
+      // same unified Helm screen no longer ends atHelm -- the player is
+      // still standing right there, just letting the autopilot steer.
+      // Clear any stale drift value from an earlier OFF period so the
+      // NEXT disengagement (if any, e.g. after the player later leaves
+      // via BACK) re-initializes drift from wherever the boat actually
+      // is at that future moment — see the driftHeading note in the
+      // nav state block.
       state.nav.driftHeading = null;
       printBlank();
       printLine('Autopilot engaged.', 'dim');
@@ -6250,19 +6304,24 @@
     state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { label: 'BACK', action: 'cancel' }] };
   }
 
-  // The persistent "AT THE HELM" block — SET COURSE / ACTUAL HEADING /
-  // WIND FROM / SPEED — shared by cmdHelm's own atHelm branch and
-  // cmdChangeCourse (so it stays visible above the dial controls).
-  // Whenever a real-time turn is currently running (activeTurn), this
-  // ALSO (re-)attaches that turn's live updates to whichever lines were
-  // just rendered here — see beginCourseTurn's own rotation timer,
-  // which writes into activeTurn.headerRefs each tick. This is what
-  // makes the header "live" regardless of how the player navigated
-  // back to it: every time this function runs while a turn is active,
-  // the turn's next tick starts updating THESE (currently on-screen)
-  // nodes, not whatever it had before. Returns the same refs, mainly
-  // for beginCourseTurn's own immediate use right after starting/
-  // retargeting a turn while this screen is already showing.
+  // The persistent "AT THE HELM" instrumentation block -- the full set
+  // established for the unified Helm screen: HEADING/COURSE, SPEED
+  // THROUGH WATER/SOG, WIND FROM/WIND/POINT OF SAIL, BEARING TO
+  // NĀWILIWILI/VMG, SAIL TRIM/AUTOPILOT. Shared by cmdHelm (the normal,
+  // steering-OK case) and cmdChangeCourse (so it stays visible above
+  // the dial controls) -- both now always reach this with
+  // state.crew.atHelm true, since HELM itself means AT THE HELM. Only
+  // the heading-dependent figures (HEADING, SPEED THROUGH WATER, SOG,
+  // POINT OF SAIL, VMG -- all recomputed live via computeHelmLiveFigures)
+  // get their own DOM refs for beginCourseTurn's rotation timer to
+  // update in place each tick; COURSE, WIND FROM/WIND, BEARING, SAIL
+  // TRIM and AUTOPILOT don't change mid-turn so they're plain printLine
+  // calls. Whenever a real-time turn is currently running (activeTurn),
+  // this ALSO (re-)attaches that turn's live updates to whichever lines
+  // were just rendered here — this is what makes the header "live"
+  // regardless of how the player navigated back to it. Returns the
+  // refs, mainly for beginCourseTurn's own immediate use right after
+  // starting/retargeting a turn while this screen is already showing.
   // 'GOOD' | 'NEEDS TRIM' -- the one place this string is derived, so
   // every HELM display and cmdTrimSails' own gating all read the exact
   // same word.
@@ -6270,24 +6329,56 @@
     return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
   }
 
-  function printHelmAtHelmHeader(state) {
-    printLine('AT THE HELM', 'heading-label');
-    printLine(inventoryLine('SET COURSE', Math.round(state.nav.setCourse) + '\u00B0'));
-    var headingEl = document.createElement('p');
-    headingEl.className = 'line';
-    headingEl.textContent = inventoryLine('ACTUAL HEADING', Math.round(state.nav.heading) + '\u00B0');
-    tempViewEl.appendChild(headingEl);
+  // headingLabel overrides the printed heading ('AT THE HELM' by
+  // default) -- used only by cmdHelm's damaged-steering branch, which
+  // passes 'HELM' since the player isn't actually steering there.
+  function printHelmAtHelmHeader(state, headingLabel) {
+    var nav = state.nav;
+    function liveLine(text) {
+      var el = document.createElement('p');
+      el.className = 'line';
+      el.textContent = text;
+      tempViewEl.appendChild(el);
+      return el;
+    }
+    var figures = computeHelmLiveFigures(state, nav.heading);
+
+    printLine(headingLabel || 'AT THE HELM', 'heading-label');
+    printBlank();
+    var headingEl = liveLine(inventoryLine('HEADING', Math.round(nav.heading) + '\u00B0'));
+    printLine(inventoryLine('COURSE', Math.round(nav.setCourse) + '\u00B0'));
+    printBlank();
+    var stwEl = liveLine(inventoryLine('SPEED THROUGH WATER', figures.stw.toFixed(1) + ' KT'));
+    var sogEl = liveLine(inventoryLine('SOG', figures.sog.toFixed(1) + ' KT'));
+    printBlank();
     printLine(inventoryLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
-    var speedEl = document.createElement('p');
-    speedEl.className = 'line';
-    speedEl.textContent = inventoryLine('SPEED', state.boat.speed.toFixed(1) + ' KT');
-    tempViewEl.appendChild(speedEl);
+    printLine(inventoryLine('WIND', Math.round(state.weather.windSpeed) + ' KT'));
+    var pointOfSailEl = liveLine(inventoryLine('POINT OF SAIL', figures.pointOfSail));
+    printBlank();
+    printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0'));
+    var vmgEl = liveLine(inventoryLine('VMG', figures.vmg.toFixed(1) + ' KT'));
+    printBlank();
     printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
-    var refs = { headingEl: headingEl, speedEl: speedEl };
+    printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
+
+    var refs = { headingEl: headingEl, stwEl: stwEl, sogEl: sogEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
     if (activeTurn) activeTurn.headerRefs = refs;
     return refs;
   }
 
+  // HELM = AT THE HELM. There is no separate "view the Helm" state
+  // leading to a TAKE THE HELM button any more: reaching this command
+  // at all (steering permitting) means the player is now physically
+  // steering. First entry (state.crew.atHelm not yet true) announces
+  // "You take the helm." and starts the SAME real-time turn TAKE THE
+  // HELM always did (toward courseSteeringTarget -- nav.setCourse with
+  // autopilot off, the live autopilot solution with it on) so the boat
+  // visibly, gradually corrects onto course rather than snapping;
+  // re-entering (already atHelm -- e.g. back from CHANGE COURSE, after
+  // TRIM SAILS, after toggling AUTOPILOT) just re-renders. BACK
+  // (formerly LEAVE THE HELM, see the 'leave-helm' action) is what
+  // actually ends manual steering and lets unattended wander resume if
+  // autopilot is off.
   function cmdHelm(state) {
     var nav = state.nav;
     printBlank();
@@ -6298,8 +6389,8 @@
       // ACTUAL HEADING reflects whatever the coastal auto-tack is doing
       // right now, which can differ from it. No manual control here —
       // the corridor is authored-safe and the player isn't required to
-      // navigate it (nor is the new manual-helm system relevant here —
-      // see the module notes on computeHeading). Bearing/distance are
+      // navigate it (nor is the manual-helm system relevant here — see
+      // the module notes on computeHeading). Bearing/distance are
       // computed fresh here rather than read from nav.intendedCourse,
       // which only updates once per simTick and can be a stale tick
       // behind when just viewed.
@@ -6322,26 +6413,17 @@
     if (nav.setCourse == null) {
       nav.setCourse = Math.round(nav.intendedCourse);
     }
-    // Computed fresh for the same reason as the coastal branch above —
-    // must reflect the boat's actual current position the instant the
-    // screen is viewed, e.g. right after SET FOR NĀWILIWILI, not
-    // whatever nav.intendedCourse held as of the last tick.
-    var liveBearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
 
     if (state.boat.steering === 'DAMAGED') {
-      // Same "nothing to be done here" shape regardless of the
-      // autopilot flag or manual-helm state — see the module notes on
-      // computeHeading: damaged steering already forces the boat to
-      // unattended drift either way, and TAKE THE HELM isn't reachable
-      // with the helm itself broken. Preserve the existing repair/
-      // rescue path; no second steering-condition system.
-      printLine('HELM', 'heading-label');
-      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
-      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
-      printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
-      printBlank();
-      printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-      printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
+      // The helm itself is gone -- physically taking it isn't possible
+      // (matches the pre-existing rule; see performRandomFailure's own
+      // steering-damage hook, which forces atHelm false). Still show
+      // the full instrumentation for information's sake -- headed plain
+      // HELM rather than AT THE HELM, since the player isn't actually
+      // steering -- with no CHANGE COURSE/SET FOR NĀWILIWILI, but
+      // AUTOPILOT (gated only on electrical damage, unchanged) and
+      // TRIM SAILS (an unrelated physical action) remain available.
+      printHelmAtHelmHeader(state, 'HELM');
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -6356,75 +6438,31 @@
       return;
     }
 
-    if (state.crew.atHelm) {
-      // AT THE HELM: the player is actively hand-steering. Deliberately
-      // a leaner field set than the other two states — SET COURSE,
-      // ACTUAL HEADING, WIND FROM, SPEED — the direct feedback loop for
-      // learning to sail by feel (course chosen vs. where the bow
-      // actually settles vs. wind vs. how fast that combination is
-      // going), rather than the navigational BEARING/DISTANCE fields
-      // that matter more when something else is doing the steering.
-      printHelmAtHelmHeader(state);
-      if (nav.landWarningLevel !== 'none') {
-        printBlank();
-        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
-      }
-      var atHelmOpts = [
-        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
-        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
-      ];
-      if (nav.sailTrimState === 'needsTrim') atHelmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
-      atHelmOpts.push({ label: 'LEAVE THE HELM', action: 'leave-helm' });
-      state.pendingChoice = { id: 'helm-menu', options: atHelmOpts };
-      return;
-    }
-
-    printLine('HELM', 'heading-label');
-    if (state.boat.autopilotOn) {
-      printLine(inventoryLine('SET COURSE', Math.round(nav.setCourse) + '\u00B0'));
-      printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
-      if (nav.tack) {
-        printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
-      }
-      printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
+    if (!state.crew.atHelm) {
+      // Fresh entry -- the exact same transition TAKE THE HELM always
+      // performed: announce it, drop any stale drift-tracking value so
+      // the NEXT unattended period (if any) starts fresh, and turn the
+      // boat toward courseSteeringTarget in real time exactly like
+      // CHANGE COURSE/SET FOR NĀWILIWILI/AUTOPILOT re-engaging do —
+      // never an instant snap.
+      state.crew.atHelm = true;
+      nav.driftHeading = null;
+      printLine('You take the helm.', 'dim');
       printBlank();
-      printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-      printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
-      if (nav.landWarningLevel !== 'none') {
-        printBlank();
-        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
-      }
-      var autopilotOnOpts = [
-        { label: 'CHANGE COURSE', action: 'cmd:change-course' },
-        { label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' },
-      ];
-      if (nav.sailTrimState === 'needsTrim') autopilotOnOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
-      autopilotOnOpts.push({ label: 'AUTOPILOT \u2014 ON', action: 'toggle-autopilot' });
-      autopilotOnOpts.push({ label: 'BACK', action: 'cancel' });
-      state.pendingChoice = { id: 'helm-menu', options: autopilotOnOpts };
-      return;
+      beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
     }
 
-    // AUTOPILOT OFF, nobody at the helm: unattended. SET COURSE is
-    // deliberately not shown here — nothing is currently steering
-    // toward it, so displaying it alongside ACTUAL HEADING would
-    // wrongly suggest something still is. It's preserved internally
-    // (see computeHeading/TAKE THE HELM) — just not surfaced until
-    // someone actually takes the helm or the autopilot comes back on.
-    printLine(inventoryLine('ACTUAL HEADING', Math.round(nav.heading) + '\u00B0'));
-    printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(liveBearingToDest) + '\u00B0'));
-    printBlank();
-    printLine(inventoryLine('DISTANCE', Math.round(distanceBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)).toLocaleString() + ' NM'));
-    printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
+    printHelmAtHelmHeader(state);
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    var unattendedOpts = [{ label: 'TAKE THE HELM', action: 'take-helm' }];
-    if (nav.sailTrimState === 'needsTrim') unattendedOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
-    unattendedOpts.push({ label: 'AUTOPILOT \u2014 OFF', action: 'toggle-autopilot' });
-    unattendedOpts.push({ label: 'BACK', action: 'cancel' });
-    state.pendingChoice = { id: 'helm-menu', options: unattendedOpts };
+    var helmOpts = [{ label: 'CHANGE COURSE', action: 'cmd:change-course' }];
+    if (nav.sailTrimState === 'needsTrim') helmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
+    helmOpts.push({ label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' });
+    helmOpts.push({ label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' });
+    helmOpts.push({ label: 'BACK', action: 'leave-helm' });
+    state.pendingChoice = { id: 'helm-menu', options: helmOpts };
   }
 
   // TRIM SAILS — audio-synced, same architecture as WASH/CHANGE/MAKE
@@ -6456,27 +6494,20 @@
 
   // The player's way of picking any of 000-359 through a button-only
   // interface: dial a draft value up or down from the current course,
-  // then confirm. Only ever reachable once open ocean unlocks it (the
-  // HELM screen doesn't offer CHANGE COURSE before then). Also reachable
-  // while autopilot is steering (not just AT THE HELM) — the persistent
-  // AT THE HELM header only makes sense for the latter, so it appears
-  // here only when state.crew.atHelm; the autopilot-driven path keeps
-  // its previous CURRENT COURSE/NEW COURSE-only display unchanged.
+  // then confirm. Only ever reachable once open ocean unlocks it, and
+  // only from the unified HELM screen -- which always means
+  // state.crew.atHelm is already true by the time this is reached (no
+  // separate "not at the helm" path exists any more), so the full
+  // instrumentation header is always shown above the dial controls.
   function cmdChangeCourse(state) {
     var nav = state.nav;
     if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
-    if (state.crew.atHelm) {
-      printHelmAtHelmHeader(state);
-      printBlank();
-      printLine('CHANGE COURSE', 'heading-label');
-      printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
-    } else {
-      printLine('CHANGE COURSE', 'heading-label');
-      printLine('CURRENT COURSE ' + Math.round(nav.setCourse) + '\u00B0');
-      printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
-    }
+    printHelmAtHelmHeader(state);
+    printBlank();
+    printLine('CHANGE COURSE', 'heading-label');
+    printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
     var opts = COURSE_DIAL_STEPS.map(function (step) {
       return { label: (step > 0 ? '+' : '') + step + '\u00B0', action: 'course-draft:' + step };
     });
@@ -10310,15 +10341,6 @@
         });
         cmdHelm(state);
         break;
-      case 'take-helm':
-        if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
-        state.crew.atHelm = true;
-        state.nav.driftHeading = null; // stale drift value from any earlier unattended period shouldn't carry into the next one -- see the same pattern for autopilot re-engaging
-        printBlank();
-        printLine('You take the helm.', 'dim');
-        beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
-        cmdHelm(state);
-        break;
       case 'leave-helm':
         state.crew.atHelm = false;
         // Unattended drift must resume from exactly where the boat
@@ -10328,7 +10350,13 @@
         state.nav.driftHeading = state.nav.heading;
         printBlank();
         printLine('You leave the helm.', 'dim');
-        cmdHelm(state);
+        // Deliberately no cmdHelm(state) call here (unlike every other
+        // Helm action) -- HELM now always means AT THE HELM, so there's
+        // no "unattended Helm view" to fall back to any more. Leaving
+        // pendingChoice untouched lets the normal handleAction tail
+        // clear it and fall back to the ordinary ABOVE DECK menu via
+        // getContextualOptions, exactly like the generic 'cancel'
+        // action does elsewhere.
         break;
       case 'resolve-aft-locker-now':
         resolveAftLocker(state);
