@@ -156,16 +156,20 @@
 
   .gap { height: 0.7rem; margin: 0; }
 
-  /* An invisible trailing spacer NAV STATION appends after its own
-     content (see cmdNavStation) purely to guarantee #output has
-     somewhere to scroll to. Never shown -- it exists below the bottom
-     of the screen so the browser always has enough scrollable range to
-     actually carry the NAV STATION heading up to the top of #output,
-     even when this screen's real content alone is shorter than
-     #output's visible height (the common case) and would otherwise
-     give the browser nothing to scroll through at all. */
+  /* An invisible trailing spacer NAV STATION sometimes appends after
+     its own content (see cmdNavStation) purely to guarantee #output
+     has somewhere to scroll to, so the first status line can actually
+     reach the top of #output even when this screen's real content
+     alone is shorter than #output's visible height and would
+     otherwise give the browser nothing to scroll through at all. Its
+     height is computed and set inline at the moment it's created --
+     precisely how much extra scroll range is still needed, no more --
+     rather than a fixed CSS size, so it never leaves a large empty
+     scrollable region below the real content. This rule intentionally
+     carries no height of its own.
+  */
   .nav-station-scroll-spacer {
-    height: 100vh;
+    height: 0;
   }
 
   .heading-label {
@@ -5863,8 +5867,6 @@
   function cmdStatus(state) {
     var b = state.boat;
     printBlank();
-    printLine('STATUS', 'heading-label');
-    printBlank();
     printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
     printLine(statusLine('BATTERY', Math.round(b.battery) + '%'));
     printBlank();
@@ -6087,7 +6089,6 @@
   function cmdPosition(state) {
     var ll = currentLatLon(state);
     printBlank();
-    printLine('POSITION', 'heading-label');
     printLine(formatLatLon(ll.lat, ll.lon));
     if (state.nav.positionConfidence === 'uncertain') {
       printLine('(dead reckoning — no recent fix)', 'dim');
@@ -6138,7 +6139,6 @@
   function cmdWeather(state) {
     var w = state.weather;
     printBlank();
-    printLine('WEATHER', 'heading-label');
     printLine(instrumentLine('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT'));
     printLine(instrumentLine('SEAS', seaStateShortLabel(w.seaState) + ' \u00B7 ' + seaStateWaveHeightFt(w.seaState) + ' FT'));
     printLine(instrumentLine('TEMP', Math.round(w.temperatureF) + '\u00B0F'));
@@ -6186,15 +6186,11 @@
   function cmdForecast(state) {
     if (state.boat.battery <= 0 || state.boat.electrical === 'DAMAGED') {
       printBlank();
-      printLine('FORECAST', 'heading-label');
-      printBlank();
       printLine('NO POWER', 'amber');
       state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
       return;
     }
     var real = state.weather.realWx;
-    printBlank();
-    printLine('FORECAST', 'heading-label');
     printBlank();
     printLine('NEXT 12 HOURS', 'heading-label');
     if (real && real.forecastLine) {
@@ -6228,7 +6224,6 @@
   function cmdSails(state) {
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printBlank();
-    printLine('SAILS', 'heading-label');
     printLine('Currently: ' + sailConfigLabel(state.boat.sailConfig) + '.');
     state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
   }
@@ -6409,7 +6404,6 @@
   function cmdEngine(state) {
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printBlank();
-    printLine('ENGINE', 'heading-label');
     printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
     printLine('Diesel: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS));
     if (!state.boat.engineOn && state.boat.engine === 'DAMAGED') {
@@ -6671,8 +6665,6 @@
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
     printBlank();
-    printLine('GALLEY', 'heading-label');
-    printBlank();
     var c = state.crew;
     printLine(statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
     printLine(statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
@@ -6691,8 +6683,6 @@
   // There's no shower aboard Solace; WASH is the wet head's sink/
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
-    printBlank();
-    printLine('HEAD', 'heading-label');
     printBlank();
     printLine(statusLine('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]));
     state.pendingChoice = {
@@ -6850,8 +6840,6 @@
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
     printBlank();
-    printLine('SALOON', 'heading-label');
-    printBlank();
     printLine(statusLine('MORALE', moraleLevel(state.crew.morale)));
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
@@ -6901,8 +6889,6 @@
   // temperature calculation.
   function cmdCabin(state) {
     printBlank();
-    printLine('CABIN', 'heading-label');
-    printBlank();
     var c = state.crew;
     printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
     printLine(statusLine('COMFORT', comfortLabel(state)));
@@ -6928,10 +6914,12 @@
   function cmdNavStation(state) {
     var b = state.boat;
     printBlank();
-    var headingEl = printLine('NAV STATION', 'heading-label');
-    printBlank();
     var cabinTempDisplay = b.cabinTemperatureF != null ? Math.round(b.cabinTemperatureF) + '\u00B0F' : '\u2014';
-    printLine(statusLine('CABIN TEMP', cabinTempDisplay));
+    // No NAV STATION heading here -- the "> NAV STATION" echo the click
+    // handler already printed just above is the screen identifier;
+    // repeating it as a heading was pure duplication. This first status
+    // line is therefore also the scroll target below.
+    var firstLineEl = printLine(statusLine('CABIN TEMP', cabinTempDisplay));
     printLine(statusLine('CABIN', cabinStatusWord(state)));
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
@@ -6989,45 +6977,50 @@
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
 
-    // A trailing spacer, invisible off the bottom of the screen --
-    // exists purely so #output HAS somewhere to scroll to. Without it,
-    // whenever this screen's own content (echo line + heading + status
-    // lines) is shorter than #output's visible height -- the common
-    // case, especially once the surrounding spacing is back to its
-    // normal size -- the browser has literally nothing to scroll
-    // through and clamps scrollTop back to 0 no matter what's set
-    // below, leaving the echo line stuck in view. 100vh comfortably
-    // exceeds #output's own (smaller) share of the viewport in every
-    // realistic case, so there's always enough scrollable range for
-    // the heading to actually reach the top. clearTempView() wipes it
-    // away with everything else the moment the player leaves this
-    // screen -- nothing to clean up separately.
-    var scrollSpacer = document.createElement('div');
-    scrollSpacer.className = 'nav-station-scroll-spacer';
-    tempViewEl.appendChild(scrollSpacer);
-
-    // Scroll #output so the heading above sits at the very top of the
-    // visible area -- reclaiming the vertical space the "> NAV
-    // STATION" echo line (printed just before this command ran) and
-    // the blank line above the heading would otherwise occupy, rather
-    // than compressing this screen's own row spacing to make room.
-    // Deferred to the next animation frame: runCommand's generic tail
+    // Scroll #output so the first status line above sits at the very
+    // top of the visible area -- reclaiming the vertical space the "> 
+    // NAV STATION" echo line (printed just before this command ran)
+    // and the blank line above it would otherwise occupy, rather than
+    // compressing this screen's own row spacing to make room. Deferred
+    // to the next animation frame: runCommand's generic tail
     // (renderOptions/scrollToBottom) runs synchronously right after
     // this function returns and would otherwise immediately overwrite
     // any scroll position set here, and the deferral also ensures
     // #options has already re-rendered with its final size before this
-    // reads #output's settled layout. scrollIntoView (not
-    // headingEl.offsetTop) deliberately -- offsetTop is relative to
-    // the nearest POSITIONED ancestor, which is #crt here (position:
-    // relative), not #output itself, so it doesn't actually describe
-    // this heading's position within #output's own scrollable content;
-    // scrollIntoView finds and scrolls the right ancestor correctly
-    // regardless of that. NAV STATION only -- no other screen in
-    // Landfall repositions the scroll like this.
+    // reads #output's settled layout.
     requestAnimationFrame(function () {
-      if (headingEl && headingEl.parentNode) {
-        headingEl.scrollIntoView({ block: 'start' });
+      if (!firstLineEl || !firstLineEl.parentNode) return;
+      // runCommand's own generic tail already ran scrollToBottom()
+      // synchronously before this frame, which may have moved scrollTop
+      // to some non-zero value -- reset to a known baseline (fully
+      // scrolled to top) first, so the measurement just below reflects
+      // this line's true position rather than wherever that left it.
+      outputEl.scrollTop = 0;
+      // #output can only scroll as far as its content genuinely
+      // extends past its own visible height. When this screen's real
+      // content (echo + blank + status lines) is shorter than that --
+      // the common case, especially at the normal, uncompressed row
+      // spacing -- there is nothing for the browser to scroll through
+      // at all, and it clamps right back to 0 no matter what's asked
+      // for, leaving the echo line stuck in view. Rather than a large
+      // fixed spacer (which leaves a big empty scrollable region below
+      // the real content once scrolled -- exactly the "empty scroll
+      // abyss" this replaced), measure precisely how much extra scroll
+      // range is still needed -- the gap between where this line
+      // already sits and #output's own current scrollable range -- and
+      // add only that much. Zero extra height, and no spacer element at
+      // all, on any screen where the real content is already tall
+      // enough on its own.
+      var neededScroll = firstLineEl.getBoundingClientRect().top - outputEl.getBoundingClientRect().top;
+      var currentRange = Math.max(0, outputEl.scrollHeight - outputEl.clientHeight);
+      var shortfall = neededScroll - currentRange;
+      if (shortfall > 0) {
+        var spacer = document.createElement('div');
+        spacer.className = 'nav-station-scroll-spacer';
+        spacer.style.height = Math.ceil(shortfall) + 'px';
+        tempViewEl.appendChild(spacer);
       }
+      firstLineEl.scrollIntoView({ block: 'start' });
     });
   }
 
