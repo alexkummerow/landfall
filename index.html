@@ -173,6 +173,36 @@
     margin-top: auto;
   }
 
+  /* SHIP'S PLAN -- a single, static reference image opened from the
+     BOOKSHELF (see cmdShipsPlan). Same technique as
+     #output.nav-station-bottom-pin just above: turning #output itself
+     into a flex column gives it a real, bounded computed height (it
+     already has one via flex:1 against #crt's fixed 100dvh, but a
+     plain block #temp-view wouldn't inherit that height downward
+     without this), so #temp-view can become a flex:1 child with
+     min-height:0 (the standard fix for the flexbox child-overflow
+     gotcha) and pass that bounded space down to the image -- letting
+     max-width/max-height:100% + object-fit:contain size the image
+     against #output's ACTUAL available room, rather than a guessed
+     viewport percentage that would need re-tuning if the surrounding
+     chrome (#topbar/#navstrip/#controls) ever changes height. */
+  #output.ships-plan-view {
+    display: flex;
+    flex-direction: column;
+  }
+  #output.ships-plan-view #temp-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .ships-plan-image {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+
   .line {
     margin: 0 0 0.35rem;
     line-height: 1.55;
@@ -5563,6 +5593,9 @@
     // cmdNavStation) -- reset here, at the start of every screen
     // transition, so it never lingers onto any other screen.
     outputEl.classList.remove('nav-station-bottom-pin');
+    // SHIP'S PLAN's own #output flex-centering (see its CSS notes and
+    // cmdShipsPlan) -- same reasoning, reset on every transition.
+    outputEl.classList.remove('ships-plan-view');
   }
 
   function printPersistentLine(text, cls) {
@@ -7465,6 +7498,9 @@
       var bs = state.books[b.id];
       return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
     });
+    // A passive reference image, not a book -- no progress/completion
+    // suffix, no reading-engine involvement (see cmdShipsPlan).
+    opts.push({ label: "SHIP'S PLAN", action: 'view-ships-plan' });
     opts.push({ label: 'BACK', action: 'cmd:saloon' });
     return opts;
   }
@@ -7474,6 +7510,26 @@
     printBlank();
     printLine('BOOKSHELF', 'heading-label');
     state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+  }
+
+  // SHIP'S PLAN -- a single static reference image (images/ships_plan.png)
+  // opened from the bookshelf, shown full-frame against #output's own
+  // existing background (see the #output.ships-plan-view CSS notes for
+  // how it's sized/centered without distortion or cropping). Purely a
+  // passive view: state.crew.readingBookId is never touched (this isn't
+  // a book, so it never engages the reading engine/its progress or
+  // completion), and nothing else in state changes either -- no time
+  // advanced, no resource/morale/statistic affected, no audio, no log
+  // entry. BACK returns directly to BOOKSHELF, never SALOON.
+  function cmdShipsPlan(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; }
+    outputEl.classList.add('ships-plan-view');
+    var img = document.createElement('img');
+    img.className = 'ships-plan-image';
+    img.src = 'images/ships_plan.png';
+    img.alt = "Ship's plan";
+    tempViewEl.appendChild(img);
+    state.pendingChoice = { id: 'ships-plan', options: [{ label: '\u2190 BACK', rawLabel: true, action: 'cmd:bookshelf' }] };
   }
 
   // Begins the continuous activity: crew.readingBookId marks it active,
@@ -10180,7 +10236,13 @@
         lamp.textContent = '\u25CF';
         btn.appendChild(lamp);
       } else {
-        btn.textContent = '> ' + opt.label;
+        // rawLabel: an option whose label is shown exactly as given,
+        // with none of the "> " prefix every other option gets. Used
+        // ONLY by SHIP'S PLAN's "← BACK" control, whose own leading
+        // arrow already reads as a back-control on its own -- no
+        // existing option sets this, so every other button's
+        // rendering is completely unaffected.
+        btn.textContent = opt.rawLabel ? opt.label : '> ' + opt.label;
       }
       btn.addEventListener('click', function () {
         if (opt.action === 'open-map' || opt.action === 'open-in-windy') {
@@ -10428,6 +10490,8 @@
       performStartReading(state, action.slice(14));
     } else if (action === 'stop-reading') {
       performStopReading(state);
+    } else if (action === 'view-ships-plan') {
+      cmdShipsPlan(state);
     } else if (action.indexOf('start-tape:') === 0) {
       performStartTape(state, action.slice(11));
     } else if (action === 'stop-tape') {
