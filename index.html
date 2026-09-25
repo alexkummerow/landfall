@@ -173,38 +173,48 @@
     margin-top: auto;
   }
 
-  /* SHIP'S PLAN -- a single, static reference image opened from the
-     BOOKSHELF (see cmdShipsPlan). Deliberately NOT sized against
-     #output's own height (via flex/percentage, the way
-     #output.nav-station-bottom-pin works above): #output also holds
-     an UNBOUNDED, ever-growing amount of persistent voyage log ABOVE
-     #temp-view, so any percentage/flex-based cap makes the image
-     compete with that log for the same space -- fine on a fresh
-     game, but on any save with real playthrough history the log
-     alone can already exceed #output's visible height, and the image
-     collapses toward 0 regardless of how it's told to size itself.
-     That was the actual cause of the original bug report (a real
-     save, not a fresh one).
-
-     Sizing against the true viewport instead (100dvh, minus the
-     surrounding chrome) sidesteps this entirely -- the image gets a
-     real, non-zero cap no matter how much log precedes it. The
-     subtracted amount (190px) is #topbar + #navstrip + #controls +
-     #output's own padding, measured across phone and desktop
-     viewports with the Ship's Plan's own single BACK control showing
-     (128-144px of chrome + ~26px of #output padding), plus a small
-     safety margin for borders/edge cases; scrollToBottom() -- already
-     called after every action -- brings the image into view even
-     when a long save's history means scrolling is needed to reach
-     it. */
+  /* SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
+     markup notes above #ships-plan-overlay, and cmdShipsPlan below).
+     position:fixed + inset:0 covers the entire viewport regardless of
+     #crt/#output's own padding, max-width cap, or accumulated voyage
+     log -- there is nothing here for the image to compete with for
+     space (unlike sizing it against #output itself, which held an
+     unbounded, ever-growing log above it and could squeeze the image
+     toward 0 on any save with real playthrough history -- see prior
+     notes on that bug). flex-direction:column with the image area as
+     flex:1 (all remaining height) and the back area sized to its own
+     content is the same shape as #output.nav-station-bottom-pin's own
+     technique elsewhere in this file, just applied to a dedicated
+     full-screen container instead of #output.
+     z-index:100 -- unused everywhere else in this file -- simply
+     needs to clear #crt's own stacking (including #scanlines' CRT
+     flicker), which it isn't given an explicit value of its own. */
+  .ships-plan-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .ships-plan-overlay[hidden] { display: none; }
+  .ships-plan-image-area {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
   .ships-plan-image {
     display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: calc(100dvh - 190px);
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-    margin: 0 auto;
+  }
+  .ships-plan-back-area {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid var(--rule);
+    padding: 0.8rem 1.2rem calc(0.7rem + env(safe-area-inset-bottom));
   }
 
   .line {
@@ -362,6 +372,23 @@
     <footer id="controls">
       <div id="options"></div>
     </footer>
+  </div>
+
+  <!-- SHIP'S PLAN -- a true full-viewport image viewer, deliberately
+       OUTSIDE #crt/#output's own padded, max-width-capped content
+       container (see cmdShipsPlan and the .ships-plan-overlay CSS
+       notes): fixed positioning covers the entire viewport regardless
+       of #output's own scroll content/padding, so the image can reach
+       every edge and isn't constrained by (or competing for space
+       with) the accumulated voyage log. Hidden by default; toggled
+       open by cmdShipsPlan and closed by its own BACK button below. -->
+  <div id="ships-plan-overlay" class="ships-plan-overlay" hidden>
+    <div class="ships-plan-image-area">
+      <img id="ships-plan-image" class="ships-plan-image" src="" alt="Ship's plan">
+    </div>
+    <div class="ships-plan-back-area">
+      <button id="ships-plan-back-btn" type="button" class="option">← BACK</button>
+    </div>
   </div>
 
 <script>
@@ -5543,6 +5570,9 @@
   var navRegionEl = document.getElementById('nav-region');
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
+  var shipsPlanOverlayEl = document.getElementById('ships-plan-overlay');
+  var shipsPlanImageEl = document.getElementById('ships-plan-image');
+  var shipsPlanBackBtn = document.getElementById('ships-plan-back-btn');
 
   /* --------------------------------------------------------------
      TWO SEPARATE RENDER SURFACES, both inside #output:
@@ -5597,6 +5627,12 @@
     // cmdNavStation) -- reset here, at the start of every screen
     // transition, so it never lingers onto any other screen.
     outputEl.classList.remove('nav-station-bottom-pin');
+    // SHIP'S PLAN's full-viewport overlay (see its CSS notes and
+    // cmdShipsPlan) -- same reasoning: closed here, at the start of
+    // every transition, so leaving it (by any path) always cleans up,
+    // and cmdShipsPlan re-opens it explicitly when it's the screen
+    // actually being shown.
+    shipsPlanOverlayEl.hidden = true;
   }
 
   function printPersistentLine(text, cls) {
@@ -7513,24 +7549,28 @@
     state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
   }
 
-  // SHIP'S PLAN -- a single static reference image (images/ships_plan.png)
-  // opened from the bookshelf, shown against #output's own existing
-  // background (see the .ships-plan-image CSS notes for how it's
-  // sized/centered without distortion or cropping, and why that's done
-  // against the viewport rather than #output itself). Purely a passive
-  // view: state.crew.readingBookId is never touched (this isn't a book,
-  // so it never engages the reading engine/its progress or completion),
+  // SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
+  // markup and .ships-plan-overlay CSS notes for the full picture):
+  // opened from the bookshelf, the static #ships-plan-overlay element
+  // is un-hidden and its <img> pointed at images/ships_plan.png,
+  // covering the whole screen edge-to-edge above its own dedicated
+  // BACK control (wired once, permanently, alongside restartBtn/
+  // soundBtn near the bottom of this file). Purely a passive view:
+  // state.crew.readingBookId is never touched (this isn't a book, so
+  // it never engages the reading engine/its progress or completion),
   // and nothing else in state changes either -- no time advanced, no
-  // resource/morale/statistic affected, no audio, no log entry. BACK
-  // returns directly to BOOKSHELF, never SALOON.
+  // resource/morale/statistic affected, no audio, no log entry.
+  // pendingChoice is still set (to a normal, non-empty options array
+  // -- an empty one would trip migrateStalePendingChoiceIfNeeded's own
+  // "empty options means an interrupted sequence, not a resumable
+  // state" rule on a later reload) even though the overlay's own BACK
+  // button, not this options array, is what's actually rendered while
+  // it's open.
   function cmdShipsPlan(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; }
-    var img = document.createElement('img');
-    img.className = 'ships-plan-image';
-    img.src = 'images/ships_plan.png';
-    img.alt = "Ship's plan";
-    tempViewEl.appendChild(img);
-    state.pendingChoice = { id: 'ships-plan', options: [{ label: '\u2190 BACK', rawLabel: true, action: 'cmd:bookshelf' }] };
+    shipsPlanImageEl.src = 'images/ships_plan.png';
+    shipsPlanOverlayEl.hidden = false;
+    state.pendingChoice = { id: 'ships-plan', options: [{ label: 'BACK', action: 'cmd:bookshelf' }] };
   }
 
   // Begins the continuous activity: crew.readingBookId marks it active,
@@ -10237,13 +10277,7 @@
         lamp.textContent = '\u25CF';
         btn.appendChild(lamp);
       } else {
-        // rawLabel: an option whose label is shown exactly as given,
-        // with none of the "> " prefix every other option gets. Used
-        // ONLY by SHIP'S PLAN's "← BACK" control, whose own leading
-        // arrow already reads as a back-control on its own -- no
-        // existing option sets this, so every other button's
-        // rendering is completely unaffected.
-        btn.textContent = opt.rawLabel ? opt.label : '> ' + opt.label;
+        btn.textContent = '> ' + opt.label;
       }
       btn.addEventListener('click', function () {
         if (opt.action === 'open-map' || opt.action === 'open-in-windy') {
@@ -11325,6 +11359,21 @@
     clearTempView();
     printEcho('restart');
     runCommand(GAME, 'restart');
+  });
+
+  // SHIP'S PLAN's BACK control -- permanently wired once, same as
+  // restartBtn/soundBtn just above/below, since it lives outside the
+  // normal #options/renderOptions rendering pipeline entirely (see the
+  // HTML markup and .ships-plan-overlay CSS notes). Does exactly what
+  // a normal "cmd:bookshelf" option click does (clearTempView, which
+  // also closes this overlay as a side effect -- see its own notes --
+  // then echo + runCommand), so BOOKSHELF renders fresh the moment the
+  // overlay closes.
+  shipsPlanBackBtn.addEventListener('click', function () {
+    if (!GAME || uiBusy) return;
+    clearTempView();
+    printEcho('bookshelf');
+    runCommand(GAME, 'bookshelf');
   });
 
   soundBtn.addEventListener('click', function () {
