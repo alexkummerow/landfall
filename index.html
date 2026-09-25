@@ -174,33 +174,37 @@
   }
 
   /* SHIP'S PLAN -- a single, static reference image opened from the
-     BOOKSHELF (see cmdShipsPlan). Same technique as
-     #output.nav-station-bottom-pin just above: turning #output itself
-     into a flex column gives it a real, bounded computed height (it
-     already has one via flex:1 against #crt's fixed 100dvh, but a
-     plain block #temp-view wouldn't inherit that height downward
-     without this), so #temp-view can become a flex:1 child with
-     min-height:0 (the standard fix for the flexbox child-overflow
-     gotcha) and pass that bounded space down to the image -- letting
-     max-width/max-height:100% + object-fit:contain size the image
-     against #output's ACTUAL available room, rather than a guessed
-     viewport percentage that would need re-tuning if the surrounding
-     chrome (#topbar/#navstrip/#controls) ever changes height. */
-  #output.ships-plan-view {
-    display: flex;
-    flex-direction: column;
-  }
-  #output.ships-plan-view #temp-view {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
+     BOOKSHELF (see cmdShipsPlan). Deliberately NOT sized against
+     #output's own height (via flex/percentage, the way
+     #output.nav-station-bottom-pin works above): #output also holds
+     an UNBOUNDED, ever-growing amount of persistent voyage log ABOVE
+     #temp-view, so any percentage/flex-based cap makes the image
+     compete with that log for the same space -- fine on a fresh
+     game, but on any save with real playthrough history the log
+     alone can already exceed #output's visible height, and the image
+     collapses toward 0 regardless of how it's told to size itself.
+     That was the actual cause of the original bug report (a real
+     save, not a fresh one).
+
+     Sizing against the true viewport instead (100dvh, minus the
+     surrounding chrome) sidesteps this entirely -- the image gets a
+     real, non-zero cap no matter how much log precedes it. The
+     subtracted amount (190px) is #topbar + #navstrip + #controls +
+     #output's own padding, measured across phone and desktop
+     viewports with the Ship's Plan's own single BACK control showing
+     (128-144px of chrome + ~26px of #output padding), plus a small
+     safety margin for borders/edge cases; scrollToBottom() -- already
+     called after every action -- brings the image into view even
+     when a long save's history means scrolling is needed to reach
+     it. */
   .ships-plan-image {
+    display: block;
+    width: auto;
+    height: auto;
     max-width: 100%;
-    max-height: 100%;
+    max-height: calc(100dvh - 190px);
     object-fit: contain;
+    margin: 0 auto;
   }
 
   .line {
@@ -5593,9 +5597,6 @@
     // cmdNavStation) -- reset here, at the start of every screen
     // transition, so it never lingers onto any other screen.
     outputEl.classList.remove('nav-station-bottom-pin');
-    // SHIP'S PLAN's own #output flex-centering (see its CSS notes and
-    // cmdShipsPlan) -- same reasoning, reset on every transition.
-    outputEl.classList.remove('ships-plan-view');
   }
 
   function printPersistentLine(text, cls) {
@@ -7513,17 +7514,17 @@
   }
 
   // SHIP'S PLAN -- a single static reference image (images/ships_plan.png)
-  // opened from the bookshelf, shown full-frame against #output's own
-  // existing background (see the #output.ships-plan-view CSS notes for
-  // how it's sized/centered without distortion or cropping). Purely a
-  // passive view: state.crew.readingBookId is never touched (this isn't
-  // a book, so it never engages the reading engine/its progress or
-  // completion), and nothing else in state changes either -- no time
-  // advanced, no resource/morale/statistic affected, no audio, no log
-  // entry. BACK returns directly to BOOKSHELF, never SALOON.
+  // opened from the bookshelf, shown against #output's own existing
+  // background (see the .ships-plan-image CSS notes for how it's
+  // sized/centered without distortion or cropping, and why that's done
+  // against the viewport rather than #output itself). Purely a passive
+  // view: state.crew.readingBookId is never touched (this isn't a book,
+  // so it never engages the reading engine/its progress or completion),
+  // and nothing else in state changes either -- no time advanced, no
+  // resource/morale/statistic affected, no audio, no log entry. BACK
+  // returns directly to BOOKSHELF, never SALOON.
   function cmdShipsPlan(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; }
-    outputEl.classList.add('ships-plan-view');
     var img = document.createElement('img');
     img.className = 'ships-plan-image';
     img.src = 'images/ships_plan.png';
