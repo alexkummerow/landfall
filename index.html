@@ -6052,10 +6052,12 @@
     return el;
   }
 
-  // Plays the physical switch click for a successful player toggle --
-  // turningOn true plays switch_on.mp3, false plays switch_off.mp3.
-  // Called only once performElectricalToggle has already decided the
-  // toggle is actually going through (never on a blocked attempt).
+  // Plays the physical switch click for a player toggle -- turningOn
+  // true plays switch_on.mp3, false plays switch_off.mp3. Called both
+  // for a real, successful toggle AND for a simulated one on a
+  // dead-panel attempt (see deadSwitchLastSimulatedOn below) -- the
+  // sound represents only the physical movement of the switch lever,
+  // never whether the circuit actually has power to respond to it.
   // Always restarts from the beginning; no fade, immediate.
   function playElectricalSwitchSound(turningOn) {
     if (!audioUnlocked) return;
@@ -6080,6 +6082,22 @@
       el.volume = muted ? 0 : (el._baseVolume || 0);
     });
   }
+
+  // DEAD-PANEL SWITCH AUDIO -- purely cosmetic and never persisted
+  // (same transient, module-level shape as activeTapeTitle/
+  // fishingSession elsewhere in this file): while a circuit can't
+  // actually be switched on (no usable power -- see every
+  // performXToggle's own battery-restart-threshold check below), the
+  // lever still physically moves and clicks with each attempt, so
+  // repeated clicks keep alternating switch_on.mp3/switch_off.mp3 even
+  // though the real circuit flag never changes. Keyed by the same
+  // strings as ELECTRICAL_TOGGLE_FIELDS, plus 'autopilot' and 'fan' for
+  // their own separate toggle functions. Cleared the moment a REAL
+  // toggle for that key goes through, so the next dead-panel spell (if
+  // the battery ever fails again) starts its alternation fresh from
+  // wherever the switch actually now sits, never from a stale
+  // simulated position left over from a previous failure.
+  var deadSwitchLastSimulatedOn = {};
 
   // Toggles flip immediately and redraw the panel — no confirmation
   // prompt, no delay, and deliberately no permanent-log entry for the
@@ -6110,15 +6128,26 @@
     // nothing just being switched on), but the task this implements
     // wants every battery-powered light/circuit visibly off at 0% with
     // no exceptions, so it's gated the same as the other three now.
+    // DEAD PANEL -- b[field] is never touched here: the system truly
+    // never turns on, no ON state is ever stored or queued, and the
+    // lamp (which reads b[field] directly, not a separate UI flag)
+    // stays dark. The switch lever still physically clicks, though --
+    // see deadSwitchLastSimulatedOn above -- so repeated attempts keep
+    // alternating the ON/OFF sound exactly as they would on a working
+    // panel, purely as physical-movement feedback.
     if (!b[field] && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      var simulatedOn = !deadSwitchLastSimulatedOn[key];
+      deadSwitchLastSimulatedOn[key] = simulatedOn;
+      playElectricalSwitchSound(simulatedOn);
       printBlank();
       printLine('No power.', 'amber');
       cmdNavStation(state);
       return;
     }
+    delete deadSwitchLastSimulatedOn[key]; // a real toggle from here on -- next dead-panel spell (if any) starts its alternation fresh
     var turningOn = !b[field];
     b[field] = turningOn;
-    playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through, never on a blocked attempt above
+    playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through for real
 
     // ACCESSORY HOOK -- switching the circuit off mid-playback cuts the
     // cassette player the same way losing power outright would; see the
@@ -6163,11 +6192,20 @@
       return;
     }
     if (!b.autopilotOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      // DEAD PANEL -- see the module notes on deadSwitchLastSimulatedOn
+      // and performElectricalToggle's identical treatment: b.autopilotOn
+      // is never touched here, so the lamp (which reads it directly)
+      // stays dark and nothing is queued, but the switch lever still
+      // physically clicks each attempt.
+      var simulatedAutopilotOn = !deadSwitchLastSimulatedOn.autopilot;
+      deadSwitchLastSimulatedOn.autopilot = simulatedAutopilotOn;
+      playElectricalSwitchSound(simulatedAutopilotOn);
       printBlank();
       printLine('No power.', 'amber');
       render(state);
       return;
     }
+    delete deadSwitchLastSimulatedOn.autopilot; // a real toggle from here on
     var turningOn = !b.autopilotOn;
     b.autopilotOn = turningOn;
     playElectricalSwitchSound(turningOn);
@@ -6222,11 +6260,17 @@
       return;
     }
     if (!b.fanOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      // DEAD PANEL -- see the module notes on deadSwitchLastSimulatedOn
+      // and performElectricalToggle's identical treatment.
+      var simulatedFanOn = !deadSwitchLastSimulatedOn.fan;
+      deadSwitchLastSimulatedOn.fan = simulatedFanOn;
+      playElectricalSwitchSound(simulatedFanOn);
       printBlank();
       printLine('No power.', 'amber');
       cmdSaloon(state);
       return;
     }
+    delete deadSwitchLastSimulatedOn.fan; // a real toggle from here on
     var turningOn = !b.fanOn;
     b.fanOn = turningOn;
     playElectricalSwitchSound(turningOn);
@@ -7205,18 +7249,14 @@
     // charging back toward BATTERY_RESTART_THRESHOLD_PCT) DOES have some
     // charge, just not enough yet to restore systems -- SYSTEMS
     // UNAVAILABLE — LOW BATTERY says so rather than repeating NO POWER
-    // inaccurately, and the second line names the exact level being
-    // waited for (built from the constant, never a hardcoded "2%", so
-    // it can never drift out of sync with the actual threshold below).
-    // Neither line appears once battery reaches the threshold; the
-    // mechanical gate itself is unchanged (see every performXToggle's
-    // own check) -- this is purely the status line catching up to what
-    // was already true.
+    // inaccurately. Neither line appears once battery reaches the
+    // threshold; the mechanical gate itself is unchanged (see every
+    // performXToggle's own check) -- this is purely the status line
+    // catching up to what was already true.
     if (b.battery === 0) {
       printLine('NO POWER', 'amber');
     } else if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
-      printLine(BATTERY_RESTART_THRESHOLD_PCT + '% REQUIRED', 'amber');
     }
     printLine(statusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
     if (b.electrical === 'DAMAGED') {
