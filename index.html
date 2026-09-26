@@ -549,6 +549,7 @@
         engineRunningMinutes: 0,   // continuous current runtime, resets to 0 the moment the engine stops — see checkFuel/engineRuntimeWeightBonus
         repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
+        batteryRecovering: false,  // true ONLY from the moment battery actually reaches 0% until it climbs back to BATTERY_RESTART_THRESHOLD_PCT -- see updateBattery. Makes that threshold a true dead-battery RECOVERY gate rather than a general minimum: every performXToggle/cmdEngine/etc. check requires this flag too, not just battery<BATTERY_RESTART_THRESHOLD_PCT, so ordinary depletion through 3%/2%/1% never locks anything out on its own.
         autopilotOn: true,          // holds SET COURSE and auto-tacks; OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
         fanOn: false,
         heaterOn: false,
@@ -3542,7 +3543,6 @@
   function updateBattery(state) {
     var b = state.boat;
     var hrs = TICK_MINUTES / 60;
-    var batteryBefore = b.battery; // only used below to detect the 1%->2% RESTART THRESHOLD crossing, so that note fires exactly once rather than every tick the battery happens to sit above it
 
     // Charging takes priority: while the engine runs, it's actively
     // pushing power in regardless of what's also drawing from it — a
@@ -3575,14 +3575,23 @@
     // light forces off, once, right when battery actually reaches 0%,
     // whichever day/night text fits — never auto-restored afterward, no
     // matter how much later power returns (see every performXToggle's
-    // own battery<BATTERY_RESTART_THRESHOLD_PCT gate). ACCESSORY and NAV
-    // LIGHTS are included now (the circuit/fixture itself may draw
-    // nothing just being switched on, but a truly dead battery can't
-    // actually light or power either one, so they're forced off exactly
-    // like the rest). A cassette actually playing right now genuinely
-    // can't keep going with no power to run it either.
+    // own batteryRecovering gate). ACCESSORY and NAV LIGHTS are included
+    // now (the circuit/fixture itself may draw nothing just being
+    // switched on, but a truly dead battery can't actually light or
+    // power either one, so they're forced off exactly like the rest). A
+    // cassette actually playing right now genuinely can't keep going
+    // with no power to run it either.
+    //
+    // b.batteryRecovering is what turns BATTERY_RESTART_THRESHOLD_PCT
+    // from a general minimum into a true DEAD-BATTERY recovery
+    // threshold: it's set true ONLY here, the moment battery actually
+    // reaches 0, and every gate elsewhere checks this flag ALONGSIDE
+    // battery<BATTERY_RESTART_THRESHOLD_PCT rather than that comparison
+    // alone -- so ordinary depletion down through 3%, 2%, 1% never
+    // triggers any lockout; only a genuine 0% event does.
     if (b.battery <= 0) {
       var hadSomethingOn = b.autopilotOn || b.fanOn || b.heaterOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
+      b.batteryRecovering = true;
       b.autopilotOn = false;
       b.fanOn = false;
       b.heaterOn = false;
@@ -3598,14 +3607,17 @@
       }
     }
 
-    // RESTART THRESHOLD -- an optional one-time note the moment battery
-    // climbs back up through BATTERY_RESTART_THRESHOLD_PCT (2%),
-    // detected via the before/after comparison above rather than a
-    // separate persisted flag. Nothing restarts automatically here —
-    // this is purely informational; every powered system stays exactly
-    // as it was left (all OFF, from the failure above) until the player
-    // manually re-engages it.
-    if (batteryBefore < BATTERY_RESTART_THRESHOLD_PCT && b.battery >= BATTERY_RESTART_THRESHOLD_PCT) {
+    // RESTART THRESHOLD -- ends recovery (and fires its one-time note)
+    // the moment battery climbs back up to BATTERY_RESTART_THRESHOLD_PCT
+    // (2%), but ONLY when actually recovering from a real 0% failure —
+    // gating on the flag rather than a bare before/after battery
+    // comparison is what stops ordinary fluctuation near 2% (never
+    // having hit 0 at all) from firing this. Nothing restarts
+    // automatically here — this is purely informational; every powered
+    // system stays exactly as it was left (all OFF, from the failure
+    // above) until the player manually re-engages it.
+    if (b.batteryRecovering && b.battery >= BATTERY_RESTART_THRESHOLD_PCT) {
+      b.batteryRecovering = false;
       log(state, "There's enough power now. I can start the engine.");
     }
   }
@@ -6006,7 +6018,7 @@
     var b = state.boat;
     printBlank();
     printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
-    printLine(statusLine('BATTERY', Math.round(b.battery) + '%'));
+    printLine(statusLine('BATTERY', Math.floor(b.battery) + '%'));
     printBlank();
     printLine(statusLine('SAILS', b.sails));
     printLine(statusLine('STEERING', b.steering));
@@ -6140,7 +6152,11 @@
     // nothing just being switched on), but the task this implements
     // wants every battery-powered light/circuit visibly off at 0% with
     // no exceptions, so it's gated the same as the other three now.
-    // DEAD PANEL -- b[field] is never touched here: the system truly
+    // DEAD PANEL -- gated on batteryRecovering as well as the raw
+    // battery value: this branch must only fire during an actual
+    // dead-battery recovery, never merely because battery is under the
+    // threshold from ordinary depletion that hasn't hit 0% (see
+    // updateBattery). b[field] is never touched here: the system truly
     // never turns on, no ON state is ever stored or queued, and the
     // lamp (which reads b[field] directly, not a separate UI flag)
     // stays dark. The switch lever still physically clicks, though --
@@ -6150,7 +6166,7 @@
     // -- the panel's own BATTERY/SYSTEMS UNAVAILABLE — LOW BATTERY
     // status lines (see cmdNavStation) already say why, so repeating it
     // on every click would just be redundant.
-    if (!b[field] && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    if (!b[field] && b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       var simulatedOn = !deadSwitchLastSimulatedOn[key];
       deadSwitchLastSimulatedOn[key] = simulatedOn;
       playElectricalSwitchSound(simulatedOn);
@@ -6204,7 +6220,7 @@
       render(state);
       return;
     }
-    if (!b.autopilotOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    if (!b.autopilotOn && b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       // DEAD PANEL -- see the module notes on deadSwitchLastSimulatedOn
       // and performElectricalToggle's identical treatment: b.autopilotOn
       // is never touched here, so the lamp (which reads it directly)
@@ -6270,7 +6286,7 @@
       cmdSaloon(state);
       return;
     }
-    if (!b.fanOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    if (!b.fanOn && b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       // DEAD PANEL -- see the module notes on deadSwitchLastSimulatedOn
       // and performElectricalToggle's identical treatment.
       var simulatedFanOn = !deadSwitchLastSimulatedOn.fan;
@@ -6495,7 +6511,7 @@
   }
 
   function cmdForecast(state) {
-    if (state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT || state.boat.electrical === 'DAMAGED') {
+    if ((state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) || state.boat.electrical === 'DAMAGED') {
       printBlank();
       printLine('NO POWER', 'amber');
       state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
@@ -6522,12 +6538,16 @@
     // actions the task this implements explicitly allows in a
     // nighttime failure (raising is a separate matter, gated within
     // performSailChange below), so this screen's own nav-lights-at-
-    // night gate is bypassed whenever battery is actually under the
-    // restart threshold -- otherwise the player couldn't even reach the
-    // menu to lower sail in the dark with a dead battery. HELM/ENGINE/
-    // FISH have their own, separate reasoning for whether they get the
-    // same exception; this doesn't change any of them.
-    if (needsNavLights(state) && !(state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
+    // night gate is bypassed whenever battery is actually recovering
+    // from a true 0% failure -- otherwise the player couldn't even
+    // reach the menu to lower sail in the dark with a dead battery.
+    // Gated on batteryRecovering, not just the raw battery value, so
+    // ordinary low-battery depletion (nav lights still on, never having
+    // hit 0%) never triggers this bypass at all -- needsNavLights would
+    // already be false in that case anyway. HELM/ENGINE/FISH have their
+    // own, separate reasoning for whether they get the same exception;
+    // this doesn't change any of them.
+    if (needsNavLights(state) && !(state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
     printBlank();
     printLine('Currently: ' + sailConfigLabel(state.boat.sailConfig) + '.');
     state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
@@ -6707,16 +6727,19 @@
   }
 
   function cmdEngine(state) {
-    // BATTERY FAILURE -- nav lights can't be lit with the battery dead or
-    // still under the restart threshold (see updateBattery), and
-    // starting the engine is the ONLY way to get power back at all, so
-    // this specific screen's own nav-lights-at-night gate is bypassed
-    // whenever battery is actually below that threshold -- without this,
-    // a nighttime failure would be a genuine dead end (no nav lights ->
-    // can't reach ENGINE -> can't charge -> nav lights never come back).
-    // HELM/SAILS/FISH keep this gate completely unchanged; only ENGINE
-    // gets the exception, and only while battery is actually that low.
-    if (needsNavLights(state) && !(state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
+    // BATTERY FAILURE -- nav lights can't be lit while actually
+    // recovering from a dead battery (see updateBattery), and starting
+    // the engine is the ONLY way to get power back at all, so this
+    // specific screen's own nav-lights-at-night gate is bypassed
+    // whenever batteryRecovering is true and battery is still under the
+    // threshold -- without this, a nighttime failure would be a genuine
+    // dead end (no nav lights -> can't reach ENGINE -> can't charge ->
+    // nav lights never come back). Gated on the recovery flag, not the
+    // raw battery value alone, so ordinary low-battery depletion (nav
+    // lights still on, never having hit 0%) never needs or triggers
+    // this bypass. HELM/SAILS/FISH keep this gate completely unchanged;
+    // only ENGINE gets the exception, and only during real recovery.
+    if (needsNavLights(state) && !(state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
     printBlank();
     printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
     printLine('Diesel: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS));
@@ -6731,14 +6754,17 @@
       return;
     }
     // BATTERY FAILURE -- not enough charge left to crank the starter.
-    // Preemptive, same pattern as DAMAGED/no-diesel just above (the
-    // toggle option itself isn't offered, so a blocked attempt never
-    // touches battery or fuel at all). Exact wording preserved verbatim
-    // per the messaging spec this implements -- this specific, physical
-    // reason stays distinct from the general electrical-panel status
-    // line (NO POWER / SYSTEMS UNAVAILABLE — LOW BATTERY) even though
-    // both can be true at the same moment.
-    if (!state.boat.engineOn && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    // Only blocks during an actual dead-battery recovery
+    // (batteryRecovering), never merely because ordinary depletion has
+    // brought battery under the threshold without ever having hit 0% --
+    // see updateBattery. Preemptive, same pattern as DAMAGED/no-diesel
+    // just above (the toggle option itself isn't offered, so a blocked
+    // attempt never touches battery or fuel at all). Exact wording
+    // preserved verbatim per the messaging spec this implements -- this
+    // specific, physical reason stays distinct from the general
+    // electrical-panel status line (SYSTEMS UNAVAILABLE — LOW BATTERY)
+    // even though both can be true at the same moment.
+    if (!state.boat.engineOn && state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('NOT ENOUGH BATTERY TO CRANK ENGINE', 'amber');
       if (isDark(state)) printLine("I'll have to wait for daylight and let the solar bring it back.", 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
@@ -7249,7 +7275,7 @@
     // repeating it as a heading was pure duplication.
     printLine(statusLine('CABIN TEMP', cabinTempDisplay));
     printLine(statusLine('CABIN', cabinStatusWord(state)));
-    var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
+    var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
     // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
     // threshold span (0% included): the separate all-caps NO POWER
@@ -7257,11 +7283,14 @@
     // BATTERY line itself, which already reads the exact percentage —
     // SYSTEMS UNAVAILABLE — LOW BATTERY communicates the consequence
     // (systems unavailable) without repeating the battery reading a
-    // second way. Never appears once battery reaches the threshold; the
-    // mechanical gate itself is unchanged (see every performXToggle's
-    // own check) -- this is purely the status line catching up to what
-    // was already true.
-    if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    // second way. Gated on batteryRecovering, not the raw value alone:
+    // this must only appear during an actual dead-battery recovery, not
+    // during ordinary depletion that dips under the threshold without
+    // ever having reached 0% (see updateBattery). Never appears once
+    // battery reaches the threshold; the mechanical gate itself is
+    // unchanged (see every performXToggle's own check) -- this is
+    // purely the status line catching up to what was already true.
+    if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
     }
     printLine(statusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
@@ -7785,7 +7814,7 @@
       cmdTapePlayer(state);
       return;
     }
-    if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
       printLine('You press PLAY. Nothing. The cassette player has no power.', 'amber');
       cmdTapePlayer(state);
@@ -9919,8 +9948,11 @@
     // failure -- see cmdSails' own bypass of the nav-lights gate above,
     // which is what makes reaching this screen possible at all in that
     // state. Only the RAISE direction is blocked here, and only when the
-    // task's own "nighttime dead-battery" condition actually holds.
-    if (SAIL_AREA_ORDER[targetConfig] > SAIL_AREA_ORDER[fromConfig] && isDark(state) && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    // task's own "nighttime dead-battery" condition actually holds --
+    // gated on batteryRecovering, not the raw value, so ordinary
+    // low-battery depletion (never having hit 0%) never blocks raising
+    // sail on its own.
+    if (SAIL_AREA_ORDER[targetConfig] > SAIL_AREA_ORDER[fromConfig] && isDark(state) && state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       blockedByDarkness(state, 'cmd:sails');
       return;
     }
@@ -10587,11 +10619,14 @@
         if (opt.action === 'open-map') {
           // BATTERY FAILURE -- the map requires electrical power. Blocked
           // BEFORE ever opening anything (never briefly opens the map tab
-          // and closes it) whenever battery is under the restart
-          // threshold; the option itself stays visible either way (see
+          // and closes it) whenever actually recovering from a dead
+          // battery and still under the restart threshold -- gated on
+          // batteryRecovering, not the raw value alone, so ordinary
+          // low-battery depletion (never having hit 0%) never blocks the
+          // map. The option itself stays visible either way (see
           // getContextualOptions/cmdPosition), only the interaction is
           // gated, exactly like every other powered-system toggle.
-          if (state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+          if (state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
             clearTempView();
             printBlank();
             printLine('No power.', 'amber');
@@ -11538,6 +11573,13 @@
     if (c.location === undefined) c.location = 'above';
     if (c.atHelm === undefined) c.atHelm = false;
     if (b.battery === undefined) b.battery = 100;
+    // BATTERY RECOVERY -- a save from before this flag existed that
+    // already has a dead battery must start in recovery too (never
+    // letting a mid-recovery upgrade skip the lockout); anything else
+    // defaults to false, same as a fresh game -- including an old save
+    // sitting at, say, 1% from ordinary play, which is correctly NOT
+    // recovery under the current logic (see updateBattery).
+    if (b.batteryRecovering === undefined) b.batteryRecovering = b.battery <= 0;
     if (b.autopilotOn === undefined) b.autopilotOn = true;
     if (b.fanOn === undefined) b.fanOn = false;
     if (b.heaterOn === undefined) b.heaterOn = false;
