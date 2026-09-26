@@ -3568,7 +3568,27 @@
       // Solar simply offsets the draw, never pauses it or replaces it --
       // a sunny day with autopilot alone nets a slow drain, not a gain.
       var solar = solarChargeRate(state);
-      b.battery = clamp(b.battery + hrs * (solar - drain), 0, 100);
+      var newBattery = b.battery + hrs * (solar - drain);
+
+      // BATTERY FLOOR -- during NORMAL DEPLETION (not already recovering
+      // from a blackout), 1% is the last usable percentage: fractional
+      // residual charge below 1% is never allowed to exist. The instant
+      // a drain calculation would take the battery below 1.0% (e.g.
+      // 1.0% -> 0.95%, or 1.4% -> 0.9%), it snaps straight to 0% instead
+      // -- the blackout check right below fires immediately off that,
+      // same tick. This only ever applies to a genuine net decrease
+      // while not already recovering (batteryRecovering guard, plus the
+      // newBattery<b.battery check so a still-charging-but-under-1%
+      // moment is never mistaken for depletion); charging is completely
+      // unaffected, including the intentionally slow, fractional climb
+      // back up through 0.1%-1.9% during an actual recovery below --
+      // that's what keeps the existing solar rates representing real
+      // elapsed charging time once a blackout has genuinely happened.
+      if (!b.batteryRecovering && newBattery < 1 && newBattery < b.battery) {
+        b.battery = 0;
+      } else {
+        b.battery = clamp(newBattery, 0, 100);
+      }
     }
 
     // BATTERY FAILURE -- every powered load AND every battery-powered
