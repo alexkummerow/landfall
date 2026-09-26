@@ -22,7 +22,19 @@
     --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', 'Courier New', monospace;
   }
 
-  * { box-sizing: border-box; }
+  /* TAP HIGHLIGHT REMOVAL -- global, site-wide, at the shared CSS level
+     rather than patched per screen/menu: mobile WebKit's default
+     -webkit-tap-highlight-color paints a brief grey/blue overlay on any
+     tapped element unless explicitly suppressed, which is exactly the
+     unwanted "flash" this removes. transparent means the overlay still
+     exists but paints nothing -- everything an action already does
+     (state changes, indicator lamps, screen transitions, audio) is
+     completely untouched; this only ever removes the passive highlight
+     browsers add on top of it. */
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
 
   /* GLOBAL RULE: nothing in Landfall is ever underlined -- not text,
      not links, not buttons/.option controls, in any state (hover,
@@ -6134,13 +6146,14 @@
     // stays dark. The switch lever still physically clicks, though --
     // see deadSwitchLastSimulatedOn above -- so repeated attempts keep
     // alternating the ON/OFF sound exactly as they would on a working
-    // panel, purely as physical-movement feedback.
+    // panel, purely as physical-movement feedback. No text message here
+    // -- the panel's own BATTERY/SYSTEMS UNAVAILABLE — LOW BATTERY
+    // status lines (see cmdNavStation) already say why, so repeating it
+    // on every click would just be redundant.
     if (!b[field] && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       var simulatedOn = !deadSwitchLastSimulatedOn[key];
       deadSwitchLastSimulatedOn[key] = simulatedOn;
       playElectricalSwitchSound(simulatedOn);
-      printBlank();
-      printLine('No power.', 'amber');
       cmdNavStation(state);
       return;
     }
@@ -6200,8 +6213,6 @@
       var simulatedAutopilotOn = !deadSwitchLastSimulatedOn.autopilot;
       deadSwitchLastSimulatedOn.autopilot = simulatedAutopilotOn;
       playElectricalSwitchSound(simulatedAutopilotOn);
-      printBlank();
-      printLine('No power.', 'amber');
       render(state);
       return;
     }
@@ -6265,8 +6276,6 @@
       var simulatedFanOn = !deadSwitchLastSimulatedOn.fan;
       deadSwitchLastSimulatedOn.fan = simulatedFanOn;
       playElectricalSwitchSound(simulatedFanOn);
-      printBlank();
-      printLine('No power.', 'amber');
       cmdSaloon(state);
       return;
     }
@@ -7242,20 +7251,17 @@
     printLine(statusLine('CABIN', cabinStatusWord(state)));
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
-    // BATTERY FAILURE -- accurately names which of the two distinct
-    // states a battery under the restart threshold is actually in: a
-    // true 0% is NO POWER (nothing at all to draw on), while above 0%
-    // but still under the threshold (mid dead-battery recovery,
-    // charging back toward BATTERY_RESTART_THRESHOLD_PCT) DOES have some
-    // charge, just not enough yet to restore systems -- SYSTEMS
-    // UNAVAILABLE — LOW BATTERY says so rather than repeating NO POWER
-    // inaccurately. Neither line appears once battery reaches the
-    // threshold; the mechanical gate itself is unchanged (see every
-    // performXToggle's own check) -- this is purely the status line
-    // catching up to what was already true.
-    if (b.battery === 0) {
-      printLine('NO POWER', 'amber');
-    } else if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+    // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
+    // threshold span (0% included): the separate all-caps NO POWER
+    // wording this used to show at exactly 0% was redundant next to the
+    // BATTERY line itself, which already reads the exact percentage —
+    // SYSTEMS UNAVAILABLE — LOW BATTERY communicates the consequence
+    // (systems unavailable) without repeating the battery reading a
+    // second way. Never appears once battery reaches the threshold; the
+    // mechanical gate itself is unchanged (see every performXToggle's
+    // own check) -- this is purely the status line catching up to what
+    // was already true.
+    if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
     }
     printLine(statusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
