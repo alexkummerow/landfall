@@ -3448,6 +3448,14 @@
     return state.meta.voyageMinutes + (state.meta.leftoverMinutes || 0);
   }
 
+  // True only while catchUpFromRealTime's own advanceSimulation call is
+  // running -- simTick (and everything it calls, including
+  // processSleepTick's autoWakeUp) can check this to tell "the player
+  // was away and this whole pass is a bulk replay of elapsed time"
+  // apart from "the live loop just ran its regular, real-time tick" --
+  // see autoWakeUp's own notes for why that distinction matters.
+  var inCatchUpPass = false;
+
   function advanceSimulation(state, minutes) {
     var remaining = minutes + (state.meta.leftoverMinutes || 0);
     var ticks = 0;
@@ -3474,7 +3482,9 @@
     var now = Date.now();
     var elapsedMinutes = (now - state.meta.lastTick) / 60000;
     if (elapsedMinutes < 1) { state.meta.lastTick = now; return 0; }
+    inCatchUpPass = true;
     var ticks = advanceSimulation(state, elapsedMinutes);
+    inCatchUpPass = false;
     state.meta.lastTick = now;
     return ticks;
   }
@@ -4376,6 +4386,23 @@
     flushNewLogEntries(state);
   }
 
+  // Same transition as wakeUp() (unchanged, still happens at exactly
+  // the same moment -- see processSleepTick's own callers below), but
+  // also marks that this particular wake happened WITHOUT the player
+  // clicking WAKE UP, so the live loop can play the same WAKING UP
+  // . .. .../wake_up.mp3 sequence the manual path gets (see the
+  // 'wake-up' case in handleAction) once it's actually safe to do so.
+  // Never marked during an offline catch-up pass (see inCatchUpPass):
+  // simTick can run many times synchronously there, long before the
+  // player is even looking at a screen, so there's no real "moment"
+  // for a real-time audio/dots sequence to occupy -- that path keeps
+  // its existing instant, silent transition, summarized via the log
+  // instead, exactly as it already works today.
+  function autoWakeUp(state, baseText, includeDuration) {
+    wakeUp(state, baseText, includeDuration);
+    if (!inCatchUpPass) state.crew._autoWakeAudioPending = true;
+  }
+
   // Advances the 'trying' -> 'sleeping' -> 'awake' state machine by one
   // tick. This is the only place any of those transitions happen, so it
   // runs identically whether it's the live loop or a multi-day catch-up.
@@ -4405,18 +4432,18 @@
     if (c.watchState === 'sleeping') {
       // Something demanding attention (e.g. the aft locker) always wins.
       if (state.pendingChoice) {
-        wakeUp(state, "Something's wrong. You're awake, fast.", false);
+        autoWakeUp(state, "Something's wrong. You're awake, fast.", false);
         return;
       }
       // A squall breaking is loud and wet enough to end anyone's sleep.
       if (state.weather.condition === 'squall' && prevCondition !== 'squall') {
-        wakeUp(state, "Cold spray through the hatch \u2014 you're awake.", false);
+        autoWakeUp(state, "Cold spray through the hatch \u2014 you're awake.", false);
         return;
       }
       if (Math.random() < wakeChanceWhileSleeping(state)) {
         if (c.fatigue <= 20) {
           // Actually rested — this is a real end to the sleep, not a blip.
-          wakeUp(state, "You surface on your own, rested.");
+          autoWakeUp(state, "You surface on your own, rested.");
         } else {
           // Still genuinely exhausted: a real wake would leave them stuck
           // fully 'awake' and racking up MORE fatigue for the rest of an
@@ -9684,6 +9711,31 @@
     armDurationWatchdog(playingEl);
   }
 
+  // The cosmetic WAKING UP . .. .../wake_up.mp3 sequence for an
+  // automatic wake (see autoWakeUp/processSleepTick), played AFTER the
+  // live loop's own tick-processing pass has fully finished for this
+  // firing -- never triggered from inside simTick/processSleepTick
+  // itself, which can run many times synchronously during an offline
+  // catch-up pass and isn't a safe place to start a UI-blocking audio
+  // sequence (see startLiveLoop's own call site for the actual
+  // safety check). watchState is already 'awake' by the time this
+  // runs -- autoWakeUp already made that transition, at the same
+  // moment it always has -- so the action callback here is a no-op;
+  // this only adds the same audio/dots presentation the manual WAKE
+  // UP path gets (see the 'wake-up' case above), including the same
+  // SOUND OFF handling.
+  function performAutoWakeSequence(state) {
+    if (muted) {
+      runShortAction(state, { label: 'WAKING UP', duration: 2, action: function () {} });
+    } else {
+      runAudioSyncedAction(state, {
+        label: 'WAKING UP',
+        playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
+        action: function () {},
+      });
+    }
+  }
+
   // Sail area ordering, used only to classify a change as a raise or a
   // lower and specifically detect FURLED<->FULL vs every other
   // transition -- see SAILS AUDIO above. Matches the relative ordering
@@ -10601,17 +10653,17 @@
           // just not the short, event-independent completion a muted
           // player should get. So muted takes a completely separate,
           // fixed-duration path here instead: no audio at all, a brief
-          // GETTING UP . .. ... (matching GOING ABOVE/BELOW's own short
+          // WAKING UP . .. ... (matching GOING ABOVE/BELOW's own short
           // physical-action pacing), done.
           if (muted) {
             runShortAction(state, {
-              label: 'GETTING UP',
+              label: 'WAKING UP',
               duration: 2,
               action: function (s) { wakeUp(s, 'You wake and go above.'); },
             });
           } else {
             runAudioSyncedAction(state, {
-              label: 'GETTING UP',
+              label: 'WAKING UP',
               playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
               action: function (s) { wakeUp(s, 'You wake and go above.'); },
             });
@@ -10871,6 +10923,20 @@
       last = now;
       var ticks = advanceSimulation(GAME, minutes);
       GAME.meta.lastTick = now;
+      // An automatic wake this pass (see autoWakeUp/processSleepTick)
+      // gets its WAKING UP . .. .../wake_up.mp3 sequence here, once
+      // tick-processing has fully finished and it's actually safe to
+      // start a UI-blocking audio sequence -- never from inside simTick
+      // itself. Skipped (flag left set, tried again next firing) if
+      // something else already has the UI busy, e.g. the player
+      // separately clicked WAKE UP at almost the same moment; run
+      // BEFORE the options-repaint just below so that repaint correctly
+      // sees uiBusy already true and doesn't flash the normal menu for
+      // an instant before this sequence takes it over.
+      if (GAME.crew._autoWakeAudioPending && !uiBusy) {
+        GAME.crew._autoWakeAudioPending = false;
+        performAutoWakeSequence(GAME);
+      }
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
