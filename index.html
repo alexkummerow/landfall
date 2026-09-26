@@ -2292,6 +2292,14 @@
   var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
   var BATTERY_DRAIN_CASSETTE_PER_HOUR = 0.05; // a cassette actually playing -- almost negligible next to the majors above; the ACCESSORY circuit itself draws nothing just being switched on, see updateBattery
   var BATTERY_CHARGE_PER_HOUR = 100; // engine running: 0% -> 100% in 60 minutes = 100%/hour
+  var BATTERY_RESTART_THRESHOLD_PCT = 2; // after a true 0% failure, powered systems (and the engine starter) stay locked out until battery climbs back to THIS -- see updateBattery/cmdEngine/every performXToggle's own gate. A simple numeric threshold, not a separate persisted recovery flag: the 0-1% band only ever exists right around an actual 0% event, so comparing battery directly is enough (unlike a higher threshold, which ordinary low-battery play could sit under for a long time without ever truly failing).
+
+  // BATTERY DEAD TEXT -- shown once, the moment battery actually reaches
+  // 0% (see updateBattery), whichever of these fits the current time of
+  // day. Plain multi-line strings (the existing convention for longer
+  // log entries elsewhere in this file, e.g. the book milestones).
+  var BATTERY_DEAD_TEXT_DAY = "Everything shuts off.\nBattery's dead.\nI can still get around in daylight, but anything electrical is out.\nOnce the solar brings it back a little, I can get the engine started.";
+  var BATTERY_DEAD_TEXT_NIGHT = "Everything goes dark.\nBattery's dead.\nI won't be able to get much done until morning.\nOnce the solar brings it back a little, I can get the engine started.";
 
   // SOLAR — a modest passive daytime trickle charge, entirely automatic
   // (no toggle, no separate resource). %/hour in full daylight, by
@@ -3522,6 +3530,7 @@
   function updateBattery(state) {
     var b = state.boat;
     var hrs = TICK_MINUTES / 60;
+    var batteryBefore = b.battery; // only used below to detect the 1%->2% RESTART THRESHOLD crossing, so that note fires exactly once rather than every tick the battery happens to sit above it
 
     // Charging takes priority: while the engine runs, it's actively
     // pushing power in regardless of what's also drawing from it — a
@@ -3550,26 +3559,42 @@
       b.battery = clamp(b.battery + hrs * (solar - drain), 0, 100);
     }
 
-    // Battery failure forces every load off, once, right when it
-    // happens — never auto-restored afterward. The player has to
-    // manually switch things back on once power returns. ACCESSORY is
-    // deliberately NOT in this list — the circuit itself draws nothing,
-    // so there's nothing for a dead battery to trip; it's fine left
-    // however the player set it. A cassette actually playing right now,
-    // though, genuinely can't keep going with no power to run it.
+    // BATTERY FAILURE -- every powered load AND every battery-powered
+    // light forces off, once, right when battery actually reaches 0%,
+    // whichever day/night text fits — never auto-restored afterward, no
+    // matter how much later power returns (see every performXToggle's
+    // own battery<BATTERY_RESTART_THRESHOLD_PCT gate). ACCESSORY and NAV
+    // LIGHTS are included now (the circuit/fixture itself may draw
+    // nothing just being switched on, but a truly dead battery can't
+    // actually light or power either one, so they're forced off exactly
+    // like the rest). A cassette actually playing right now genuinely
+    // can't keep going with no power to run it either.
     if (b.battery <= 0) {
-      var hadSomethingOn = b.autopilotOn || b.fanOn || b.heaterOn || b.cabinLightsOn;
+      var hadSomethingOn = b.autopilotOn || b.fanOn || b.heaterOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
       b.autopilotOn = false;
       b.fanOn = false;
       b.heaterOn = false;
       b.cabinLightsOn = false;
+      b.accessoryOn = false;
+      b.navLightsOn = false;
       if (hadSomethingOn) {
-        log(state, 'Battery dead. Everything electrical drops out.');
+        log(state, isDark(state) ? BATTERY_DEAD_TEXT_NIGHT : BATTERY_DEAD_TEXT_DAY);
       }
       if (activeTapeTitle != null) {
         stopCurrentTapeTrackImmediately();
         playTapeOffSound();
       }
+    }
+
+    // RESTART THRESHOLD -- an optional one-time note the moment battery
+    // climbs back up through BATTERY_RESTART_THRESHOLD_PCT (2%),
+    // detected via the before/after comparison above rather than a
+    // separate persisted flag. Nothing restarts automatically here —
+    // this is purely informational; every powered system stays exactly
+    // as it was left (all OFF, from the failure above) until the player
+    // manually re-engages it.
+    if (batteryBefore < BATTERY_RESTART_THRESHOLD_PCT && b.battery >= BATTERY_RESTART_THRESHOLD_PCT) {
+      log(state, "There's enough power now. I can start the engine.");
     }
   }
 
@@ -6077,12 +6102,14 @@
       cmdNavStation(state);
       return;
     }
-    // ACCESSORY HOOK -- unlike the others, the circuit itself draws
-    // nothing just being switched on (only an actually-playing cassette
-    // does — see updateBattery), so a dead battery doesn't stop the
-    // player from flipping it on; playing a tape is what's actually
-    // gated on real charge, at performStartTape.
-    if (!b[field] && b.battery <= 0 && key !== 'accessory') {
+    // RESTART THRESHOLD -- battery must have climbed back to
+    // BATTERY_RESTART_THRESHOLD_PCT (2%) before ANY of the four panel
+    // circuits, ACCESSORY included, can be switched back on after a
+    // true failure. ACCESSORY used to be exempt (its own circuit draws
+    // nothing just being switched on), but the task this implements
+    // wants every battery-powered light/circuit visibly off at 0% with
+    // no exceptions, so it's gated the same as the other three now.
+    if (!b[field] && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
       printLine('No power.', 'amber');
       cmdNavStation(state);
@@ -6134,7 +6161,7 @@
       render(state);
       return;
     }
-    if (!b.autopilotOn && b.battery <= 0) {
+    if (!b.autopilotOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
       printLine('No power.', 'amber');
       render(state);
@@ -6193,7 +6220,7 @@
       cmdSaloon(state);
       return;
     }
-    if (!b.fanOn && b.battery <= 0) {
+    if (!b.fanOn && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
       printLine('No power.', 'amber');
       cmdSaloon(state);
@@ -6414,7 +6441,7 @@
   }
 
   function cmdForecast(state) {
-    if (state.boat.battery <= 0 || state.boat.electrical === 'DAMAGED') {
+    if (state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT || state.boat.electrical === 'DAMAGED') {
       printBlank();
       printLine('NO POWER', 'amber');
       state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
@@ -6437,7 +6464,16 @@
 
 
   function cmdSails(state) {
-    if (needsNavLights(state)) { blockedByNavLights(state); return; }
+    // BATTERY FAILURE -- lowering sail is one of the few physical
+    // actions the task this implements explicitly allows in a
+    // nighttime failure (raising is a separate matter, gated within
+    // performSailChange below), so this screen's own nav-lights-at-
+    // night gate is bypassed whenever battery is actually under the
+    // restart threshold -- otherwise the player couldn't even reach the
+    // menu to lower sail in the dark with a dead battery. HELM/ENGINE/
+    // FISH have their own, separate reasoning for whether they get the
+    // same exception; this doesn't change any of them.
+    if (needsNavLights(state) && !(state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
     printBlank();
     printLine('Currently: ' + sailConfigLabel(state.boat.sailConfig) + '.');
     state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
@@ -6617,7 +6653,16 @@
   }
 
   function cmdEngine(state) {
-    if (needsNavLights(state)) { blockedByNavLights(state); return; }
+    // BATTERY FAILURE -- nav lights can't be lit with the battery dead or
+    // still under the restart threshold (see updateBattery), and
+    // starting the engine is the ONLY way to get power back at all, so
+    // this specific screen's own nav-lights-at-night gate is bypassed
+    // whenever battery is actually below that threshold -- without this,
+    // a nighttime failure would be a genuine dead end (no nav lights ->
+    // can't reach ENGINE -> can't charge -> nav lights never come back).
+    // HELM/SAILS/FISH keep this gate completely unchanged; only ENGINE
+    // gets the exception, and only while battery is actually that low.
+    if (needsNavLights(state) && !(state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
     printBlank();
     printLine('Status: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
     printLine('Diesel: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS));
@@ -6628,6 +6673,16 @@
     }
     if (!state.boat.engineOn && state.boat.fuelGallons <= 0) {
       printLine('No diesel left to start it.', 'amber');
+      state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
+      return;
+    }
+    // BATTERY FAILURE -- not enough charge left to crank the starter.
+    // Preemptive, same pattern as DAMAGED/no-diesel just above (the
+    // toggle option itself isn't offered, so a blocked attempt never
+    // touches battery or fuel at all).
+    if (!state.boat.engineOn && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      printLine('Not enough battery to crank the engine.', 'amber');
+      if (isDark(state)) printLine("I'll have to wait for daylight and let the solar bring it back.", 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
       return;
     }
@@ -7299,7 +7354,10 @@
   // performClothingCommit). Neither is the generic 'cancel' every
   // other screen uses, since both need their own specific behavior.
   function cmdClothing(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
+    // BATTERY FAILURE -- changing clothes is explicitly allowed even in
+    // a nighttime failure (see the task this implements), so the usual
+    // darkness gate other below-deck actions use is deliberately absent
+    // here and throughout the rest of this clothing flow.
     if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
     printBlank();
     printLine('CHANGE', 'heading-label');
@@ -7342,7 +7400,6 @@
   // BE SELECTED NORMALLY") — a DRY or WET garment still sets the
   // pending selection directly and returns here, exactly as before.
   function cmdClothingCategory(state, category) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     printBlank();
     printLine(CLOTHING_CATEGORY_TITLE[category], 'heading-label');
     var options = CLOTHING_CATEGORY_ORDER[category].map(function (value) {
@@ -7364,7 +7421,6 @@
   // drying garment (see cmdClothingCategory above). PUT ON WET is the
   // only way to interrupt a drying cycle; see performPutOnWet.
   function cmdGarmentDryingDetail(state, category, key) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     if (garmentStatus(state, key) !== 'drying') { cmdClothingCategory(state, category); return; } // defensive -- finished drying (or otherwise changed) between opening the category menu and clicking it; the category list will freshly reflect its now-current status
     printBlank();
     printLine(CLOTHING_LABELS[category][key], 'heading-label');
@@ -7385,7 +7441,6 @@
   // for its slot. The player still has to press COMMIT to actually
   // wear it — this only updates the draft, same as any other pick.
   function performPutOnWet(state, category, key) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     var cond = resolveGarmentCondition(state, key);
     if (cond && cond.dryAtGameMinutes != null) {
       cond.dryAtGameMinutes = null;
@@ -7402,7 +7457,6 @@
   // action, no audio, nothing actually worn changes yet. See
   // performClothingCommit for the one place that's true.
   function performSetPendingClothing(state, category, value) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     // Defensive — cmdClothingCategory already routes a drying garment
     // to PUT ON WET instead of here, but never silently skip that
     // consequence if this is somehow reached directly anyway.
@@ -7417,7 +7471,6 @@
   // flips the pending value in place and redraws the same screen, same
   // "pending only" rule as the four category pickers above.
   function performTogglePendingClothing(state, key) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
     pendingClothing[key] = !pendingClothing[key];
     cmdClothing(state);
@@ -7444,7 +7497,6 @@
   // pending outfit is applied simultaneously only once that audio
   // actually finishes, never garment-by-garment while it plays.
   function performClothingCommit(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     var outfit = pendingClothing || cloneClothing(state.crew.clothing);
     if (clothingOutfitsEqual(outfit, state.crew.clothing)) {
       pendingClothing = null;
@@ -7662,7 +7714,7 @@
       cmdTapePlayer(state);
       return;
     }
-    if (b.battery <= 0) {
+    if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
       printLine('You press PLAY. Nothing. The cassette player has no power.', 'amber');
       cmdTapePlayer(state);
@@ -7823,7 +7875,11 @@
   }
 
   function cmdEat(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:galley'); return; }
+    // BATTERY FAILURE -- this screen itself only offers MEALS/SNACKS, and
+    // several snacks (nuts, dried mango, energy bar) need no cooking or
+    // light at all -- see the task this implements. Left reachable here;
+    // cmdMeals (all cooked) and individual snack items are gated where
+    // they actually matter, in cmdMeals and performEat respectively.
     printBlank();
     printLine('PROVISIONS', 'heading-label');
     var anyMeal = FOOD_ITEMS.some(function (f) { return f.type === 'meal' && state.food[f.key] > 0; }) || !!heldFishAsMealItem(state);
@@ -7843,6 +7899,10 @@
   }
 
   function cmdMeals(state) {
+    // BATTERY FAILURE -- every meal (see FOOD_ITEMS/heldFishAsMealItem)
+    // is a cooked item, so the whole submenu is blocked at once rather
+    // than offering a screen full of individually-blocked options.
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:eat'); return; }
     printBlank();
     printLine('MEALS', 'heading-label');
     state.pendingChoice = { id: 'meals-menu', options: buildMealsOptions(state) };
@@ -7956,6 +8016,18 @@
     if (!item || (!isHeldFish && state.food[key] <= 0)) {
       printBlank();
       printLine("That's already gone.", 'dim');
+      return;
+    }
+
+    // BATTERY FAILURE -- anything actually cooked (all meals, held fish,
+    // and Popcorn among the snacks) needs the stove and enough light to
+    // use it safely; Tuna on Crackers is called out explicitly in the
+    // task this implements as needing more than a straight grab-and-eat
+    // too, so it's blocked here alongside the cooked items even though
+    // it's otherwise an uncooked snack. Every other snack (nuts, dried
+    // mango, energy bar) and chocolate stay completely unaffected.
+    if ((item.cooked || key === 'tunaCrackers') && needsCabinLight(state)) {
+      blockedByDarkness(state, isHeldFish || item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
       return;
     }
 
@@ -9770,6 +9842,17 @@
 
   function performSailChange(state, targetConfig) {
     var fromConfig = state.boat.sailConfig;
+    // BATTERY FAILURE -- raising sail (moving to MORE canvas) needs
+    // enough light/power to do safely; lowering (less canvas, including
+    // furling) does not and is explicitly allowed even in a nighttime
+    // failure -- see cmdSails' own bypass of the nav-lights gate above,
+    // which is what makes reaching this screen possible at all in that
+    // state. Only the RAISE direction is blocked here, and only when the
+    // task's own "nighttime dead-battery" condition actually holds.
+    if (SAIL_AREA_ORDER[targetConfig] > SAIL_AREA_ORDER[fromConfig] && isDark(state) && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      blockedByDarkness(state, 'cmd:sails');
+      return;
+    }
     var audioKey = sailChangeAudioKey(fromConfig, targetConfig);
     runAudioSyncedAction(state, {
       label: SAIL_CHANGE_WORKING_LABEL[targetConfig],
@@ -10322,13 +10405,35 @@
         btn.textContent = '> ' + opt.label;
       }
       btn.addEventListener('click', function () {
-        if (opt.action === 'open-map' || opt.action === 'open-in-windy') {
+        if (opt.action === 'open-map') {
+          // BATTERY FAILURE -- the map requires electrical power. Blocked
+          // BEFORE ever opening anything (never briefly opens the map tab
+          // and closes it) whenever battery is under the restart
+          // threshold; the option itself stays visible either way (see
+          // getContextualOptions/cmdPosition), only the interaction is
+          // gated, exactly like every other powered-system toggle.
+          if (state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+            clearTempView();
+            printBlank();
+            printLine('No power.', 'amber');
+            state.pendingChoice = { id: 'map-blocked', options: [{ label: 'BACK', action: state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station' }] };
+            renderOptions(state);
+            scrollToBottom();
+            return;
+          }
           // Pure external side effect: opens a new tab and changes
           // nothing about the current Landfall view, so the panel that
-          // offered this (POSITION or FORECAST) stays exactly as it was
-          // — no clearTempView, no touching openInfoPanel, no re-render.
-          var url = opt.action === 'open-map' ? googleMapsUrl(state.nav.lat, state.nav.lon) : windyUrl(state.nav.lat, state.nav.lon);
-          window.open(url, '_blank');
+          // offered this (POSITION) stays exactly as it was — no
+          // clearTempView, no touching openInfoPanel, no re-render.
+          window.open(googleMapsUrl(state.nav.lat, state.nav.lon), '_blank');
+          return;
+        }
+        if (opt.action === 'open-in-windy') {
+          // Pure external side effect: opens a new tab and changes
+          // nothing about the current Landfall view, so the panel that
+          // offered this (FORECAST) stays exactly as it was — no
+          // clearTempView, no touching openInfoPanel, no re-render.
+          window.open(windyUrl(state.nav.lat, state.nav.lon), '_blank');
           return;
         }
         if (opt.action.indexOf('cmd:') === 0) {
