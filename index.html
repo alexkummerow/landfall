@@ -6680,9 +6680,13 @@
     // BATTERY FAILURE -- not enough charge left to crank the starter.
     // Preemptive, same pattern as DAMAGED/no-diesel just above (the
     // toggle option itself isn't offered, so a blocked attempt never
-    // touches battery or fuel at all).
+    // touches battery or fuel at all). Exact wording preserved verbatim
+    // per the messaging spec this implements -- this specific, physical
+    // reason stays distinct from the general electrical-panel status
+    // line (NO POWER / SYSTEMS UNAVAILABLE — LOW BATTERY) even though
+    // both can be true at the same moment.
     if (!state.boat.engineOn && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
-      printLine('Not enough battery to crank the engine.', 'amber');
+      printLine('NOT ENOUGH BATTERY TO CRANK ENGINE', 'amber');
       if (isDark(state)) printLine("I'll have to wait for daylight and let the solar bring it back.", 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
       return;
@@ -7194,7 +7198,27 @@
     printLine(statusLine('CABIN', cabinStatusWord(state)));
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.round(b.battery) + '%';
     printLine(statusLine('BATTERY', batteryLabel));
-    printLine(statusLine('SOLAR', solarOutputWatts(state) + ' W'));
+    // BATTERY FAILURE -- accurately names which of the two distinct
+    // states a battery under the restart threshold is actually in: a
+    // true 0% is NO POWER (nothing at all to draw on), while above 0%
+    // but still under the threshold (mid dead-battery recovery,
+    // charging back toward BATTERY_RESTART_THRESHOLD_PCT) DOES have some
+    // charge, just not enough yet to restore systems -- SYSTEMS
+    // UNAVAILABLE — LOW BATTERY says so rather than repeating NO POWER
+    // inaccurately, and the second line names the exact level being
+    // waited for (built from the constant, never a hardcoded "2%", so
+    // it can never drift out of sync with the actual threshold below).
+    // Neither line appears once battery reaches the threshold; the
+    // mechanical gate itself is unchanged (see every performXToggle's
+    // own check) -- this is purely the status line catching up to what
+    // was already true.
+    if (b.battery === 0) {
+      printLine('NO POWER', 'amber');
+    } else if (b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+      printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
+      printLine(BATTERY_RESTART_THRESHOLD_PCT + '% REQUIRED', 'amber');
+    }
+    printLine(statusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
