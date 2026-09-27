@@ -6520,19 +6520,25 @@
   // nearest 5 KT band, seas use the SAME per-tier feet Landfall
   // already shows in WEATHER (see SEA_STATE_WAVE_HEIGHT_FT) as the
   // band's low end, +2 FT as its high end.
-  function buildForecastPeriods(state) {
-    var w = state.weather;
+  // The near/far period labels (TODAY/TONIGHT, or TONIGHT/next-weekday
+  // when it's already night) -- shared by buildForecastPeriods below
+  // and cmdForecast's NOAA path, so the label logic exists exactly
+  // once regardless of which data source actually fills in the wind/
+  // seas/conditions underneath it.
+  function forecastNearFarLabels(state) {
     var now = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
     var isNight = now.getHours() >= 18 || now.getHours() < 6;
-    var nearLabel, farLabel;
     if (isNight) {
-      nearLabel = 'TONIGHT';
       var tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-      farLabel = FORECAST_WEEKDAY_NAMES[tomorrow.getDay()];
-    } else {
-      nearLabel = 'TODAY';
-      farLabel = 'TONIGHT';
+      return { nearLabel: 'TONIGHT', farLabel: FORECAST_WEEKDAY_NAMES[tomorrow.getDay()] };
     }
+    return { nearLabel: 'TODAY', farLabel: 'TONIGHT' };
+  }
+
+  function buildForecastPeriods(state) {
+    var w = state.weather;
+    var labels = forecastNearFarLabels(state);
+    var nearLabel = labels.nearLabel, farLabel = labels.farLabel;
 
     var windDir = compassPoint(w.windDirection);
     var nearWindLow = Math.floor(w.windSpeed / 5) * 5;
@@ -6581,6 +6587,158 @@
     ];
   }
 
+  /* --------------------------------------------------------------
+     NOAA MARINE FORECAST -- real wind data underneath, Landfall's
+     existing TODAY/TOMORROW presentation on top (see cmdForecast
+     below for where this is actually used).
+
+     WHAT'S REAL VS DERIVED: api.weather.gov's structured, machine-
+     readable forecast (the only NOAA product with a documented JSON
+     schema and confirmed CORS support) is a land-oriented gridpoint
+     forecast -- it reliably includes real wind speed/direction and a
+     short conditions phrase, but never a sea-height field. Every NOAA
+     product that DOES include sea height (Coastal Waters, Offshore,
+     High Seas forecasts) is issued as free-form bulletin text with no
+     stable schema across issuing offices -- parsing that reliably
+     enough to trust for a specific numeric range was judged too
+     fragile to build here, which is exactly the "cannot be reliably
+     interpreted" case this task's own fallback language anticipates.
+     Seas below are instead derived from the REAL retrieved wind speed
+     using Landfall's own existing wind/sea-state scale
+     (seaStateWaveHeightFt) -- Landfall's model applied to a real
+     input, never presented as itself coming from NOAA.
+
+     OFFSHORE COVERAGE: /points/{lat},{lon} simply returns no usable
+     forecast link for positions NOAA has no gridpoint forecast for
+     (most of the open Pacific) -- fetchNoaaMarineForecast treats that
+     exactly like any other failure, and cmdForecast falls straight
+     through to Landfall's existing, fully-simulated
+     buildForecastPeriods. That satisfies the task's point-forecast-
+     then-fallback priority without a separate, unreliable offshore-
+     text-parsing tier in between.
+
+     NO LOADING SEQUENCE: selecting MARINE FORECAST renders
+     immediately (see handleAction's 'computer:marine-forecast' case),
+     which rules out ever waiting on a live fetch at that moment. So
+     the network request never happens at the moment of selection --
+     refreshNoaaForecastCache is instead called opportunistically
+     (right when the computer finishes booting, and again each time
+     the forecast is actually viewed) to keep a short-lived cache warm
+     in the background; cmdForecast only ever reads whatever is
+     already sitting in that cache the instant it's asked to render. */
+  var noaaForecastCache = null; // { lat, lon, periods, fetchedAtMs } | null -- periods is NOAA's own raw array, unconverted
+  var noaaForecastFetchInFlight = false; // guards against piling up duplicate concurrent requests
+  var NOAA_FORECAST_CACHE_MAX_AGE_MS = 20 * 60 * 1000; // 20 minutes -- short-lived, per the task's own caching guidance
+  var NOAA_FORECAST_CACHE_MAX_DISTANCE_NM = 25; // Solace is moving; a cache built this far from the current position is treated as stale rather than reused
+
+  function noaaCacheIsUsable(state) {
+    var c = noaaForecastCache;
+    if (!c) return false;
+    if (Date.now() - c.fetchedAtMs > NOAA_FORECAST_CACHE_MAX_AGE_MS) return false;
+    if (distanceBetween(state.nav.lat, state.nav.lon, c.lat, c.lon) > NOAA_FORECAST_CACHE_MAX_DISTANCE_NM) return false;
+    return true;
+  }
+
+  // Fires off a background fetch of the real NOAA point forecast for
+  // the CURRENT simulated position, populating noaaForecastCache when
+  // it succeeds. Deliberately fire-and-forget -- nothing here ever
+  // blocks rendering, and any failure (network, CORS, no NOAA
+  // gridpoint at this position, timeout, malformed response) just
+  // leaves the cache exactly as it was, which cmdForecast already
+  // treats as "use Landfall's own forecast."
+  function refreshNoaaForecastCache(state) {
+    if (noaaForecastFetchInFlight) return;
+    if (noaaCacheIsUsable(state)) return; // already warm and close enough
+    var lat = state.nav.lat, lon = state.nav.lon;
+    noaaForecastFetchInFlight = true;
+    fetchNoaaMarineForecast(lat, lon).then(function (periods) {
+      noaaForecastFetchInFlight = false;
+      if (periods) noaaForecastCache = { lat: lat, lon: lon, periods: periods, fetchedAtMs: Date.now() };
+    }, function () {
+      noaaForecastFetchInFlight = false; // fetchNoaaMarineForecast already catches internally and resolves null rather than rejecting, but never leave the in-flight flag stuck on a stray rejection either
+    });
+  }
+
+  // Resolves to NOAA's raw forecast periods array for this position, or
+  // null on ANY failure whatsoever -- offline, request timeout, no
+  // gridpoint forecast at this position (the common case far
+  // offshore), CORS/browser restrictions, a non-OK HTTP status, or a
+  // response that doesn't parse the way expected. Every failure mode
+  // is handled identically and silently; the caller's only job is
+  // deciding what to do with null.
+  function fetchNoaaMarineForecast(lat, lon) {
+    var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 6000) : null;
+    var fetchOpts = { headers: { 'Accept': 'application/geo+json' } };
+    if (controller) fetchOpts.signal = controller.signal;
+    return fetch('https://api.weather.gov/points/' + lat.toFixed(4) + ',' + lon.toFixed(4), fetchOpts)
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (pointData) {
+        var forecastUrl = pointData && pointData.properties && pointData.properties.forecast;
+        if (!forecastUrl) return null;
+        return fetch(forecastUrl, fetchOpts).then(function (res) { return res.ok ? res.json() : null; });
+      })
+      .then(function (forecastData) {
+        if (timeoutId) clearTimeout(timeoutId);
+        var periods = forecastData && forecastData.properties && forecastData.properties.periods;
+        return (periods && periods.length >= 2) ? periods : null;
+      })
+      .catch(function () {
+        if (timeoutId) clearTimeout(timeoutId);
+        return null;
+      });
+  }
+
+  // NOAA's windSpeed is a free-text string like "10 mph" or "10 to 15
+  // mph" -- pulls out the number(s), converts mph->kt, and rounds to
+  // the nearest 5kt band the same way Landfall's own simulated
+  // forecast already does (see buildForecastPeriods above), so a real
+  // reading never reads any more falsely precise than a simulated one.
+  function parseNoaaWindSpeedKt(windSpeedStr) {
+    var nums = (windSpeedStr || '').match(/\d+/g);
+    if (!nums || !nums.length) return null;
+    var MPH_TO_KT = 0.868976;
+    var low = Math.round((parseInt(nums[0], 10) * MPH_TO_KT) / 5) * 5;
+    var high = nums.length > 1 ? Math.round((parseInt(nums[1], 10) * MPH_TO_KT) / 5) * 5 : low + 5;
+    if (high <= low) high = low + 5;
+    return { low: low, high: high };
+  }
+
+  // No NOAA product reliably gives a numeric sea height as clean JSON
+  // (see this section's own opening notes) -- this derives a tier from
+  // the REAL wind speed just retrieved using Landfall's own existing
+  // wind/sea-state relationship, the same SEA_STATE_WAVE_HEIGHT_FT
+  // scale the simulated forecast already uses, rather than a
+  // separately invented formula.
+  function noaaWindKtToSeaStateTier(kt) {
+    if (kt <= 10) return 0;
+    if (kt <= 15) return 1;
+    if (kt <= 20) return 2;
+    if (kt <= 25) return 3;
+    if (kt <= 33) return 4;
+    if (kt <= 40) return 5;
+    return 6;
+  }
+
+  // Converts one raw NOAA period object into the exact same
+  // {label, windDir, windLow, windHigh, seaLow, seaHigh, conditionLines}
+  // shape buildForecastPeriods already produces, so cmdForecast's own
+  // rendering loop never needs to know whether a given period came
+  // from NOAA or from Landfall's own simulated forecast.
+  function noaaPeriodToForecastPeriod(period, label) {
+    var wind = parseNoaaWindSpeedKt(period.windSpeed) || { low: 10, high: 15 };
+    var seaLow = seaStateWaveHeightFt(noaaWindKtToSeaStateTier(wind.high));
+    return {
+      label: label,
+      windDir: period.windDirection || compassPoint(0),
+      windLow: wind.low,
+      windHigh: wind.high,
+      seaLow: seaLow,
+      seaHigh: seaLow + 2,
+      conditionLines: [(period.shortForecast || '').toUpperCase()],
+    };
+  }
+
   // Reachable two ways: the historical standalone NAV STATION link
   // (currently unlinked from any menu -- see cmdNavStation's own
   // options -- but left registered in COMMANDS so nothing else that
@@ -6604,7 +6762,22 @@
     printBlank();
     printLine('MARINE FORECAST', 'heading-label');
     printLine('ISSUED ' + forecastIssuedHHMM(state));
-    buildForecastPeriods(state).forEach(function (period) {
+    // Real NOAA data when a recent-enough, close-enough cached fetch is
+    // already sitting there (see refreshNoaaForecastCache's own notes
+    // on why the fetch never happens synchronously, right here);
+    // Landfall's own fully-simulated forecast otherwise. Either way the
+    // two periods share the exact same near/far labels and rendering
+    // shape, so the player never sees a difference in presentation.
+    var periods;
+    if (noaaCacheIsUsable(state)) {
+      var labels = forecastNearFarLabels(state);
+      var raw = noaaForecastCache.periods;
+      periods = [noaaPeriodToForecastPeriod(raw[0], labels.nearLabel), noaaPeriodToForecastPeriod(raw[1], labels.farLabel)];
+    } else {
+      periods = buildForecastPeriods(state);
+    }
+    refreshNoaaForecastCache(state); // opportunistic -- keeps the cache warm for the next time this is viewed; never blocks this render
+    periods.forEach(function (period) {
       printBlank();
       printLine(period.label);
       printBlank();
@@ -7487,6 +7660,7 @@
       playAudio: function (onEnded) { return playNavStationOneShot('computerStartup', onEnded); },
       action: function (s) {
         s.boat.computerOn = true;
+        refreshNoaaForecastCache(s); // opportunistic head start -- see its own notes; by the time the player actually navigates to MARINE FORECAST, this background fetch has had as long as possible to finish
         cmdShipsComputerMenu(s);
       },
     });
@@ -7521,8 +7695,8 @@
         [
           { label: 'SATELLITE WEATHER', action: 'computer:satellite-weather' },
           { label: 'WIND MAP', action: 'computer:wind-map' },
-          { label: 'MARINE FORECAST', action: 'computer:marine-forecast' },
           { label: 'NAVIGATION CHART', action: 'computer:navigation-chart' },
+          { label: 'MARINE FORECAST', action: 'computer:marine-forecast' },
         ],
         [{ label: 'SHUT DOWN', action: 'shut-down-computer' }],
       ]),
@@ -11166,6 +11340,12 @@
         printLine('The screen is dark. No power.', 'amber');
         state.pendingChoice = { id: 'computer-blocked', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
       } else {
+        // Mouse click, same as the three external apps -- selecting an
+        // application on the computer, even one that opens an internal
+        // screen instead of a website. No loading dots (per the task
+        // this implements): the forecast screen renders immediately
+        // right after, synchronously, same as before.
+        playNavStationOneShot('mouse');
         // Landfall's own internal forecast, not an external site --
         // see cmdForecast's own notes on the backAction parameter.
         // BACK returns to SHIP'S COMPUTER's own menu, since the
