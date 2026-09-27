@@ -1237,7 +1237,7 @@
   }
   function blockedByDarkness(state, backAction) {
     printBlank();
-    printLine('TOO DARK TO SEE.', 'amber');
+    printLine('TOO DARK TO SEE', 'amber');
     state.pendingChoice = { id: 'dark-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
   }
 
@@ -1260,7 +1260,7 @@
   }
   function blockedByNavLights(state, backAction) {
     printBlank();
-    printLine('Too dark. I need the nav lights.', 'amber');
+    printLine('TOO DARK TO SEE', 'amber');
     state.pendingChoice = { id: 'navlights-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
   }
 
@@ -8157,7 +8157,7 @@
     if (c.location === 'below' && needsCabinLight(state)) {
       c.readingBookId = null;
       state.pendingChoice = null;
-      log(state, 'Too dark to keep reading.');
+      log(state, 'TOO DARK TO SEE');
       return;
     }
   }
@@ -8536,7 +8536,7 @@
   function performCoffee(state) {
     if (needsCabinLight(state)) {
       printBlank();
-      printLine('TOO DARK TO SEE.', 'amber');
+      printLine('TOO DARK TO SEE', 'amber');
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
@@ -8570,7 +8570,7 @@
   function performTea(state) {
     if (needsCabinLight(state)) {
       printBlank();
-      printLine('TOO DARK TO SEE.', 'amber');
+      printLine('TOO DARK TO SEE', 'amber');
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
@@ -10717,7 +10717,7 @@
   var NATURAL_LIGHT_SUNSET_HOUR = 20;
   var NATURAL_LIGHT_SUNRISE_HOUR = 5;
   var NATURAL_LIGHT_TRANSITION_MINUTES = 30; // how long the dim/brighten ramp takes on either side of sunset/sunrise
-  var NIGHT_TEXT_BRIGHTNESS = 0.4; // the one tunable dim floor -- 1.0 is full/normal (unchanged) brightness; this is as dim as natural light alone ever gets. Retune only this.
+  var NIGHT_TEXT_BRIGHTNESS = 0.2; // the one tunable dim floor -- 1.0 is full/normal (unchanged) brightness; this is as dim as natural light alone ever gets (80% darker than normal, per the task this implements). Retune only this.
 
   // Returns 0..1: how bright natural light ALONE makes the text right
   // now — continuous through the two 30-minute ramps, 1 (untouched)
@@ -10786,13 +10786,26 @@
   // from the same places so it's always in sync with CURRENT state,
   // including right after loading a saved game or an offline catch-up
   // (nothing here is ever persisted; it's recomputed fresh every time).
-  // Cabin lights ON is a full override back to normal brightness
-  // regardless of time of day or how far through a transition natural
-  // light currently is -- see CABIN LIGHT OVERRIDE. Turning them back
-  // OFF simply reveals whatever naturalLightBrightness says for that
-  // exact moment, never restarting or resuming a transition.
+  // The light that overrides natural dimming depends on location, same
+  // as applyCabinLighting's own 'below'-only gate just above and the
+  // needsCabinLight/needsNavLights action gates elsewhere in this file:
+  // NAV LIGHTS govern it above deck, CABIN LIGHTS below -- this
+  // previously read cabinLightsOn unconditionally regardless of
+  // location, which is why NAV LIGHTS had no effect on text brightness
+  // above deck and CABIN LIGHTS incorrectly brightened it there
+  // instead. Either light, when it's the one that applies, is a full
+  // override back to normal brightness regardless of time of day or
+  // how far through a transition natural light currently is -- see
+  // CABIN LIGHT OVERRIDE. Turning it back OFF simply reveals whatever
+  // naturalLightBrightness says for that exact moment, never
+  // restarting or resuming a transition. This is TEXT BRIGHTNESS only,
+  // deliberately separate from the ACTION lock (needsCabinLight/
+  // needsNavLights), which keeps its own existing day/night boundary
+  // rather than this ramp's continuous value -- see those functions'
+  // own notes.
   function applyNaturalLightDimming(state) {
-    var factor = state.boat.cabinLightsOn ? 1 : naturalLightBrightness(state);
+    var lightsOverrideOn = state.crew.location === 'below' ? !!state.boat.cabinLightsOn : !!state.boat.navLightsOn;
+    var factor = lightsOverrideOn ? 1 : naturalLightBrightness(state);
     if (factor >= 1) {
       NATURAL_LIGHT_TEXT_VARS.forEach(function (name) { document.documentElement.style.removeProperty(name); });
       return;
