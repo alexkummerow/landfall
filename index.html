@@ -994,9 +994,10 @@
   // POSITION's own OPEN MAP, removed in favor of this one dedicated
   // home -- see cmdPosition/cmdShipsComputerMenu). windyUrl: FORECAST's
   // existing OPEN IN WINDY and SHIP'S COMPUTER's WIND MAP both open the
-  // same wind layer. zoomEarthUrl/nowCoastUrl: SHIP'S COMPUTER's
-  // SATELLITE WEATHER and MARINE FORECAST respectively -- see
-  // cmdShipsComputerMenu's click handling.
+  // same wind layer. zoomEarthUrl: SHIP'S COMPUTER's SATELLITE WEATHER
+  // -- see cmdShipsComputerMenu's click handling. MARINE FORECAST is no
+  // external link at all; it opens Landfall's own internal forecast
+  // (see cmdForecast/handleAction's 'computer:marine-forecast' case).
   function googleMapsUrl(lat, lon) {
     return 'https://www.google.com/maps/search/?api=1&query=' + lat.toFixed(5) + ',' + lon.toFixed(5);
   }
@@ -1025,32 +1026,20 @@
     return 'https://zoom.earth/maps/satellite/#view=' + lat.toFixed(3) + ',' + lon.toFixed(3) + ',6z';
   }
 
-  // NOAA nowCOAST's public viewer accepts a BOX map-extent parameter
-  // (minLon:minLat:maxLon:maxLat) in its URL, which is the one
-  // documented way to have it open already centered somewhere rather
-  // than on its own default view -- a small fixed-size box around the
-  // current position gives an ocean-scale view without needing (or
-  // having) any deeper per-point deep-link support. nowCOAST is a U.S.
-  // coastal/marine service; far offshore it may simply have little or
-  // no data to show at that box, which is expected and fine -- the
-  // point is handing the player the real, current external tool
-  // pointed at the right place, not fabricating forecast content here.
-  function nowCoastUrl(lat, lon) {
-    var span = 2; // degrees on each side -- a modest, ocean-scale box, not a close-in zoom
-    var box = (lon - span).toFixed(2) + ':' + (lat - span).toFixed(2) + ':' + (lon + span).toFixed(2) + ':' + (lat + span).toFixed(2);
-    return 'https://nowcoast.noaa.gov/?BOX=' + box;
-  }
 
-  // SHIP'S COMPUTER's four app actions, each mapped to the URL builder
-  // it opens -- WIND MAP reuses the exact same windyUrl FORECAST's own
-  // OPEN IN WINDY already uses; the other three are dedicated to this
-  // feature. Referenced only from the generic options click handler
-  // (see its own notes there for the shared mouse-click-then-open
-  // behavior all four share).
+  // SHIP'S COMPUTER's three remaining external-link app actions, each
+  // mapped to the URL builder it opens -- WIND MAP reuses the exact
+  // same windyUrl FORECAST's own OPEN IN WINDY already uses; the other
+  // two are dedicated to this feature. MARINE FORECAST is deliberately
+  // absent here now -- it opens Landfall's own internal forecast
+  // instead of an external site (see handleAction's
+  // 'computer:marine-forecast' case, which calls cmdForecast directly).
+  // Referenced only from the generic options click handler (see its
+  // own notes there for the shared mouse-click-then-open behavior these
+  // three share).
   var SHIPS_COMPUTER_APP_URLS = {
     'computer:satellite-weather': zoomEarthUrl,
     'computer:wind-map': windyUrl,
-    'computer:marine-forecast': nowCoastUrl,
     'computer:navigation-chart': googleMapsUrl,
   };
 
@@ -6592,11 +6581,24 @@
     ];
   }
 
-  function cmdForecast(state) {
+  // Reachable two ways: the historical standalone NAV STATION link
+  // (currently unlinked from any menu -- see cmdNavStation's own
+  // options -- but left registered in COMMANDS so nothing else that
+  // might reference the 'forecast' command name breaks) and now SHIP'S
+  // COMPUTER's own MARINE FORECAST option (see handleAction's
+  // 'computer:marine-forecast' case), which is the only live path to
+  // it today. backAction lets each caller say where BACK actually
+  // belongs -- NAV STATION for the former, SHIP'S COMPUTER's own menu
+  // for the latter, since the computer is still ON and shouldn't be
+  // exited just by backing out of one of its own screens -- without
+  // duplicating this function's actual forecast-rendering logic for
+  // the two different callers.
+  function cmdForecast(state, backAction) {
+    var back = backAction || 'cmd:nav-station';
     if ((state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) || state.boat.electrical === 'DAMAGED') {
       printBlank();
       printLine('NO POWER', 'amber');
-      state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: back }] };
       return;
     }
     printBlank();
@@ -6610,7 +6612,7 @@
       printLine('SEAS ' + period.seaLow + ' TO ' + period.seaHigh + ' FT');
       period.conditionLines.forEach(function (line) { printLine(line); });
     });
-    state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+    state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: back }] };
   }
 
 
@@ -7428,7 +7430,6 @@
       [
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
-        { label: 'FORECAST', action: 'cmd:forecast' },
         { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' },
       ],
       [
@@ -11155,6 +11156,22 @@
       performFanToggle(state);
     } else if (action === 'shut-down-computer') {
       performShutDownComputer(state);
+    } else if (action === 'computer:marine-forecast') {
+      // Defensive, same shape as cmdShipsComputerMenu's own check: the
+      // computer may have lost power in the background (see
+      // updateBattery) since this menu was last shown, in which case
+      // there's no active computer screen to enter at all.
+      if (!state.boat.computerOn) {
+        printBlank();
+        printLine('The screen is dark. No power.', 'amber');
+        state.pendingChoice = { id: 'computer-blocked', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      } else {
+        // Landfall's own internal forecast, not an external site --
+        // see cmdForecast's own notes on the backAction parameter.
+        // BACK returns to SHIP'S COMPUTER's own menu, since the
+        // computer is still on.
+        cmdForecast(state, 'cmd:ships-computer');
+      }
     } else if (action === 'trim-sails') {
       cmdTrimSails(state);
     } else if (action.indexOf('chore:') === 0) {
