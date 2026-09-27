@@ -726,6 +726,212 @@
   }
 
   /* ============================================================
+     3b. TEMPORARY DEV RESET (?reset=1)
+     ------------------------------------------------------------
+     A developer-only diagnostic, active only when the page URL
+     contains ?reset=1. Backs up and sanitizes the real save FIRST,
+     then wipes browser-side state that could be contaminating a
+     reverted/older build, then restores the sanitized save and
+     reloads once with the query param removed. Never runs on a
+     normal load. See performDevReset for the full sequence.
+
+     SANITIZATION: Landfall has exactly one storage location
+     (STORAGE_KEY, read/written only by loadGameState/saveGameState
+     above) and no transient runtime value (audio state, action
+     locks, dots-progress, computer boot/shutdown state, derived
+     day/night values, etc.) is ever written onto the state object in
+     the first place -- all of that lives in separate, non-persisted
+     module-level variables throughout this file. That means a plain
+     whitelist prune against newGameState()'s own shape is already
+     sufficient to strip BOTH obsolete fields left behind by some
+     other build AND any transient value that might have ended up on
+     a save some other way -- neither can appear in newGameState()'s
+     template, so neither survives the prune. A recognized field's
+     VALUE is always taken from the real save, never replaced by the
+     template's fresh-game default -- this only removes keys the
+     current build's schema doesn't recognize, it never touches
+     legitimate progress. */
+
+  function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  // Recursively keeps only the keys `saved` has in common with
+  // `template` at each level of plain-object nesting. A key missing
+  // from `saved` is simply left out of the result -- per the task
+  // this implements, the current build's own existing default/
+  // undefined handling takes it from there rather than this function
+  // inventing a migration value.
+  function sanitizeAgainstTemplate(saved, template) {
+    if (!isPlainObject(template) || !isPlainObject(saved)) return saved;
+    var result = {};
+    Object.keys(template).forEach(function (key) {
+      if (!(key in saved)) return;
+      var savedValue = saved[key];
+      var templateValue = template[key];
+      if (isPlainObject(templateValue) && isPlainObject(savedValue)) {
+        result[key] = sanitizeAgainstTemplate(savedValue, templateValue);
+      } else {
+        result[key] = savedValue;
+      }
+    });
+    return result;
+  }
+
+  // Landfall never uses IndexedDB itself (single-file, localStorage-
+  // only save system) -- this is a defensive wipe of anything present
+  // on this origin regardless, in case some other build (or anything
+  // else on this site) created one. Logs 'not used' when there is
+  // nothing to do, exactly like the Cache Storage/Service Worker
+  // steps below.
+  function clearLandfallIndexedDb() {
+    if (!window.indexedDB || !indexedDB.databases) {
+      console.log('IndexedDB: not used');
+      return Promise.resolve();
+    }
+    return indexedDB.databases().then(function (dbs) {
+      if (!dbs || dbs.length === 0) {
+        console.log('IndexedDB: not used');
+        return;
+      }
+      return Promise.all(dbs.map(function (db) {
+        if (!db || !db.name) return null;
+        return new Promise(function (resolve) {
+          var req = indexedDB.deleteDatabase(db.name);
+          req.onsuccess = resolve;
+          req.onerror = resolve;
+          req.onblocked = resolve;
+        });
+      })).then(function () { console.log('IndexedDB: \u2713 cleared'); });
+    }).catch(function (e) {
+      console.warn('IndexedDB: could not enumerate/clear:', describeError(e));
+    });
+  }
+
+  // Landfall registers no service worker and never calls the Cache
+  // Storage API itself -- defensive wipe only, same reasoning as
+  // clearLandfallIndexedDb above.
+  function clearLandfallCacheStorage() {
+    if (!window.caches || !caches.keys) {
+      console.log('Cache Storage: none');
+      return Promise.resolve();
+    }
+    return caches.keys().then(function (names) {
+      if (!names || names.length === 0) {
+        console.log('Cache Storage: none');
+        return;
+      }
+      return Promise.all(names.map(function (name) { return caches.delete(name); })).then(function () {
+        console.log('Cache Storage: \u2713 cleared');
+      });
+    }).catch(function (e) {
+      console.warn('Cache Storage: could not clear:', describeError(e));
+    });
+  }
+
+  // Landfall never registers a service worker -- defensive unregister
+  // of anything found on this origin regardless.
+  function clearLandfallServiceWorkers() {
+    if (!navigator.serviceWorker || !navigator.serviceWorker.getRegistrations) {
+      console.log('Service Worker: none');
+      return Promise.resolve();
+    }
+    return navigator.serviceWorker.getRegistrations().then(function (regs) {
+      if (!regs || regs.length === 0) {
+        console.log('Service Worker: none');
+        return;
+      }
+      return Promise.all(regs.map(function (r) { return r.unregister(); })).then(function () {
+        console.log('Service Worker: \u2713 unregistered');
+      });
+    }).catch(function (e) {
+      console.warn('Service Worker: could not unregister:', describeError(e));
+    });
+  }
+
+  function reloadWithoutResetParam() {
+    console.log('Reloading clean build...');
+    var url = new URL(window.location.href);
+    url.searchParams.delete('reset');
+    history.replaceState(null, '', url.toString());
+    window.location.reload();
+  }
+
+  // Runs the full ?reset=1 sequence: read -> back up -> verify ->
+  // sanitize -> clear everything else -> restore -> reload. Returns
+  // true if it took over (an async chain is now in flight that will
+  // reload the page on its own), or false if it aborted immediately
+  // WITHOUT clearing anything -- the only case for that is the saved
+  // game existing but being unreadable/corrupted (see SAFETY note
+  // below), in which case the caller falls through to a completely
+  // normal boot(), exactly as if ?reset=1 had never been present.
+  function performDevReset() {
+    console.log('LANDFALL CLEAN RESET');
+
+    var raw;
+    try {
+      raw = localStorage.getItem(STORAGE_KEY);
+    } catch (e) {
+      console.error('LANDFALL CLEAN RESET: could not read localStorage -- aborting, nothing cleared.', describeError(e));
+      return false;
+    }
+
+    var backedUpSave = null;
+    if (raw) {
+      // SAFETY -- never clear before backup. If the save is present
+      // but does not parse, we do not have a confident backup of it,
+      // so the reset aborts here, before any clearing step, exactly
+      // per the task's own requirement.
+      try {
+        backedUpSave = JSON.parse(raw);
+      } catch (e) {
+        console.error('LANDFALL CLEAN RESET: saved game is unreadable/corrupted -- aborting, nothing cleared.', describeError(e));
+        return false;
+      }
+      console.log('Saved game: \u2713 found');
+      console.log('Saved game: \u2713 backed up');
+    } else {
+      console.log('Saved game: none found (nothing to preserve)');
+    }
+
+    var sanitizedSave = backedUpSave ? sanitizeAgainstTemplate(backedUpSave, newGameState()) : null;
+    if (sanitizedSave) console.log('Saved game: \u2713 sanitized for this build');
+
+    try {
+      localStorage.clear();
+      console.log('localStorage: \u2713 cleared');
+    } catch (e) {
+      console.warn('localStorage: could not clear:', describeError(e));
+    }
+    try {
+      sessionStorage.clear();
+      console.log('sessionStorage: \u2713 cleared');
+    } catch (e) {
+      console.warn('sessionStorage: could not clear:', describeError(e));
+    }
+
+    clearLandfallIndexedDb()
+      .then(clearLandfallCacheStorage)
+      .then(clearLandfallServiceWorkers)
+      .then(function () {
+        if (sanitizedSave) {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedSave));
+            console.log('Saved game: \u2713 restored');
+          } catch (e) {
+            console.error('LANDFALL CLEAN RESET: failed to restore the saved game after clearing storage!', describeError(e));
+          }
+        }
+        reloadWithoutResetParam();
+      })
+      .catch(function (e) {
+        console.error('LANDFALL CLEAN RESET: unexpected error during cleanup.', describeError(e));
+      });
+
+    return true;
+  }
+
+  /* ============================================================
      4. SIMULATION ENGINE
      ============================================================ */
   function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
@@ -11821,8 +12027,19 @@
     saveGameState(GAME);
   });
 
-  boot();
-  setInterval(updateClock, 30000);
+  // ?reset=1 (see performDevReset above) takes over the boot sequence
+  // entirely when present -- it ends in its own page reload once
+  // cleanup finishes, rather than falling into a normal boot() here.
+  // The one exception is an unreadable/corrupted existing save, where
+  // performDevReset aborts (returns false) before touching anything;
+  // in that case boot() runs completely normally, exactly as if
+  // ?reset=1 had never been present, since loadGameState's own
+  // parse-failure handling already treats that the same way.
+  var devResetRequested = new URLSearchParams(window.location.search).get('reset') === '1';
+  if (!devResetRequested || !performDevReset()) {
+    boot();
+    setInterval(updateClock, 30000);
+  }
 })();
 </script>
 </body>
