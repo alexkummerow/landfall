@@ -557,6 +557,7 @@
         cabinLightsOn: false,
         navLightsOn: false,         // NAV STATION / ELECTRICAL PANEL — the boat's running lights, one single state (never a separate "exterior lights" duplicate) driving the indicator, the battery draw, and the nighttime Above Deck restriction alike; same BATTERY_DRAIN_LIGHTS_PER_HOUR drain as cabinLightsOn; required after dark (19:00-05:59) for Above Deck activities (HELM/SAILS/ENGINE/FISH) — see needsNavLights/blockedByNavLights and isNavLightsNight's own notes
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
+        computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
         hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears heat-stuffiness immediately (isCabinHeatStuffy), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateBoatAudioForState/updateRainAudioForState)
       },
@@ -3825,6 +3826,13 @@
       b.cabinLightsOn = false;
       b.accessoryOn = false;
       b.navLightsOn = false;
+      // SHIP'S COMPUTER -- an abrupt loss of power, not an intentional
+      // shutdown: forced off silently here, same as every other load
+      // above, with no computer_shutdown.mp3 and no SHUTTING DOWN
+      // sequence (those belong solely to performShutDownComputer, the
+      // player-initiated path). Power returning later never auto-boots
+      // it -- the player must manually select SHIP'S COMPUTER again.
+      b.computerOn = false;
       if (hadSomethingOn) {
         log(state, isDark(state) ? BATTERY_DEAD_TEXT_NIGHT : BATTERY_DEAD_TEXT_DAY);
       }
@@ -4839,6 +4847,7 @@
     applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
     applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
     applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
+    applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -6569,7 +6578,6 @@
     state.pendingChoice = {
       id: 'position-menu',
       options: [
-        { label: 'OPEN MAP', action: 'open-map' },
         // Reachable from both NAV STATION (the normal case) and the
         // life-raft menu (raftOptions, above, once the boat itself is
         // gone) -- BACK has to return to whichever of those actually
@@ -6670,8 +6678,11 @@
 
   // Two periods (TONIGHT/TODAY, then the following calendar day),
   // each with a compass direction, ranged WIND/SEAS values, and terse
-  // condition lines — see the module notes above cmdForecast for the
-  // full picture. Ranges follow the task's own "don't expose
+  // condition lines. No longer rendered anywhere in the player-facing
+  // UI (the FORECAST screen that once displayed this was removed in
+  // favor of SHIP'S COMPUTER's external WINDY link) -- left in place
+  // untouched since it's part of Landfall's own weather-derived data,
+  // not a UI concern. Ranges follow the task's own "don't expose
   // unrealistically precise future values" rule: wind floors to the
   // nearest 5 KT band, seas use the SAME per-tier feet Landfall
   // already shows in WEATHER (see SEA_STATE_WAVE_HEIGHT_FT) as the
@@ -6737,28 +6748,7 @@
     ];
   }
 
-  function cmdForecast(state) {
-    if ((state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) || state.boat.electrical === 'DAMAGED') {
-      printBlank();
-      printLine('NO POWER', 'amber');
-      state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
-      return;
-    }
-    printBlank();
-    printLine('MARINE FORECAST', 'heading-label');
-    printLine('ISSUED ' + forecastIssuedHHMM(state));
-    buildForecastPeriods(state).forEach(function (period) {
-      printBlank();
-      printLine(period.label);
-      printBlank();
-      printLine('WIND ' + period.windDir + ' ' + period.windLow + ' TO ' + period.windHigh + ' KT');
-      printLine('SEAS ' + period.seaLow + ' TO ' + period.seaHigh + ' FT');
-      period.conditionLines.forEach(function (line) { printLine(line); });
-    });
-    state.pendingChoice = { id: 'forecast-menu', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
-  }
-
-
+  
 
   function cmdSails(state) {
     // BATTERY FAILURE -- lowering sail is one of the few physical
@@ -7573,7 +7563,7 @@
       [
         { label: 'POSITION', action: 'cmd:position' },
         { label: 'WEATHER', action: 'cmd:weather' },
-        { label: 'FORECAST', action: 'cmd:forecast' },
+        { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' },
       ],
       [
         { label: 'INVENTORY', action: 'cmd:inventory' },
@@ -7595,6 +7585,102 @@
     // shows the latest lines flush at the bottom with the echo
     // scrolled above it -- nothing extra to do here for that case.
     outputEl.classList.add('nav-station-bottom-pin');
+  }
+
+  // Darkness gate FIRST, before either power check -- per the task
+  // this implements, the computer is treated like any other sight-
+  // dependent below-deck action (same shape as cmdRepair/cmdInventory/
+  // etc.), not a special exception. Checked even when the computer is
+  // already on: reading a screen still needs light regardless of
+  // whether it was already running when the cabin went dark.
+  function cmdShipsComputer(state) {
+    var b = state.boat;
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (b.computerOn) {
+      cmdShipsComputerMenu(state);
+      return;
+    }
+    if (!b.accessoryOn) {
+      printBlank();
+      printLine('Accessory power is off.', 'amber');
+      state.pendingChoice = { id: 'computer-blocked', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      return;
+    }
+    if ((b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) || b.electrical === 'DAMAGED') {
+      printBlank();
+      printLine('No power.', 'amber');
+      state.pendingChoice = { id: 'computer-blocked', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      return;
+    }
+    // PREVENT DUPLICATE STARTUP -- no extra guard needed here:
+    // runAudioSyncedAction sets uiBusy true and empties the options
+    // panel immediately, so there is no button left to click again
+    // until this sequence's own onAudioDone fires exactly once.
+    runAudioSyncedAction(state, {
+      label: 'SYSTEM BOOTING',
+      playAudio: function (onEnded) { return playNavStationOneShot('computerStartup', onEnded); },
+      action: function (s) {
+        s.boat.computerOn = true;
+        cmdShipsComputerMenu(s);
+      },
+    });
+  }
+
+  // SHIP'S COMPUTER's own main menu -- no BACK; the player exits by
+  // choosing SHUT DOWN (see performShutDownComputer), since this is
+  // meant to read as a physical machine rather than another Landfall
+  // submenu. WINDY/GOOGLE MAPS are pure external links (see the
+  // 'computer:*' click handling) that never navigate away from or
+  // re-render this screen, so returning from one of those tabs leaves
+  // the player looking at this exact same menu -- no extra code needed
+  // for that. The defensive check at the top covers the one background
+  // event that can invalidate this screen without the player doing
+  // anything: a true battery blackout while it was already open (see
+  // updateBattery) forces computerOn false with no shutdown sound at
+  // all, so the next interaction here (SHUT DOWN) needs to reveal that
+  // abrupt loss rather than pretending the computer is still running.
+  function cmdShipsComputerMenu(state) {
+    if (!state.boat.computerOn) {
+      printBlank();
+      printLine('The screen is dark. No power.', 'amber');
+      state.pendingChoice = { id: 'computer-blocked', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+      return;
+    }
+    printBlank();
+    printLine('SHIP\u2019S COMPUTER', 'heading-label');
+    state.pendingChoice = {
+      id: 'ships-computer-menu',
+      options: groupedOptions([
+        [
+          { label: 'WINDY', action: 'computer:windy' },
+          { label: 'GOOGLE MAPS', action: 'computer:google-maps' },
+        ],
+        [{ label: 'SHUT DOWN', action: 'shut-down-computer' }],
+      ]),
+    };
+  }
+
+  // SHUT DOWN -- the only way out of the computer's own menu. If the
+  // computer already lost power in the background (see
+  // cmdShipsComputerMenu's own matching check), there's nothing left to
+  // actually shut down; just return to NAV STATION with no sound/dots,
+  // same as the menu's own defensive path. PREVENT DUPLICATE SHUTDOWN:
+  // same reasoning as PREVENT DUPLICATE STARTUP above -- no extra guard
+  // needed, runAudioSyncedAction's own uiBusy/empty-options-panel
+  // already makes a second click impossible mid-sequence.
+  function performShutDownComputer(state) {
+    if (!state.boat.computerOn) {
+      cmdNavStation(state);
+      return;
+    }
+    runAudioSyncedAction(state, {
+      label: 'SHUTTING DOWN',
+      playAudio: function (onEnded) { return playNavStationOneShot('computerShutdown', onEnded); },
+      action: function (s) {
+        s.boat.computerOn = false;
+        cmdNavStation(s);
+      },
+    });
   }
 
 
@@ -8805,7 +8891,7 @@
     status: cmdStatus,
     position: cmdPosition,
     weather: cmdWeather,
-    forecast: cmdForecast,
+    'ships-computer': cmdShipsComputer,
     inventory: cmdInventory,
     'rescue-status': cmdDistress,
     'radio-for-rescue': cmdRadioForRescue,
@@ -9855,6 +9941,106 @@
   }
 
   /* --------------------------------------------------------------
+     NAV STATION AUDIO -- SHIP'S COMPUTER's three one-shots (boot,
+     shutdown, app-select click). Identical shape to SALOON's audio
+     just above (lazy-loaded elements, quick fade-in, onEnded wiring
+     for runAudioSyncedAction) -- its own independent copy of that
+     machinery, same as every other one-shot domain in this file.
+     -------------------------------------------------------------- */
+  var NAV_STATION_AUDIO_FILES = {
+    computerStartup: 'audio/nav_station/computer_startup.mp3',
+    computerShutdown: 'audio/nav_station/computer_shutdown.mp3',
+    mouse: 'audio/nav_station/mouse.mp3',
+  };
+  var NAV_STATION_AUDIO_VOLUME = {
+    computerStartup: 0.5,
+    computerShutdown: 0.5,
+    mouse: 0.5,
+  };
+  var NAV_STATION_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+
+  var navStationAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as saloonAudioEls/headAudioEls/etc.
+
+  function getNavStationAudioEl(key) {
+    var el = navStationAudioEls[key];
+    if (el) return el;
+    el = new Audio(NAV_STATION_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Nav station audio failed to load (' + key + '): ' + NAV_STATION_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
+    navStationAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeSaloonVolume/fadeHeadVolume/etc. -- see
+  // those functions' own comments for why each audio system keeps its
+  // own independent copy rather than sharing one.
+  function fadeNavStationVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a nav station one-shot (computerStartup/computerShutdown/
+  // mouse) once from the beginning, with a quick fade-in, and fires
+  // onEnded (once) when it naturally finishes -- the exact onEnded
+  // wiring runAudioSyncedAction expects from its config.playAudio (used
+  // for computerStartup/computerShutdown), and returns the element
+  // itself so its own duration-derived watchdog can size itself off the
+  // real file. mouse.mp3 is always called with no onEnded at all (a
+  // pure fire-and-forget click, never gating an action).
+  function playNavStationOneShot(key, onEnded) {
+    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    var el = getNavStationAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.then) {
+      p.then(function () {}, function (e) {
+        console.warn('Nav station audio failed to play (' + key + '):', describeError(e));
+        if (onEnded) onEnded();
+      });
+    }
+    fadeNavStationVolume(el, muted ? 0 : NAV_STATION_AUDIO_VOLUME[key], NAV_STATION_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  function applyMuteToNavStationAudio() {
+    Object.keys(navStationAudioEls).forEach(function (key) {
+      var el = navStationAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : NAV_STATION_AUDIO_VOLUME[key];
+    });
+  }
+
+  /* --------------------------------------------------------------
      SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
      pair, and the winch one-shot, which now specifically represents the
      player physically trimming the sails (see cmdTrimSails/
@@ -10877,38 +11063,36 @@
         btn.textContent = '> ' + opt.label;
       }
       btn.addEventListener('click', function () {
-        if (opt.action === 'open-map') {
-          // BATTERY FAILURE -- the map requires electrical power. Blocked
-          // BEFORE ever opening anything (never briefly opens the map tab
-          // and closes it) whenever actually recovering from a dead
-          // battery and still under the restart threshold -- gated on
-          // batteryRecovering, not the raw value alone, so ordinary
-          // low-battery depletion (never having hit 0%) never blocks the
-          // map. The option itself stays visible either way (see
-          // getContextualOptions/cmdPosition), only the interaction is
-          // gated, exactly like every other powered-system toggle.
-          if (state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT) {
+        if (opt.action === 'computer:windy' || opt.action === 'computer:google-maps') {
+          // Pure external side effect, same shape the old OPEN MAP/OPEN
+          // IN WINDY buttons used before SHIP'S COMPUTER replaced them:
+          // plays the mouse click (selecting an app on the computer),
+          // then immediately opens the corresponding site at Solace's
+          // CURRENT simulated coordinates, read fresh right here rather
+          // than at boot time -- the boat keeps moving, so a WINDY visit
+          // now and a GOOGLE MAPS visit two hours later must each use
+          // wherever the boat actually is at that exact moment. Never
+          // re-renders or navigates anywhere -- the computer menu that
+          // offered this stays exactly as it was, so returning from the
+          // new tab leaves the player looking at the same SHIP'S
+          // COMPUTER screen, still on.
+          var lat = state.nav.lat, lon = state.nav.lon;
+          if (!isFinite(lat) || !isFinite(lon)) {
+            // Defensive -- should never happen (nav.lat/lon are always
+            // real numbers, maintained by the simulation itself), but
+            // never guess a location (Seattle/Kaua'i/0,0) if it somehow
+            // did; fail gracefully in the existing Landfall style instead.
             clearTempView();
             printBlank();
-            printLine('No power.', 'amber');
-            state.pendingChoice = { id: 'map-blocked', options: [{ label: 'BACK', action: state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station' }] };
+            printLine('Position unavailable.', 'amber');
+            state.pendingChoice = { id: 'computer-position-unavailable', options: [{ label: 'BACK', action: 'cmd:ships-computer' }] };
             renderOptions(state);
             scrollToBottom();
             return;
           }
-          // Pure external side effect: opens a new tab and changes
-          // nothing about the current Landfall view, so the panel that
-          // offered this (POSITION) stays exactly as it was — no
-          // clearTempView, no touching openInfoPanel, no re-render.
-          window.open(googleMapsUrl(state.nav.lat, state.nav.lon), '_blank');
-          return;
-        }
-        if (opt.action === 'open-in-windy') {
-          // Pure external side effect: opens a new tab and changes
-          // nothing about the current Landfall view, so the panel that
-          // offered this (FORECAST) stays exactly as it was — no
-          // clearTempView, no touching openInfoPanel, no re-render.
-          window.open(windyUrl(state.nav.lat, state.nav.lon), '_blank');
+          playNavStationOneShot('mouse');
+          var url = opt.action === 'computer:windy' ? windyUrl(lat, lon) : googleMapsUrl(lat, lon);
+          window.open(url, '_blank');
           return;
         }
         if (opt.action.indexOf('cmd:') === 0) {
@@ -11137,6 +11321,8 @@
       performAutopilotToggle(state, cmdNavStation);
     } else if (action === 'toggle-fan') {
       performFanToggle(state);
+    } else if (action === 'shut-down-computer') {
+      performShutDownComputer(state);
     } else if (action === 'trim-sails') {
       cmdTrimSails(state);
     } else if (action.indexOf('chore:') === 0) {
@@ -11854,6 +12040,7 @@
     }
     delete b.exteriorLightsOn;
     if (b.accessoryOn === undefined) b.accessoryOn = false;
+    if (b.computerOn === undefined) b.computerOn = false;
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
     if (b.hatchOpen === undefined) b.hatchOpen = false;
