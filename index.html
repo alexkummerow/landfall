@@ -3105,13 +3105,16 @@
      filtering) lives in section 6, AMBIENT AUDIO, alongside audioCtx.
      -------------------------------------------------------------- */
   var TAPES = [
-    { title: 'Stargazing', path: 'audio/music/stargazing.mp3' },
-    { title: 'Homeward', path: 'audio/music/homeward.mp3' },
-    { title: 'Sunbeams', path: 'audio/music/sunbeams.mp3' },
+    { title: 'Studio I', path: 'audio/saloon/Studio_I.mp3' },
+    { title: 'Studio II', path: 'audio/saloon/Studio_II.mp3' },
+    { title: 'Studio III', path: 'audio/saloon/Studio_III.mp3' },
+    { title: 'Waltz', path: 'audio/saloon/Waltz.mp3' },
+    { title: 'Coda', path: 'audio/saloon/Coda.mp3' },
   ];
   var TAPES_BY_TITLE = {};
   TAPES.forEach(function (t) { TAPES_BY_TITLE[t.title] = t; });
-  var TAPE_OFF_PATH = 'audio/music/tape_off.mp3';
+  var TAPE_START_PATH = 'audio/saloon/tape_start.mp3';
+  var TAPE_STOP_PATH = 'audio/saloon/tape_stop.mp3';
 
   // Small, periodic morale nudge — same diminishing-returns shape
   // (routineMoraleGain) as WASH/DRESS/etc., just keyed to a meaningful
@@ -3847,9 +3850,14 @@
       if (hadSomethingOn) {
         log(state, isDark(state) ? BATTERY_DEAD_TEXT_NIGHT : BATTERY_DEAD_TEXT_DAY);
       }
-      if (activeTapeTitle != null) {
-        stopCurrentTapeTrackImmediately();
-        playTapeOffSound();
+      // Abrupt power loss -- immediate silence, no tape_stop.mp3,
+      // regardless of which phase the cassette was in (sections 7/8).
+      // tapePhase (not activeTapeTitle) is the right condition here: it
+      // also correctly catches an in-progress 'starting'/'stopping'
+      // phase, which activeTapeTitle alone would miss (it's only ever
+      // set while the music itself, 'track', is actually playing).
+      if (tapePhase != null) {
+        resetTapePlaybackImmediately();
       }
     }
 
@@ -5687,11 +5695,11 @@
      nothing here is ever synchronized to voyageMinutes, simulation
      ticks, or any other game-time source.
      -------------------------------------------------------------- */
-  var tapeAudioEl = null;        // single, reused plain <audio> element -- plays TAPES tracks AND tape_off.mp3 in sequence, since the two never overlap
-  var activeTapeTitle = null;    // title of the TAPES entry currently playing, or null -- this is what TAPE PLAYER's "X -- PLAYING" reflects; briefly null again while tape_off.mp3 is the only thing sounding, whether stopping or changing tapes
-  var tapeAudioRole = null;      // 'track' | 'tape_off' | null -- which of the two tapeAudioEl is currently loaded with, so the shared 'ended' handler knows what just finished
-  var pendingNextTapeTitle = null; // set only when CHANGING tapes: which tape to start once the in-flight tape_off.mp3 finishes
-  var pendingNextTapePath = null;
+  var tapeAudioEl = null;        // single, reused plain <audio> element -- plays tape_start.mp3, the selected track, AND tape_stop.mp3 in sequence, since exactly one of the three is ever wanted at a time
+  var activeTapeTitle = null;    // title of the TAPES entry actually PLAYING (tapePhase === 'track') -- null at every other phase; this is what TAPE PLAYER's "X -- PLAYING" reflects
+  var tapePhase = null;          // null (stopped) | 'starting' (tape_start.mp3) | 'track' (the selected music) | 'stopping' (tape_stop.mp3) -- the one authoritative state the shared 'ended' handler and every cancel path key off of
+  var pendingTapeTitle = null;   // during 'starting' only: which tape tape_start.mp3 is building toward
+  var pendingTapePath = null;
   var tapeSessionQualified = false; // whether the CURRENT listening session (since this tape/track started) has already been credited toward today's morale allowance
 
   var TAPE_QUALIFYING_SECONDS = 300;  // 5 minutes of actual playback before a session counts
@@ -5768,12 +5776,12 @@
   // below/above: state.crew.location doesn't flip until the short
   // action's dots finish running, several seconds later. A no-op
   // whenever there's no element yet or no track actually playing right
-  // now (tape_off.mp3, a stopped player, or silence between tapes) --
+  // now (tape_start.mp3/tape_stop.mp3, a stopped player, or silence) --
   // nothing to smoothly fade in those cases, and applyTapeLocationAudio
   // above still correctly sets whatever DOES start playing later to the
   // right level for wherever the player ends up.
   function transitionTapeLocationAudio(state, targetLocation) {
-    if (!tapeAudioEl || tapeAudioRole !== 'track') return;
+    if (!tapeAudioEl || tapePhase !== 'track') return;
     var target = targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
     fadeTapeVolume(tapeAudioEl, target, TAPE_LOCATION_FADE_SECONDS);
   }
@@ -5802,43 +5810,62 @@
   }
 
   function onTapeTimeUpdate() {
-    if (tapeAudioRole === 'track' && !tapeSessionQualified && tapeAudioEl.currentTime >= TAPE_QUALIFYING_SECONDS) {
+    if (tapePhase === 'track' && !tapeSessionQualified && tapeAudioEl.currentTime >= TAPE_QUALIFYING_SECONDS) {
       awardTapeListenMorale();
     }
   }
 
-  // Shared 'ended' handler for both roles the single audio element can
-  // hold. A track ending naturally: credit a qualifying short tape,
-  // clear the active-tape state, play the mechanical stop sound, and
-  // never restart/advance to anything else -- this fires at exactly
-  // the file's real natural end regardless of location, so a tape that
-  // finishes while the player is above deck clears correctly and on
-  // time; it just isn't audible when it happens. tape_off.mp3 ending:
-  // either silence (the normal case) or, if the player selected a
-  // different tape while this one was stopping, start that tape now
-  // that the cassette-swap sound has actually finished.
+  // Shared 'ended' handler for all three phases the single audio
+  // element can hold. tapePhase is read fresh here every time, which
+  // is what makes every cancel path below safe against a stale/late
+  // 'ended' event: resetTapePlaybackImmediately (or any other cancel)
+  // always sets tapePhase away from whatever a leftover event would
+  // expect BEFORE that event could ever fire, so an old callback can
+  // never advance playback for a selection that's already been
+  // superseded -- no separate generation counter needed on top of that.
+  //
+  // 'starting' ending: tape_start.mp3 finished naturally -- begin the
+  // selected music now, never overlapping the click itself (section 4).
+  // 'track' ending: the music finished naturally -- credit a qualifying
+  // listen, clear the active-tape state, and begin the mechanical
+  // tape_stop.mp3 (section 5). 'stopping' ending: tape_stop.mp3
+  // finished naturally -- fully stopped, nothing further happens.
   function onTapeAudioEnded() {
-    if (tapeAudioRole === 'track') {
+    if (tapePhase === 'starting') {
+      tapePhase = 'track';
+      activeTapeTitle = pendingTapeTitle;
+      var path = pendingTapePath;
+      pendingTapeTitle = null;
+      pendingTapePath = null;
+      tapeSessionQualified = false;
+      applyTapeLocationAudio(GAME);
+      loadAndPlayTapeAudio(path);
+    } else if (tapePhase === 'track') {
       awardTapeListenMorale(); // no-op if already credited via onTapeTimeUpdate
       activeTapeTitle = null;
-      playTapeOffSound();
-    } else if (tapeAudioRole === 'tape_off') {
-      tapeAudioRole = null;
-      if (pendingNextTapePath) {
-        var title = pendingNextTapeTitle, path = pendingNextTapePath;
-        pendingNextTapeTitle = null;
-        pendingNextTapePath = null;
-        startTapeTrack(title, path);
-      }
+      beginTapeStopSequence();
+    } else if (tapePhase === 'stopping') {
+      tapePhase = null;
     }
   }
 
-  function stopCurrentTapeTrackImmediately() {
-    if (tapeAudioEl && tapeAudioRole === 'track') {
-      tapeAudioEl.pause();
-      tapeAudioEl.currentTime = 0;
-    }
+  // The ONE shared, silent cancel point -- no sound of its own, ever.
+  // Used for: STOP pressed during 'starting' (section 9), selecting a
+  // different tape while something is already playing or starting
+  // (section 10, via beginTapeStartSequence below), and abrupt power
+  // loss from either Accessory being switched off or the battery dying
+  // outright (section 7/8) -- every one of those cases is specified as
+  // "immediate silence, no tape_stop.mp3", regardless of which phase
+  // was actually in progress, which is exactly what this does: pause
+  // and rewind the element (harmless no-op if nothing was playing),
+  // then clear every piece of tape state back to fully stopped.
+  function resetTapePlaybackImmediately() {
+    if (tapeAudioEl && !tapeAudioEl.paused) tapeAudioEl.pause();
+    if (tapeAudioEl) tapeAudioEl.currentTime = 0;
+    tapePhase = null;
     activeTapeTitle = null;
+    pendingTapeTitle = null;
+    pendingTapePath = null;
   }
 
   // play() is expected to return a Promise, but not every environment
@@ -5857,13 +5884,16 @@
     }
   }
 
-  // The ONE place a src is loaded and playback started, for either a
-  // music track or tape_off.mp3 -- centralizing this is what guarantees
+  // The ONE place a src is loaded and playback started, for any of the
+  // three sounds this element ever holds (tape_start.mp3, a music
+  // track, or tape_stop.mp3) -- centralizing this is what guarantees
   // playbackRate/defaultPlaybackRate are always explicitly 1.0 no
   // matter which path led here, per the core rule that speed and pitch
-  // must always match the source file exactly. Nothing outside this
-  // function ever touches playbackRate, defaultPlaybackRate, or
-  // currentTime once playback is underway.
+  // must always match the source file exactly, and what guarantees
+  // currentTime always starts at 0 so every one of the three can replay
+  // reliably no matter what this element was doing a moment before.
+  // Nothing outside this function ever touches playbackRate,
+  // defaultPlaybackRate, or currentTime once playback is underway.
   function loadAndPlayTapeAudio(path) {
     tapeAudioEl.src = path;
     tapeAudioEl.currentTime = 0;
@@ -5872,19 +5902,35 @@
     safePlayTapeAudio();
   }
 
-  function playTapeOffSound() {
-    if (!tapeAudioEl) return;
-    tapeAudioRole = 'tape_off';
-    loadAndPlayTapeAudio(TAPE_OFF_PATH);
+  // Begins the mechanical tape_stop.mp3 -- used by BOTH a track ending
+  // naturally (section 5) and the player pressing STOP while music is
+  // actually playing (section 6). Never called for power loss or for
+  // STOP during 'starting' -- those go through resetTapePlaybackImmediately
+  // instead, which is silent by design (sections 7-9).
+  function beginTapeStopSequence() {
+    tapePhase = 'stopping';
+    loadAndPlayTapeAudio(TAPE_STOP_PATH);
   }
 
-  function startTapeTrack(title, path) {
+  // Begins a brand new cassette sequence for `title`/`path`: tape_start.mp3
+  // first, then (once onTapeAudioEnded sees it finish naturally) the
+  // music itself -- section 4's required order, and never overlapping.
+  // Safely cancels whatever this element was already doing FIRST,
+  // silently -- this is what makes selecting a tape while one is
+  // already playing or starting safe (section 10): the old sequence is
+  // reset to nothing before the new one begins, so there is never a
+  // moment where two sounds could be layered, and a leftover 'ended'
+  // event from the superseded sequence can never fire against the new
+  // one (see onTapeAudioEnded's own notes on why tapePhase alone is
+  // sufficient for that).
+  function beginTapeStartSequence(title, path) {
     if (!ensureTapeAudioReady()) return; // audio unavailable in this browser/session -- fail gracefully, no UI breakage
-    activeTapeTitle = title;
-    tapeAudioRole = 'track';
-    tapeSessionQualified = false;
-    applyTapeLocationAudio(GAME);
-    loadAndPlayTapeAudio(path);
+    resetTapePlaybackImmediately();
+    pendingTapeTitle = title;
+    pendingTapePath = path;
+    tapePhase = 'starting';
+    applyTapeLocationAudio(GAME); // tape_start.mp3 itself should already be at the correct above/below level
+    loadAndPlayTapeAudio(TAPE_START_PATH);
   }
 
   /* ============================================================
@@ -6445,16 +6491,18 @@
     playElectricalSwitchSound(turningOn); // ELECTRICAL HOOK -- only reached once the toggle is actually going through for real
 
     // ACCESSORY HOOK -- switching the circuit off mid-playback cuts the
-    // cassette player the same way losing power outright would; see the
-    // matching hook in updateBattery for when the battery itself dies.
-    // Same for the fan: it runs off this exact circuit too (see
-    // performFanToggle), so losing ACCESSORY POWER kills it immediately,
-    // just like a fan whose circuit breaker has tripped -- it does NOT
-    // come back on its own once ACCESSORY is restored; the player has
-    // to return to the SALOON and switch it on again themselves.
-    if (key === 'accessory' && !turningOn && activeTapeTitle != null) {
-      stopCurrentTapeTrackImmediately();
-      playTapeOffSound();
+    // cassette player the same way losing power outright would (immediate
+    // silence, no tape_stop.mp3 -- section 7); see the matching hook in
+    // updateBattery for when the battery itself dies. tapePhase (not
+    // activeTapeTitle) is the right condition: it also correctly catches
+    // an in-progress 'starting'/'stopping' phase, which activeTapeTitle
+    // alone would miss. Same for the fan: it runs off this exact circuit
+    // too (see performFanToggle), so losing ACCESSORY POWER kills it
+    // immediately, just like a fan whose circuit breaker has tripped --
+    // it does NOT come back on its own once ACCESSORY is restored; the
+    // player has to return to the SALOON and switch it on again themselves.
+    if (key === 'accessory' && !turningOn && tapePhase != null) {
+      resetTapePlaybackImmediately();
     }
     if (key === 'accessory' && !turningOn && b.fanOn) {
       b.fanOn = false;
@@ -8131,9 +8179,19 @@
   // continuous "session" pendingChoice the way performStartReading
   // does, and the player is free to leave this screen immediately
   // while the tape keeps playing.
+  //
+  // STOP TAPE is offered during BOTH 'starting' and 'track' -- the
+  // player must be able to stop it while tape_start.mp3 is still
+  // playing, not just once the music itself has actually begun (see
+  // performStopTape's own notes on the 'starting' case). Every TAPES
+  // entry stays selectable in every phase, the currently-PLAYING one
+  // (activeTapeTitle, which is only ever set during 'track') excepted
+  // -- selecting any of them, including re-selecting the one currently
+  // starting, safely resets whatever's in progress first (see
+  // beginTapeStartSequence).
   function buildTapePlayerOptions(state) {
     var opts = [];
-    if (activeTapeTitle != null) {
+    if (tapePhase === 'starting' || tapePhase === 'track') {
       opts.push({ label: 'STOP TAPE', action: 'stop-tape' });
     }
     TAPES.forEach(function (t) {
@@ -8173,25 +8231,31 @@
       cmdTapePlayer(state);
       return;
     }
-    if (activeTapeTitle != null) {
-      // Changing tapes: stop the current one, play the mechanical
-      // cassette-stop sound, and queue the new tape to start the
-      // moment that sound actually finishes -- never overlapping.
-      stopCurrentTapeTrackImmediately();
-      pendingNextTapeTitle = tape.title;
-      pendingNextTapePath = tape.path;
-      playTapeOffSound();
-    } else {
-      startTapeTrack(tape.title, tape.path);
-    }
+    // Section 4's required order (tape_start.mp3 -> music) for every
+    // selection, whether starting fresh or switching mid-play/mid-start
+    // -- beginTapeStartSequence safely cancels whatever this element
+    // was already doing before beginning the new sequence (section 10).
+    beginTapeStartSequence(tape.title, tape.path);
     cmdTapePlayer(state);
   }
 
   function performStopTape(state) {
-    stopCurrentTapeTrackImmediately();
-    pendingNextTapeTitle = null; // an explicit stop cancels any change-in-progress too
-    pendingNextTapePath = null;
-    playTapeOffSound();
+    if (tapePhase === 'track') {
+      // Music is actually playing -- stop it immediately, then the
+      // mechanical tape_stop.mp3 (section 6).
+      if (tapeAudioEl && !tapeAudioEl.paused) tapeAudioEl.pause();
+      if (tapeAudioEl) tapeAudioEl.currentTime = 0;
+      activeTapeTitle = null;
+      beginTapeStopSequence();
+    } else if (tapePhase === 'starting') {
+      // STOP DURING TAPE START (section 9) -- cancel the pending song
+      // and the tape-start sound itself, straight back to stopped, no
+      // tape_stop.mp3: the music never actually began, so there is
+      // nothing for that mechanical "stop" click to represent.
+      resetTapePlaybackImmediately();
+    }
+    // tapePhase === 'stopping' or null: nothing playing to stop --
+    // no-op, matches this action not being offered in those phases anyway.
     cmdTapePlayer(state);
   }
 
