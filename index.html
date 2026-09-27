@@ -4786,6 +4786,26 @@
   var masterGain = null;
   var muted = false;
 
+  // AUDIO DEBUG -- off by default, never ships enabled. Flip to true
+  // only for local troubleshooting of a specific playback issue; every
+  // one-shot/loop start below calls audioDebugLog at the moment it's
+  // requested and audioDebugError alongside its EXISTING, always-on
+  // console.warn on actual failure (that warn is unconditional and
+  // stays that way regardless of this flag -- a real playback failure
+  // is never hidden, per the audit this implements; this flag only
+  // adds OPTIONAL, verbose trace logging on top of it). Both are
+  // no-ops when AUDIO_DEBUG is false, so normal play produces zero
+  // extra console output.
+  var AUDIO_DEBUG = false;
+  function audioDebugLog(msg) {
+    if (!AUDIO_DEBUG) return;
+    console.log('[AUDIO] ' + msg);
+  }
+  function audioDebugError(soundId, err) {
+    if (!AUDIO_DEBUG) return;
+    console.log('[AUDIO ERROR] ' + soundId + ': ' + describeError(err));
+  }
+
   function unlockAudio() {
     if (audioUnlocked) return;
     audioUnlocked = true;
@@ -4956,11 +4976,11 @@
       });
       el.addEventListener('loadeddata', function () {
         var path = el.currentSrc || el.src;
-        console.log('BOAT AUDIO LOADED', 'path:', path, 'duration:', el.duration);
+        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
       });
       el.addEventListener('playing', function () {
         var path = el.currentSrc || el.src;
-        console.log('BOAT AUDIO PLAYING', 'path:', path);
+        audioDebugLog('started: ' + path + ' (playing)');
         // Confirmation path #2 (alongside the play() Promise below) --
         // only commit if this slot's most recent attempt is still the
         // channel's most recent attempt overall AND still what's
@@ -5073,7 +5093,7 @@
     }
 
     channel.loadingPath = desiredPath;
-    console.log('BOAT AUDIO REQUEST', 'location:', locationForLog, 'windSpeed:', windSpeedForLog, 'desiredPath:', desiredPath, 'gainMultiplier:', gainMultiplier);
+    audioDebugLog('play: ' + desiredPath + ' (boat, ' + locationForLog + ', wind ' + windSpeedForLog + ')');
 
     try {
       var incomingIndex = outgoingIndex === 0 ? 1 : 0;
@@ -5105,8 +5125,7 @@
           if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
           channel.currentPath = desiredPath;
           channel.loadingPath = null;
-          console.log('BOAT AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
-            'volume:', incoming.el.volume, 'muted:', incoming.el.muted, 'currentTime:', incoming.el.currentTime);
+          audioDebugLog('started: ' + desiredPath + ' (boat)');
         }, function (error) {
           console.error('BOAT AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
           // currentPath was never set for this attempt -- nothing to
@@ -5261,11 +5280,11 @@
       });
       el.addEventListener('loadeddata', function () {
         var path = el.currentSrc || el.src;
-        console.log('RAIN AUDIO LOADED', 'path:', path, 'duration:', el.duration);
+        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
       });
       el.addEventListener('playing', function () {
         var path = el.currentSrc || el.src;
-        console.log('RAIN AUDIO PLAYING', 'path:', path);
+        audioDebugLog('started: ' + path + ' (playing)');
         // Confirmation path #2 (alongside the play() Promise below) --
         // only commit if this slot's most recent attempt is still the
         // channel's most recent attempt overall AND still what's
@@ -5357,7 +5376,7 @@
     }
 
     channel.loadingPath = desiredPath;
-    console.log('RAIN AUDIO REQUEST', 'location:', locationForLog, 'rainLevel:', rainLevelForLog, 'desiredPath:', desiredPath, 'gainMultiplier:', gainMultiplier);
+    audioDebugLog('play: ' + desiredPath + ' (rain, ' + locationForLog + ', level ' + rainLevelForLog + ')');
 
     try {
       var incomingIndex = outgoingIndex === 0 ? 1 : 0;
@@ -5386,8 +5405,7 @@
           if (channel.generation !== myGeneration || channel.desiredPath !== desiredPath) return;
           channel.currentPath = desiredPath;
           channel.loadingPath = null;
-          console.log('RAIN AUDIO PLAY SUCCESS', 'path:', desiredPath, 'paused:', incoming.el.paused,
-            'volume:', incoming.el.volume, 'muted:', incoming.el.muted, 'currentTime:', incoming.el.currentTime);
+          audioDebugLog('started: ' + desiredPath + ' (rain)');
         }, function (error) {
           console.error('RAIN AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
           if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
@@ -5525,7 +5543,8 @@
   // stopAllEngineLoops (below) always clears any pending onended before
   // it could fire late.
   function playEngineOneShot(key, baseVolume, onEnded) {
-    if (!audioUnlocked) return;
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getEngineAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -5534,7 +5553,7 @@
     el.volume = 0;
     el._baseVolume = baseVolume;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Engine audio failed to play (' + key + '):', describeError(e)); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Engine audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); });
     fadeEngineVolume(el, muted ? 0 : baseVolume, ENGINE_TRANSITION_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -9284,7 +9303,8 @@
   // fade-in to avoid a click at the start -- and fires onEnded (once)
   // when it naturally finishes, same wiring as playEngineOneShot.
   function playFishingOneShot(key, onEnded) {
-    if (!audioUnlocked) return;
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getFishingAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -9293,7 +9313,7 @@
     el.volume = 0;
     el._baseVolume = FISHING_AUDIO_VOLUME[key];
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); });
     fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -9370,6 +9390,7 @@
      reassigning .src, sidesteps that entirely.
      -------------------------------------------------------------- */
   var fishingLandingAudio = new Audio();
+  fishingLandingAudio.preload = 'auto'; // AUDIT FIX -- this was the one Audio element in the whole file missing this; without it, the browser's default preload behavior doesn't necessarily start buffering a size-specific catch sound the moment .src is reassigned, right before an immediate play() call below, which is exactly the kind of narrow timing gap that can make a single .play() intermittently fail to actually start
   var fishingLandingAudioPrimed = false;
 
   // Called synchronously from the REEL IN click itself (a genuine user
@@ -9400,18 +9421,19 @@
   // .src. Called only from the one place the final suspense beat's own
   // step already triggers it (see beginFishLandingSequence/revealMarlin).
   function playFishingLandingAudio(weightLb) {
-    if (!audioUnlocked) return;
+    if (!audioUnlocked) { audioDebugLog('play: ' + fishingCatchSoundKeyForWeight(weightLb) + ' -- blocked (audio not unlocked)'); return; }
     var catchSoundKey = fishingCatchSoundKeyForWeight(weightLb);
     var landingSrc = FISHING_AUDIO_FILES[catchSoundKey];
     fishingLandingAudio.pause();
     fishingLandingAudio.src = landingSrc;
     fishingLandingAudio.currentTime = 0;
     fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
-    console.log('LANDING AUDIO', weightLb, landingSrc, fishingLandingAudio.src); // TEMP DEBUG -- remove once confirmed fixed
+    audioDebugLog('play: ' + catchSoundKey + ' (' + landingSrc + ')');
     var p = fishingLandingAudio.play();
     if (p && p.catch) {
       p.catch(function (err) {
         console.warn('Final fishing catch audio failed:', landingSrc, describeError(err));
+        audioDebugError(catchSoundKey, err);
       });
     }
   }
@@ -9571,7 +9593,8 @@
   // runAudioSyncedAction's watchdog can size itself off the real file's
   // own duration rather than a fixed number.
   function playGalleyOneShot(key, onEnded) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getGalleyAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -9579,7 +9602,7 @@
     el.currentTime = 0;
     el.volume = 0;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
     fadeGalleyVolume(el, muted ? 0 : GALLEY_AUDIO_VOLUME[key], GALLEY_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -9678,7 +9701,8 @@
   // so its own duration-derived watchdog can size itself off the real
   // file rather than a fixed number, same as galley/sails.
   function playCabinOneShot(key, onEnded) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getCabinAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -9686,7 +9710,7 @@
     el.currentTime = 0;
     el.volume = 0;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Cabin audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Cabin audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
     fadeCabinVolume(el, muted ? 0 : CABIN_AUDIO_VOLUME[key], CABIN_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -9790,17 +9814,14 @@
   // site, not this function -- see the file's own investigation notes
   // above) is confirmed fixed.
   function playHeadOneShot(key, onEnded) {
-    var tag = 'HEAD ' + key.toUpperCase() + ' AUDIO';
-    if (!audioUnlocked) { console.warn(tag + ' REQUESTED', 'audioUnlocked: false -- audio not yet unlocked, skipping playback entirely'); if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getHeadAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
     if (!el.paused) el.pause();
     el.currentTime = 0;
     el.volume = 0;
-    console.log(tag + ' REQUESTED', 'audioUnlocked:', audioUnlocked, 'muted:', muted,
-      'resolved src:', el.currentSrc || el.src, 'readyState:', el.readyState, 'networkState:', el.networkState,
-      'duration:', el.duration, 'volume:', el.volume);
     var p = el.play();
     if (p && p.then) {
       // Single chain, both outcomes handled on the SAME promise (the
@@ -9813,9 +9834,10 @@
       // rejection every time playback fails, independent of the
       // handling below. This is the one true handler for both cases.
       p.then(function () {
-        console.log(tag + ' PLAY STARTED', 'paused:', el.paused, 'readyState:', el.readyState, 'volume:', el.volume);
+        audioDebugLog('started: ' + (el.currentSrc || el.src));
       }, function (e) {
-        console.warn(tag + ' PLAY FAILED', describeError(e));
+        console.warn('Head audio failed to play (' + key + '):', describeError(e));
+        audioDebugError(key, e);
         if (onEnded) onEnded();
       });
     }
@@ -9907,7 +9929,8 @@
   // so its own duration-derived watchdog can size itself off the real
   // file rather than a fixed number, same as head/cabin/galley/sails.
   function playSaloonOneShot(key, onEnded) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getSaloonAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -9918,6 +9941,7 @@
     if (p && p.then) {
       p.then(function () {}, function (e) {
         console.warn('Saloon audio failed to play (' + key + '):', describeError(e));
+        audioDebugError(key, e);
         if (onEnded) onEnded();
       });
     }
@@ -10007,7 +10031,8 @@
   // real file. mouse.mp3 is always called with no onEnded at all (a
   // pure fire-and-forget click, never gating an action).
   function playNavStationOneShot(key, onEnded) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getNavStationAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -10018,6 +10043,7 @@
     if (p && p.then) {
       p.then(function () {}, function (e) {
         console.warn('Nav station audio failed to play (' + key + '):', describeError(e));
+        audioDebugError(key, e);
         if (onEnded) onEnded();
       });
     }
@@ -10140,7 +10166,8 @@
   // runAudioSyncedAction's watchdog can size itself off the real
   // file's own duration rather than a fixed number.
   function playSailsOneShot(key, onEnded, state) {
-    if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
     var el = getSailsAudioEl(key);
     el.onended = null;
     if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
@@ -10149,7 +10176,7 @@
     el.volume = 0;
     el._baseVolume = SAILS_AUDIO_VOLUME[key];
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Sails audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Sails audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
     fadeSailsVolume(el, sailsAudibleVolume(state, key), SAILS_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -12226,7 +12253,30 @@
       if (ticks > 0) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
-        updateAudioForState(GAME);
+      }
+      // AUDIO RESUME -- always re-synced on return, not just when a
+      // catch-up tick actually occurred: the browser can silently pause
+      // ambient loops (sea state, rain) while backgrounded even over a
+      // span too short to advance a single simulation tick (a quick
+      // app-switch and back). updateAudioForState's own health checks
+      // (see boatChannelIsHealthy/rainChannelIsHealthy, which explicitly
+      // check !el.paused) mean this call is a safe no-op whenever
+      // everything is already correctly playing -- it only ever
+      // restarts a channel that's actually stale or was paused out from
+      // under it, and it never stacks a duplicate on top of one that's
+      // already healthy.
+      updateAudioForState(GAME);
+      // ENGINE LOOP -- not part of updateAudioForState (engine audio is
+      // deliberately triggered only from the actual start/stop actions
+      // and GO ABOVE/BELOW, never inferred from render state -- see
+      // updateAudioForState's own notes), so it needs its own, equally
+      // safe re-assertion here: playEngineLoop already no-ops if the
+      // element isn't paused, so this only ever resumes a genuinely
+      // browser-paused engine loop, never restarts (or duplicates) one
+      // that's already healthy, and does nothing at all if the engine
+      // is actually off.
+      if (GAME.boat.engineOn) {
+        playEngineLoop(GAME.crew.location === 'above' ? 'cruise' : 'interior', GAME.crew.location === 'above' ? ENGINE_VOLUME.cruise : ENGINE_VOLUME.interior);
       }
       saveGameState(GAME);
       updateClock();
