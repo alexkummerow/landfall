@@ -6297,6 +6297,31 @@
     }
   }
 
+  // Re-renders the TAPE PLAYER screen in place, but ONLY if the player
+  // is actually looking at it right now (state.pendingChoice.id ===
+  // 'tape-player-menu') -- cassette playback runs in the background
+  // regardless of what screen is open, so this must never yank the
+  // player away from whatever else they're doing just because the
+  // cassette's own state changed on its own. Used for the two
+  // transitions that need to update this screen WITHOUT the player
+  // having clicked anything (tape_start.mp3 handing off to the music,
+  // and tape_stop.mp3 finishing naturally -- see onTapeAudioEnded),
+  // so "once the stop sound finishes, return automatically to the
+  // TAPE SELECTION MENU" actually happens on its own rather than
+  // waiting for an unrelated future click. No-ops if a short action
+  // currently owns the options panel (uiBusy) -- the tape player
+  // re-render simply happens the next time IT next calls this, same
+  // as any other deferred UI update in this file.
+  function refreshTapePlayerIfOpen() {
+    if (!GAME || uiBusy) return;
+    if (!GAME.pendingChoice || GAME.pendingChoice.id !== 'tape-player-menu') return;
+    clearTempView();
+    cmdTapePlayer(GAME);
+    renderOptions(GAME);
+    saveGameState(GAME);
+    scrollToBottom();
+  }
+
   // Shared 'ended' handler for all three phases the single audio
   // element can hold. tapePhase is read fresh here every time, which
   // is what makes every cancel path below safe against a stale/late
@@ -6322,12 +6347,14 @@
       tapeSessionQualified = false;
       applyTapeLocationAudio(GAME);
       loadAndPlayTapeAudio(path);
+      refreshTapePlayerIfOpen(); // reflect "X -- PLAYING" the moment the music actually begins, if this screen is currently open
     } else if (tapePhase === 'track') {
       awardTapeListenMorale(); // no-op if already credited via onTapeTimeUpdate
       activeTapeTitle = null;
       beginTapeStopSequence();
     } else if (tapePhase === 'stopping') {
       tapePhase = null;
+      refreshTapePlayerIfOpen(); // natural end -- return to the full TAPE SELECTION MENU on its own, without waiting for the player to click anything
     }
   }
 
@@ -8698,13 +8725,19 @@
   // -- selecting any of them, including re-selecting the one currently
   // starting, safely resets whatever's in progress first (see
   // beginTapeStartSequence).
+  // While starting or playing (tapePhase 'starting'/'track') or in the
+  // middle of the mechanical stop click ('stopping'), the ONLY visible
+  // cassette action is STOP TAPE -- no other tape can be selected and
+  // there is no BACK, so the player can't leave this screen or start a
+  // different tape until the current one is actually stopped. Once
+  // tapePhase is back to null (nothing playing), the full tape list
+  // returns, exactly as before.
   function buildTapePlayerOptions(state) {
-    var opts = [];
-    if (tapePhase === 'starting' || tapePhase === 'track') {
-      opts.push({ label: 'STOP TAPE', action: 'stop-tape' });
+    if (tapePhase !== null) {
+      return [{ label: 'STOP TAPE', action: 'stop-tape' }];
     }
+    var opts = [];
     TAPES.forEach(function (t) {
-      if (t.title === activeTapeTitle) return; // don't re-list the one already playing
       opts.push({ label: t.title.toUpperCase(), action: 'start-tape:' + t.title });
     });
     opts.push({ label: 'BACK', action: 'cmd:saloon' });
@@ -11996,29 +12029,18 @@
           // once the audio actually finishes, as the action callback
           // below, rather than instantly when WAKE UP is clicked.
           //
-          // Under SOUND OFF, runAudioSyncedAction's own onEnded still
-          // fires eventually (playCabinOneShot keeps playing, just
-          // silently, at volume 0 -- the same established pattern every
-          // other muted sound in this game uses), but only after the
-          // audio file's full real duration -- never actually STUCK,
-          // just not the short, event-independent completion a muted
-          // player should get. So muted takes a completely separate,
-          // fixed-duration path here instead: no audio at all, a brief
-          // WAKING UP . .. ... (matching GOING ABOVE/BELOW's own short
-          // physical-action pacing), done.
-          if (muted) {
-            runShortAction(state, {
-              label: 'WAKING UP',
-              duration: 2,
-              action: function (s) { wakeUp(s, 'You wake and go above.'); },
-            });
-          } else {
-            runAudioSyncedAction(state, {
-              label: 'WAKING UP',
-              playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
-              action: function (s) { wakeUp(s, 'You wake and go above.'); },
-            });
-          }
+          // Always the same path regardless of SOUND ON/OFF: muting is a
+          // pure audibility switch, never a shortcut that swaps in a
+          // different, shorter, audio-independent timing -- playCabinOneShot
+          // still calls .play() and progresses normally while muted (just
+          // at volume 0, the same established pattern every other muted
+          // sound in this game uses), so onEnded still fires off the
+          // audio's own real duration either way.
+          runAudioSyncedAction(state, {
+            label: 'WAKING UP',
+            playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
+            action: function (s) { wakeUp(s, 'You wake and go above.'); },
+          });
           break;
         case 'go-above-below':
           // A physical place, tracked independently of any menu — the
