@@ -369,7 +369,7 @@
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
-        <button id="sound-btn" class="hdr-btn" type="button">SOUND: OFF</button>
+        <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
         <span id="clock">—</span>
       </div>
     </header>
@@ -4844,6 +4844,7 @@
       log(state, "Fumbled it in the dark \u2014 a bruised knuckle, and it's still not quite secure.");
     }
     flushNewLogEntries(state);
+    cmdRepair(state);
   }
 
   /* --------------------------------------------------------------
@@ -5299,11 +5300,12 @@
     applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
     applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
     applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
+    applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
   function updateSoundLabel() {
-    soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND: OFF' : 'SOUND: ON') : 'SOUND: OFF';
+    soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND OFF' : 'SOUND ON') : 'SOUND OFF';
   }
 
   /* --------------------------------------------------------------
@@ -6208,7 +6210,20 @@
   function applyTapeLocationAudio(state) {
     if (!tapeAudioEl) return;
     var above = !!(state && state.crew.location === 'above');
-    tapeAudioEl.volume = above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
+    tapeAudioEl.volume = muted ? 0 : (above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
+  }
+
+  // SOUND OFF/SOUND ON hook -- the cassette system (tape_start.mp3, the
+  // selected track, tape_stop.mp3, all one shared element) has no
+  // separate mute path of its own; it's a thin wrapper reusing the
+  // exact same volume computation applyTapeLocationAudio already does
+  // on every render, called here too so SOUND OFF/SOUND ON take effect
+  // on the cassette the instant they're pressed, not just on the next
+  // natural render. Never plays or pauses anything -- purely a volume
+  // sync -- so it can never replay a one-shot (tape_start.mp3/
+  // tape_stop.mp3) that already finished while muted.
+  function applyMuteToTapeAudio() {
+    applyTapeLocationAudio(GAME);
   }
 
   // Same shape as fadeSailsVolume/fadeFishingVolume/etc. elsewhere in
@@ -6249,7 +6264,7 @@
   // right level for wherever the player ends up.
   function transitionTapeLocationAudio(state, targetLocation) {
     if (!tapeAudioEl || tapePhase !== 'track') return;
-    var target = targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
+    var target = muted ? 0 : (targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
     fadeTapeVolume(tapeAudioEl, target, TAPE_LOCATION_FADE_SECONDS);
   }
 
@@ -7353,7 +7368,7 @@
   }
 
   function showInventoryCategory(state, cat) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:inventory'); return; }
     printBlank();
     switch (cat) {
       case 'provisions':
@@ -7917,8 +7932,22 @@
     tidy: { play: playSaloonOneShot, key: 'tidyUp' },
   };
 
+  // Which room a completed chore of this kind returns to -- each one is
+  // offered from exactly one room's own screen (see the
+  // choreOptionIfDue call sites: dishes from GALLEY, tidy from SALOON,
+  // bunk/air from CABIN, tools from NAV STATION), so this is also the
+  // correct BACK/darkness-block destination while mid-chore.
+  var CHORE_ROOM_CMD = { dishes: 'cmd:galley', tidy: 'cmd:saloon', bunk: 'cmd:cabin', air: 'cmd:cabin', tools: 'cmd:nav-station' };
+  function chorePendingReturn(kind) {
+    if (kind === 'dishes') return cmdGalley;
+    if (kind === 'tidy') return cmdSaloon;
+    if (kind === 'bunk' || kind === 'air') return cmdCabin;
+    if (kind === 'tools') return cmdNavStation;
+    return null;
+  }
+
   function performChore(state, kind) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, CHORE_ROOM_CMD[kind]); return; }
     var def = CHORE_DEFS[kind];
     if (!def) return;
     if (def.canDo && !def.canDo(state)) {
@@ -7943,6 +7972,8 @@
       s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
       log(s, pickChoreLine(kind));
       flushNewLogEntries(s);
+      var returnCmd = chorePendingReturn(kind);
+      if (returnCmd) returnCmd(s);
     };
     var choreAudio = CHORE_AUDIO[kind];
     if (choreAudio) {
@@ -8140,7 +8171,7 @@
   // whether it was already running when the cabin went dark.
   function cmdShipsComputer(state) {
     var b = state.boat;
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
     if (b.computerOn) {
       cmdShipsComputerMenu(state);
       return;
@@ -8260,6 +8291,7 @@
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         log(s, 'A wash-up with fresh water. Small thing, helps anyway.');
         flushNewLogEntries(s);
+        cmdHead(s);
       },
     });
   }
@@ -8346,7 +8378,7 @@
           { label: inventoryLine('SUNGLASSES', clo.sunglasses ? 'ON' : 'OFF'), action: 'toggle-pending:sunglasses' },
         ],
         [
-          { label: 'COMMIT', action: 'commit-clothing' },
+          { label: 'CONFIRM', action: 'commit-clothing' },
           { label: 'BACK', action: 'clothing-discard' },
         ],
       ]),
@@ -8454,6 +8486,7 @@
     pendingClothing = null;
     printBlank();
     printLine('Left as it was.', 'dim');
+    cmdCabin(state);
   }
 
   // COMMIT — the only command that actually changes what's worn.
@@ -8541,7 +8574,7 @@
   }
 
   function performHangWetClothes(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
     if (!hasHangableWetClothes(state)) return; // shouldn't be reachable -- button isn't offered otherwise
     runAudioSyncedAction(state, {
       label: 'HANGING CLOTHES',
@@ -8562,6 +8595,7 @@
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         log(s, 'You wring out the wet clothes and hang them to dry.');
         flushNewLogEntries(s);
+        cmdCabin(s);
       },
     });
   }
@@ -8885,7 +8919,7 @@
       options: [
         { label: 'MEALS', action: 'cmd:meals' },
         { label: 'SNACKS', action: 'cmd:snacks' },
-        { label: 'NEVER MIND', action: 'cancel' },
+        { label: 'BACK', action: 'cmd:galley' },
       ],
     };
   }
@@ -9032,6 +9066,7 @@
         s.crew.lastChocolateAt = s.meta.voyageMinutes;
         log(s, eatChocolateLine(s));
         flushNewLogEntries(s);
+        cmdGalley(s);
       };
       var chocolatePrepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
       if (chocolatePrepAudioKey) {
@@ -9118,6 +9153,7 @@
       c.morale = clamp(c.morale + moraleGain, 0, 100);
       log(s, eatFlavorLine(s, item));
       flushNewLogEntries(s);
+      cmdGalley(s);
     };
 
     // Any item with a mapped preparation sound (see FOOD_PREP_AUDIO_KEY
@@ -9158,7 +9194,7 @@
       { label: instrumentLine('WATER', galCurrentOnly(state.water.gallons).toUpperCase()), action: 'drink:water' },
       { label: instrumentLine('COFFEE', String(state.drinks.coffee)), action: 'drink:coffee' },
       { label: instrumentLine('TEA', String(state.drinks.tea)), action: 'drink:tea' },
-      { label: 'BACK', action: 'cancel' },
+      { label: 'BACK', action: 'cmd:galley' },
     ];
   }
 
@@ -9185,6 +9221,7 @@
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
         log(s, 'You drink some water.');
         flushNewLogEntries(s);
+        cmdGalley(s);
       },
     });
   }
@@ -9219,6 +9256,7 @@
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
         log(s, 'Coffee, strong and hot. The world sharpens a little.');
         flushNewLogEntries(s);
+        cmdGalley(s);
       },
     });
   }
@@ -9252,6 +9290,7 @@
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
         log(s, 'Tea, warm in your hands. Something steadying about it.');
         flushNewLogEntries(s);
+        cmdGalley(s);
       },
     });
   }
@@ -9406,6 +9445,7 @@
           log(s, pickFromPool(REPAIR_FAILURE_LINES[systemKey]));
         }
         flushNewLogEntries(s);
+        cmdRepair(s);
       },
     });
   }
@@ -9437,16 +9477,17 @@
   }
 
   function cmdRepair(state) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state); return; }
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:status'); return; }
     var items = buildDamagedSystemsList(state);
     if (items.length === 0) {
       printBlank();
       printLine('Nothing aboard needs repair.', 'dim');
+      cmdStatus(state); // e.g. just-completed the last repair on the list -- back to STATUS (REPAIR's real parent), not the generic deck menu
       return;
     }
     printBlank();
     printLine('REPAIR', 'heading-label');
-    state.pendingChoice = { id: 'repair-menu', options: items.concat([{ label: 'BACK', action: 'cancel' }]) };
+    state.pendingChoice = { id: 'repair-menu', options: items.concat([{ label: 'BACK', action: 'cmd:status' }]) };
   }
 
   function cmdRestart(state) {
@@ -10938,6 +10979,7 @@
         s.boat.sailConfig = targetConfig;
         log(s, SAIL_CHANGE_LOG_LINES[targetConfig]);
         flushNewLogEntries(s);
+        cmdSails(s);
       },
     });
   }
@@ -12033,6 +12075,7 @@
               printBlank();
               printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
               printLine(s.boat.speed.toFixed(1) + ' kt', 'dim');
+              cmdEngine(s);
             },
           });
           break;
@@ -12049,6 +12092,7 @@
               printBlank();
               printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
               printLine(s.boat.speed.toFixed(1) + ' kt', 'dim');
+              cmdEngine(s);
             },
           });
           break;
