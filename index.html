@@ -618,7 +618,8 @@
         glovesWetExposureMinutes: 0,  // hidden accumulator toward GLOVES becoming wet -- only accumulates while actually worn
         clothingMismatchKind: null, // null | 'cold' | 'warm' -- which comfort mismatch is CURRENTLY active, for the gradual gated consequence and staged text prompts; resets whenever the mismatch resolves or flips
         clothingMismatchSinceMinutes: null, // voyageMinutes the CURRENT clothingMismatchKind began
-        lastClothingPromptAt: null,   // voyageMinutes of the last clothing text prompt (any kind), for a shared cooldown so these stay infrequent
+        lastClothingPromptAt: null,   // voyageMinutes of the last clothing observation actually shown, for the same-condition reminder cooldown
+        lastClothingObservationKind: null, // null | 'wet' | 'cold' | 'tooWarm' | 'glareUnprotected' | 'nightUnneeded' -- whichever kind was last actually reported, so a change of kind always speaks up while an unchanged one waits for the cooldown; see checkClothingNarration
         toolsOutSinceMinutes: null,   // voyageMinutes since a completed repair left tools out, or null — cleared by PUT AWAY TOOLS
         bunkUnmadeSinceMinutes: null, // voyageMinutes since last waking, or null once made — cleared by MAKE BUNK
         dampCabinHours: 0,            // accumulates while below deck in bad weather; resets when the cabin is aired out
@@ -4564,33 +4565,42 @@
     if (thirstLevel(state.crew.hoursSinceWater) < THIRST_THIRSTY) f.thirstNarrated = false;
   }
 
-  // CLOTHING OBSERVATIONS — one shared pool of short, sensory lines and
-  // one shared selector (clothingObservationLine) used by BOTH the
-  // single post-change observation when the player actually commits a
-  // new outfit (see performClothingCommit) and the occasional ambient
-  // narration during normal play (checkClothingNarration below) — one
-  // consistent voice for what Landfall says about clothing, not two
-  // parallel systems. Selection is driven entirely by
+  // CLOTHING OBSERVATIONS -- silence is the default, correct-and-
+  // comfortable reading. A line is only ever shown for a genuine
+  // problem the player might want to act on: soaked clothing, being
+  // clearly under- or overdressed, glare with no sunglasses, or
+  // sunglasses worn somewhere too dark for them. Landfall never
+  // praises or confirms a correct clothing choice -- there is
+  // deliberately no "comfortable"/"windbreaker is helping"/"sunglasses
+  // are helping" pool at all; see clothingObservationKind, whose only
+  // non-null returns are the five problems above.
+  //
+  // One shared selector (clothingObservationLine/clothingObservationKind)
+  // is used by BOTH the single post-change observation when the player
+  // actually commits a new outfit (see performClothingCommit) and the
+  // occasional ambient narration during normal play (checkClothingNarration
+  // below) -- one consistent voice for what Landfall says about
+  // clothing, not two parallel systems. Selection is driven entirely by
   // clothingComfortCategory (itself driven by clothingWarmthDelta,
   // which already folds in wind and wetness) plus the wet flags
-  // themselves — nothing here
-  // recomputes comfort on its own. State names are never shown; only
-  // the resulting sentence is.
-  var CLOTHING_LINES_COMFORTABLE = ['Comfortable enough.', 'Nothing to complain about.', 'Feels about right.', 'Better.'];
-  var CLOTHING_LINES_WINDBREAKER_WORKING = ['The windbreaker cuts the breeze.', 'Good call on the windbreaker out here.'];
-  var CLOTHING_LINES_SLIGHTLY_COLD = {
-    above: ['A bit of a chill on deck.', 'The wind has an edge to it.', 'Cool enough to notice out here.'],
-    below: ['Still a little chilly.', 'A bit cool in here, but manageable.', 'Could use another layer.'],
-  };
-  var CLOTHING_LINES_COLD = {
-    above: ['Cold enough to feel it in the wind.', 'The wind cuts right through this.'],
-    below: ['Properly cold in the cabin now.', 'The chill has settled in.'],
-  };
-  var CLOTHING_LINES_SLIGHTLY_WARM = ['Getting warm in this.', 'A little too much layer for this.', 'Starting to feel it.'];
-  var CLOTHING_LINES_TOO_WARM = ['Too warm for this, honestly.', 'Sweating in all this.', 'Definitely too much for the weather.'];
-  var CLOTHING_LINES_WET_COLD = ['The wet fabric is starting to feel cold.', 'Damp and chilled through.'];
-  var CLOTHING_LINES_WET_MILD = ['Your clothes are still damp and uncomfortable.', 'The wet fabric clings to you.'];
-  var CLOTHING_LINES_WET_IGNORED = ['You should change out of these clothes.'];
+  // themselves -- nothing here recomputes comfort on its own. Only the
+  // FULL 'cold'/'tooWarm' bands are ever worth a remark; the milder
+  // 'slightlyCold'/'slightlyWarm' bands stay silent, same as
+  // 'comfortable' -- minor variation the sailor barely notices isn't
+  // something Landfall narrates. (Those milder bands still exist and
+  // still matter for the mechanical mismatch tracking just above --
+  // clothingMismatchKind groups both cold bands and both warm bands
+  // together for that -- this file only changes what gets SAID, never
+  // what gets calculated.) State names are never shown; only the
+  // resulting sentence is.
+  var CLOTHING_LINES_COLD = ['The cold is starting to get through.', 'The wind cuts through this.', 'I could use another layer.'];
+  var CLOTHING_LINES_TOO_WARM = ["I'm getting too warm in this.", 'Too many layers.', "I'm starting to sweat."];
+  // One shared pool regardless of WHY it's wet or how cold that's also
+  // making the sailor -- wet already outranks cold/warm below in
+  // clothingObservationKind, so this is the only clothing line that can
+  // ever show while wet; there is no separate wet-and-cold variant to
+  // risk showing back-to-back with a plain cold remark.
+  var CLOTHING_LINES_WET = ['These clothes are soaked through.', 'Wet fabric clings to me.', 'I should change out of this.'];
 
   // SUNGLASSES — glare/sunlight comfort only, entirely separate from
   // the thermal warmth model above (see computeClothingWarmth, which
@@ -4599,11 +4609,13 @@
   // only source of "how much glare is there right now" — no second
   // daylight or weather system. Above deck, clear conditions, daytime:
   // glare either bothers the eyes (no sunglasses) or doesn't
-  // (sunglasses on). Overcast/rain/squall: glare is negligible either
-  // way. Night above deck: sunglasses become mildly counterproductive
-  // rather than helpful. Below deck, or no sunglasses at night: no
-  // effect at all. Kept to these four possible states deliberately —
-  // this is meant to stay subtle texture, not a real survival lever.
+  // (sunglasses on, in which case there is nothing to say -- see
+  // clothingObservationKind). Overcast/rain/squall: glare is
+  // negligible either way. Night above deck: sunglasses become mildly
+  // counterproductive rather than helpful. Below deck, or no
+  // sunglasses at night: no effect at all. Kept to these four possible
+  // states deliberately — this is meant to stay subtle texture, not a
+  // real survival lever.
   function sunglassesGlareState(state) {
     if (state.crew.location !== 'above') return 'none';
     if (timeOfDayPhase(state) === 'night') {
@@ -4612,71 +4624,82 @@
     if (state.weather.condition !== 'clear') return 'none'; // overcast/rain/squall -- little to no glare
     return state.crew.clothing.sunglasses ? 'glareProtected' : 'glareUnprotected';
   }
-  var CLOTHING_LINES_GLARE_UNPROTECTED = ['The glare off the water is hard on my eyes.', 'Could use sunglasses out here.', 'Squinting against the glare off the water.'];
-  var CLOTHING_LINES_GLARE_PROTECTED = ['The sunglasses cut the glare off the water.', 'Good thing I have these on.'];
-  var CLOTHING_LINES_NIGHT_SUNGLASSES = ["It's too dark for these.", "Hard to see much with these on right now."];
+  var CLOTHING_LINES_GLARE_UNPROTECTED = ['The glare off the water is hard on my eyes.', "I'm squinting against the glare."];
+  var CLOTHING_LINES_NIGHT_SUNGLASSES = ["It's too dark for these.", 'Hard to see much with these on.'];
 
-  function clothingObservationLine(state) {
+  var CLOTHING_LINES_BY_KIND = {
+    wet: CLOTHING_LINES_WET,
+    cold: CLOTHING_LINES_COLD,
+    tooWarm: CLOTHING_LINES_TOO_WARM,
+    glareUnprotected: CLOTHING_LINES_GLARE_UNPROTECTED,
+    nightUnneeded: CLOTHING_LINES_NIGHT_SUNGLASSES,
+  };
+
+  // The one place priority between the five problems is decided --
+  // both clothingObservationLine (what to actually say) and
+  // checkClothingNarration (whether saying it now is warranted) call
+  // this rather than each resolving priority their own way. Returns
+  // null whenever there's nothing worth remarking on: dry, in the
+  // 'comfortable'/'slightlyCold'/'slightlyWarm' band, and no glare/
+  // night-sunglasses issue. Wet outranks everything (see
+  // CLOTHING_LINES_WET's own note); cold/warm outrank glare, since a
+  // genuine temperature problem is the more pressing one to mention.
+  function clothingObservationKind(state) {
     var c = state.crew;
     var wet = computeWornWetBuckets(state);
-    var anyWet = wet.torso || wet.bottom || wet.feet;
+    if (wet.torso || wet.bottom || wet.feet) return 'wet';
     var category = clothingComfortCategory(clothingWarmthDelta(state));
-    var above = c.location === 'above';
-
-    if (anyWet) {
-      var coldLeaning = category === 'cold' || category === 'slightlyCold';
-      var longIgnored = clothingMismatchHours(state) > CLOTHING_CONSEQUENCE_GATE_HOURS * 2;
-      if (longIgnored) return pickFromPool(CLOTHING_LINES_WET_IGNORED);
-      return pickFromPool(coldLeaning ? CLOTHING_LINES_WET_COLD : CLOTHING_LINES_WET_MILD);
-    }
-    if (category === 'slightlyCold') return pickFromPool(CLOTHING_LINES_SLIGHTLY_COLD[above ? 'above' : 'below']);
-    if (category === 'cold') return pickFromPool(CLOTHING_LINES_COLD[above ? 'above' : 'below']);
-    if (category === 'slightlyWarm') return pickFromPool(CLOTHING_LINES_SLIGHTLY_WARM);
-    if (category === 'tooWarm') return pickFromPool(CLOTHING_LINES_TOO_WARM);
-
-    // Comfortable: call out glare/sunglasses or the windbreaker
-    // specifically when either is actually doing something meaningful
-    // right now -- otherwise a plain, quiet confirmation. Neither is a
-    // competing priority signal (both only ever speak up once there's
-    // no real thermal/wetness problem to report), so simple order
-    // between the two is fine -- glare checked first since it's the
-    // newer of the two, windbreaker as it always was.
+    if (category === 'cold') return 'cold';
+    if (category === 'tooWarm') return 'tooWarm';
     var glareState = sunglassesGlareState(state);
-    if (glareState === 'glareUnprotected') return pickFromPool(CLOTHING_LINES_GLARE_UNPROTECTED);
-    if (glareState === 'glareProtected') return pickFromPool(CLOTHING_LINES_GLARE_PROTECTED);
-    if (glareState === 'nightUnneeded') return pickFromPool(CLOTHING_LINES_NIGHT_SUNGLASSES);
-    if (above && c.clothing.outer === 'windbreaker' && (state.weather.windSpeed || 0) > 8) {
-      return pickFromPool(CLOTHING_LINES_WINDBREAKER_WORKING);
-    }
-    return pickFromPool(CLOTHING_LINES_COMFORTABLE);
+    if (glareState === 'glareUnprotected') return 'glareUnprotected';
+    if (glareState === 'nightUnneeded') return 'nightUnneeded';
+    return null;
+  }
+
+  function clothingObservationLine(state) {
+    var kind = clothingObservationKind(state);
+    if (!kind) return null;
+    return pickFromPool(CLOTHING_LINES_BY_KIND[kind]);
   }
 
   // Ambient, in-play clothing narration -- occasional and meaningful,
-  // never continuous. Reasonably appropriate, dry clothing says nothing
-  // almost all of the time (an occasional quiet confirmation keeps it
-  // from feeling dead); anything genuinely wet or mismatched is worth
-  // mentioning, but only once it's actually persisted a little rather
-  // than the instant it starts, and never more often than the shared
-  // cooldown allows.
+  // never continuous, and completely silent while comfortable (see the
+  // section comment above clothingObservationKind). A remark is only
+  // shown when the specific problem (wet/cold/tooWarm/glare/night-
+  // sunglasses) is genuinely new -- either the sailor was fine a
+  // moment ago, or a different problem just gave way to this one --
+  // or, failing that, when this SAME unchanged problem hasn't been
+  // mentioned in a while and a reminder is due. Never both at once,
+  // and never repeated every tick while nothing about it has changed.
   var CLOTHING_PROMPT_COOLDOWN_MINUTES = 45;
 
   function checkClothingNarration(state) {
     var c = state.crew;
-    var last = c.lastClothingPromptAt;
-    if (last != null && (state.meta.voyageMinutes - last) < CLOTHING_PROMPT_COOLDOWN_MINUTES) return;
+    var kind = clothingObservationKind(state);
 
-    var wet = computeWornWetBuckets(state);
-    var anyWet = wet.torso || wet.bottom || wet.feet;
-    var category = clothingComfortCategory(clothingWarmthDelta(state));
-
-    if (!anyWet && category === 'comfortable') {
-      if (Math.random() < 0.08) {
-        c.lastClothingPromptAt = state.meta.voyageMinutes;
-        log(state, clothingObservationLine(state));
-      }
+    if (!kind) {
+      c.lastClothingObservationKind = null; // comfortable again -- whatever problem shows up next is newly meaningful, not a continuation of this one
       return;
     }
-    if (!anyWet && clothingMismatchHours(state) <= 0.15) return; // ~9 minutes -- let a fresh mismatch settle before commenting
+
+    if (kind !== c.lastClothingObservationKind) {
+      // A brand new cold/warm mismatch gets a moment to settle before
+      // being worth a remark (a brief errand in the wrong jacket
+      // shouldn't immediately draw a comment) -- wet, glare, and
+      // night-sunglasses are already real the instant they're true, so
+      // they speak up right away, same as before.
+      if ((kind === 'cold' || kind === 'tooWarm') && clothingMismatchHours(state) <= 0.15) return; // ~9 minutes
+      c.lastClothingObservationKind = kind;
+      c.lastClothingPromptAt = state.meta.voyageMinutes;
+      log(state, clothingObservationLine(state));
+      return;
+    }
+
+    // Same unchanged problem as last time -- only a periodic reminder,
+    // never on every tick while it persists.
+    var last = c.lastClothingPromptAt;
+    if (last != null && (state.meta.voyageMinutes - last) < CLOTHING_PROMPT_COOLDOWN_MINUTES) return;
     c.lastClothingPromptAt = state.meta.voyageMinutes;
     log(state, clothingObservationLine(state));
   }
@@ -8470,8 +8493,15 @@
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
         pendingClothing = null;
         cmdCabin(s);
-        printBlank();
-        printLine(clothingObservationLine(s), 'dim');
+        // Silent whenever the new outfit is comfortable -- correct
+        // choices are never praised or confirmed in text (the CABIN
+        // screen's own COMFORT line already reflects it); only a real
+        // problem with what was just put on gets a remark.
+        var line = clothingObservationLine(s);
+        if (line) {
+          printBlank();
+          printLine(line, 'dim');
+        }
       },
     });
   }
@@ -12510,6 +12540,7 @@
     if (c.clothingMismatchKind === undefined) c.clothingMismatchKind = null;
     if (c.clothingMismatchSinceMinutes === undefined) c.clothingMismatchSinceMinutes = null;
     if (c.lastClothingPromptAt === undefined) c.lastClothingPromptAt = null;
+    if (c.lastClothingObservationKind === undefined) c.lastClothingObservationKind = null;
     if (c.toolsOutSinceMinutes === undefined) c.toolsOutSinceMinutes = null;
     if (c.bunkUnmadeSinceMinutes === undefined) c.bunkUnmadeSinceMinutes = null;
     if (c.dampCabinHours === undefined) c.dampCabinHours = 0;
