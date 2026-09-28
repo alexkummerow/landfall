@@ -462,6 +462,8 @@
       version: 1,
       meta: {
         departedAt: now,
+        clockAlignedV1: true,   // this voyage's game clock started equal to the real clock -- see alignGameClockIfNeeded, which only ever acts on older saves that lack this
+        departureDateAnchor: null, // set only if alignGameClockIfNeeded had to shift departedAt: the ORIGINAL departure instant, so the DAY counter keeps counting from the real calendar date the voyage began on -- see voyageDayNumber
         lastTick: now,
         leftoverMinutes: 0,
         voyageMinutes: 0,
@@ -3867,15 +3869,75 @@
     return ticks;
   }
 
+  // THE one place real time becomes game time. state.meta.lastTick is
+  // the real-world instant the simulation has been advanced up to, and
+  // every path that moves the clock (boot, coming back to the tab, the
+  // live loop) goes through here, consuming exactly (now - lastTick)
+  // and moving lastTick to now -- so real time is neither thrown away
+  // nor counted twice, and the game clock stays equal to the real
+  // clock (1 real minute = 1 game minute), which is what the header
+  // clock, night falling at 8 PM, and the day counter all rely on.
+  //
+  // Nothing else may write meta.lastTick: an earlier version reset it
+  // to "now" on hide/pagehide and discarded any sub-minute gap here,
+  // silently losing however much real time had passed since the last
+  // live-loop tick -- on a phone that gets locked, killed, and reopened
+  // within a minute, that alone could put the game clock tens of
+  // minutes behind the real one. Fractions of a minute are safe to pass
+  // in: advanceSimulation carries them forward in meta.leftoverMinutes
+  // until they add up to a whole tick.
   function catchUpFromRealTime(state) {
     var now = Date.now();
     var elapsedMinutes = (now - state.meta.lastTick) / 60000;
-    if (elapsedMinutes < 1) { state.meta.lastTick = now; return 0; }
-    inCatchUpPass = true;
+    if (elapsedMinutes <= 0) {
+      // Device clock stepped backward (or no time has passed): nothing to
+      // add, but re-anchor so a backward step can't stall the game until
+      // real time catches back up to the old lastTick.
+      state.meta.lastTick = now;
+      return 0;
+    }
+    inCatchUpPass = elapsedMinutes >= 1;
     var ticks = advanceSimulation(state, elapsedMinutes);
     inCatchUpPass = false;
     state.meta.lastTick = now;
     return ticks;
+  }
+
+  // ONE-TIME REALIGNMENT of a save whose game clock fell behind the real
+  // clock (see catchUpFromRealTime for how that used to happen). The game
+  // clock is departedAt + voyageMinutes; if voyageMinutes lost real time,
+  // the game's time of day (night falling, the dimming, the day counter)
+  // runs late by exactly that much. Moving departedAt FORWARD by the gap
+  // makes the game clock equal the real clock again while leaving every
+  // simulated quantity exactly as it was -- no simulation is run for the
+  // missing time, and every stored voyage-minute timestamp (sleep start,
+  // last wash/coffee, drying garments, scheduled events, ...) is
+  // untouched, so nothing that has "been happening for N hours" changes
+  // its N. It does NOT invent sailing, hunger, fuel use, or anything else
+  // for the lost minutes; they were never simulated and still aren't.
+  //
+  // Runs once per save (clockAlignedV1), AFTER boot's own catch-up so the
+  // gap it measures is only the historical loss, not time that catch-up
+  // has just replayed. Only ever moves the clock forward, and only when
+  // the gap is at least 2 minutes: a save that's already in step (or
+  // running ahead) is left exactly as it is.
+  //
+  // Old log entries keep their stored absolute timestamps; the DAY
+  // counter keeps counting from the real calendar date the voyage began
+  // on (departureDateAnchor), so shifting departedAt across a midnight
+  // can never make it miscount.
+  var CLOCK_ALIGN_MIN_GAP_MS = 2 * 60000;
+  function alignGameClockIfNeeded(state) {
+    var m = state.meta;
+    if (m.clockAlignedV1) return false;
+    m.clockAlignedV1 = true;
+    var gameNowMs = m.departedAt + (m.voyageMinutes + (m.leftoverMinutes || 0)) * 60000;
+    var gapMs = Date.now() - gameNowMs;
+    if (gapMs < CLOCK_ALIGN_MIN_GAP_MS) return false;
+    if (m.departureDateAnchor == null) m.departureDateAnchor = m.departedAt;
+    m.departedAt += gapMs;
+    console.info('Landfall: game clock was ' + (gapMs / 60000).toFixed(1) + ' minutes behind real time -- realigned once.');
+    return true;
   }
 
   /* ============================================================
@@ -6488,7 +6550,7 @@
   // (a 4pm departure should read DAY 2 at midnight that same night, a
   // few hours in, not at 4pm the next day).
   function voyageDayNumber(state) {
-    var departure = new Date(state.meta.departedAt);
+    var departure = new Date(state.meta.departureDateAnchor != null ? state.meta.departureDateAnchor : state.meta.departedAt);
     var current = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
     var departureMidnight = new Date(departure.getFullYear(), departure.getMonth(), departure.getDate());
     var currentMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate());
@@ -12132,14 +12194,9 @@
 
   function startLiveLoop() {
     if (liveTimer) return;
-    var last = Date.now();
     liveTimer = setInterval(function () {
       if (!GAME) return;
-      var now = Date.now();
-      var minutes = (now - last) / 60000;
-      last = now;
-      var ticks = advanceSimulation(GAME, minutes);
-      GAME.meta.lastTick = now;
+      var ticks = catchUpFromRealTime(GAME); // same single clock as boot/resume -- see catchUpFromRealTime
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
@@ -12635,6 +12692,7 @@
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
+    alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
     renderReturn(GAME, ticks);
     startLiveLoop();
@@ -12676,7 +12734,10 @@
   document.addEventListener('visibilitychange', function () {
     if (!GAME) return;
     if (document.visibilityState === 'hidden') {
-      GAME.meta.lastTick = Date.now();
+      // Save only. meta.lastTick already records exactly how far the
+      // simulation has been advanced, so whenever the game next loads
+      // or resumes it catches up from there -- overwriting it with "now"
+      // here would silently discard any time since the last live tick.
       saveGameState(GAME);
     } else if (document.visibilityState === 'visible') {
       var ticks = catchUpFromRealTime(GAME);
@@ -12715,8 +12776,7 @@
 
   window.addEventListener('pagehide', function () {
     if (!GAME) return;
-    GAME.meta.lastTick = Date.now();
-    saveGameState(GAME);
+    saveGameState(GAME); // save only -- see the note in the visibilitychange handler on why lastTick is never touched here
   });
 
   // ?reset=1 (see performDevReset above) takes over the boot sequence
