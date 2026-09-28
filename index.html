@@ -433,7 +433,7 @@
      only legitimate callers are catchUpFromRealTime() (diffing real
      timestamps) and the live tick loop (diffing real elapsed ms).
      REST/SLEEP is a STATE (crew.watchState), not a time-skip action —
-     see beginSleep() / wakeUp() / checkSleepInterrupt() below.
+     see cmdSleep() / wakeUp() and updateCrew() below.
      ===================================================================== */
 
   /* ============================================================
@@ -567,9 +567,10 @@
         hoursSinceMeal: 2,
         hoursSinceWater: 2,
         morale: 72,
-        watchState: 'awake',        // 'awake' | 'trying' | 'sleeping' — see SLEEP PRESSURE note below
-        sleepAttemptStartedAt: null, // voyageMinutes when SLEEP was selected, for the "trying" timeout
-        sleepStartedAt: null,        // voyageMinutes at the moment sleep actually began, for duration text on waking
+        watchState: 'awake',        // 'awake' | 'sleeping' — see the SLEEP note above wakeUp. Entered the moment SLEEP finishes, left only by the player's own WAKE UP.
+        sleepStartedAt: null,        // voyageMinutes (the real-elapsed-time voyage clock) when this sleep began -- how long he has slept is always current clock minus this, so it counts correctly across a closed browser
+        sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
+        hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
         coffeeCount: 0,
         inLifeRaft: false,
@@ -946,9 +947,9 @@
   // If P is the chance of NOT happening in one old 10-minute tick, then
   // over TICK_MINUTES/10 of a new tick the chance of not happening must
   // be P^(TICK_MINUTES/10), so that TICK_MINUTES/10 of those compose
-  // back to exactly P across the same 10 minutes. Used by
-  // fallAsleepChance and wakeChanceWhileSleeping, both explicitly
-  // "per-tick" probabilities tuned against the old step size.
+  // back to exactly P across the same 10 minutes. Used by the
+  // scheduled-failure rolls, explicitly "per-tick" probabilities tuned
+  // against the old step size.
   function tickProbability(p10) {
     return 1 - Math.pow(1 - p10, TICK_MINUTES / 10);
   }
@@ -1366,47 +1367,70 @@
      by hoursSinceMeal / hoursSinceWater (already tracked). No numeric
      meter is ever shown — cmdStatus prints the label only.
      -------------------------------------------------------------- */
-  var HUNGER_LABELS = ['FULL', 'SATISFIED', 'HUNGRY', 'VERY HUNGRY', 'STARVING'];
-  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'THIRSTY', 'VERY THIRSTY', 'SEVERELY THIRSTY'];
-  var ENERGY_LABELS = ['DEPLETED', 'EXHAUSTED', 'TIRED', 'GOOD', 'RESTED'];
+  // Three eating opportunities a day is the intended rhythm, so the
+  // cadence AFTER A FULL MEAL (hoursSinceMeal = 0) is: 0-2h FULL, 2-4h
+  // SATISFIED, 4-5h CONTENT, 5-7h PECKISH, 7-10h HUNGRY, 10-14h VERY
+  // HUNGRY, 14h+ STARVING. hoursSinceMeal is never reset by sleeping or
+  // waking -- it only ever moves by real elapsed time (updateCrew, every
+  // tick, asleep or not) and by actually eating (performEat).
+  var HUNGER_LABELS = ['FULL', 'SATISFIED', 'CONTENT', 'PECKISH', 'HUNGRY', 'VERY HUNGRY', 'STARVING'];
+  // Hydration after drinking: 0-2h WELL HYDRATED, 2-4h HYDRATED, 4-6h
+  // SLIGHTLY THIRSTY, 6-8h THIRSTY, 8h+ VERY THIRSTY. Morale/comfort and a
+  // little fatigue only -- never dangerous by itself.
+  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'SLIGHTLY THIRSTY', 'THIRSTY', 'VERY THIRSTY'];
+  // Index 0 is the worst state, 5 the best (same direction as before).
+  var ENERGY_LABELS = ['EXHAUSTED', 'VERY TIRED', 'TIRED', 'OKAY', 'GOOD', 'RESTED'];
+
+  // Named level indices, so the many "is this at least X" checks
+  // elsewhere read as what they mean instead of a bare number that
+  // silently means something different if the scale ever changes again.
+  var HUNGER_PECKISH = 3, HUNGER_HUNGRY = 4, HUNGER_VERY_HUNGRY = 5, HUNGER_STARVING = 6;
+  var THIRST_SLIGHTLY = 2, THIRST_THIRSTY = 3, THIRST_VERY = 4;
 
   function hungerLevel(hoursSinceMeal) {
-    if (hoursSinceMeal <= 3) return 0;
-    if (hoursSinceMeal <= 7) return 1;
-    if (hoursSinceMeal <= 13) return 2;
-    if (hoursSinceMeal <= 20) return 3;
-    return 4;
+    if (hoursSinceMeal <= 2) return 0;
+    if (hoursSinceMeal <= 4) return 1;
+    if (hoursSinceMeal <= 5) return 2;
+    if (hoursSinceMeal <= 7) return 3;
+    if (hoursSinceMeal <= 10) return 4;
+    if (hoursSinceMeal <= 14) return 5;
+    return 6;
   }
   function thirstLevel(hoursSinceWater) {
-    if (hoursSinceWater <= 3) return 0;
-    if (hoursSinceWater <= 7) return 1;
-    if (hoursSinceWater <= 13) return 2;
-    if (hoursSinceWater <= 20) return 3;
+    if (hoursSinceWater <= 2) return 0;
+    if (hoursSinceWater <= 4) return 1;
+    if (hoursSinceWater <= 6) return 2;
+    if (hoursSinceWater <= 8) return 3;
     return 4;
   }
-  // Same breakpoints computeMoraleTarget already uses for fatigue (below)
-  // — ENERGY is just fatigue read the other way round (high fatigue =
-  // low energy), not a second tracked number.
+  // ENERGY is fatigue read the other way round (high fatigue = low
+  // energy), not a second tracked number. After a proper night the day
+  // reads RESTED (morning) -> GOOD (midday) -> OKAY (afternoon) -> TIRED
+  // (evening) -> VERY TIRED (late night); see FATIGUE_RATE_SCALE in
+  // updateCrew for the pace that produces. SLEEP DEBT (below) is the
+  // separate, hidden, longer-term half of the picture.
+  var ENERGY_EXHAUSTED = 0, ENERGY_VERY_TIRED = 1, ENERGY_TIRED = 2, ENERGY_OKAY = 3;
   function energyLevel(fatigue) {
-    if (fatigue > 80) return 0;  // DEPLETED
-    if (fatigue > 60) return 1;  // EXHAUSTED
-    if (fatigue > 40) return 2;  // TIRED
-    if (fatigue > 20) return 3;  // GOOD
-    return 4;                     // RESTED
+    if (fatigue > 72) return 0;  // EXHAUSTED
+    if (fatigue > 52) return 1;  // VERY TIRED
+    if (fatigue > 42) return 2;  // TIRED
+    if (fatigue > 28) return 3;  // OKAY
+    if (fatigue > 12) return 4;  // GOOD
+    return 5;                     // RESTED
   }
 
-  // HYGIENE — a qualitative read of hoursSinceWash (already tracked,
-  // see below), never a second tracked number. Forgiving thresholds:
-  // this is an offshore voyage, not a hotel — a day without washing is
-  // completely normal and still reads CLEAN, not a problem. NEEDS A
-  // WASH lines up with the point computeMoraleTarget's own wash pressure
-  // starts (48h), so the label and the actual consequence agree.
+  // HYGIENE — a qualitative read of hygieneHours (see hoursSinceWash
+  // below), never a second tracked number. Washing about once a day is
+  // the intended rhythm, with an occasional second wash after heat, hard
+  // work, fish, or getting soaked: 0-6 FRESH, 6-14 CLEAN, 14-24 NEEDS A
+  // WASH, 24-40 GRIMY, 40+ FILTHY. Mostly a morale/comfort/flavor
+  // matter -- never a harsh survival mechanic.
   var HYGIENE_LABELS = ['FILTHY', 'GRIMY', 'NEEDS A WASH', 'CLEAN', 'FRESH'];
   function hygieneLevel(hoursSinceWash) {
     if (hoursSinceWash <= 6) return 4;   // FRESH
-    if (hoursSinceWash <= 24) return 3;  // CLEAN
-    if (hoursSinceWash <= 48) return 2;  // NEEDS A WASH
-    if (hoursSinceWash <= 84) return 1;  // GRIMY
+    if (hoursSinceWash <= 14) return 3;  // CLEAN
+    if (hoursSinceWash <= 24) return 2;  // NEEDS A WASH
+    if (hoursSinceWash <= 40) return 1;  // GRIMY
     return 0;                             // FILTHY
   }
 
@@ -1454,10 +1478,57 @@
   // source now (never lumped together) — wash and dishes are tracked
   // separately so one doesn't mask the other, and neither creates any
   // real consequence until it's been genuinely neglected for a while.
+  // "Hours since wash" is now an ACCUMULATOR (crew.hygieneHours) rather
+  // than a plain timestamp difference, so heat, hard work, spray, wet
+  // clothes and the like can make it advance faster than the clock (see
+  // hygieneRate in updateCrew and bumpHygiene). It resets to 0 on a wash
+  // and is never touched by sleeping -- it just keeps accruing.
   function hoursSinceWash(state) {
-    var last = state.crew.lastRoutineAt.wash;
-    if (last == null) return state.meta.voyageMinutes / 60;
-    return (state.meta.voyageMinutes - last) / 60;
+    return state.crew.hygieneHours;
+  }
+  // A one-time increment for a specific dirty/sweaty activity (a repair,
+  // handling a fish) -- the same kind of "extra dirty hours" the ambient
+  // rate adds continuously.
+  function bumpHygiene(state, hours) {
+    state.crew.hygieneHours += hours;
+  }
+
+  /* --------------------------------------------------------------
+     SLEEP DEBT -- hidden, never shown as a number.
+
+     ENERGY (crew.fatigue) is the short-term half: it climbs through the
+     waking day and comes back down while asleep. SLEEP DEBT
+     (crew.sleepDebt, in hours owed) is the long-term half: it grows
+     while awake (SLEEP_DEBT_PER_AWAKE_HOUR, tuned so an ordinary ~16h
+     day owes ~8h) and is repaid ONLY by actually sleeping, one hour
+     owed per hour slept, and can never go below zero -- there is no
+     "banked" sleep, and sleeping more than you owe buys nothing further.
+
+     Only the debt CARRIED into the current waking stretch matters for
+     effects (sleepDebtCarry): the ordinary same-day accrual is exactly
+     what a normal night repays, so it shouldn't count as "poorly
+     slept". Carried debt makes the day feel rough three gentle ways:
+     energy falls a little faster, morale sits a little lower, and
+     concentration (repair odds) is slightly worse.
+     -------------------------------------------------------------- */
+  var SLEEP_DEBT_PER_AWAKE_HOUR = 0.5;
+  var SLEEP_DEBT_MAX = 16;             // hours owed -- a hard ceiling so even days awake are never a runaway spiral
+  var SLEEP_FATIGUE_FLOOR = 4;         // a fully rested sailor's fatigue; sleep never pushes below this (no extra credit)
+  // Energy recovered per hour asleep, by how long THIS sleep session has
+  // lasted -- deliberately back-loaded, so a short nap helps only a
+  // little, 4h leaves you groggy, 6h is decent, and a real ~8h night is
+  // what actually restores you. After 8h there is almost nothing left to
+  // gain, and (via SLEEP_FATIGUE_FLOOR) never any credit.
+  function sleepEnergyRecoveryPerHour(sessionHours) {
+    if (sessionHours < 2) return 4;
+    if (sessionHours < 4) return 6;
+    if (sessionHours < 6) return 8;
+    if (sessionHours < 8) return 10;
+    return 1;
+  }
+  function sleepDebtCarry(state) {
+    var c = state.crew;
+    return Math.max(0, c.sleepDebt - SLEEP_DEBT_PER_AWAKE_HOUR * c.hoursSinceRest);
   }
   function dishesDirtyHours(state) {
     var since = state.crew.dishesDirtySinceMinutes;
@@ -1497,30 +1568,47 @@
     var c = state.crew;
     var target = MORALE_BASELINE;
 
+    // Hunger/thirst/energy/hygiene/sleep debt all lean on morale gently --
+    // a small dip for mild neglect, a noticeably larger one only when it's
+    // been left a long time -- and all of them naturally relax back as
+    // soon as the underlying condition is fixed (morale just drifts
+    // toward this target; see updateCrew).
     var hLevel = hungerLevel(c.hoursSinceMeal);
     if (hLevel === 0) target += 8;
-    else if (hLevel === 1) target += 3;
-    else if (hLevel === 2) target -= 6;
-    else if (hLevel === 3) target -= 14;
-    else target -= clamp(24 + (c.hoursSinceMeal - 20) * 0.8, 24, 38);
+    else if (hLevel === 1) target += 5;
+    else if (hLevel === 2) target += 2;
+    else if (hLevel === 3) target += 0;
+    else if (hLevel === 4) target -= 4;
+    else if (hLevel === 5) target -= 8;
+    else target -= clamp(20 + (c.hoursSinceMeal - 14) * 0.8, 20, 34);
 
     var tLevel = thirstLevel(c.hoursSinceWater);
     if (tLevel === 0) target += 8;
     else if (tLevel === 1) target += 3;
-    else if (tLevel === 2) target -= 8;
-    else if (tLevel === 3) target -= 18;
-    else target -= clamp(28 + (c.hoursSinceWater - 20) * 1.0, 28, 45);
+    else if (tLevel === 2) target -= 2;
+    else if (tLevel === 3) target -= 6;
+    else target -= clamp(12 + (c.hoursSinceWater - 8) * 1.0, 12, 30);
 
-    if (c.fatigue <= 20) target += 6;
-    else if (c.fatigue <= 40) target += 0;
-    else if (c.fatigue <= 60) target -= 8;
-    else if (c.fatigue <= 80) target -= 16;
-    else target -= 26;
+    var eLevel = energyLevel(c.fatigue);
+    if (eLevel === 5) target += 6;
+    else if (eLevel === 4) target += 3;
+    else if (eLevel === 3) target += 0;
+    else if (eLevel === 2) target -= 3;
+    else if (eLevel === 1) target -= 9;
+    else target -= 18;
 
-    // Skipping one wash: no meaningful consequence. Several days without
-    // one: a small, capped drag, never a crisis.
+    // Sleep debt carried into today: a slight extra drag on top of
+    // whatever the energy state itself already costs.
+    target -= clamp(sleepDebtCarry(state) * 0.6, 0, 5);
+
+    // Hygiene: no consequence while FRESH/CLEAN, then a gentle, capped
+    // drag as it's left.
     var washHours = hoursSinceWash(state);
-    if (washHours > 48) target -= clamp((washHours - 48) * 0.15, 0, 10);
+    var hyLevel = hygieneLevel(washHours);
+    if (hyLevel === 4) target += 2;
+    else if (hyLevel === 2) target -= 1;
+    else if (hyLevel === 1) target -= 5;
+    else if (hyLevel === 0) target -= clamp(9 + (washHours - 40) * 0.1, 9, 12);
 
     // Same shape for a galley left dirty a long time.
     var dishHours = dishesDirtyHours(state);
@@ -1589,8 +1677,7 @@
   }
 
   // Coffee: a small, temporary, subtle edge — never a fatigue cure. Active
-  // for a few hours after the last cup; recent coffee also makes it a bit
-  // harder to fall asleep (see fallAsleepChance below).
+  // for a few hours after the last cup.
   function coffeeActive(state) {
     var last = state.crew.lastCoffeeAt;
     return last != null && (state.meta.voyageMinutes - last) < 180;
@@ -3185,8 +3272,8 @@
     var speed = baseSpeedForWind(w.windSpeed)
       * pointOfSailFactor(heading, w.windDirection)
       * sailConfigFactor(b.sailConfig, w.windSpeed);
-    if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= 3) speed *= 0.9; // poor trim, wandering helm
-    if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — trying to sleep, or asleep
+    if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= THIRST_VERY) speed *= 0.9; // poor trim, wandering helm
+    if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — asleep
     return Math.max(0, speed);
   }
 
@@ -3469,45 +3556,106 @@
     };
   }
 
+  var FATIGUE_RATE_SCALE = 2;          // see the daily-rhythm note in updateCrew
+  var SLEEP_WATER_RATE_FACTOR = 0.5;   // hydration decays at half speed while asleep -- slower, not stopped
+
+  function wearingWetGarment(state) {
+    var cl = state.crew.clothing;
+    return ['top', 'outer', 'bottom', 'feet'].some(function (slot) {
+      var key = cl[slot];
+      return !!key && key !== 'none' && key !== 'barefoot' && isGarmentWet(state, key);
+    });
+  }
+
   function updateCrew(state) {
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
 
-    if (c.watchState === 'sleeping') {
-      // Rougher seas make for shallower, less restorative sleep, not just
-      // a higher chance of being woken (see wakeChanceWhileSleeping).
-      // Morale nudges quality too, gently either way — a steady mind
-      // rests better, a low one rests worse — and good sleep gives a
-      // little morale back, same as a decent meal does.
+    var asleep = c.watchState === 'sleeping';
+    var w = state.weather;
+
+    if (asleep) {
+      // Sleep is nothing but elapsed time here: this runs once per tick
+      // whether the game is open or a multi-hour offline catch-up is
+      // replaying them (see catchUpFromRealTime), and how long THIS
+      // session has lasted comes straight from the stored sleepStartedAt
+      // timestamp -- there is no separate sleep clock, and nothing here
+      // ever advances the voyage clock (only simTick does that).
+      var sessionHours = c.sleepStartedAt == null ? 0 : (state.meta.voyageMinutes - c.sleepStartedAt) / 60;
+      // Rougher seas make for shallower, less restorative sleep. Morale
+      // nudges quality too, gently either way -- a steady mind rests
+      // better, a low one rests worse.
       var moraleFactor = clamp(0.88 + (c.morale / 100) * 0.24, 0.75, 1.12);
-      var quality = clamp((1 - state.weather.seaState / 10) * moraleFactor, 0.3, 1.1);
-      c.fatigue = clamp(c.fatigue - hrs * 9 * quality, 0, 100);
-      c.morale = clamp(c.morale + hrs * 1.2 * quality, 0, 100);
+      var quality = clamp((1 - w.seaState / 10) * moraleFactor, 0.3, 1.1);
+      var qualityFactor = clamp(quality / 0.85, 0.35, 1.15); // ~1.0 in ordinary conditions
+      var stillRecovering = c.sleepDebt > 0 || c.fatigue > SLEEP_FATIGUE_FLOOR;
+
+      // ENERGY: restored on the back-loaded curve, never below the floor
+      // (so sleeping longer than needed can't push it past "fully
+      // rested" -- no extra credit).
+      if (c.fatigue > SLEEP_FATIGUE_FLOOR) {
+        c.fatigue = Math.max(SLEEP_FATIGUE_FLOOR, c.fatigue - sleepEnergyRecoveryPerHour(sessionHours) * qualityFactor * hrs);
+      }
+      // SLEEP DEBT: repaid one hour per hour actually slept -- purely
+      // elapsed time, however the sea is behaving -- and floored at
+      // zero: it can never go negative, so there is no way to bank
+      // sleep for later. (Rough seas only ever make the ENERGY
+      // recovery above shallower, as they always have.)
+      c.sleepDebt = Math.max(0, c.sleepDebt - hrs);
+      // Good sleep gives a little morale back, same as a decent meal --
+      // but only while it's actually still restoring something.
+      if (stillRecovering) c.morale = clamp(c.morale + hrs * 1.2 * quality, 0, 100);
       c.hoursSinceRest = 0;
     } else {
       var fatigueRate = 1.6;
-      if (state.weather.seaState >= 4) fatigueRate += 1.0;
-      if (hungerLevel(c.hoursSinceMeal) >= 2) fatigueRate += 0.4;
-      if (hungerLevel(c.hoursSinceMeal) >= 3) fatigueRate += 0.6;
-      if (thirstLevel(c.hoursSinceWater) >= 3) fatigueRate += 0.8;
+      if (w.seaState >= 4) fatigueRate += 1.0;
+      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_HUNGRY) fatigueRate += 0.4;
+      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
+      if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
+      if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
       if (c.morale < 30) fatigueRate += 0.3; // a discouraged crew tires faster
-      fatigueRate += clothingFatigueRateBonus(state);
-      if (c.watchState === 'trying') fatigueRate *= 0.5; // lying down helps a little even without real sleep
+      // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
+      // a good night's sleep it reads RESTED in the morning, GOOD by
+      // midday, OKAY through the afternoon, TIRED by evening and VERY
+      // TIRED late at night -- rather than staying "fine" all day.
+      fatigueRate *= FATIGUE_RATE_SCALE;
+      fatigueRate += clothingFatigueRateBonus(state); // unchanged, deliberately not scaled
+      // Carried sleep debt makes energy fall a little faster all day.
+      fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
       c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
-      if (c.watchState !== 'trying') c.hoursSinceRest += hrs;
+      c.hoursSinceRest += hrs;
+      c.sleepDebt = Math.min(SLEEP_DEBT_MAX, c.sleepDebt + SLEEP_DEBT_PER_AWAKE_HOUR * hrs);
     }
 
+    // HUNGER: real elapsed time only, asleep or awake alike -- going to
+    // bed hungry means waking hungrier, not reset.
     c.hoursSinceMeal += hrs;
-    // Real heat and hard physical work (rough seas) both raise water
-    // needs — modeled as thirst simply arriving faster. Uses the boat's
-    // actual current temperature reading rather than a coastal/tropics
-    // proxy, since Landfall already tracks that directly.
+
+    // HYDRATION: heat, sun on an exposed deck and hard seas all raise
+    // water needs (modeled as thirst simply arriving faster); asleep it
+    // runs at half speed -- slower, but never stopped.
     var waterRate = 1;
-    if (state.weather.temperatureF >= 82) waterRate += 0.5;
-    else if (state.weather.temperatureF >= 72) waterRate += 0.2;
-    if (state.weather.seaState >= 4) waterRate += 0.3;
+    if (w.temperatureF >= 82) waterRate += 0.5;
+    else if (w.temperatureF >= 72) waterRate += 0.2;
+    if (w.seaState >= 4) waterRate += 0.3;
+    if (!asleep && c.location === 'above' && w.condition === 'clear' && w.temperatureF >= 68) waterRate += 0.2; // sun and no shade
     waterRate += clothingThirstRateBonus(state);
+    if (asleep) waterRate *= SLEEP_WATER_RATE_FACTOR;
     c.hoursSinceWater += hrs * waterRate;
+
+    // HYGIENE: keeps accruing through sleep like everything else, and
+    // runs faster in the heat, in spray/storms on deck, and while
+    // wearing wet clothes. One-off dirty work (repairs, fish) adds its
+    // own increment via bumpHygiene.
+    var hygieneRate = 1;
+    if (w.temperatureF >= 82) hygieneRate += 0.5;
+    else if (w.temperatureF >= 75) hygieneRate += 0.2;
+    if (!asleep) {
+      if (c.location === 'above' && (w.seaState >= 4 || w.condition === 'squall')) hygieneRate += 0.4;
+      else if (c.location === 'above' && w.condition === 'rain') hygieneRate += 0.3;
+      if (wearingWetGarment(state)) hygieneRate += 0.3;
+    }
+    c.hygieneHours += hrs * hygieneRate;
 
     // CLOTHING — gradual wetness accumulation (past the one-minute
     // above-deck grace period) and the comfort-mismatch clock; see
@@ -3674,7 +3822,6 @@
     checkSpoilage(state);
     checkMilestones(state);
     checkAmbientEvent(state);
-    processSleepTick(state, prevCondition);
 
     clampState(state);
   }
@@ -3692,11 +3839,10 @@
   }
 
   // True only while catchUpFromRealTime's own advanceSimulation call is
-  // running -- simTick (and everything it calls, including
-  // processSleepTick's autoWakeUp) can check this to tell "the player
-  // was away and this whole pass is a bulk replay of elapsed time"
-  // apart from "the live loop just ran its regular, real-time tick" --
-  // see autoWakeUp's own notes for why that distinction matters.
+  // running -- simTick (and everything it calls) can check this to tell
+  // "the player was away and this whole pass is a bulk replay of
+  // elapsed time" apart from "the live loop just ran its regular,
+  // real-time tick".
   var inCatchUpPass = false;
 
   function advanceSimulation(state, minutes) {
@@ -3924,6 +4070,7 @@
   function checkAftLocker(state) {
     var f = state.flags;
     if (!f.aftLockerTriggered && state.meta.voyageMinutes >= f.aftLockerTriggerAt) {
+      if (state.crew.watchState === 'sleeping') return; // nothing wakes him automatically -- it simply happens once he's up, since the trigger is a threshold that stays crossed
       f.aftLockerTriggered = true;
       log(state, "Something in the aft locker has come loose. A dull, irregular thud with every roll.");
       state.pendingChoice = {
@@ -4348,11 +4495,11 @@
 
   function checkThirstNarration(state) {
     var f = state.flags;
-    if (thirstLevel(state.crew.hoursSinceWater) >= 3 && !f.thirstNarrated) {
+    if (thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY && !f.thirstNarrated) {
       f.thirstNarrated = true;
       log(state, "Your mouth feels like the inside of a sail bag. Water, before anything else.");
     }
-    if (thirstLevel(state.crew.hoursSinceWater) < 2) f.thirstNarrated = false;
+    if (thirstLevel(state.crew.hoursSinceWater) < THIRST_THIRSTY) f.thirstNarrated = false;
   }
 
   // CLOTHING OBSERVATIONS — one shared pool of short, sensory lines and
@@ -4474,21 +4621,21 @@
 
   function checkHungerNarration(state) {
     var f = state.flags;
-    if (hungerLevel(state.crew.hoursSinceMeal) >= 3 && !f.hungerNarrated) {
+    if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY && !f.hungerNarrated) {
       f.hungerNarrated = true;
       log(state, "Stomach's stopped asking and started aching. You need real food.");
     }
-    if (hungerLevel(state.crew.hoursSinceMeal) < 2) f.hungerNarrated = false;
+    if (hungerLevel(state.crew.hoursSinceMeal) < HUNGER_HUNGRY) f.hungerNarrated = false;
   }
 
   function checkCleanlinessNarration(state) {
     var f = state.flags;
     var hours = hoursSinceWash(state);
-    if (hours > 60 && !f.cleanlinessNarrated) {
+    if (hours > 24 && !f.cleanlinessNarrated) {
       f.cleanlinessNarrated = true;
       log(state, 'You could use a wash.');
     }
-    if (hours < 24) f.cleanlinessNarrated = false;
+    if (hours < 14) f.cleanlinessNarrated = false;
   }
 
   function checkGalleyNarration(state) {
@@ -4518,13 +4665,13 @@
   function ambientEventsAllowed(state) {
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) return false; // mid opening-sequence — no room for musing
     if (state.crew.inLifeRaft) return false; // pure survival focus — no idle noticing from a raft
-    if (state.crew.watchState !== 'awake') return false;      // asleep or trying to be — not noticing anything
+    if (state.crew.watchState !== 'awake') return false;      // asleep — not noticing anything
     if (state.pendingChoice) return false;                    // mid-decision, not the moment for a stray thought
     if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
     if (state.weather.seaState >= 5) return false;
     if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) return false; // an active problem aboard
-    if (hungerLevel(state.crew.hoursSinceMeal) >= 3) return false;  // severe hunger/thirst — physical concerns dominate
-    if (thirstLevel(state.crew.hoursSinceWater) >= 3) return false;
+    if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) return false;  // severe hunger/thirst — physical concerns dominate
+    if (thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY) return false;
     return true;
   }
 
@@ -4598,8 +4745,8 @@
   function resolveAftLocker(state) {
     var c = state.crew;
     var penalty = 0;
-    if (hungerLevel(c.hoursSinceMeal) >= 3) penalty += 0.12;
-    if (thirstLevel(c.hoursSinceWater) >= 3) penalty += 0.15;
+    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) penalty += 0.12;
+    if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) penalty += 0.15;
     if (coffeeActive(state)) penalty -= 0.05;
     if (c.morale < 40) penalty += 0.06; // rattled, more likely to fumble it
     var successChance = clamp(0.92 - c.fatigue / 150 - penalty, 0.2, 0.92);
@@ -4615,24 +4762,33 @@
   }
 
   /* --------------------------------------------------------------
-     SLEEP PRESSURE
+     SLEEP -- real time, player-controlled
 
-     Sleep is still a STATE, never a call that manufactures time — but
-     it's now three states, not two: 'awake' -> 'trying' -> 'sleeping'.
-     Selecting SLEEP only ever starts an attempt; every tick after that
-     (whether the live loop or catchUpFromRealTime) rolls real, condition-
-     driven odds for actually falling asleep, and later for staying that
-     way. A well-rested sailor can select SLEEP and simply lie there,
-     exactly as asked — this is what keeps "close game, tap SLEEP" from
-     ever being a guaranteed free fatigue reset.
+     Choosing SLEEP puts the sailor straight into the 'sleeping' watch
+     state and stamps crew.sleepStartedAt with the current voyage-clock
+     time (voyageMinutes -- the same real-elapsed-time clock everything
+     else in Landfall runs on: one tick is one real minute, and
+     catchUpFromRealTime replays any time the tab was closed through the
+     very same ticks). Nothing here ever advances that clock or keeps a
+     clock of its own: how long he has slept is just the current clock
+     minus the stored start, so it keeps counting correctly whether the
+     game is open, the phone is locked, or the browser was closed
+     overnight -- the ticks that pass in the meantime are what restore
+     energy and repay sleep debt (see updateCrew).
+
+     There is NO automatic waking of any kind: not after 8 hours, not on
+     full recovery, not at sunrise, not for weather. He stays asleep,
+     with WAKE UP available, until the player wakes him. And SLEEP is
+     always available -- recovery is capped (sleep debt floors at zero,
+     energy at fully rested), not the act of sleeping, so a shifted
+     schedule can always be walked back to a normal bedtime without
+     ever gaining extra credit for it.
      -------------------------------------------------------------- */
-  var TRYING_TO_SLEEP_GIVE_UP_MINUTES = 120; // give up and get up after 2 hours of not falling asleep
-
-  function tryingToSleepNarrative() {
+  function sleepSettleNarrative() {
     var options = [
-      "You go below and try to settle. The autopilot holds her course.",
-      "You lie down, still half dressed, and wait for it to take you.",
-      "Eyes closed. Whether sleep comes is another matter.",
+      "You go below and settle into the bunk. The autopilot holds her course.",
+      "You lie down, still half dressed, and let the boat rock you under.",
+      "Eyes closed. The hull talks quietly; you stop listening.",
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -4644,37 +4800,11 @@
     return rounded + (rounded === 1 ? " hour" : " hours");
   }
 
-  // Chance of actually dropping off while 'trying', PER OLD 10-MINUTE
-  // TICK (all the math below is tuned against that frame) -- converted
-  // to the correct per-current-tick chance via tickProbability() at the
-  // very end, so the conditions/weights here never need to change.
-  // Fatigue does most of the work; a long stretch already awake nudges
-  // it further; rough seas and recent coffee push back against it.
-  function fallAsleepChance(state) {
-    var c = state.crew;
-    var base = 0.15;
-    var fatigueBoost = clamp(c.fatigue / 100, 0, 1) * 0.55;
-    var awakeBoost = clamp((c.hoursSinceRest - 4) / 20, 0, 0.25);
-    var seaPenalty = state.weather.seaState >= 4 ? 0.15 : (state.weather.seaState >= 3 ? 0.05 : 0);
-    var coffeePenalty = coffeeActive(state) ? 0.18 : 0;
-    var p10 = clamp(base + fatigueBoost + awakeBoost - seaPenalty - coffeePenalty, 0.03, 0.9);
-    return tickProbability(p10);
-  }
-
-  // Chance of surfacing again once 'sleeping', PER OLD 10-MINUTE TICK,
-  // same tickProbability() conversion as fallAsleepChance above. Low
-  // remaining fatigue (already well rested) makes waking likelier;
-  // rough seas add their own chance on top — sleep interrupted by
-  // weather, not just completed by resting enough.
-  function wakeChanceWhileSleeping(state) {
-    var c = state.crew;
-    var restedness = clamp(1 - c.fatigue / 100, 0, 1);
-    var base = 0.02 + restedness * 0.10;
-    var seaBoost = state.weather.seaState >= 5 ? 0.12 : (state.weather.seaState >= 4 ? 0.05 : 0);
-    var p10 = clamp(base + seaBoost, 0.01, 0.6);
-    return tickProbability(p10);
-  }
-
+  // Only ever reached from the player's own WAKE UP. Energy and debt
+  // have already been updated tick by tick for exactly the real time that
+  // passed (see updateCrew) -- as have hunger, hydration and hygiene --
+  // so this just ends the sleeping state and reports how long it was,
+  // measured from the stored start timestamp.
   function wakeUp(state, baseText, includeDuration) {
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
@@ -4687,81 +4817,6 @@
     }
     log(state, text);
     flushNewLogEntries(state);
-  }
-
-  // Same transition as wakeUp() (unchanged, still happens at exactly
-  // the same moment -- see processSleepTick's own callers below), but
-  // also marks that this particular wake happened WITHOUT the player
-  // clicking WAKE UP, so the live loop can play the same WAKING UP
-  // . .. .../wake_up.mp3 sequence the manual path gets (see the
-  // 'wake-up' case in handleAction) once it's actually safe to do so.
-  // Never marked during an offline catch-up pass (see inCatchUpPass):
-  // simTick can run many times synchronously there, long before the
-  // player is even looking at a screen, so there's no real "moment"
-  // for a real-time audio/dots sequence to occupy -- that path keeps
-  // its existing instant, silent transition, summarized via the log
-  // instead, exactly as it already works today.
-  function autoWakeUp(state, baseText, includeDuration) {
-    wakeUp(state, baseText, includeDuration);
-    if (!inCatchUpPass) state.crew._autoWakeAudioPending = true;
-  }
-
-  // Advances the 'trying' -> 'sleeping' -> 'awake' state machine by one
-  // tick. This is the only place any of those transitions happen, so it
-  // runs identically whether it's the live loop or a multi-day catch-up.
-  function processSleepTick(state, prevCondition) {
-    var c = state.crew;
-
-    if (c.watchState === 'trying') {
-      if (Math.random() < fallAsleepChance(state)) {
-        c.watchState = 'sleeping';
-        // Only stamp this on the FIRST drop-off of the session — a restless
-        // wake-and-resettle (above) deliberately leaves sleepStartedAt alone
-        // so the eventual "roughly X hours below" spans the whole night,
-        // not just the last stretch after the last stir.
-        if (c.sleepStartedAt == null) c.sleepStartedAt = state.meta.voyageMinutes;
-        return;
-      }
-      var elapsed = state.meta.voyageMinutes - c.sleepAttemptStartedAt;
-      if (elapsed >= TRYING_TO_SLEEP_GIVE_UP_MINUTES) {
-        c.watchState = 'awake';
-        c.sleepAttemptStartedAt = null;
-        c.sleepStartedAt = null; // fully awake now — a later session starts its own duration count clean
-        log(state, "The rest wouldn't come. Up again.");
-      }
-      return;
-    }
-
-    if (c.watchState === 'sleeping') {
-      // Something demanding attention (e.g. the aft locker) always wins.
-      if (state.pendingChoice) {
-        autoWakeUp(state, "Something's wrong. You're awake, fast.", false);
-        return;
-      }
-      // A squall breaking is loud and wet enough to end anyone's sleep.
-      if (state.weather.condition === 'squall' && prevCondition !== 'squall') {
-        autoWakeUp(state, "Cold spray through the hatch \u2014 you're awake.", false);
-        return;
-      }
-      if (Math.random() < wakeChanceWhileSleeping(state)) {
-        if (c.fatigue <= 20) {
-          // Actually rested — this is a real end to the sleep, not a blip.
-          autoWakeUp(state, "You surface on your own, rested.");
-        } else {
-          // Still genuinely exhausted: a real wake would leave them stuck
-          // fully 'awake' and racking up MORE fatigue for the rest of an
-          // unattended absence over one unlucky roll. A still-tired sailor
-          // instead stirs and drifts straight back toward sleep — logged,
-          // but not a full wake (watchState goes to 'trying', where the
-          // normal high fallAsleepChance at this fatigue very quickly
-          // pulls them back under).
-          log(state, "Restless. You surface for a moment, then let it take you again.");
-          flushNewLogEntries(state);
-          c.watchState = 'trying';
-          c.sleepAttemptStartedAt = state.meta.voyageMinutes;
-        }
-      }
-    }
   }
 
   /* ============================================================
@@ -7613,22 +7668,22 @@
 
   // The physical act of getting into the bunk (sleep.mp3) is a real
   // busy action, same architecture as everything else in this file --
-  // only once it actually finishes does the EXISTING sleep/time-
-  // passing mechanic begin (the whole prior body of this function,
-  // untouched, now the action callback below). watchState only
-  // becomes 'trying' once that happens, so GET UP/the trying-to-sleep
-  // screen can't appear mid-audio.
+  // only once it actually finishes does he fall asleep. Sleep is always
+  // allowed (no "not tired enough", no lockout after recent sleep): the
+  // sailor is simply put to sleep and the current voyage-clock time is
+  // stored as the sleep start. The real-time clock is never touched.
   function cmdSleep(state) {
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
     runAudioSyncedAction(state, {
       label: 'GETTING INTO BUNK',
       playAudio: function (onEnded) { return playCabinOneShot('sleep', onEnded); },
       action: function (s) {
-        s.crew.watchState = 'trying';
-        s.crew.sleepAttemptStartedAt = s.meta.voyageMinutes;
-        s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and GET UP never actually appears
+        s.crew.watchState = 'sleeping';
+        s.crew.sleepStartedAt = s.meta.voyageMinutes;
+        s.crew.atHelm = false; // can't stay at the helm while asleep — see cmdHelm
+        s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and WAKE UP never actually appears
         clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
-        log(s, tryingToSleepNarrative());
+        log(s, sleepSettleNarrative());
         flushNewLogEntries(s);
       },
     });
@@ -8115,6 +8170,7 @@
       playAudio: function (onEnded) { return playHeadOneShot('wash', onEnded); },
       action: function (s) {
         consumeWater(s, WATER_WASH_GAL);
+        s.crew.hygieneHours = 0; // FRESH again -- see hoursSinceWash
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         log(s, 'A wash-up with fresh water. Small thing, helps anyway.');
@@ -8765,14 +8821,15 @@
     return verb + ' ' + item.name.toLowerCase() + ' ' + where + '.';
   }
 
-  // How much hunger-relief TIME each type buys, applied as the value
-  // hoursSinceMeal resets to (often negative — "buys a few extra hours
-  // before hunger starts building again") rather than always snapping to
-  // a flat zero. A MEAL's -3 keeps the sailor out of HUNGRY (threshold
-  // 3, see hungerLevel) roughly twice as long as a SNACK's 0 — a meal
-  // holding about twice as long as a snack is the whole point. Chocolate
-  // isn't listed: it never touches hoursSinceMeal at all.
-  var HUNGER_RESET_HOURS_BY_TYPE = { meal: -3, snack: 0 };
+  // What eating does to hoursSinceMeal. A full MEAL puts the sailor
+  // back at the very start of the cadence (FULL). A SNACK is a smaller
+  // reset: it brings hunger back to about the 3-hour mark (SATISFIED)
+  // -- enough to bridge the gap between breakfast and dinner as a light
+  // lunch -- but only ever moves the clock BACKWARD toward that mark
+  // (Math.min), so a snack while already full changes nothing and can
+  // never make anyone hungrier. Chocolate isn't listed: it never
+  // touches hoursSinceMeal at all (morale/comfort only).
+  var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 };
 
   // Comfort, not sustenance — no prep, no seastate/water gates,
   // no hunger/thirst/energy effect at all. A small, temporary morale
@@ -8800,7 +8857,7 @@
   ];
   function eatChocolateLine(state) {
     if (state.food.chocolate === 0) return 'You eat the last of the chocolate, and sit for a while.';
-    var lines = hungerLevel(state.crew.hoursSinceMeal) > 0 ? CHOCOLATE_LINES_HUNGRY : CHOCOLATE_LINES_FULL;
+    var lines = hungerLevel(state.crew.hoursSinceMeal) >= 2 ? CHOCOLATE_LINES_HUNGRY : CHOCOLATE_LINES_FULL;
     return lines[Math.floor(Math.random() * lines.length)];
   }
 
@@ -8940,10 +8997,9 @@
         s.food[key] -= 1;
       }
 
-      // Hunger: a real meal genuinely holds longer than a snack, so
-      // this resets to a type-dependent offset rather than always
-      // snapping to a flat zero.
-      c.hoursSinceMeal = HUNGER_RESET_HOURS_BY_TYPE[item.type] || 0;
+      // Hunger: a full meal resets to FULL; a snack is a smaller reset
+      // (see HUNGER_RESET_HOURS_BY_TYPE).
+      c.hoursSinceMeal = item.type === 'snack' ? Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack) : HUNGER_RESET_HOURS_BY_TYPE.meal;
 
       // Meal-history monotony (hidden, never shown): an exponential
       // moving average nudged toward 1 by a snack, toward 0 by a real
@@ -9173,16 +9229,20 @@
     var c = state.crew, w = state.weather;
     var factors = [];
 
-    var eLvl = energyLevel(c.fatigue); // 0=DEPLETED..4=RESTED
-    var energyPenalty = [0.35, 0.20, 0.08, 0, 0][eLvl];
+    var eLvl = energyLevel(c.fatigue); // 0=EXHAUSTED..5=RESTED
+    var energyPenalty = [0.35, 0.20, 0.10, 0.04, 0, 0][eLvl];
+    // Carried sleep debt slightly dulls concentration on top of whatever
+    // the energy state already costs -- only ever folded into an
+    // already-listed ENERGY factor, never a new line of its own.
+    if (energyPenalty > 0) energyPenalty += Math.min(0.06, sleepDebtCarry(state) * 0.01);
     if (energyPenalty > 0) factors.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl], penalty: energyPenalty });
 
-    var hLvl = hungerLevel(c.hoursSinceMeal); // 0=FULL..4=STARVING
-    var hungerPenalty = [0, 0, 0.12, 0.22, 0.22][hLvl];
+    var hLvl = hungerLevel(c.hoursSinceMeal); // 0=FULL..6=STARVING
+    var hungerPenalty = [0, 0, 0, 0.04, 0.12, 0.20, 0.24][hLvl];
     if (hungerPenalty > 0) factors.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl], penalty: hungerPenalty });
 
     var tLvl = thirstLevel(c.hoursSinceWater);
-    var thirstPenalty = [0, 0, 0.12, 0.28, 0.28][tLvl];
+    var thirstPenalty = [0, 0, 0.03, 0.12, 0.24][tLvl];
     if (thirstPenalty > 0) factors.push({ label: 'THIRST', value: THIRST_LABELS[tLvl], penalty: thirstPenalty });
 
     var moralePenalty = 0, moraleLabelText = null;
@@ -9242,6 +9302,8 @@
       action: function (s) {
         s.supplies.spares[spareKey] -= 1;
         s.crew.fatigue = clamp(s.crew.fatigue + rand(6, 10), 0, 100);
+        bumpHygiene(s, 1.5);            // grease, sweat, cramped work
+        s.crew.hoursSinceWater += 0.4;  // strenuous -- thirst arrives a little sooner
         if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
         if (Math.random() < chance) {
           s.boat[systemKey] = 'GOOD';
@@ -10728,31 +10790,6 @@
     armDurationWatchdog(playingEl);
   }
 
-  // The cosmetic WAKING UP . .. .../wake_up.mp3 sequence for an
-  // automatic wake (see autoWakeUp/processSleepTick), played AFTER the
-  // live loop's own tick-processing pass has fully finished for this
-  // firing -- never triggered from inside simTick/processSleepTick
-  // itself, which can run many times synchronously during an offline
-  // catch-up pass and isn't a safe place to start a UI-blocking audio
-  // sequence (see startLiveLoop's own call site for the actual
-  // safety check). watchState is already 'awake' by the time this
-  // runs -- autoWakeUp already made that transition, at the same
-  // moment it always has -- so the action callback here is a no-op;
-  // this only adds the same audio/dots presentation the manual WAKE
-  // UP path gets (see the 'wake-up' case above), including the same
-  // SOUND OFF handling.
-  function performAutoWakeSequence(state) {
-    if (muted) {
-      runShortAction(state, { label: 'WAKING UP', duration: 2, action: function () {} });
-    } else {
-      runAudioSyncedAction(state, {
-        label: 'WAKING UP',
-        playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
-        action: function () {},
-      });
-    }
-  }
-
   // Sail area ordering, used only to classify a change as a raise or a
   // lower and specifically detect FURLED<->FULL vs every other
   // transition -- see SAILS AUDIO above. Matches the relative ordering
@@ -11140,6 +11177,7 @@
     var mealName = FISH_MEAL_BY_SPECIES[speciesId] || caught.displayName;
     state.fishing.heldFish = { speciesId: speciesId, caughtDay: voyageDayNumber(state) };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
+    bumpHygiene(state, 2); // handling a fish
     log(state, 'Kept: ' + mealName.toUpperCase() + ' \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
     flushNewLogEntries(state);
     showFishResultScreen(state);
@@ -11147,6 +11185,7 @@
 
   function performFishRelease(state) {
     if (!fishingSession) return;
+    bumpHygiene(state, 1); // handling a fish, even just to let it go
     if (fishingSession.phase === 'marlin-release') {
       playFishingOneShot('release'); // FISHING HOOK
       // A marlin is memorable enough to be worth a permanent voyage-log
@@ -11216,9 +11255,6 @@
       return [{ label: 'RESTART', action: 'confirm-restart' }];
     }
 
-    if (state.crew.watchState === 'trying') {
-      return [{ label: 'GET UP', action: 'give-up-trying' }];
-    }
     if (state.crew.watchState === 'sleeping') {
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
@@ -11594,7 +11630,7 @@
 
   function activityDotsShouldBeVisible(state) {
     if (state.pendingChoice && state.pendingChoice.id === 'reading') return true;
-    if (state.crew.watchState === 'trying' || state.crew.watchState === 'sleeping') return true;
+    if (state.crew.watchState === 'sleeping') return true;
     return false;
   }
 
@@ -11817,13 +11853,6 @@
           break;
         case 'commit-clothing':
           performClothingCommit(state);
-          break;
-        case 'give-up-trying':
-          state.crew.watchState = 'awake';
-          state.crew.sleepAttemptStartedAt = null;
-          state.crew.sleepStartedAt = null; // fully awake now — a later session starts its own duration count clean
-          printBlank();
-          printLine('You give up on it and get up.', 'dim');
           break;
         case 'wake-up':
           // The physical act of getting out of the bunk (wake_up.mp3) is
@@ -12111,20 +12140,6 @@
       last = now;
       var ticks = advanceSimulation(GAME, minutes);
       GAME.meta.lastTick = now;
-      // An automatic wake this pass (see autoWakeUp/processSleepTick)
-      // gets its WAKING UP . .. .../wake_up.mp3 sequence here, once
-      // tick-processing has fully finished and it's actually safe to
-      // start a UI-blocking audio sequence -- never from inside simTick
-      // itself. Skipped (flag left set, tried again next firing) if
-      // something else already has the UI busy, e.g. the player
-      // separately clicked WAKE UP at almost the same moment; run
-      // BEFORE the options-repaint just below so that repaint correctly
-      // sees uiBusy already true and doesn't flash the normal menu for
-      // an instant before this sequence takes it over.
-      if (GAME.crew._autoWakeAudioPending && !uiBusy) {
-        GAME.crew._autoWakeAudioPending = false;
-        performAutoWakeSequence(GAME);
-      }
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
@@ -12375,7 +12390,27 @@
     if (!state.fishing) state.fishing = { keptFishOnDay: null, heldFish: null };
     delete state.fishing.freshFishCaughtAt;
     if (state.fishing.heldFish === undefined) state.fishing.heldFish = null;
-    if (c.sleepAttemptStartedAt === undefined) c.sleepAttemptStartedAt = null;
+    // SLEEP -- the old stochastic 'trying to sleep' state (and its
+    // random waking) no longer exists: sleep is immediate and ends only
+    // when the player wakes him. A save caught mid-attempt is simply
+    // treated as asleep from the moment the attempt began, with
+    // sleepStartedAt as the one stored timestamp.
+    if (c.watchState === 'trying') {
+      c.watchState = 'sleeping';
+      if (c.sleepStartedAt == null) c.sleepStartedAt = c.sleepAttemptStartedAt != null ? c.sleepAttemptStartedAt : state.meta.voyageMinutes;
+    }
+    delete c.sleepAttemptStartedAt;
+    if (c.sleepStartedAt === undefined) c.sleepStartedAt = null;
+    if (c.watchState === 'sleeping' && c.sleepStartedAt == null) c.sleepStartedAt = state.meta.voyageMinutes;
+    // SLEEP DEBT / HYGIENE ACCUMULATOR -- new fields. An existing save
+    // starts carrying no sleep debt (exactly the ordinary accrual for
+    // however long it's currently been awake), and its hygiene picks up
+    // from the same "hours since last wash" it was already showing.
+    if (c.sleepDebt === undefined) c.sleepDebt = SLEEP_DEBT_PER_AWAKE_HOUR * (c.hoursSinceRest || 0);
+    if (c.hygieneHours === undefined) {
+      var lastWashAt = c.lastRoutineAt && c.lastRoutineAt.wash;
+      c.hygieneHours = lastWashAt == null ? state.meta.voyageMinutes / 60 : (state.meta.voyageMinutes - lastWashAt) / 60;
+    }
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
     if (c.snackMealRatio === undefined) c.snackMealRatio = 0;
