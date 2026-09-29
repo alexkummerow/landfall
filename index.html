@@ -230,6 +230,52 @@
     padding: 0.8rem 1.2rem calc(0.7rem + env(safe-area-inset-bottom));
   }
 
+  /* VESSEL LOG -- a full-viewport, scrollable TEXT record, opened from
+     SHIP'S COMPUTER (see cmdVesselLog). Same fixed/inset:0/z-index
+     pattern as .ships-plan-overlay just above, for the same reason
+     (nothing here competes with #output's own unbounded, ever-growing
+     content for space) -- a scrollable text body plus a fixed RETURN
+     area in place of an image. */
+  .vessel-log-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .vessel-log-overlay[hidden] { display: none; }
+  .vessel-log-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 1.2rem 1.2rem 0.4rem;
+    max-width: 640px;
+    width: 100%;
+    margin: 0 auto;
+    box-sizing: border-box;
+  }
+  .vessel-log-rule {
+    border: none;
+    border-top: 1px solid var(--rule);
+    margin: 1rem 0;
+  }
+  .vessel-log-stat {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.95rem;
+    line-height: 1.55;
+    color: var(--phosphor);
+  }
+  .vessel-log-back-area {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    border-top: 1px solid var(--rule);
+    padding: 0.8rem 1.2rem calc(0.7rem + env(safe-area-inset-bottom));
+  }
+
   .line {
     margin: 0 0 0.35rem;
     line-height: 1.55;
@@ -401,6 +447,22 @@
     </div>
     <div class="ships-plan-back-area">
       <button id="ships-plan-back-btn" type="button" class="option">← BACK</button>
+    </div>
+  </div>
+
+  <!-- VESSEL LOG -- a full-viewport, scrollable text record, same
+       reasoning and shape as SHIP'S PLAN just above (see cmdVesselLog
+       and the .vessel-log-overlay CSS notes): fixed positioning so the
+       accumulated voyage log never squeezes it, hidden by default,
+       toggled open by cmdVesselLog and closed by its own RETURN button
+       below (which goes back to the SHIP'S COMPUTER menu specifically,
+       not to NAV STATION/SALOON -- see that button's own JS notes).
+       #vessel-log-body is populated fresh each time cmdVesselLog opens
+       this; nothing here is static markup. -->
+  <div id="vessel-log-overlay" class="vessel-log-overlay" hidden>
+    <div id="vessel-log-body" class="vessel-log-body"></div>
+    <div class="vessel-log-back-area">
+      <button id="vessel-log-back-btn" type="button" class="option">← RETURN</button>
     </div>
   </div>
 
@@ -657,6 +719,24 @@
         heldFish: null,                          // { speciesId, caughtDay } for the currently-held catch, or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
       },
       books: newBooksState(),
+      // VESSEL LOG -- an automatic, purely factual per-day record
+      // (distance, speed, engine time, repairs, notable events),
+      // entirely separate from the narrative log()/state.log stream
+      // above (ambient observations, milestone text, flavor lines) --
+      // that stream is unaffected by any of this. currentDay is the
+      // live, still-accumulating day; completedDays holds every
+      // finalized day in chronological order (day 1 first) -- the
+      // full-screen viewer (cmdVesselLog) reverses that for display
+      // (newest first), but storage stays append-only/chronological,
+      // the simplest and least error-prone order to write to. See
+      // checkVesselLogDayRollover/sampleVesselLogTick (called from
+      // simTick) for how currentDay is kept current, and
+      // logVesselLogRepair/logVesselLogEvent for how repairs/events
+      // are added to it.
+      vesselLog: {
+        currentDay: newVesselLogDay(1, vesselLogMonthDayLabel(now), 0),
+        completedDays: [],
+      },
       flags: {
         aftLockerTriggerAt: rand(8 * 60, 16 * 60), // guaranteed once, sometime hour 8-16
         aftLockerTriggered: false,
@@ -3717,6 +3797,11 @@
 
   function simTick(state) {
     state.meta.voyageMinutes += TICK_MINUTES;
+    // VESSEL LOG -- must run before this tick's own speed/wind/engine
+    // sample is taken (see sampleVesselLogTick at the end of this
+    // function), so a tick that crosses midnight is folded into the
+    // NEW day, not the one that just ended.
+    checkVesselLogDayRollover(state);
 
     var prevCondition = state.weather.condition;
     driftWeather(state.weather, state.nav.lat);
@@ -3848,6 +3933,9 @@
     checkAmbientEvent(state);
 
     clampState(state);
+    // VESSEL LOG -- last, once every other per-tick system (weather,
+    // movement, engine) has fully settled this tick's final values.
+    sampleVesselLogTick(state);
   }
 
   // The continuous, sub-tick-precision game clock. voyageMinutes only
@@ -4079,6 +4167,7 @@
       b.computerOn = false;
       if (hadSomethingOn) {
         log(state, isDark(state) ? BATTERY_DEAD_TEXT_NIGHT : BATTERY_DEAD_TEXT_DAY);
+        logVesselLogEvent(state, 'BATTERY DEPLETED'); // VESSEL LOG -- same hadSomethingOn gate as the narrative line above, so a battery that's ALREADY been at 0 (nothing left to lose) never logs this again every subsequent tick
       }
       // Abrupt power loss -- immediate silence, no tape_stop.mp3,
       // regardless of which phase the cassette was in (sections 7/8).
@@ -4329,6 +4418,11 @@
     }
     log(state, pickFromPool(FAILURE_NARRATIVES[systemKey]));
     flushNewLogEntries(state);
+    // VESSEL LOG -- a genuine mechanical/system failure, same
+    // terminology map as repairs (steering -> RUDDER), whichever of
+    // the two paths above triggered it (scheduled or storm-driven risk
+    // -- both funnel through this one shared function).
+    logVesselLogEvent(state, REPAIR_SYSTEM_LABEL[systemKey] + ' FAILURE');
   }
 
   function checkScheduledFailures(state) {
@@ -6525,6 +6619,9 @@
   var shipsPlanOverlayEl = document.getElementById('ships-plan-overlay');
   var shipsPlanImageEl = document.getElementById('ships-plan-image');
   var shipsPlanBackBtn = document.getElementById('ships-plan-back-btn');
+  var vesselLogOverlayEl = document.getElementById('vessel-log-overlay');
+  var vesselLogBodyEl = document.getElementById('vessel-log-body');
+  var vesselLogBackBtn = document.getElementById('vessel-log-back-btn');
 
   /* --------------------------------------------------------------
      TWO SEPARATE RENDER SURFACES, both inside #output:
@@ -6585,6 +6682,9 @@
     // and cmdShipsPlan re-opens it explicitly when it's the screen
     // actually being shown.
     shipsPlanOverlayEl.hidden = true;
+    // VESSEL LOG's own full-viewport overlay -- same reasoning as
+    // SHIP'S PLAN just above.
+    vesselLogOverlayEl.hidden = true;
   }
 
   function printPersistentLine(text, cls) {
@@ -6686,6 +6786,170 @@
     var currentMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate());
     var daysSince = Math.round((currentMidnight - departureMidnight) / 86400000);
     return daysSince + 1;
+  }
+
+  /* ============================================================
+     VESSEL LOG -- an automatic, purely factual per-day record
+     (distance, speed, engine time, repairs, notable events), opened
+     from SHIP'S COMPUTER. Entirely separate from the narrative
+     log()/state.log stream (ambient observations, milestone text,
+     flavor lines): that's the personal/story record ("the Journal");
+     this is the onboard computer's own dry statistical one. Neither
+     reads from nor writes into the other.
+
+     Reuses existing data wherever it exists rather than tracking a
+     duplicate: state.nav.distanceTraveled is already a running
+     odometer (TOTAL DISTANCE is just a live read of it; DISTANCE
+     TRAVELED today is that value minus a snapshot taken when today
+     began), state.boat.speed is already recomputed every tick, and
+     state.weather.windSpeed is already a plain per-tick number --
+     none of those need a second copy, only a per-tick sample folded
+     into a running sum/count (for the average) and a running max.
+     Engine time has no existing tracker, so that one IS accumulated
+     here, in minutes, from state.boat.engineOn sampled once a tick.
+
+     Two functions hook into simTick (see its own call sites):
+     checkVesselLogDayRollover, right after voyageMinutes advances,
+     finalizes yesterday and starts today the moment voyageDayNumber
+     first reads a new value; sampleVesselLogTick, at the very end of
+     simTick once this tick's own speed/weather/engine state has fully
+     settled, folds this tick's sample into whichever day is now
+     current. Repairs and events are logged directly from their own
+     existing completion points elsewhere in the file (see
+     logVesselLogRepair/logVesselLogEvent and their call sites) rather
+     than being inferred here. */
+
+  function vesselLogMonthDayLabel(ts) {
+    var months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    var d = new Date(ts);
+    return months[d.getMonth()] + ' ' + d.getDate();
+  }
+
+  function vesselLogTimeLabel(ts) {
+    var d = new Date(ts);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  // The live-accumulating shape for whichever day is current.
+  // distanceTraveledAtStart is a snapshot of the odometer at the exact
+  // moment this day began, so "distance traveled today" is always
+  // simply the odometer's current value minus this, never a second,
+  // separately-accumulated total that could drift out of sync with it.
+  function newVesselLogDay(dayNumber, dateLabel, distanceTraveledAtStart) {
+    return {
+      dayNumber: dayNumber,
+      dateLabel: dateLabel,
+      distanceTraveledAtStart: distanceTraveledAtStart,
+      speedSampleSum: 0, speedSampleCount: 0, maxSpeed: 0,
+      windSampleSum: 0, windSampleCount: 0, maxWindSpeed: 0,
+      engineMinutes: 0,
+      repairs: [], events: [],
+    };
+  }
+
+  // Snapshots a day's live currentDay into its permanent, never-
+  // touched-again completedDays form. Called only from
+  // checkVesselLogDayRollover, exactly once per day, the moment the
+  // NEXT day begins -- distances/speeds/wind are rounded for display
+  // here (not stored raw), same rounding convention used elsewhere in
+  // this file for each figure's own unit (1 decimal for nm/kt/hours,
+  // matching navSpeedEl/foodItemLine-style displays; whole knots for
+  // wind, matching the existing WEATHER screen's own Math.round(w.windSpeed)).
+  function finalizeVesselLogDay(state, cd) {
+    return {
+      dayNumber: cd.dayNumber,
+      dateLabel: cd.dateLabel,
+      distanceTraveled: +(state.nav.distanceTraveled - cd.distanceTraveledAtStart).toFixed(1),
+      totalDistanceAtEnd: +state.nav.distanceTraveled.toFixed(1),
+      avgSpeed: cd.speedSampleCount > 0 ? +(cd.speedSampleSum / cd.speedSampleCount).toFixed(1) : 0,
+      maxSpeed: +cd.maxSpeed.toFixed(1),
+      // null (not 0) when there were no samples at all -- distinguishes
+      // "genuinely calm all day" from "never actually tracked", though
+      // in practice every day has at least one tick's worth of samples.
+      avgWindSpeed: cd.windSampleCount > 0 ? Math.round(cd.windSampleSum / cd.windSampleCount) : null,
+      maxWindSpeed: cd.windSampleCount > 0 ? Math.round(cd.maxWindSpeed) : null,
+      engineHours: +(cd.engineMinutes / 60).toFixed(1),
+      repairs: cd.repairs,
+      events: cd.events,
+    };
+  }
+
+  // Called at the very top of simTick, immediately after voyageMinutes
+  // advances -- BEFORE this tick's own speed/wind/engine sample is
+  // taken (see sampleVesselLogTick, called at the end of simTick),
+  // so a tick that crosses midnight is correctly counted toward the
+  // NEW day, not the one that just ended. A day can only ever roll
+  // over by exactly one per tick in practice (TICK_MINUTES=1, far
+  // below a day's 1440), but the while loop is a harmless, purely
+  // defensive safety net rather than an assumption relied on -- if
+  // voyageMinutes were ever advanced by more than a day in one step,
+  // this still finalizes each day in between correctly, in order,
+  // rather than silently skipping any.
+  function checkVesselLogDayRollover(state) {
+    var vl = state.vesselLog;
+    var nowDay = voyageDayNumber(state);
+    while (vl.currentDay.dayNumber < nowDay) {
+      vl.completedDays.push(finalizeVesselLogDay(state, vl.currentDay));
+      var nowTs = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+      vl.currentDay = newVesselLogDay(vl.currentDay.dayNumber + 1, vesselLogMonthDayLabel(nowTs), state.nav.distanceTraveled);
+    }
+  }
+
+  // Called at the very end of simTick, once this tick's own
+  // speed/weather/engine state has fully settled -- folds this tick's
+  // sample into whichever day is now current (checkVesselLogDayRollover,
+  // called earlier in the same tick, guarantees that's the correct day
+  // even on the one tick that crosses midnight).
+  function sampleVesselLogTick(state) {
+    var cd = state.vesselLog.currentDay;
+    cd.speedSampleSum += state.boat.speed;
+    cd.speedSampleCount++;
+    if (state.boat.speed > cd.maxSpeed) cd.maxSpeed = state.boat.speed;
+    cd.windSampleSum += state.weather.windSpeed;
+    cd.windSampleCount++;
+    if (state.weather.windSpeed > cd.maxWindSpeed) cd.maxWindSpeed = state.weather.windSpeed;
+    if (state.boat.engineOn) cd.engineMinutes += TICK_MINUTES;
+  }
+
+  // Called only once a repair has actually SUCCEEDED (see
+  // performSystemRepairAttempt's own success branch) -- never for an
+  // attempt that fails. REPAIR_SYSTEM_LABEL is the same terminology
+  // map the REPAIR menu itself uses (steering -> RUDDER included), so
+  // "never say steering" is automatic, not a separate rule to maintain
+  // here.
+  function logVesselLogRepair(state, systemKey) {
+    var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+    state.vesselLog.currentDay.repairs.push({ time: vesselLogTimeLabel(ts), text: REPAIR_SYSTEM_LABEL[systemKey] + ' REPAIRED' });
+  }
+
+  // Shared by every EVENTS entry (fish kept, battery depleted, a
+  // system failure) -- see each call site for exactly which existing,
+  // already-triggered simulation events qualify. Never called for a
+  // routine player action (eating, moving between rooms, opening a
+  // menu) -- those never reach this function at all.
+  function logVesselLogEvent(state, text) {
+    var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+    state.vesselLog.currentDay.events.push({ time: vesselLogTimeLabel(ts), text: text });
+  }
+
+  // A save from before this feature existed has no state.vesselLog at
+  // all. There's no honest way to reconstruct past days' distance/
+  // speed/engine stats after the fact (that data was never recorded),
+  // so this simply starts tracking from right now: currentDay begins
+  // at the voyage's actual current day number, with distanceTraveledAtStart
+  // set to the odometer's CURRENT value (today's own distance-so-far is
+  // therefore read as 0 at the moment of migration, not backfilled or
+  // guessed), and completedDays starts empty -- no invented history for
+  // days already sailed before this existed. Runs at most once per save
+  // (state.vesselLog existing at all is the guard), same shape as every
+  // other migrateXIfNeeded in this file.
+  function migrateVesselLogIfNeeded(state) {
+    if (state.vesselLog) return;
+    var nowTs = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+    state.vesselLog = {
+      currentDay: newVesselLogDay(voyageDayNumber(state), vesselLogMonthDayLabel(nowTs), state.nav.distanceTraveled),
+      completedDays: [],
+    };
   }
 
   function updateNavStrip(state) {
@@ -8332,10 +8596,141 @@
         [
           { label: 'WEATHER MAP', action: 'computer:windy' },
           { label: 'CHART', action: 'computer:google-maps' },
+          { label: 'VESSEL LOG', action: 'view-vessel-log' },
         ],
         [{ label: 'SHUT DOWN', action: 'shut-down-computer' }],
       ]),
     };
+  }
+
+  // VESSEL LOG -- the six figures a finalized (or, via
+  // finalizeVesselLogDay called on the still-live currentDay, an
+  // "as of right now") day carries. AVERAGE/MAX WIND are appended only
+  // when there's real sampled data for them (avgWindSpeed/maxWindSpeed
+  // non-null) -- every day in practice has at least one tick's worth,
+  // but this keeps the rule explicit rather than assumed.
+  function vesselLogStatRows(day) {
+    var rows = [
+      ['DISTANCE TRAVELED', Math.round(day.distanceTraveled).toLocaleString() + ' NM'],
+      ['TOTAL DISTANCE', Math.round(day.totalDistanceAtEnd).toLocaleString() + ' NM'],
+      ['AVERAGE SPEED', day.avgSpeed.toFixed(1) + ' KT'],
+      ['MAX SPEED', day.maxSpeed.toFixed(1) + ' KT'],
+      ['ENGINE TIME', day.engineHours.toFixed(1) + ' HR'],
+    ];
+    if (day.avgWindSpeed != null) rows.push(['AVERAGE WIND', day.avgWindSpeed + ' KT']);
+    if (day.maxWindSpeed != null) rows.push(['MAX WIND', day.maxWindSpeed + ' KT']);
+    return rows;
+  }
+
+  // Appends one full day block (heading, stats, REPAIRS if any, EVENTS
+  // if any) to `container` -- shared by the live current day and every
+  // completed day alike, since both are handed here in the exact same
+  // finalizeVesselLogDay shape (see renderVesselLogBody). REPAIRS/
+  // EVENTS headings are omitted entirely, not shown empty, when that
+  // day has none -- see the task's own explicit requirement for this.
+  function appendVesselLogDay(container, day, isCurrent) {
+    var heading = document.createElement('p');
+    heading.className = 'line heading-label';
+    heading.textContent = 'DAY ' + day.dayNumber + ' \u2014 ' + (isCurrent ? 'IN PROGRESS' : day.dateLabel);
+    container.appendChild(heading);
+
+    var gap = document.createElement('p');
+    gap.className = 'gap';
+    container.appendChild(gap);
+
+    vesselLogStatRows(day).forEach(function (row) {
+      var statRow = document.createElement('div');
+      statRow.className = 'vessel-log-stat';
+      var label = document.createElement('span');
+      label.textContent = row[0];
+      var value = document.createElement('span');
+      value.textContent = row[1];
+      statRow.appendChild(label);
+      statRow.appendChild(value);
+      container.appendChild(statRow);
+    });
+
+    if (day.repairs.length > 0) {
+      var repairsGap = document.createElement('p');
+      repairsGap.className = 'gap';
+      container.appendChild(repairsGap);
+      var repairsHeading = document.createElement('p');
+      repairsHeading.className = 'line heading-label';
+      repairsHeading.textContent = 'REPAIRS';
+      container.appendChild(repairsHeading);
+      day.repairs.forEach(function (r) {
+        var line = document.createElement('p');
+        line.className = 'line dim';
+        line.textContent = r.time + '  ' + r.text;
+        container.appendChild(line);
+      });
+    }
+
+    if (day.events.length > 0) {
+      var eventsGap = document.createElement('p');
+      eventsGap.className = 'gap';
+      container.appendChild(eventsGap);
+      var eventsHeading = document.createElement('p');
+      eventsHeading.className = 'line heading-label';
+      eventsHeading.textContent = 'EVENTS';
+      container.appendChild(eventsHeading);
+      day.events.forEach(function (e) {
+        var line = document.createElement('p');
+        line.className = 'line dim';
+        line.textContent = e.time + '  ' + e.text;
+        container.appendChild(line);
+      });
+    }
+  }
+
+  // Builds the ENTIRE scrollable body fresh every time the log is
+  // opened -- current day first (live, via finalizeVesselLogDay on the
+  // still-accumulating currentDay, never mutating or pushing it),
+  // then every completed day newest-first (completedDays itself is
+  // stored oldest-first/chronological -- see its own notes -- so this
+  // is the one place that reverses it for display), down to Day 1 at
+  // the very bottom. One continuous scroll, no pagination, no
+  // per-day click targets.
+  function renderVesselLogBody(state) {
+    vesselLogBodyEl.innerHTML = '';
+    var title = document.createElement('p');
+    title.className = 'line heading-label';
+    title.textContent = 'VESSEL LOG';
+    vesselLogBodyEl.appendChild(title);
+    var titleGap = document.createElement('p');
+    titleGap.className = 'gap';
+    vesselLogBodyEl.appendChild(titleGap);
+
+    appendVesselLogDay(vesselLogBodyEl, finalizeVesselLogDay(state, state.vesselLog.currentDay), true);
+
+    var completed = state.vesselLog.completedDays;
+    for (var i = completed.length - 1; i >= 0; i--) {
+      var rule = document.createElement('hr');
+      rule.className = 'vessel-log-rule';
+      vesselLogBodyEl.appendChild(rule);
+      appendVesselLogDay(vesselLogBodyEl, completed[i], false);
+    }
+  }
+
+  // Opened only from SHIP'S COMPUTER's own menu (view-vessel-log,
+  // handled in handleAction like any other normal action) -- by the
+  // time the player can even see that menu, cmdShipsComputer's own
+  // power/darkness gates have already passed, so this needs no gate of
+  // its own. Plays the SAME plain mouse-click one-shot WEATHER MAP/
+  // CHART already use (never computer_startup.mp3/computer_shutdown.mp3
+  // -- the computer stays on, this is just another screen on it) and
+  // never touches state.boat.computerOn at all. pendingChoice still
+  // gets a normal, non-empty options array (same reasoning as
+  // cmdShipsPlan's own notes -- migrateStalePendingChoiceIfNeeded's
+  // "empty options means an interrupted sequence" rule on reload) even
+  // though the overlay's own RETURN button, not this array, is what's
+  // actually rendered while it's open.
+  function cmdVesselLog(state) {
+    playNavStationOneShot('mouse');
+    renderVesselLogBody(state);
+    vesselLogBodyEl.scrollTop = 0; // always opens scrolled to the top (current day), regardless of where a previous visit left off
+    vesselLogOverlayEl.hidden = false;
+    state.pendingChoice = { id: 'vessel-log', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
   }
 
   // SHUT DOWN -- the only way out of the computer's own menu. If the
@@ -9685,6 +10080,7 @@
           if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
           s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(REPAIR_PROTECTION_MIN_HOURS, REPAIR_PROTECTION_MAX_HOURS) * 60;
           log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
+          logVesselLogRepair(s, systemKey); // VESSEL LOG -- only on genuine success, never on a failed attempt
         } else {
           log(s, pickFromPool(REPAIR_FAILURE_LINES[systemKey]));
         }
@@ -11760,6 +12156,10 @@
     bumpHygiene(state, 2); // handling a fish
     log(state, 'Kept: ' + mealName.toUpperCase() + ' \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
     flushNewLogEntries(state);
+    // VESSEL LOG -- whole-pound figure here (the task's own "14 LB
+    // MAHI" style), distinct from the narrative log line above, which
+    // keeps its own existing 1-decimal precision.
+    logVesselLogEvent(state, 'FISH CAUGHT \u2014 ' + Math.round(caught.weightLb) + ' LB ' + caught.displayName.toUpperCase());
     showFishResultScreen(state);
   }
 
@@ -12426,6 +12826,8 @@
       performStopReading(state);
     } else if (action === 'view-ships-plan') {
       cmdShipsPlan(state);
+    } else if (action === 'view-vessel-log') {
+      cmdVesselLog(state);
     } else if (action.indexOf('start-tape:') === 0) {
       performStartTape(state, action.slice(11));
     } else if (action === 'stop-tape') {
@@ -13272,6 +13674,7 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateVesselLogIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
@@ -13303,6 +13706,30 @@
     clearTempView();
     printEcho('bookshelf');
     runCommand(GAME, 'bookshelf');
+  });
+
+  // VESSEL LOG's RETURN control -- permanently wired once, same
+  // reasoning as shipsPlanBackBtn just above (lives outside the normal
+  // #options/renderOptions pipeline entirely, since the overlay covers
+  // where #options would be). Deliberately NOT the same
+  // clearTempView+printEcho+runCommand shape as that button, though:
+  // cmdShipsComputerMenu isn't a top-level COMMANDS entry (it's SHIP'S
+  // COMPUTER's own internal sub-screen, reached only through
+  // cmdShipsComputer), so this calls it directly and does its own
+  // render/save/scroll tail -- the same tail runCommand's would
+  // otherwise provide. Plays the same plain mouse-click one-shot
+  // opening the log did (never computer_shutdown.mp3 -- the computer
+  // stays on) and never touches state.boat.computerOn, so the
+  // player's computer state (still booted, same menu) is fully
+  // preserved.
+  vesselLogBackBtn.addEventListener('click', function () {
+    if (!GAME || uiBusy) return;
+    playNavStationOneShot('mouse');
+    clearTempView();
+    cmdShipsComputerMenu(GAME);
+    renderOptions(GAME);
+    saveGameState(GAME);
+    scrollToBottom();
   });
 
   soundBtn.addEventListener('click', function () {
