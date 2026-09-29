@@ -467,7 +467,7 @@
         lastTick: now,
         leftoverMinutes: 0,
         voyageMinutes: 0,
-        foodInventoryVersion: 2, // current canonical FOOD_ITEMS quantities — see migrateProvisionsIfNeeded; a fresh voyage is already at the current version and must never be rebased
+        foodInventoryVersion: FOOD_INVENTORY_VERSION, // current canonical FOOD_ITEMS quantities — see migrateProvisionsIfNeeded; a fresh voyage is already at the current version and must never be rebased. (Was a hardcoded literal, 2, that had drifted behind FOOD_INVENTORY_VERSION -- harmless for the quantities themselves since a rebase restocks to the same FOOD_ITEMS originals either way, but it meant every reload of an otherwise-untouched fresh voyage silently re-triggered a full restock it didn't need. Referencing the constant directly is what the comment here already promised.)
       },
       nav: {
         lat: start.lat,
@@ -634,7 +634,7 @@
       },
       food: {
         macCheese: 5, chiliRice: 5, chickenNoodleSoup: 5, oatmeal: 15, pancakes: 10,
-        tunaCrackers: 5, mixedNuts: 5, driedMangos: 5, energyBar: 5, popcorn: 10,
+        cupNoodles: 5, mixedNuts: 5, driedMangos: 5, energyBar: 5, popcorn: 10,
         chocolate: 5,
       },
       drinks: {
@@ -1714,9 +1714,9 @@
     { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 15 },
     { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 10 },
     // SNACKS — 30 total
-    { key: 'tunaCrackers', name: 'Tuna on Crackers', type: 'snack', cooked: false, original: 5 },
+    { key: 'cupNoodles', name: 'Cup Noodles', type: 'snack', cooked: false, original: 5 },
     { key: 'mixedNuts', name: 'Mixed Nuts', type: 'snack', cooked: false, original: 5 },
-    { key: 'driedMangos', name: 'Dried Mangos', type: 'snack', cooked: false, original: 5 },
+    { key: 'driedMangos', name: 'Dried Fruit', type: 'snack', cooked: false, original: 5 }, // key unchanged (driedMangos) -- only the player-facing name changed; same audio asset (mango), same inventory, same everything else
     { key: 'energyBar', name: 'Energy Bar', type: 'snack', cooked: false, original: 5 },
     { key: 'popcorn', name: 'Popcorn', type: 'snack', cooked: true, original: 10 }, // needs the stove, unlike the rest of SNACKS -- see performEat's cooked gate
     // CHOCOLATE — 5. Shown under SNACKS in the menu but never counted as one.
@@ -1759,7 +1759,10 @@
   // than every time it loads. newGameState() sets meta.foodInventoryVersion
   // to this same value up front, so a fresh voyage is already current
   // and never gets rebased.
-  var FOOD_INVENTORY_VERSION = 3;
+  // Bumped 3 -> 4: Tuna on Crackers (key tunaCrackers) retired and
+  // replaced by Cup Noodles (key cupNoodles) -- see migrateProvisionsIfNeeded's
+  // oldFoodKeys for the cleanup this triggers on an existing save.
+  var FOOD_INVENTORY_VERSION = 4;
 
   // Fallback temperature from latitude alone, when no real-world reading
   // is available (or ever arrives) — cool in the mid-40s near Shilshole,
@@ -9174,7 +9177,7 @@
   // FISH_MEAL_BY_SPECIES, and Chocolate's own type:'chocolate' entry)
   // shares. Covers meals, snacks, and chocolate alike -- this is not
   // gated on item.cooked, since several mapped items (Energy Bar,
-  // Mixed Nuts, Dried Mangos, Tuna on Crackers, Chocolate) are
+  // Mixed Nuts, Dried Fruit, Cup Noodles, Chocolate) are
   // uncooked. An item absent from this map just uses the plain fixed-
   // duration EATING/MAKING/PREPARING dots, as before. Adding a new
   // preparation sound for a new or existing item later is one line
@@ -9211,10 +9214,28 @@
     'Chocolate': 'wrapper',
     // NUTS
     'Mixed Nuts': 'nuts',
-    // MANGO
-    'Dried Mangos': 'mango',
-    // TUNA ON CRACKERS
-    'Tuna on Crackers': 'tunaCrackers',
+    // MANGO -- audio asset unchanged; only the player-facing item name
+    // (now Dried Fruit) changed, so only this lookup key changed to match.
+    'Dried Fruit': 'mango',
+    // CUP NOODLES -- replaces the old Tuna on Crackers/tunaCrackers entry
+    'Cup Noodles': 'cupNoodles',
+  };
+
+  // Standardized temporary action text for the SNACKS lineup (plus
+  // Chocolate, which lives visually alongside them) -- overrides the
+  // generic "MAKING X"/"PREPARING X" derivation below (and Chocolate's
+  // own separate branch further down, which reads from here too rather
+  // than hardcoding its own string) with a specific verb per item.
+  // Anything not listed here (every MEAL, and a held fish) still falls
+  // back to the generic derivation exactly as before -- this is scoped
+  // to snacks/chocolate only, not a general relabeling.
+  var SNACK_ACTION_LABEL = {
+    'Cup Noodles': 'PREPARING CUP NOODLES',
+    'Popcorn': 'POPPING POPCORN',
+    'Dried Fruit': 'OPENING DRIED FRUIT',
+    'Chocolate': 'OPENING CHOCOLATE',
+    'Mixed Nuts': 'OPENING MIXED NUTS',
+    'Energy Bar': 'OPENING ENERGY BAR',
   };
 
   function performEat(state, key) {
@@ -9228,12 +9249,13 @@
 
     // BATTERY FAILURE -- anything actually cooked (all meals, held fish,
     // and Popcorn among the snacks) needs the stove and enough light to
-    // use it safely; Tuna on Crackers is called out explicitly in the
-    // task this implements as needing more than a straight grab-and-eat
-    // too, so it's blocked here alongside the cooked items even though
-    // it's otherwise an uncooked snack. Every other snack (nuts, dried
-    // mango, energy bar) and chocolate stay completely unaffected.
-    if ((item.cooked || key === 'tunaCrackers') && needsCabinLight(state)) {
+    // use it safely; Cup Noodles is called out explicitly here as
+    // needing more than a straight grab-and-eat too (it needs hot
+    // water, same as the old Tuna on Crackers it replaced), so it's
+    // blocked here alongside the cooked items even though it's
+    // otherwise an uncooked snack. Every other snack (nuts, dried
+    // fruit, energy bar) and chocolate stay completely unaffected.
+    if ((item.cooked || key === 'cupNoodles') && needsCabinLight(state)) {
       blockedByDarkness(state, isHeldFish || item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
       return;
     }
@@ -9251,13 +9273,15 @@
       var chocolatePrepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
       if (chocolatePrepAudioKey) {
         runAudioSyncedAction(state, {
-          label: 'EATING CHOCOLATE',
+          label: SNACK_ACTION_LABEL[item.name],
+          transientLabel: true, // standardized snack/chocolate action text -- temporary only, never left in the persistent log
           playAudio: function (onEnded) { return playGalleyOneShot(chocolatePrepAudioKey, onEnded); },
           action: doEatChocolate,
         });
       } else {
         runShortAction(state, {
-          label: 'EATING CHOCOLATE',
+          label: SNACK_ACTION_LABEL[item.name],
+          transientLabel: true,
           duration: 2,
           action: doEatChocolate,
         });
@@ -9289,7 +9313,11 @@
     // something ready to eat. This same mutation logic runs regardless
     // of which busy-action runner wraps it below — only the wrapper
     // (and therefore what determines the duration) differs.
-    var label = (item.cooked ? 'MAKING ' : 'PREPARING ') + item.name.toUpperCase();
+    // SNACK_ACTION_LABEL, when the item has an entry there, overrides
+    // this generic "MAKING X"/"PREPARING X" derivation with its own
+    // standardized verb; every MEAL and a held fish (neither ever in
+    // that map) still gets the generic form exactly as before.
+    var label = SNACK_ACTION_LABEL[item.name] || ((item.cooked ? 'MAKING ' : 'PREPARING ') + item.name.toUpperCase());
     var doEat = function (s) {
       var c = s.crew;
       if (waterNeeded > 0) consumeWater(s, waterNeeded);
@@ -9345,16 +9373,24 @@
     // preparation sound goes through; everything else about the
     // action (gates already checked above, the mutation itself, the
     // resulting log line) is identical to any other item.
+    // isStandardizedSnackAction: only the SNACK_ACTION_LABEL items
+    // (Cup Noodles, Popcorn, Dried Fruit, Mixed Nuts, Energy Bar) are
+    // transient -- temporary action text only, never left in the
+    // persistent log. Every MEAL and a held fish (neither ever in that
+    // map) keeps the existing permanent label, unchanged.
+    var isStandardizedSnackAction = !!SNACK_ACTION_LABEL[item.name];
     var prepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
     if (prepAudioKey) {
       runAudioSyncedAction(state, {
         label: label,
+        transientLabel: isStandardizedSnackAction,
         playAudio: function (onEnded) { return playGalleyOneShot(prepAudioKey, onEnded); },
         action: doEat,
       });
     } else {
       runShortAction(state, {
         label: label,
+        transientLabel: isStandardizedSnackAction,
         duration: item.cooked ? 5 : 2,
         action: doEat,
       });
@@ -10304,7 +10340,7 @@
      (food/snacks/chocolate), CHORE_AUDIO_KEY (chores), or drink call
      site mapping, nothing structural. Covers food prep (thickBoil,
      thinBoil, boilSizzle, sizzle, boilChop, popcorn, wrapper, nuts,
-     mango, tunaCrackers -- see FOOD_PREP_AUDIO_KEY), hot drinks
+     mango, cupNoodles -- see FOOD_PREP_AUDIO_KEY), hot drinks
      (hotDrink) and water (water) in performDrink*, and dishes
      (dishes) in performChore/CHORE_AUDIO_KEY. Every key here is a
      one-shot (none currently loop; loop is only ever set true for an
@@ -10327,14 +10363,14 @@
     wrapper: 'audio/galley/wrapper.mp3',
     nuts: 'audio/galley/nuts.mp3',
     mango: 'audio/galley/mango.mp3',
-    tunaCrackers: 'audio/galley/tuna_crackers.mp3', // corrected filename -- was tuna_crakers.mp3 (missing a 'c'); fixed on GitHub, path updated to match
+    cupNoodles: 'audio/galley/cup_noodles.mp3', // replaces the old tunaCrackers entry (Tuna on Crackers -> Cup Noodles)
     hotDrink: 'audio/galley/hot_drink.mp3',
     water: 'audio/galley/water.mp3',
     dishes: 'audio/galley/dishes.mp3',
   };
   var GALLEY_AUDIO_VOLUME = {
     thickBoil: 0.5, thinBoil: 0.5, boilSizzle: 0.5, sizzle: 0.5, boilChop: 0.5,
-    popcorn: 0.5, wrapper: 0.5, nuts: 0.5, mango: 0.5, tunaCrackers: 0.5,
+    popcorn: 0.5, wrapper: 0.5, nuts: 0.5, mango: 0.5, cupNoodles: 0.5,
     hotDrink: 0.5, water: 0.5, dishes: 0.5,
   };
   var GALLEY_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
@@ -12246,21 +12282,30 @@
 
     optionsEl.innerHTML = '';
     clearTempView(); // whatever menu was open is done being looked at once an action starts
-    printPersistentBlank();
 
-    // Normally the label (e.g. "STARTING ENGINE") is printed permanently,
-    // same as everything else in the scrollback. config.transientLabel
-    // opts a specific action out of that: the label shows only while the
-    // dots are running and is gone once resolved, leaving just the
-    // result line behind — for actions minor enough that only the
-    // outcome, not the doing, belongs in the permanent record.
+    // Normally the blank line and the label (e.g. "STARTING ENGINE") are
+    // printed permanently, same as everything else in the scrollback.
+    // config.transientLabel opts a specific action out of BOTH: the
+    // whole block shows only while the dots are running and is gone
+    // once resolved, leaving just the result line behind — for actions
+    // minor enough that only the outcome, not the doing, belongs in the
+    // permanent record. See runAudioSyncedAction's own matching comment
+    // for why the blank line is tracked and removed here too, not just
+    // the label -- an untracked, always-persistent printPersistentBlank
+    // would otherwise leave exactly the leftover-gap artifact that
+    // option exists to avoid.
+    var blankEl = null;
     var labelEl = null;
     if (config.transientLabel) {
+      blankEl = document.createElement('p');
+      blankEl.className = 'gap';
+      outputEl.insertBefore(blankEl, tempViewEl);
       labelEl = document.createElement('p');
       labelEl.className = 'line heading-label';
       labelEl.textContent = config.label;
       outputEl.insertBefore(labelEl, tempViewEl);
     } else {
+      printPersistentBlank();
       printPersistentLine(config.label, 'heading-label');
     }
 
@@ -12286,6 +12331,7 @@
         clearInterval(dotTimer);
         if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
         if (labelEl && labelEl.parentNode) { labelEl.parentNode.removeChild(labelEl); labelEl = null; }
+        if (blankEl && blankEl.parentNode) { blankEl.parentNode.removeChild(blankEl); blankEl = null; }
         onDone();
       }, durationSeconds * 1000);
     }
@@ -12961,7 +13007,8 @@
     if (state.meta.foodInventoryVersion === undefined) state.meta.foodInventoryVersion = 0;
     if (state.meta.foodInventoryVersion < FOOD_INVENTORY_VERSION) {
       var oldFoodKeys = ['pasta', 'rice', 'soup', 'chili', 'tuna', 'crackers', 'peanutButter',
-        'nuts', 'driedFruit', 'energyBars', 'freshFruit', 'freshBread', 'freshFish', 'comfort'];
+        'nuts', 'driedFruit', 'energyBars', 'freshFruit', 'freshBread', 'freshFish', 'comfort',
+        'tunaCrackers']; // retired when Cup Noodles (cupNoodles) replaced it at FOOD_INVENTORY_VERSION 4
       oldFoodKeys.forEach(function (k) { delete state.food[k]; });
       FOOD_ITEMS.forEach(function (f) { state.food[f.key] = f.original; });
       state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
