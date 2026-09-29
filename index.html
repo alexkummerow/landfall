@@ -8739,31 +8739,63 @@
 
   // Begins the continuous activity: crew.readingBookId marks it active,
   // and syncReadingProgress (called every advanceSimulation, live or
-  // offline catch-up alike) does the actual accumulating. The screen
-  // itself just shows the quiet "settled in" dots and STOP READING —
-  // nothing here needs repeated clicking.
+  // offline catch-up alike) does the actual accumulating. Selecting a
+  // book first plays book_open.mp3 (the player taking it down and
+  // settling in), showing the animated "READING . .. ..." dots via the
+  // existing runAudioSyncedAction machinery -- exactly the same "audio
+  // is authoritative, no hard-coded duration" pattern used for a
+  // repair or the companionway transition. Nothing about the reading
+  // session itself (readingBookId, readingLastSyncedAt, the "You open
+  // [title]." log line, clutter, or the STOP READING screen) starts
+  // until that audio has genuinely finished -- until then, no other
+  // action is available (uiBusy) and no progress accumulates, since
+  // readingBookId stays null the whole time.
   function performStartReading(state, bookId) {
     var bookDef = BOOKS_BY_ID[bookId];
     if (!bookDef) return;
     var bookState = state.books[bookId];
     if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
-    state.crew.readingBookId = bookId;
-    state.crew.readingLastSyncedAt = currentGameMinutes(state); // starts the continuous clock fresh — nothing before this moment counts toward this session
-    bumpClutter(state, 1); // the book itself, left out
-    log(state, 'You open ' + bookDef.title + '.');
-    flushNewLogEntries(state);
-    state.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
+    runAudioSyncedAction(state, {
+      label: 'READING',
+      transientLabel: true, // gone once the real "You open [title]." log line takes over, same as GOING ABOVE/REPAIRING X
+      playAudio: function (onEnded) { return playSaloonOneShot('bookOpen', onEnded); },
+      action: function (s) {
+        s.crew.readingBookId = bookId;
+        s.crew.readingLastSyncedAt = currentGameMinutes(s); // starts the continuous clock fresh — nothing before this moment counts toward this session
+        bumpClutter(s, 1); // the book itself, left out
+        log(s, 'You open ' + bookDef.title + '.');
+        flushNewLogEntries(s);
+        s.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
+      },
+    });
   }
 
+  // The reverse of performStartReading: book_close.mp3 (the player
+  // shutting the book and putting it back) plays AFTER the final
+  // partial reading interval is committed, so no progress is ever lost
+  // to the closing sequence's own timing -- see syncReadingProgress's
+  // own call below, which happens first, synchronously, before any
+  // audio even starts. "CLOSING BOOK . .. ..." shows the same way
+  // READING did while opening; the real "You close the book." log line
+  // and the return to BOOKSHELF only happen once that audio genuinely
+  // ends.
   function performStopReading(state) {
     if (state.crew.readingBookId == null) { cmdSaloon(state); return; } // defensive -- shouldn't be reachable otherwise
-    syncReadingProgress(state); // commit the final partial interval since the last sync before stopping, so it's never lost
+    syncReadingProgress(state); // commit the final partial interval since the last sync before stopping, so it's never lost -- may itself detect completion/darkness and already begin its own closing sequence below
     if (state.crew.readingBookId == null) { flushNewLogEntries(state); return; } // the sync itself already ended the session (completion or darkness) and set up its own next screen -- don't double-handle it
     state.crew.readingBookId = null;
-    log(state, 'You close the book.');
-    flushNewLogEntries(state);
-    cmdBookshelf(state);
+    flushNewLogEntries(state); // any milestone crossed in that final partial interval is shown before the closing dots take over
+    runAudioSyncedAction(state, {
+      label: 'CLOSING BOOK',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
+      action: function (s) {
+        log(s, 'You close the book.');
+        flushNewLogEntries(s);
+        cmdBookshelf(s);
+      },
+    });
   }
 
   // TAPE PLAYER — mirrors cmdBookshelf/buildBookshelfOptions in
@@ -8874,6 +8906,30 @@
   // partial interval rather than losing up to a minute of it, and a
   // milestone/completion is detected the moment it's crossed rather
   // than waiting for the next full tick.
+  // Starts "CLOSING BOOK . .. ..." + book_close.mp3, then applies
+  // `applyEndState` once that audio genuinely finishes -- shared by
+  // both interruption paths below (completion, darkness), each
+  // supplying its own applyEndState for what happens once the book is
+  // actually closed. Falls back to calling applyEndState immediately,
+  // with no audio/dots at all, whenever starting a live, DOM-touching
+  // audio action here wouldn't be safe: mid-bulk offline catch-up
+  // (inCatchUpPass, replaying many minutes at once with no live moment
+  // to play anything during), or while some OTHER action already owns
+  // the screen (uiBusy) -- e.g. a second, unrelated event interrupting
+  // in the same tick. The reading session's own end state
+  // (readingBookId/completed/etc., already set by the caller before
+  // this runs) is identical either way; only whether the audio/dots
+  // layer gets to run on top of it differs.
+  function beginBookCloseSequenceOrSkip(state, applyEndState) {
+    if (inCatchUpPass || uiBusy) { applyEndState(state); return; }
+    runAudioSyncedAction(state, {
+      label: 'CLOSING BOOK',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
+      action: applyEndState,
+    });
+  }
+
   function syncReadingProgress(state) {
     var c = state.crew;
     if (c.readingBookId == null) return;
@@ -8917,7 +8973,10 @@
       if (completing) {
         bookState.completed = true;
         c.readingBookId = null;
-        state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+        flushNewLogEntries(state); // any milestone text just triggered above is shown before the closing dots (if any) take over
+        beginBookCloseSequenceOrSkip(state, function (s) {
+          s.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(s) };
+        });
         return; // session already ended by completion -- no need to also check the interruption conditions below
       }
     }
@@ -8937,8 +8996,11 @@
     // electrical panel.
     if (c.location === 'below' && needsCabinLight(state)) {
       c.readingBookId = null;
-      state.pendingChoice = null;
-      log(state, 'TOO DARK TO SEE');
+      beginBookCloseSequenceOrSkip(state, function (s) {
+        s.pendingChoice = null;
+        log(s, 'TOO DARK TO SEE');
+        flushNewLogEntries(s);
+      });
       return;
     }
   }
@@ -10582,11 +10644,15 @@
     hatchOpen: 'audio/saloon/hatch_open.mp3',
     hatchClose: 'audio/saloon/hatch_close.mp3',
     tidyUp: 'audio/saloon/tidy_up.mp3', // TIDY UP chore -- see CHORE_AUDIO.tidy
+    bookOpen: 'audio/saloon/book_open.mp3', // starting a reading session -- see performStartReading
+    bookClose: 'audio/saloon/book_close.mp3', // ending one (STOP READING, completion, or darkness) -- see performStopReading/syncReadingProgress
   };
   var SALOON_AUDIO_VOLUME = {
     hatchOpen: 0.5,
     hatchClose: 0.5,
     tidyUp: 0.5,
+    bookOpen: 0.5,
+    bookClose: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
