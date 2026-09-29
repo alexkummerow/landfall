@@ -1228,15 +1228,26 @@
     return 'https://www.windy.com/?wind,' + lat.toFixed(4) + ',' + lon.toFixed(4) + ',6,d:picker';
   }
 
+  // The ONE shared day/night boundary in this file -- night is 19:00
+  // through 05:59. isDark/needsCabinLight, isNavLightsNight/
+  // needsNavLights, the natural-light text-dimming curve
+  // (NATURAL_LIGHT_SUNSET_HOUR/NATURAL_LIGHT_SUNRISE_HOUR below), and
+  // buildForecastPeriods's own TONIGHT/TODAY split all read this same
+  // function (directly or via isDark) rather than each keeping an
+  // independent hour check -- see each of their own comments. Only the
+  // two thresholds that touch 'night' itself changed (5->6, 20->19);
+  // dawn's and dusk's OTHER edges (7, 18) are untouched on purpose, so
+  // dawn/dusk simply narrow to what's left adjacent to the new night
+  // boundary rather than being independently redefined.
   function timeOfDayPhase(state) {
     var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
     var h = d.getHours();
-    if (h < 5) return 'night';
+    if (h < 6) return 'night';
     if (h < 7) return 'dawn';
     if (h < 11) return 'morning';
     if (h < 15) return 'midday';
     if (h < 18) return 'afternoon';
-    if (h < 20) return 'dusk';
+    if (h < 19) return 'dusk';
     return 'night';
   }
 
@@ -1260,17 +1271,16 @@
 
   // NAV LIGHTS gating — physical Above Deck activities (HELM, SAILS,
   // ENGINE, FISH) need NAV LIGHTS on after dark, the same shape as
-  // needsCabinLight/blockedByDarkness above but its own simpler day/
-  // night boundary (06:00-18:59 day, 19:00-05:59 night) rather than
-  // timeOfDayPhase's five-phase atmospheric read -- running-light
-  // convention, not dawn/dusk. GO BELOW is never gated by this (see
+  // needsCabinLight/blockedByDarkness above. Now the SAME night boundary
+  // as isDark/timeOfDayPhase (they coincide exactly, 19:00-05:59), so
+  // this defers to isDark directly rather than keeping its own
+  // independent day/night calculation -- one shared night-state system,
+  // not two that happen to agree. GO BELOW is never gated by this (see
   // getContextualOptions/'go-above-below'), so the player can always
   // retreat below deck, visit NAV STATION, and switch NAV LIGHTS on
   // rather than ever being trapped Above Deck.
   function isNavLightsNight(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var h = d.getHours();
-    return h >= 19 || h < 6;
+    return isDark(state);
   }
   function needsNavLights(state) {
     return isNavLightsNight(state) && !state.boat.navLightsOn;
@@ -5372,7 +5382,7 @@
   }
 
   // While a companionway transition is pending (see the 'go-above-below'
-  // action handler and playCompanionwayTransition), the marine/rain
+  // action handler and startCompanionwayForTransition), the marine/rain
   // ambient layers must keep reflecting the location the player is
   // LEAVING, not the one state.crew.location already flipped to -- the
   // companionway-timed crossfade (transitionBoatAudioThroughCompanionway/
@@ -5691,7 +5701,7 @@
   // -- reading it straight from state is correct either way. targetLocation
   // is taken explicitly (rather than reading state.crew.location) because
   // the caller -- the companionway sample's near-end callback, see
-  // playCompanionwayTransition -- fires before state.crew.location has
+  // startCompanionwayForTransition -- fires before state.crew.location has
   // necessarily settled into its final value from the player's
   // perspective, and because it makes both directions genuinely the
   // same code path.
@@ -5701,7 +5711,7 @@
   // over the short COMPANIONWAY_CROSSFADE_SECONDS window instead of the
   // normal multi-second weather/location duration. Called once, right
   // at the end of upstairs.mp3/downstairs.mp3 (see
-  // playCompanionwayTransition), not at the moment the player clicks
+  // startCompanionwayForTransition), not at the moment the player clicks
   // GO ABOVE/GO BELOW -- see the 'go-above-below' action handler for
   // why the two are deliberately no longer the same moment.
   function transitionBoatAudioThroughCompanionway(state, targetLocation) {
@@ -7321,7 +7331,7 @@
   function buildForecastPeriods(state) {
     var w = state.weather;
     var now = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var isNight = now.getHours() >= 18 || now.getHours() < 6;
+    var isNight = isDark(state); // the same shared night boundary as everywhere else, rather than an independent hour check
     var nearLabel, farLabel;
     if (isNight) {
       nearLabel = 'TONIGHT';
@@ -10784,39 +10794,42 @@
      engine/sails/tape. `loop` is never set (defaults to false): this
      is always a one-shot, never a loop, regardless of how it's used.
 
-     The one thing this domain does beyond a plain one-shot: it
-     schedules a delayed callback timed to (the file's real decoded
-     duration - COMPANIONWAY_CROSSFADE_SECONDS), so the interior<->
-     exterior ambience crossfade begins right at the END of the sample
-     rather than when it starts -- reusing the exact same "poll for
-     duration, then setTimeout" approach makeCrossfadeLoopController's
-     own near-end scheduling already uses (see crossfadeTo above),
-     rather than inventing a second timing mechanism or hardcoding the
-     sample length. A duration that's never determined, or a file that
-     never even starts playing, both still resolve via their own
-     fallbacks below -- the ambient crossfade (and therefore normal
-     looping picking back up) must never be held hostage by a missing
-     or broken companionway file.
+     The whole GOING ABOVE/GOING BELOW transition (see the
+     'go-above-below' action handler) now runs on runAudioSyncedAction,
+     exactly like a repair or any other audio-synced action: the
+     GOING ABOVE/GOING BELOW dots stay up, the action lock stays held,
+     and the player's location only actually changes once this
+     companionway sample has GENUINELY finished -- never on a separate,
+     shorter fixed timer that could complete before the audio does.
+     runAudioSyncedAction's own duration watchdog (armDurationWatchdog)
+     is what guarantees that overall completion even if this file's
+     audio never resolves at all; see startCompanionwayForTransition's
+     own comment for the one extra thing layered on top of that: the
+     interior<->exterior ambience crossfade, independently timed to
+     begin COMPANIONWAY_CROSSFADE_SECONDS before the SAME real duration
+     runAudioSyncedAction is already watching, using the identical
+     "poll for duration, then setTimeout" approach
+     makeCrossfadeLoopController's own near-end scheduling uses (see
+     crossfadeTo above) rather than a second, independent timing
+     mechanism.
      -------------------------------------------------------------- */
   var COMPANIONWAY_AUDIO_FILES = {
     upstairs: 'audio/companionway/upstairs.mp3',
     downstairs: 'audio/companionway/downstairs.mp3',
   };
-  var COMPANIONWAY_CROSSFADE_SECONDS = 0.75; // within the requested ~500-1000ms range
-  // A true last-resort ceiling for when the real duration can never be
-  // determined at all (metadata never loads, playback fails outright) --
-  // deliberately generous, well beyond any realistic companionway sample
-  // length, so it can never fire BEFORE the real duration-based
-  // scheduling above gets a chance to for a normal, successfully-loading
-  // file. This is the one deliberate exception to "don't hardcode the
-  // duration": a bound on how long to wait for a real duration, not a
-  // substitute for it.
-  var COMPANIONWAY_FALLBACK_SECONDS = 10;
+  // Both WHEN the ambience crossfade begins (duration - this) and HOW
+  // LONG it takes are this same value, since applyBoatAudioDesiredState/
+  // applyRainAudioDesiredState use it as both the near-end offset (via
+  // transitionBoatAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
+  // and the crossfade's own ramp length -- exactly the requested "begin
+  // 2 seconds before the end, ramp smoothly across those final 2
+  // seconds."
+  var COMPANIONWAY_CROSSFADE_SECONDS = 2;
   var companionwayAudioEl = null;
   // The double-click/overlap lock -- true from the moment GO ABOVE/GO
-  // BELOW is clicked until the companionway sound has resolved (see
-  // playCompanionwayTransition's onNearEnd) and the ambience crossfade
-  // has actually run. Checked at the top of the 'go-above-below' action
+  // BELOW is clicked until runAudioSyncedAction's own onEnded fires
+  // (the companionway sample has genuinely finished, or its watchdog
+  // fallback did). Checked at the top of the 'go-above-below' action
   // handler, which simply does nothing while this is true -- so rapid
   // repeated clicks, or clicking the opposite direction mid-transition,
   // can never stack a second upstairs.mp3/downstairs.mp3 or start a
@@ -10835,44 +10848,49 @@
     return el;
   }
 
-  // play() is expected to return a Promise, but not every environment
-  // guarantees that -- same defensive shape as every other safePlayX
-  // in this file.
-  function safePlayCompanionwayAudio(el) {
-    try {
-      var p = el.play();
-      if (p && typeof p.catch === 'function') {
-        p.catch(function (e) { console.warn('Companionway audio failed to play:', describeError(e)); });
-      }
-    } catch (e) {
-      // fail gracefully -- file genuinely missing, autoplay blocked without a promise, or play() itself throwing
-    }
-  }
-
-  // Plays the one-shot for `direction` ('upstairs' | 'downstairs') and
-  // calls `onNearEnd` exactly once, timed to COMPANIONWAY_CROSSFADE_SECONDS
-  // before the file's real end. Three independent paths can trigger that
-  // single call, whichever happens first -- a `fired` guard makes it
-  // safe for more than one to eventually fire:
-  //   1. the normal case: real duration becomes known, a timer is set
-  //      for (duration - COMPANIONWAY_CROSSFADE_SECONDS) out;
-  //   2. the element's own natural 'ended' event, in case duration was
-  //      never available in time to schedule (1) but the file did
-  //      still play through;
-  //   3. a flat COMPANIONWAY_FALLBACK_SECONDS timer, in case audio is
-  //      locked, the file 404s, or playback fails outright -- this is
-  //      what guarantees navigation and the ambient crossfade can never
-  //      be stuck waiting on a companionway sound that never plays.
-  function playCompanionwayTransition(direction, onNearEnd) {
+  // Starts the one-shot for `direction` ('upstairs' | 'downstairs') as
+  // the audio behind a runAudioSyncedAction, and returns the element
+  // (for that caller's own armDurationWatchdog -- the SAME duration
+  // this function itself polls for below, so the two timers are always
+  // in agreement about how long the sample actually is). Calls
+  // `onFullyEnded` (runAudioSyncedAction's own onEnded) exactly once,
+  // whenever the sample genuinely finishes or definitively fails to
+  // play at all -- that decides when GOING ABOVE/GOING BELOW itself
+  // resolves and the player's location actually changes.
+  //
+  // Independently of that, the interior<->exterior crossfade
+  // (transitionBoatAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
+  // is scheduled for COMPANIONWAY_CROSSFADE_SECONDS before the SAME
+  // real duration, polled the same "check now, retry in 100ms until
+  // known" way. fireCrossfadeOnce is ALSO called, as a guarantee, at
+  // the very top of fireFullyEnded -- so however the transition ends up
+  // resolving (the normal near-end timer, the file's own 'ended' event
+  // firing before that timer got the chance, a rejected play() promise,
+  // play() throwing outright, or runAudioSyncedAction's own watchdog
+  // giving up on a duration that's never coming) the ambience has
+  // always already moved to the destination location by the moment the
+  // transition itself completes. Never queues or replays anything: both
+  // fire-once guards mean a slow/late signal after the other path has
+  // already resolved is simply a no-op.
+  function startCompanionwayForTransition(direction, targetLocation, onFullyEnded) {
     var fired = false;
-    function fireOnce() {
+    var crossfadeFired = false;
+    function fireCrossfadeOnce() {
+      if (crossfadeFired) return;
+      crossfadeFired = true;
+      if (GAME) {
+        transitionBoatAudioThroughCompanionway(GAME, targetLocation);
+        transitionRainAudioThroughCompanionway(GAME, targetLocation);
+      }
+    }
+    function fireFullyEnded() {
       if (fired) return;
       fired = true;
-      onNearEnd();
+      fireCrossfadeOnce(); // guaranteed to have already happened by the moment the transition completes, whichever path got us here
+      onFullyEnded();
     }
-    var fallbackTimer = setTimeout(fireOnce, COMPANIONWAY_FALLBACK_SECONDS * 1000);
 
-    if (!audioUnlocked) { clearTimeout(fallbackTimer); fireOnce(); return; } // matches every other domain's own play function -- silently no-op the sound, but navigation/ambience must still proceed
+    if (!audioUnlocked) { fireFullyEnded(); return null; } // matches every other domain's own play function -- silently no-op the sound, but navigation/ambience must still proceed
 
     var el = getCompanionwayAudioEl();
     el.onended = null;
@@ -10882,27 +10900,39 @@
     el.playbackRate = 1.0;
     el.defaultPlaybackRate = 1.0;
     el.volume = muted ? 0 : 1;
-    safePlayCompanionwayAudio(el);
-    el.onended = function () {
-      el.onended = null;
-      clearTimeout(fallbackTimer);
-      fireOnce();
-    };
 
-    function schedule() {
-      if (fired) return; // already resolved via 'ended' or the fallback
+    try {
+      var p = el.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function (e) {
+          console.warn('Companionway audio failed to play:', describeError(e));
+          fireFullyEnded();
+        });
+      }
+    } catch (e) {
+      // fail gracefully -- file genuinely missing, autoplay blocked without a promise, or play() itself throwing
+      fireFullyEnded();
+      return el;
+    }
+
+    function scheduleCrossfade() {
+      if (fired || crossfadeFired) return; // whole transition already resolved, or the crossfade already ran -- nothing left to schedule
       var duration = el.duration;
       if (!isFinite(duration) || duration <= 0) {
-        setTimeout(schedule, 100); // metadata not loaded yet -- keep polling; the fallback timer above still bounds the total wait
+        setTimeout(scheduleCrossfade, 100); // metadata not loaded yet -- keep polling; runAudioSyncedAction's own watchdog still bounds the total wait
         return;
       }
       var delayMs = Math.max(0, (duration - COMPANIONWAY_CROSSFADE_SECONDS) * 1000);
-      setTimeout(function () {
-        clearTimeout(fallbackTimer);
-        fireOnce();
-      }, delayMs);
+      setTimeout(fireCrossfadeOnce, delayMs);
     }
-    schedule();
+    scheduleCrossfade();
+
+    el.onended = function () {
+      el.onended = null;
+      fireFullyEnded();
+    };
+
+    return el;
   }
 
   // SOUND OFF/SOUND ON hook -- a plain volume sync, never touches
@@ -11121,7 +11151,22 @@
     optionsEl.innerHTML = '';
     clearTempView();
     printPersistentBlank();
-    printPersistentLine(config.label, 'heading-label');
+
+    // Same transientLabel option as runShortAction: normally the label
+    // is printed permanently, same as everything else in the
+    // scrollback; transientLabel opts a specific action out of that --
+    // the label shows only while the dots run and is gone once
+    // resolved, leaving just the result line behind. See
+    // runShortAction's own comment for the full reasoning.
+    var labelEl = null;
+    if (config.transientLabel) {
+      labelEl = document.createElement('p');
+      labelEl.className = 'line heading-label';
+      labelEl.textContent = config.label;
+      outputEl.insertBefore(labelEl, tempViewEl);
+    } else {
+      printPersistentLine(config.label, 'heading-label');
+    }
 
     var dotsLine = document.createElement('p');
     dotsLine.className = 'line dim';
@@ -11163,6 +11208,7 @@
       clearTimeout(watchdogTimer);
       clearInterval(dotTimer);
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+      if (labelEl && labelEl.parentNode) labelEl.parentNode.removeChild(labelEl); // transientLabel: gone once resolved, same as runShortAction's own
       if (config.action) config.action(state);
       if (state.pendingChoice === choiceAtStart) state.pendingChoice = null;
       uiBusy = false;
@@ -11740,14 +11786,14 @@
      for text color are ever overridden.
 
      SUNSET/SUNRISE: this codebase has no separate astronomical
-     sunrise/sunset calculation — 'night' already begins at hour 20 and
-     ends at hour 5 (see timeOfDayPhase/isDark), and that IS the
+     sunrise/sunset calculation — 'night' already begins at hour 19 and
+     ends at hour 6 (see timeOfDayPhase/isDark), and that IS the
      existing authoritative day/night boundary already governing the
      cabin-light darkness gates elsewhere in this file. These two
      constants simply name that same existing boundary rather than
      inventing a new one. */
-  var NATURAL_LIGHT_SUNSET_HOUR = 20;
-  var NATURAL_LIGHT_SUNRISE_HOUR = 5;
+  var NATURAL_LIGHT_SUNSET_HOUR = 19;
+  var NATURAL_LIGHT_SUNRISE_HOUR = 6;
   var NATURAL_LIGHT_TRANSITION_MINUTES = 30; // how long the dim/brighten ramp takes on either side of sunset/sunrise
   var NIGHT_TEXT_BRIGHTNESS = 0.2; // the one tunable dim floor -- 1.0 is full/normal (unchanged) brightness; this is as dim as natural light alone ever gets (80% darker than normal, per the task this implements). Retune only this.
 
@@ -12279,23 +12325,28 @@
           // soundscape" the companionway effect is specifically about,
           // so their timing is deliberately left untouched. Only the
           // ambient layers are held back, via companionwayHoldLocation,
-          // to crossfade at the end of the companionway sample instead.
+          // to crossfade near the end of the companionway sample instead.
           transitionEngineLocationAudio(state, companionwayTargetLocation);
           transitionTapeLocationAudio(state, companionwayTargetLocation);
           companionwayHoldLocation = state.crew.location; // hold the ambience at the location being LEFT until the sample actually ends
           companionwayTransitionActive = true;
-          playCompanionwayTransition(goingBelow ? 'downstairs' : 'upstairs', function () {
-            companionwayHoldLocation = null;
-            companionwayTransitionActive = false;
-            if (!GAME) return; // defensive -- e.g. a restart happened during the pending window
-            transitionBoatAudioThroughCompanionway(GAME, companionwayTargetLocation);
-            transitionRainAudioThroughCompanionway(GAME, companionwayTargetLocation);
-          });
-          runShortAction(state, {
+          // Runs on runAudioSyncedAction, same architecture as a repair:
+          // GOING ABOVE/GOING BELOW and the action lock stay up for the
+          // companionway sample's ENTIRE real duration (never a
+          // separate, shorter fixed timer), and the player's location
+          // only actually changes once that audio has genuinely
+          // finished. See startCompanionwayForTransition's own comment
+          // for how the ambience crossfade is independently timed
+          // within that same window.
+          runAudioSyncedAction(state, {
             label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
             transientLabel: true,
-            duration: 2,
+            playAudio: function (onEnded) {
+              return startCompanionwayForTransition(goingBelow ? 'downstairs' : 'upstairs', companionwayTargetLocation, onEnded);
+            },
             action: function (s) {
+              companionwayHoldLocation = null;
+              companionwayTransitionActive = false;
               s.crew.location = goingBelow ? 'below' : 'above';
               if (goingBelow) s.crew.atHelm = false; // can't stay at the helm while below -- see cmdSleep for the same pattern
               printPersistentLine(goingBelow ? 'You go below.' : 'You go above.', 'dim');
