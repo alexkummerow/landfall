@@ -399,6 +399,70 @@
     touch-action: none;
   }
 
+  /* CHART -- same family/shell as PONG/SHIP'S COMPUTER HOME just above
+     (see .ships-computer-overlay's own notes): #chart-overlay is
+     another element wearing those same classes. #chart-map is a plain
+     div MapLibre GL JS takes over as its own container -- unlike
+     .pong-canvas, this is NOT scaled via a fixed internal resolution;
+     MapLibre wants its real on-screen pixel size (via map.resize(),
+     see the JS) so its own tiles/lines render at native sharpness
+     rather than being stretched. touch-action:none for the same
+     drag/pinch reason as PONG's own canvas.
+     A few small MapLibre UI pieces (attribution, the vessel/
+     destination markers) are restyled below to Landfall's own dark/
+     monospace/green look rather than MapLibre's default light,
+     modern-map-app styling -- see MAP_STYLE and the marker-building
+     functions in the JS for the basemap itself. */
+  .chart-map {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+  /* #chart-map (an ID selector) rather than .chart-map here is
+     deliberate, not just a naming accident: MapLibre's own CSS
+     (maplibre-gl.css) defines .maplibregl-ctrl-attrib.maplibregl-
+     compact with the exact same specificity as a plain two-class
+     selector would have here, and since that stylesheet is injected
+     dynamically (loadMapLibreIfNeeded, in the JS) AFTER this static
+     one, it would otherwise win the cascade purely on load order and
+     this restyling would silently do nothing -- confirmed directly by
+     screenshot before switching to the ID form below, which
+     outranks it regardless of load order. */
+  #chart-map .maplibregl-ctrl-attrib,
+  #chart-map .maplibregl-ctrl-attrib.maplibregl-compact,
+  #chart-map .maplibregl-ctrl-attrib.maplibregl-compact-show {
+    background: rgba(5, 8, 6, 0.75);
+    color: var(--phosphor);
+    font-family: var(--font-mono);
+    font-size: 0.55rem;
+  }
+  #chart-map .maplibregl-ctrl-attrib a { color: var(--phosphor-bright); }
+  #chart-map .maplibregl-ctrl-attrib-button { background-color: transparent; }
+  .chart-map .maplibregl-ctrl-bottom-right { font-family: var(--font-mono); }
+  .chart-vessel-marker { line-height: 0; } /* a bare inline SVG would otherwise sit inside unwanted inherited line-height, throwing MapLibre's own anchor-point math off by a few px */
+  .chart-dest-marker {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    line-height: 0;
+    white-space: nowrap;
+  }
+  .chart-dest-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--phosphor-bright);
+    flex-shrink: 0;
+  }
+  .chart-dest-label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.05em;
+    color: var(--phosphor-bright);
+  }
+
   .line {
     margin: 0 0 0.35rem;
     line-height: 1.55;
@@ -668,6 +732,24 @@
     </div>
   </div>
 
+  <!-- CHART -- same family/shell as PONG/SHIP'S COMPUTER HOME just
+       above (see .ships-computer-overlay's own CSS notes). #chart-map
+       is handed to MapLibre GL JS as its own container (search "CHART"
+       below the PONG section for the JS that builds and maintains it)
+       rather than drawn here; nothing here is static beyond the shell
+       and RETURN, in the exact same position/style as every other
+       full-screen computer app's own RETURN/BACK. -->
+  <div id="chart-overlay" class="ships-computer-overlay" hidden>
+    <div class="ships-computer-screen-area" id="chart-screen-area">
+      <div class="ships-computer-screen" id="chart-screen">
+        <div id="chart-map" class="chart-map"></div>
+      </div>
+    </div>
+    <div class="ships-computer-shutdown-area">
+      <button id="chart-return-btn" type="button" class="option">← RETURN</button>
+    </div>
+  </div>
+
 <script>
 (function () {
   'use strict';
@@ -752,6 +834,8 @@
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
+        track: [[start.lon, start.lat]], // CHART's traveled-track history, as [lon, lat] pairs (GeoJSON coordinate order) -- see recordChartTrackPointIfNeeded, which appends to this as the voyage progresses; a fresh voyage starts with just its own departure point
+        trackLastSampleDistanceTraveled: 0, // nav.distanceTraveled's value the last time a track point was recorded -- see recordChartTrackPointIfNeeded's own comment for why distanceTraveled (already tracked) doubles as the sampling clock rather than a separate distance/haversine check
       },
       weather: {
         // SW — real wind, not routing logic, so it can still drift into a
@@ -1480,25 +1564,13 @@
     return 'approach';
   }
 
-  // External links (SHIP'S COMPUTER's CHART and WEATHER MAP) — always
-  // built fresh from the boat's current simulated coordinates, never
-  // cached. Read-only conveniences opened in a new tab; nothing about
-  // the game reads their result.
+  // WEATHER MAP's external link — always built fresh from the boat's
+  // current simulated coordinates, never cached. A read-only
+  // convenience opened in a new tab; nothing about the game reads its
+  // result. (CHART itself no longer opens an external link at all --
+  // see the CHART section, below the PONG section, for its own
+  // in-game MapLibre map.)
   //
-  // CHART opens turn-by-turn directions FROM the vessel's current
-  // position TO a fixed destination (Nāwiliwili Harbor, Kauaʻi) --
-  // Google's own "Universal Cross-Platform URLs" /maps/dir/ endpoint,
-  // which both desktop and iOS Safari resolve the same way (opening
-  // the Google Maps app on a phone that has it installed, or the web
-  // app otherwise). destination is run through encodeURIComponent
-  // rather than hand-building "+"-joined text -- %20-style encoding is
-  // unambiguous everywhere a "+" can, in some contexts, be read as a
-  // literal character instead of a space.
-  function googleMapsDirectionsUrl(originLat, originLon) {
-    var destination = 'Nawiliwili Harbor, Kauai, HI';
-    return 'https://www.google.com/maps/dir/?api=1&origin=' + originLat.toFixed(5) + ',' + originLon.toFixed(5) + '&destination=' + encodeURIComponent(destination);
-  }
-
   // Windy gives genuinely global wind/gust/wave/swell/pressure coverage
   // with a simple coordinate URL, and is a standard reference among
   // cruising sailors — always Windy, never NOAA, since the command is
@@ -4220,6 +4292,12 @@
     // VESSEL LOG -- last, once every other per-tick system (weather,
     // movement, engine) has fully settled this tick's final values.
     sampleVesselLogTick(state);
+    // CHART -- same reasoning, position has fully settled for this
+    // tick. recordChartTrackPointIfNeeded always runs (history is kept
+    // regardless of whether CHART happens to be open right now);
+    // refreshChartMapIfOpen only actually does anything when it is.
+    recordChartTrackPointIfNeeded(state);
+    refreshChartMapIfOpen(state);
   }
 
   // The continuous, sub-tick-precision game clock. voyageMinutes only
@@ -6915,6 +6993,11 @@
   var pongScreenEl = document.getElementById('pong-screen');
   var pongCanvasEl = document.getElementById('pong-canvas');
   var pongReturnBtn = document.getElementById('pong-return-btn');
+  var chartOverlayEl = document.getElementById('chart-overlay');
+  var chartScreenAreaEl = document.getElementById('chart-screen-area');
+  var chartScreenEl = document.getElementById('chart-screen');
+  var chartMapEl = document.getElementById('chart-map');
+  var chartReturnBtn = document.getElementById('chart-return-btn');
 
   // Sizes an aspect-ratio-locked box (boxEl) to the largest refW x refH
   // box that fits inside its own flex-centered parent (areaEl) without
@@ -6947,10 +7030,36 @@
   function fitPongScreen() {
     fitAspectRatioBox(pongScreenAreaEl, pongScreenEl, SHIPS_COMPUTER_REF_W, SHIPS_COMPUTER_REF_H);
   }
+  function fitChartScreen() {
+    fitAspectRatioBox(chartScreenAreaEl, chartScreenEl, SHIPS_COMPUTER_REF_W, SHIPS_COMPUTER_REF_H);
+  }
   window.addEventListener('resize', function () {
     if (!shipsComputerOverlayEl.hidden) fitShipsComputerScreen();
     if (!pongOverlayEl.hidden) fitPongScreen();
+    if (!chartOverlayEl.hidden) {
+      fitChartScreen();
+      // Unlike PONG's canvas (a fixed logical resolution CSS just
+      // scales), MapLibre needs to be told explicitly that its real
+      // on-screen pixel size changed -- chartMap may not exist yet if
+      // CHART has never been opened this session, hence the guard.
+      if (chartMap) chartMap.resize();
+    }
   });
+
+  // Shared by every Ship's Computer app that needs Landfall's own
+  // colors/font rather than drawing with independent hard-coded values
+  // (PONG's canvas, CHART's map markers) -- reads --bg/--phosphor-
+  // bright/the body's own font live from actual computed CSS, so all
+  // of them automatically stay in sync with the rest of the game's
+  // palette with nothing to duplicate or keep updated by hand.
+  var shipsComputerColors = { bg: '#050806', green: '#c9f5da', font: 'monospace' }; // placeholder defaults, immediately overwritten by readShipsComputerColors() the moment any app using them first opens
+  function readShipsComputerColors() {
+    var cs = getComputedStyle(document.documentElement);
+    shipsComputerColors.bg = cs.getPropertyValue('--bg').trim() || shipsComputerColors.bg;
+    shipsComputerColors.green = cs.getPropertyValue('--phosphor-bright').trim() || shipsComputerColors.green;
+    var fontEl = getComputedStyle(document.body);
+    shipsComputerColors.font = fontEl.fontFamily || shipsComputerColors.font;
+  }
 
 
   /* --------------------------------------------------------------
@@ -7029,6 +7138,14 @@
     // mid-game) -- closePong() is a no-op if PONG wasn't open at all.
     if (!pongOverlayEl.hidden) closePong();
     pongOverlayEl.hidden = true;
+    // CHART's own full-viewport overlay -- same reasoning, minus any
+    // equivalent of closePong(): the map instance is deliberately kept
+    // alive/mounted (just hidden) rather than torn down on every exit,
+    // per this feature's own "don't create duplicate instances, reuse
+    // instead" requirement -- see buildChartMap's own top comment.
+    // There is no running loop or attached listener of CHART's own
+    // that would otherwise keep going behind the hidden overlay.
+    chartOverlayEl.hidden = true;
   }
 
   function printPersistentLine(text, cls) {
@@ -7294,6 +7411,19 @@
       currentDay: newVesselLogDay(voyageDayNumber(state), vesselLogMonthDayLabel(nowTs), state.nav.distanceTraveled),
       completedDays: [],
     };
+  }
+
+  // Older saves predate CHART's own track history -- give them a
+  // single starting point at wherever they currently are (there's no
+  // way to reconstruct where they actually sailed before this feature
+  // existed, so this deliberately does NOT invent history, the same
+  // choice migrateVesselLogIfNeeded makes above) rather than an empty
+  // array, which would leave CHART's track line with nothing to draw
+  // until the next sampled point arrives.
+  function migrateChartTrackIfNeeded(state) {
+    if (Array.isArray(state.nav.track)) return;
+    state.nav.track = [[state.nav.lon, state.nav.lat]];
+    state.nav.trackLastSampleDistanceTraveled = state.nav.distanceTraveled;
   }
 
   function updateNavStrip(state) {
@@ -9106,7 +9236,9 @@
   var PONG_BASE_SPEED = 1300; // px/sec (logical) at serve -- moderately fast, not a sluggish opening rally
   var PONG_SPEED_INCREASE = 1.06; // per paddle hit
   var PONG_MAX_SPEED = 2600; // caps the rally so it excites without becoming unplayable
-  var PONG_AI_MAX_SPEED = 950; // deliberately below what's needed to track a fast, sharply-angled ball -- this, not perfect tracking, is what makes it beatable
+  var PONG_AI_MAX_SPEED = 1100; // deliberately below what's needed to track a fast, sharply-angled ball at full rally speed -- this, not perfect tracking, is what keeps it beatable (moderately faster than before -- see this file's own AI-tuning history for the prior 950)
+  var PONG_AI_RETARGET_MIN = 0.06, PONG_AI_RETARGET_RANGE = 0.10; // seconds between AI re-evaluations (0.06-0.16, reaction lag) -- shorter than before, so it notices a new shot sooner
+  var PONG_AI_ERROR_RANGE = 100; // +-50 units of random imprecision layered onto the AI's own target -- smaller than before, so it aims noticeably closer to the truth
   var PONG_WIN_SCORE = 5;
   var PONG_SERVE_DELAY = 0.7; // seconds the ball sits frozen at center before each serve, for readability
 
@@ -9114,16 +9246,7 @@
   var pongCtx = null; // 2D context, fetched once when PONG first opens
   var pongRAF = null; // requestAnimationFrame handle -- always cancelled on close, never left running invisibly behind the home screen
   var pongLastFrameMs = null;
-  var pongColors = { bg: '#050806', green: '#c9f5da', font: 'monospace' }; // placeholder defaults, immediately overwritten by pongReadColors() the moment PONG opens -- never hard-coded duplicates of --bg/--phosphor-bright in practice
   var pongPointerId = null; // the one pointer currently dragging the paddle, if any -- ignores any others (e.g. an accidental second touch) until it's released
-
-  function pongReadColors() {
-    var cs = getComputedStyle(document.documentElement);
-    pongColors.bg = cs.getPropertyValue('--bg').trim() || pongColors.bg;
-    pongColors.green = cs.getPropertyValue('--phosphor-bright').trim() || pongColors.green;
-    var fontEl = getComputedStyle(document.body);
-    pongColors.font = fontEl.fontFamily || pongColors.font;
-  }
 
   function newPongGame() {
     var g = {
@@ -9192,15 +9315,39 @@
     }
 
     // AI -- re-targets periodically rather than every frame (a simple
-    // stand-in for reaction lag), with a random error term on top of
-    // wherever the ball actually is, then chases that target at a
-    // capped speed. Both the cap and the imprecision are what make it
-    // beatable -- see PONG_AI_MAX_SPEED's own comment.
+    // stand-in for reaction lag), then chases that target at a capped
+    // speed. While the ball is heading toward the computer's own goal,
+    // the target is an ANTICIPATED arrival X -- where the ball will
+    // actually cross the paddle's own Y line, projected forward from
+    // its current position/velocity and "folded" off the side walls
+    // the same number of times the real ball would bounce off them
+    // (a straight-line reflection projection, exact for the physics
+    // here since the ball never curves in flight) -- rather than just
+    // chasing wherever the ball happens to be sitting RIGHT NOW. While
+    // the ball is heading away, there's no arrival to anticipate yet,
+    // so it just stays loosely positioned on the ball's current X.
+    // Beatability still comes from three places even with this
+    // upgrade: the random error term below (smaller than before, but
+    // real), the retarget delay (shorter, but real -- most exposed
+    // right as the ball changes direction off the player's paddle),
+    // and, above all, PONG_AI_MAX_SPEED itself -- a sharp, fast rally
+    // shot can still demand more horizontal speed than the AI has,
+    // accurate prediction or not.
     g.aiRetargetTimer -= dt;
     if (g.aiRetargetTimer <= 0) {
-      g.aiRetargetTimer = 0.12 + Math.random() * 0.18;
-      var error = (Math.random() - 0.5) * 240;
-      g.aiTargetX = clamp(g.ballX + error, PONG_PADDLE_W / 2, PONG_W - PONG_PADDLE_W / 2);
+      g.aiRetargetTimer = PONG_AI_RETARGET_MIN + Math.random() * PONG_AI_RETARGET_RANGE;
+      var targetX;
+      if (g.ballVY < 0) {
+        var timeToArrive = Math.max((g.ballY - PONG_PADDLE_MARGIN) / -g.ballVY, 0); // clamped at 0 for the rare frame where the ball has already passed the paddle's own Y-line (a miss, about to score) but hasn't yet crossed the goal -- falls back to the ball's current X rather than projecting backward
+        var rawX = g.ballX + g.ballVX * timeToArrive;
+        var period = 2 * PONG_W;
+        var folded = ((rawX % period) + period) % period; // normalize into [0, period)
+        targetX = folded <= PONG_W ? folded : period - folded; // reflect back in for every wall bounce along the way
+      } else {
+        targetX = g.ballX;
+      }
+      var error = (Math.random() - 0.5) * PONG_AI_ERROR_RANGE;
+      g.aiTargetX = clamp(targetX + error, PONG_PADDLE_W / 2, PONG_W - PONG_PADDLE_W / 2);
     }
     var aiDx = g.aiTargetX - g.computerX;
     var aiMaxStep = PONG_AI_MAX_SPEED * dt;
@@ -9292,11 +9439,11 @@
     if (!g || !pongCtx) return;
     var ctx = pongCtx;
 
-    ctx.fillStyle = pongColors.bg;
+    ctx.fillStyle = shipsComputerColors.bg;
     ctx.fillRect(0, 0, PONG_W, PONG_H);
 
-    ctx.fillStyle = pongColors.green;
-    ctx.strokeStyle = pongColors.green;
+    ctx.fillStyle = shipsComputerColors.green;
+    ctx.strokeStyle = shipsComputerColors.green;
 
     // Side boundary lines only -- explicitly NO center net/line, per
     // this feature's own requirement; the middle of the playfield
@@ -9308,7 +9455,7 @@
     ctx.stroke();
 
     ctx.textAlign = 'center';
-    ctx.font = '600 58px ' + pongColors.font;
+    ctx.font = '600 58px ' + shipsComputerColors.font;
     ctx.textBaseline = 'top';
     ctx.fillText('COMPUTER  ' + g.computerScore, PONG_W / 2, 56);
     ctx.textBaseline = 'bottom';
@@ -9321,7 +9468,7 @@
       ctx.fillRect(g.ballX - PONG_BALL_SIZE / 2, g.ballY - PONG_BALL_SIZE / 2, PONG_BALL_SIZE, PONG_BALL_SIZE);
     } else {
       ctx.textBaseline = 'middle';
-      ctx.font = '700 130px ' + pongColors.font;
+      ctx.font = '700 130px ' + shipsComputerColors.font;
       ctx.fillText(g.winner === 'player' ? 'YOU WIN' : 'YOU LOSE', PONG_W / 2, PONG_H / 2);
     }
   }
@@ -9378,7 +9525,7 @@
   // (newPongGame) -- nothing about a previous game is ever preserved.
   function cmdPong(state) {
     playNavStationOneShot('mouse');
-    pongReadColors();
+    readShipsComputerColors();
     if (!pongCtx) pongCtx = pongCanvasEl.getContext('2d');
     pongCanvasEl.width = PONG_W;
     pongCanvasEl.height = PONG_H; // the one-time, fixed logical drawing resolution -- see this section's own top comment for why this never changes again, even on resize
@@ -9418,6 +9565,309 @@
   // no startup/shutdown audio, same render/save/scroll tail).
   function pongReturnToHome(state) {
     closePong();
+    clearTempView();
+    cmdShipsComputerMenu(state);
+    renderOptions(state);
+    saveGameState(state);
+    scrollToBottom();
+  }
+
+  /* ============================================================
+     CHART -- an in-game nautical chart built into the Ship's Computer
+     with MapLibre GL JS, replacing the old "open Google Maps in a new
+     tab" behavior (WEATHER MAP keeps that external-tab pattern
+     unchanged; only CHART's own icon now opens this instead). Same
+     shell/RETURN/no-startup-replay reasoning as PONG's own top
+     comment -- see there for the family this belongs to.
+
+     This is deliberately NOT a routing engine: no driving/walking/
+     marine route is ever calculated. It draws exactly three things
+     over a restrained, keyless dark basemap: the vessel's live
+     simulated position, Nāwiliwili Harbor, the vessel's OWN actual
+     traveled track (solid), and a plain, undashed-need-not-apply
+     straight reference line toward Nāwiliwili (dashed, visually
+     distinct on purpose -- never call it a "route" anywhere in
+     comments or UI text, it isn't one).
+
+     MapLibre GL JS itself is loaded lazily from a CDN (never bundled
+     inline -- it's a large, versioned third-party library) the first
+     time CHART is actually opened, not up front at page load, so a
+     player who never opens CHART never pays for it. Once built, the
+     one Map instance is reused for the rest of the session (per this
+     feature's own "don't create duplicate instances" requirement) --
+     opening CHART again just resizes/refreshes it, never rebuilds it.
+     -------------------------------------------------------------- */
+
+  // The exact same point the simulation itself already treats as the
+  // voyage's arrival (WAYPOINTS' own final entry, computeHeading/
+  // simTick's arrival check, the BEARING TO NĀWILIWILI display) --
+  // reused here rather than a second, independently-specified
+  // coordinate, so CHART's destination marker and the game's own
+  // arrival logic can never silently drift apart from each other.
+  var NAWILIWILI_HARBOR = FINAL_DEST;
+
+  // MapLibre CDN build -- pinned to an exact version (never a "latest"
+  // floating tag) so this page keeps rendering identically regardless
+  // of whatever MapLibre ships after today. CARTO's free "dark
+  // matter, no labels" raster basemap needs no API key (nothing here
+  // to configure or keep secret for a static, key-less page) and is
+  // already a dark, muted, label-free canvas -- Landfall's own green
+  // vessel/track/destination markers are the only labels/UI drawn on
+  // top of it, exactly per this feature's own "limited labels, minimal
+  // POI clutter" request.
+  var MAPLIBRE_JS_URL = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js';
+  var MAPLIBRE_CSS_URL = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css';
+  var CHART_MAP_STYLE = {
+    version: 8,
+    sources: {
+      'chart-basemap': {
+        type: 'raster',
+        tiles: [
+          'https://a.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+          'https://b.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+          'https://c.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+          'https://d.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+        ],
+        tileSize: 256,
+        attribution: '\u00A9 OpenStreetMap contributors \u00A9 CARTO',
+      },
+    },
+    layers: [{ id: 'chart-basemap-layer', type: 'raster', source: 'chart-basemap' }],
+  };
+  var CHART_TRACK_MIN_DISTANCE_NM = 3; // how far (actual nm sailed, via nav.distanceTraveled) between recorded track points -- frequent enough for a smooth-looking track over a ~2800nm voyage, coarse enough to keep the save small and never add a point every single tick
+  var CHART_MAX_TRACK_POINTS = 2000; // a generous safety cap -- the full Seattle-Kaua'i voyage at the interval above is well under 1000 points; this only ever matters for an unusually long/wandering session
+
+  var chartMap = null; // the one MapLibre Map instance -- created lazily on first CHART open, then reused (never rebuilt) for the rest of the session
+  var chartVesselMarker = null;
+  var chartDestMarker = null;
+  var chartLoaded = false; // true once chartMap's sources/layers/markers actually exist (its own 'load' event has fired)
+  var chartLibraryLoading = false; // guards against kicking off a second concurrent <script> injection if CHART is closed and reopened before the first finishes
+
+  // Keeps lon2 within 180 degrees of lon1 by adding/subtracting whole
+  // 360s as needed -- the standard fix for a straight line that would
+  // otherwise cross the +-180 antimeridian and have MapLibre draw it
+  // the "long way" around the entire globe instead of the short way
+  // across the date line. Exact for this purpose since longitude wraps
+  // at exactly 360 degrees.
+  function unwrapLon(lon1, lon2) {
+    var d = lon2 - lon1;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    return lon1 + d;
+  }
+
+  // Turns a list of raw [lon, lat] points (as actually recorded -- each
+  // independently in the normal -180..180 range) into a continuously-
+  // unwrapped coordinate list, each point's longitude carried forward
+  // relative to the previous one via unwrapLon -- so a track that
+  // genuinely crosses the date line renders as one continuous line
+  // instead of snapping back across the whole map every time the raw
+  // value flips sign near +-180.
+  function unwrapTrackCoordinates(points) {
+    if (!points.length) return [];
+    var out = [[points[0][0], points[0][1]]];
+    for (var i = 1; i < points.length; i++) {
+      out.push([unwrapLon(out[i - 1][0], points[i][0]), points[i][1]]);
+    }
+    return out;
+  }
+
+  function chartLineStringFeature(coordinates) {
+    return { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coordinates } };
+  }
+
+  // Always runs, every tick, whether or not CHART happens to be open
+  // right now -- track HISTORY is kept regardless of whether the
+  // player is currently looking at it (matching VESSEL LOG's own
+  // always-sampling approach just above). distanceTraveled (already
+  // maintained by simTick as the voyage's own odometer) doubles as the
+  // sampling clock: a new point is recorded once the boat has actually
+  // covered CHART_TRACK_MIN_DISTANCE_NM since the last one, rather
+  // than on a fixed real-time or tick interval, so a long becalmed
+  // stretch correctly adds nothing and a fast reach adds points at a
+  // steady geographic (not time) cadence.
+  function recordChartTrackPointIfNeeded(state) {
+    var nav = state.nav;
+    if (!Array.isArray(nav.track)) nav.track = [[nav.lon, nav.lat]]; // defensive; migrateChartTrackIfNeeded should already guarantee this
+    var sinceLast = nav.distanceTraveled - (nav.trackLastSampleDistanceTraveled || 0);
+    if (sinceLast < CHART_TRACK_MIN_DISTANCE_NM) return;
+    nav.trackLastSampleDistanceTraveled = nav.distanceTraveled;
+    var last = nav.track[nav.track.length - 1];
+    if (last && last[0] === nav.lon && last[1] === nav.lat) return; // avoid an exact duplicate (e.g. arrived/becalmed at the same spot)
+    nav.track.push([nav.lon, nav.lat]);
+    if (nav.track.length > CHART_MAX_TRACK_POINTS) nav.track.shift(); // keep saved data size reasonable; only the oldest history is ever trimmed, never the recent track
+  }
+
+  // Injects MapLibre's <script>/<link> tags on first use only -- never
+  // up front at page load, so a player who never opens CHART never
+  // downloads it. Safe to call repeatedly: does nothing once loaded,
+  // and chartLibraryLoading prevents two concurrent injections if
+  // CHART is closed and reopened again before the first finishes (the
+  // first attempt's own callback still fires the reopened session's
+  // callback once ready -- see ensureChartMapLoaded).
+  var chartLibraryCallbacks = [];
+  function loadMapLibreIfNeeded(callback) {
+    if (window.maplibregl) { callback(); return; }
+    chartLibraryCallbacks.push(callback);
+    if (chartLibraryLoading) return;
+    chartLibraryLoading = true;
+    var link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = MAPLIBRE_CSS_URL;
+    document.head.appendChild(link);
+    var script = document.createElement('script');
+    script.src = MAPLIBRE_JS_URL;
+    script.onload = function () {
+      var callbacks = chartLibraryCallbacks;
+      chartLibraryCallbacks = [];
+      callbacks.forEach(function (cb) { cb(); });
+    };
+    document.head.appendChild(script);
+  }
+
+  // Deliberately plain/minimal per this feature's own "no modern
+  // Google-Maps-style pin" request: a small filled triangle, pointing
+  // up (0 degrees) by default so Marker.setRotation(heading) lines it
+  // up with a normal compass convention with no extra math here.
+  function buildChartVesselMarkerEl() {
+    var el = document.createElement('div');
+    el.className = 'chart-vessel-marker';
+    el.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" xmlns="http://www.w3.org/2000/svg">'
+      + '<path d="M12 1 L20 22 L12 17 L4 22 Z" fill="' + shipsComputerColors.green + '"/></svg>';
+    return el;
+  }
+  function buildChartDestMarkerEl() {
+    var el = document.createElement('div');
+    el.className = 'chart-dest-marker';
+    el.innerHTML = '<div class="chart-dest-dot"></div><div class="chart-dest-label">N\u0100WILIWILI</div>';
+    return el;
+  }
+
+  // Builds the one MapLibre Map instance -- called exactly once, the
+  // first time CHART is opened (see ensureChartMapLoaded); every
+  // later CHART open reuses this same instance rather than rebuilding
+  // it, per this feature's own "no duplicate map instances" and
+  // "clean up correctly / avoid leaks" requirements: there is simply
+  // nothing here that ever runs a second time.
+  function buildChartMap(state) {
+    readShipsComputerColors();
+    chartMap = new maplibregl.Map({
+      container: chartMapEl,
+      style: CHART_MAP_STYLE,
+      center: [state.nav.lon, state.nav.lat],
+      zoom: 3,
+      attributionControl: false,
+    });
+    chartMap.addControl(new maplibregl.AttributionControl({ compact: true }));
+    chartMap.dragRotate.disable(); // a north-up chart display, not a 3D explorer -- keeps "rotate the vessel marker to match heading" meaningful against a map that itself never rotates
+    chartMap.touchZoomRotate.disableRotation();
+
+    chartMap.on('load', function () {
+      chartMap.addSource('chart-track', { type: 'geojson', data: chartLineStringFeature([]) });
+      chartMap.addLayer({
+        id: 'chart-track-line', type: 'line', source: 'chart-track',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': shipsComputerColors.green, 'line-width': 2, 'line-opacity': 0.85 },
+      });
+      chartMap.addSource('chart-reference', { type: 'geojson', data: chartLineStringFeature([]) });
+      chartMap.addLayer({
+        id: 'chart-reference-line', type: 'line', source: 'chart-reference',
+        paint: { 'line-color': shipsComputerColors.green, 'line-width': 1.5, 'line-opacity': 0.5, 'line-dasharray': [2, 2] },
+      });
+
+      chartVesselMarker = new maplibregl.Marker({ element: buildChartVesselMarkerEl() })
+        .setLngLat([state.nav.lon, state.nav.lat]).addTo(chartMap);
+      chartDestMarker = new maplibregl.Marker({ element: buildChartDestMarkerEl(), anchor: 'left' })
+        .setLngLat([NAWILIWILI_HARBOR.lon, NAWILIWILI_HARBOR.lat]).addTo(chartMap);
+
+      chartLoaded = true;
+      refreshChartData(state);
+      fitChartView(state);
+    });
+  }
+
+  // Only called when CHART is actually being opened (cmdChart) -- NOT
+  // on every live refresh while it's already sitting open, per this
+  // feature's own "don't constantly snap the camera back" request.
+  // Bounds are computed with the SAME unwrapLon the track/reference
+  // lines use, so a vessel position near the date line still fits
+  // correctly instead of the bounds box being computed across the
+  // "long way" around.
+  function fitChartView(state) {
+    var vesselLon = state.nav.lon, vesselLat = state.nav.lat;
+    var destLon = unwrapLon(vesselLon, NAWILIWILI_HARBOR.lon);
+    var bounds = new maplibregl.LngLatBounds([vesselLon, vesselLat], [vesselLon, vesselLat]);
+    bounds.extend([destLon, NAWILIWILI_HARBOR.lat]);
+    chartMap.fitBounds(bounds, { padding: 70, maxZoom: 7, duration: 0 });
+  }
+
+  // Refreshes everything CHART draws from the CURRENT game state --
+  // called once whenever CHART opens (after the map/markers exist) and
+  // again on every live tick while it's already open (see
+  // refreshChartMapIfOpen), so the vessel marker/track/reference line
+  // all stay current even if the player leaves CHART open while time
+  // passes. Never touches the camera itself -- see fitChartView's own
+  // comment for why that's separate.
+  function refreshChartData(state) {
+    if (!chartLoaded) return;
+    var nav = state.nav;
+    chartVesselMarker.setLngLat([nav.lon, nav.lat]);
+    if (isFinite(nav.heading)) chartVesselMarker.setRotation(nav.heading);
+
+    chartMap.getSource('chart-track').setData(chartLineStringFeature(unwrapTrackCoordinates(nav.track)));
+
+    var destLon = unwrapLon(nav.lon, NAWILIWILI_HARBOR.lon);
+    chartMap.getSource('chart-reference').setData(chartLineStringFeature([[nav.lon, nav.lat], [destLon, NAWILIWILI_HARBOR.lat]]));
+  }
+
+  // The live-update half of this feature's own "if CHART stays
+  // mounted while visible, update whenever the in-game position
+  // changes" requirement -- called from simTick every tick regardless
+  // (cheap no-op check) but only actually does anything while the
+  // overlay is genuinely open, so a closed/never-opened CHART costs
+  // nothing per tick beyond this one hidden check.
+  function refreshChartMapIfOpen(state) {
+    if (chartOverlayEl.hidden || !chartLoaded) return;
+    refreshChartData(state);
+  }
+
+  // Opened only from SHIP'S COMPUTER HOME's own CHART icon. Shows the
+  // overlay and sizes it immediately (so the screen never sits visibly
+  // blank/unsized even before MapLibre itself is ready), then either
+  // builds the map for the first time or just resizes/refreshes an
+  // already-built one -- see buildChartMap/ensureChartMapLoaded's own
+  // comments for why this never creates a second instance.
+  function cmdChart(state) {
+    playNavStationOneShot('mouse');
+    chartOverlayEl.hidden = false;
+    fitChartScreen();
+    state.pendingChoice = { id: 'chart', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
+    ensureChartMapLoaded(state);
+  }
+
+  function ensureChartMapLoaded(state) {
+    if (chartMap) {
+      if (chartLoaded) {
+        chartMap.resize(); // the container's on-screen size may have changed since chartMap was last shown (window resize while CHART was closed) -- MapLibre needs to be told explicitly, unlike a plain scaled canvas
+        refreshChartData(state);
+        fitChartView(state);
+      }
+      return;
+    }
+    loadMapLibreIfNeeded(function () {
+      if (chartOverlayEl.hidden) return; // player already left CHART before the library finished loading -- don't build a map nobody can see
+      if (chartMap) return; // a previous, still-pending load already won this race and built it
+      buildChartMap(state);
+    });
+  }
+
+  // Shared by CHART's own RETURN button and (were it ever needed) any
+  // other exit path -- exactly the same shape as pongReturnToHome just
+  // above: computerOn untouched, no startup/shutdown audio, same
+  // render/save/scroll tail. The map instance itself is left exactly
+  // as it is (still built, just hidden) -- see this section's own top
+  // comment for why it's reused rather than torn down.
+  function chartReturnToHome(state) {
     clearTempView();
     cmdShipsComputerMenu(state);
     renderOptions(state);
@@ -14340,15 +14790,19 @@
   // (which IS fully reconstructible, from state.boat.computerOn alone)
   // is the correct landing spot -- not the empty-options fallback
   // above, which would drop the player at a bare room menu instead of
-  // back into the computer they were actually inside.
+  // back into the computer they were actually inside. CHART's own
+  // chartMap/chartLoaded are exactly the same kind of module-level,
+  // never-persisted state (see CHART's own top comment) -- a reload
+  // mid-CHART needs the identical redirect, for the identical reason.
   function migrateStalePendingChoiceIfNeeded(state) {
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
     }
-    if (state.pendingChoice && state.pendingChoice.id === 'pong') {
+    if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart')) {
       cmdShipsComputerMenu(state);
     }
   }
+
 
   function boot() {
     var saved = loadGameState();
@@ -14363,6 +14817,7 @@
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
     migrateVesselLogIfNeeded(GAME);
+    migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
@@ -14436,29 +14891,38 @@
     pongReturnToHome(GAME);
   });
 
+  // CHART's RETURN -- permanently wired once, same reasoning as
+  // pongReturnBtn/vesselLogBackBtn above. There's no mid-match state
+  // of CHART's own to worry about interrupting (unlike PONG) -- just
+  // the click sound and the same shared return-to-home tail.
+  chartReturnBtn.addEventListener('click', function () {
+    if (!GAME || uiBusy) return;
+    playNavStationOneShot('mouse');
+    chartReturnToHome(GAME);
+  });
+
   // SHIP'S COMPUTER HOME's five app icons -- permanently wired once,
   // same reasoning as shipsPlanBackBtn/vesselLogBackBtn above (the
   // overlay covers where #options would be, so these live outside the
   // normal rendering pipeline entirely). One shared handler dispatches
   // on each button's own data-app rather than five near-identical
-  // listeners. The computer NEVER leaves this screen for WEATHER MAP/
-  // CHART (unchanged external-link behavior, moved here from the old
+  // listeners. The computer NEVER leaves this screen for WEATHER MAP
+  // (unchanged external-link behavior, moved here from the old
   // #options text buttons it used to be -- see the shared logic
   // below) or for JOURNAL (click sound only, no placeholder, no alert,
-  // nothing else). VESSEL LOG and PONG are the two real navigations,
-  // each to its own full-viewport overlay, exactly like clicking
-  // VESSEL LOG used to work as a text option.
+  // nothing else). VESSEL LOG, PONG, and CHART are the three real
+  // navigations, each to its own full-viewport overlay, exactly like
+  // clicking VESSEL LOG used to work as a text option.
   Array.prototype.forEach.call(document.querySelectorAll('.computer-icon-hit'), function (btn) {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy) return;
       var app = btn.dataset.app;
-      if (app === 'weatherMap' || app === 'chart') {
+      if (app === 'weatherMap') {
         // Pure external side effect, unchanged from before this task:
         // plays the mouse click (selecting an app on the computer),
-        // then immediately opens the corresponding site at Solace's
-        // CURRENT simulated coordinates, read fresh right here rather
-        // than at boot time -- the boat keeps moving, so a WINDY visit
-        // now and a GOOGLE MAPS visit two hours later must each use
+        // then immediately opens Windy at Solace's CURRENT simulated
+        // coordinates, read fresh right here rather than at boot time
+        // -- the boat keeps moving, so a WINDY visit now must use
         // wherever the boat actually is at that exact moment. Never
         // navigates or re-renders anything in Landfall itself -- the
         // computer home screen underneath stays exactly as it was, so
@@ -14479,8 +14943,15 @@
           return;
         }
         playNavStationOneShot('mouse');
-        var url = app === 'weatherMap' ? windyUrl(lat, lon) : googleMapsDirectionsUrl(lat, lon);
-        window.open(url, '_blank');
+        window.open(windyUrl(lat, lon), '_blank');
+        return;
+      }
+      if (app === 'chart') {
+        clearTempView(); // closes THIS overlay; cmdChart (which plays its own mouse click) opens its own right after
+        cmdChart(GAME);
+        renderOptions(GAME);
+        saveGameState(GAME);
+        scrollToBottom();
         return;
       }
       if (app === 'vesselLog') {
