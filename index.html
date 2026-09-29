@@ -4152,7 +4152,7 @@
         state.crew.morale = clamp(state.crew.morale - 4, 0, 100);
         if (state.boat.steering === 'GOOD') {
           state.boat.steering = 'DAMAGED';
-          log(state, "The thud from aft has worked something loose against the steering gear. Should have looked sooner.");
+          log(state, "The thud from aft has worked something loose against the rudder. Should have looked sooner.");
         } else {
           log(state, "The thud from aft has worked something loose. Should have looked sooner.");
         }
@@ -6886,7 +6886,7 @@
     printLine(statusLine('BATTERY', Math.floor(b.battery) + '%'));
     printBlank();
     printLine(statusLine('SAILS', b.sails));
-    printLine(statusLine('STEERING', b.steering));
+    printLine(statusLine('RUDDER', b.steering));
     printLine(statusLine('ENGINE', b.engine));
     printLine(statusLine('ELECTRICAL', b.electrical));
     var opts = [];
@@ -7417,7 +7417,7 @@
      are about a choice right now, not a supply audit.
      -------------------------------------------------------------- */
   var SPARES_NAMES = {
-    sailRepairKit: 'Sail repair kit', steeringParts: 'Steering parts', engineParts: 'Engine parts', fuses: 'Fuses',
+    sailRepairKit: 'Sail Repair Kit', steeringParts: 'Rudder Parts', engineParts: 'Engine Parts', fuses: 'Fuses',
   };
 
   function inventoryLine(name, valueText) {
@@ -7463,7 +7463,10 @@
         break;
       case 'spares':
         printLine('SPARES', 'heading-label');
-        printSuppliesCategory(state, 'spares', SPARES_NAMES, ORIGINAL_SPARES);
+        // Informational only -- these are never consumed (repairs are
+        // unlimited), so this is simply a list of what's aboard, not a
+        // quantity/count display. See performSystemRepairAttempt.
+        Object.keys(SPARES_NAMES).forEach(function (k) { printLine(SPARES_NAMES[k]); });
         break;
       default:
         printLine('Nothing there.', 'dim');
@@ -7750,7 +7753,7 @@
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
       }
       printBlank();
-      printLine('Steering is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
+      printLine('Rudder is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
       var damagedHelmOpts = [];
       if (nav.sailTrimState === 'needsTrim') damagedHelmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
       damagedHelmOpts.push({ label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' });
@@ -8001,6 +8004,7 @@
     dishes: { play: playGalleyOneShot, key: 'dishes' },
     bunk: { play: playCabinOneShot, key: 'makeBunk' },
     tidy: { play: playSaloonOneShot, key: 'tidyUp' },
+    tools: { play: playNavStationOneShot, key: 'putAwayTools' },
   };
 
   // Which room a completed chore of this kind returns to -- each one is
@@ -9392,14 +9396,34 @@
   }
 
 
-  // Which spare each system's repair consumes, and its display name.
+  // Spares are unlimited (see performSystemRepairAttempt/cmdRepairSystem
+  // below) -- REPAIR_SPARE_KEY only still identifies which informational
+  // SPARES inventory entry each system's repair is associated with
+  // (see SPARES_NAMES), not a consumable count.
   var REPAIR_SPARE_KEY = { sails: 'sailRepairKit', steering: 'steeringParts', engine: 'engineParts', electrical: 'fuses' };
-  var REPAIR_SPARE_LABEL = { sailRepairKit: 'SAIL REPAIR KIT', steeringParts: 'STEERING PARTS', engineParts: 'ENGINE PARTS', fuses: 'FUSES' };
-  var REPAIR_SYSTEM_LABEL = { sails: 'SAILS', steering: 'STEERING', engine: 'ENGINE', electrical: 'ELECTRICAL' };
+  // Player-facing category label: heading on the REPAIR -- X decision
+  // screen, and the button text on REPAIR's own system-select list.
+  // 'steering' reads RUDDER everywhere player-facing (see section on
+  // STEERING -> RUDDER terminology); the object key stays 'steering'
+  // internally, matching state.boat.steering/BOAT_FAIL_SYSTEMS/etc.
+  var REPAIR_SYSTEM_LABEL = { sails: 'SAILS', steering: 'RUDDER', engine: 'ENGINE', electrical: 'ELECTRICAL' };
+  // The actual repair BUTTON text -- distinct per system rather than a
+  // generic "ATTEMPT REPAIR", per the exact player-facing wording
+  // requested: electrical repair is specifically REPLACE FUSE, not
+  // REPAIR ELECTRICAL.
+  var REPAIR_ACTION_LABEL = { sails: 'REPAIR SAILS', steering: 'REPAIR RUDDER', engine: 'REPAIR ENGINE', electrical: 'REPLACE FUSE' };
+  // The animated ". .. ..." dots label while the repair audio plays --
+  // runAudioSyncedAction appends the dots itself, so this is just the
+  // bare "REPAIRING X"/"REPLACING FUSE" text.
+  var REPAIR_WORKING_LABEL = { sails: 'REPAIRING SAILS', steering: 'REPAIRING RUDDER', engine: 'REPAIRING ENGINE', electrical: 'REPLACING FUSE' };
+  // Which NAV_STATION_AUDIO_FILES/VOLUME key each system's repair plays
+  // -- see playNavStationOneShot. steeringRepair's underlying file stays
+  // audio/nav_station/steering_repair.mp3 (asset filename unchanged).
+  var REPAIR_AUDIO_KEY = { sails: 'sailRepair', steering: 'steeringRepair', engine: 'engineRepair', electrical: 'fuseRepair' };
 
   var REPAIR_SUCCESS_LINES = {
     sails: ['The patch holds. Sail drawing again.', 'Stitched and taped \u2014 she fills properly again.'],
-    steering: ['The steering answers again.', 'The rudder bites again, helm answering true.'],
+    steering: ['The rudder answers again.', 'The rudder bites again, helm answering true.'],
     engine: ['The engine turns over and settles into its rhythm.', 'She catches, coughs once, then runs clean.'],
     electrical: ['New fuse in. The panel comes back to life.', 'Power\u2019s back. The panel lights up again.'],
   };
@@ -9484,31 +9508,31 @@
     });
     var chance = repairSuccessChance(state);
     printLine(statusLine('SUCCESS', repairSuccessLabel(chance)));
-    var spareKey = REPAIR_SPARE_KEY[systemKey];
-    var options = [];
-    if (state.supplies.spares[spareKey] > 0) {
-      options.push({ label: 'ATTEMPT REPAIR', action: 'attempt-repair:' + systemKey });
-    } else {
-      printBlank();
-      printLine('NO ' + REPAIR_SPARE_LABEL[spareKey] + ' REMAIN.', 'amber');
-    }
+    // Spares are unlimited -- the repair action is always offered here
+    // (subject only to this screen even being reachable at all, which
+    // already requires the system to be DAMAGED -- see
+    // buildDamagedSystemsList/cmdRepair).
+    var options = [{ label: REPAIR_ACTION_LABEL[systemKey], action: 'attempt-repair:' + systemKey }];
     options.push({ label: 'BACK', action: 'cmd:repair' });
     state.pendingChoice = { id: 'repair-decision', options: options };
   }
 
-  // The actual attempt: one spare consumed regardless of outcome, some
-  // fatigue either way, and — only on success — the system restored to
-  // GOOD. A failed attempt leaves the system DAMAGED; it never damages
-  // anything else.
+  // The actual attempt: unlimited spares now (see section on repair
+  // spares becoming informational-only), some fatigue either way, and
+  // — only on success — the system restored to GOOD. A failed attempt
+  // leaves the system DAMAGED; it never damages anything else. Success/
+  // failure is still decided by the SAME chance computed here, from the
+  // player's condition at the moment they click the repair button
+  // (repairSuccessChance/computeRepairPenalties, both untouched) --
+  // only WHEN the outcome is applied and shown changed, to the moment
+  // the repair audio actually finishes (see below), not the click
+  // itself or a fixed timer.
   function performSystemRepairAttempt(state, systemKey) {
-    var spareKey = REPAIR_SPARE_KEY[systemKey];
-    if (state.supplies.spares[spareKey] <= 0) return; // not reachable with the button hidden, but guard anyway
     var chance = repairSuccessChance(state);
-    runShortAction(state, {
-      label: 'WORKING ON ' + REPAIR_SYSTEM_LABEL[systemKey],
-      duration: 6,
+    runAudioSyncedAction(state, {
+      label: REPAIR_WORKING_LABEL[systemKey],
+      playAudio: function (onEnded) { return playNavStationOneShot(REPAIR_AUDIO_KEY[systemKey], onEnded); },
       action: function (s) {
-        s.supplies.spares[spareKey] -= 1;
         s.crew.fatigue = clamp(s.crew.fatigue + rand(6, 10), 0, 100);
         bumpHygiene(s, 1.5);            // grease, sweat, cramped work
         s.crew.hoursSinceWater += 0.4;  // strenuous -- thirst arrives a little sooner
@@ -10648,11 +10672,21 @@
     computerStartup: 'audio/nav_station/computer_startup.mp3',
     computerShutdown: 'audio/nav_station/computer_shutdown.mp3',
     mouse: 'audio/nav_station/mouse.mp3',
+    sailRepair: 'audio/nav_station/sail_repair.mp3',
+    steeringRepair: 'audio/nav_station/steering_repair.mp3', // file name unchanged -- see REPAIR SYSTEM section: player-facing text says RUDDER, the asset itself stays steering_repair.mp3
+    fuseRepair: 'audio/nav_station/fuse_repair.mp3',
+    engineRepair: 'audio/nav_station/engine_repair.mp3',
+    putAwayTools: 'audio/nav_station/put_away_tools.mp3',
   };
   var NAV_STATION_AUDIO_VOLUME = {
     computerStartup: 0.5,
     computerShutdown: 0.5,
     mouse: 0.5,
+    sailRepair: 0.5,
+    steeringRepair: 0.5,
+    fuseRepair: 0.5,
+    engineRepair: 0.5,
+    putAwayTools: 0.5,
   };
   var NAV_STATION_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
