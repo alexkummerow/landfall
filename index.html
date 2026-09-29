@@ -8104,10 +8104,15 @@
   // optimistically on click -- consistent with every other audio-synced
   // physical action in this file. The hatch itself has no other gate
   // (no darkness/water/etc. check) -- it's a simple mechanical action
-  // reachable any time the SALOON is.
+  // reachable any time the SALOON is. transientLabel: routine movement
+  // like this leaves nothing behind in the scrollback once it resolves,
+  // same as GO ABOVE/GO BELOW -- see runAudioSyncedAction's own comment
+  // for why that now also cleanly removes the blank line above it, not
+  // just the label.
   function cmdOpenHatch(state) {
     runAudioSyncedAction(state, {
       label: 'OPENING HATCH',
+      transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('hatchOpen', onEnded); },
       action: function (s) {
         s.boat.hatchOpen = true;
@@ -8118,6 +8123,7 @@
   function cmdCloseHatch(state) {
     runAudioSyncedAction(state, {
       label: 'CLOSING HATCH',
+      transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('hatchClose', onEnded); },
       action: function (s) {
         s.boat.hatchOpen = false;
@@ -8741,15 +8747,18 @@
   // and syncReadingProgress (called every advanceSimulation, live or
   // offline catch-up alike) does the actual accumulating. Selecting a
   // book first plays book_open.mp3 (the player taking it down and
-  // settling in), showing the animated "READING . .. ..." dots via the
-  // existing runAudioSyncedAction machinery -- exactly the same "audio
-  // is authoritative, no hard-coded duration" pattern used for a
+  // settling in), showing the animated "SETTLING IN . .. ..." dots via
+  // the existing runAudioSyncedAction machinery -- exactly the same
+  // "audio is authoritative, no hard-coded duration" pattern used for a
   // repair or the companionway transition. Nothing about the reading
   // session itself (readingBookId, readingLastSyncedAt, the "You open
   // [title]." log line, clutter, or the STOP READING screen) starts
   // until that audio has genuinely finished -- until then, no other
   // action is available (uiBusy) and no progress accumulates, since
-  // readingBookId stays null the whole time.
+  // readingBookId stays null the whole time. Once it does start, the
+  // continuous "READING . .. ..." indicator (syncActivityDots, driven by
+  // pendingChoice.id === 'reading') picks up automatically the very next
+  // render -- no explicit start call needed here.
   function performStartReading(state, bookId) {
     var bookDef = BOOKS_BY_ID[bookId];
     if (!bookDef) return;
@@ -8757,7 +8766,7 @@
     if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
     runAudioSyncedAction(state, {
-      label: 'READING',
+      label: 'SETTLING IN',
       transientLabel: true, // gone once the real "You open [title]." log line takes over, same as GOING ABOVE/REPAIRING X
       playAudio: function (onEnded) { return playSaloonOneShot('bookOpen', onEnded); },
       action: function (s) {
@@ -8776,11 +8785,18 @@
   // partial reading interval is committed, so no progress is ever lost
   // to the closing sequence's own timing -- see syncReadingProgress's
   // own call below, which happens first, synchronously, before any
-  // audio even starts. "CLOSING BOOK . .. ..." shows the same way
-  // READING did while opening; the real "You close the book." log line
-  // and the return to BOOKSHELF only happen once that audio genuinely
-  // ends.
+  // audio even starts. stopActivityDots() runs FIRST, before any of
+  // that, so the continuous "READING . .. ..." indicator disappears the
+  // instant STOP READING is pressed rather than sitting on screen
+  // underneath "CLOSING BOOK . .. ..." for the length of that audio --
+  // syncActivityDots's own declarative check can't catch this on its
+  // own, since runAudioSyncedAction (started right below) won't call
+  // renderOptions again until IT resolves. "CLOSING BOOK . .. ..." then
+  // shows the same way SETTLING IN did while opening; the real "You
+  // close the book." log line and the return to BOOKSHELF only happen
+  // once that audio genuinely ends.
   function performStopReading(state) {
+    stopActivityDots();
     if (state.crew.readingBookId == null) { cmdSaloon(state); return; } // defensive -- shouldn't be reachable otherwise
     syncReadingProgress(state); // commit the final partial interval since the last sync before stopping, so it's never lost -- may itself detect completion/darkness and already begin its own closing sequence below
     if (state.crew.readingBookId == null) { flushNewLogEntries(state); return; } // the sync itself already ended the session (completion or darkness) and set up its own next screen -- don't double-handle it
@@ -8973,6 +8989,7 @@
       if (completing) {
         bookState.completed = true;
         c.readingBookId = null;
+        stopActivityDots(); // the continuous "READING . .. ..." indicator won't otherwise disappear until CLOSING BOOK's own runAudioSyncedAction resolves -- see performStopReading's comment for why this can't rely on syncActivityDots's own declarative check alone
         flushNewLogEntries(state); // any milestone text just triggered above is shown before the closing dots (if any) take over
         beginBookCloseSequenceOrSkip(state, function (s) {
           s.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(s) };
@@ -8984,7 +9001,10 @@
     // Something else already took over the screen (an aft-locker prompt
     // and the like) -- reading quietly stops rather than fighting for
     // the UI; the interrupting event's own message already explains
-    // what happened.
+    // what happened. No explicit stopActivityDots() needed here --
+    // pendingChoice is already something other than 'reading' by this
+    // point, so syncActivityDots's own declarative check (run by
+    // whatever's about to render that new screen) already catches it.
     if (state.pendingChoice && state.pendingChoice.id !== 'reading') {
       c.readingBookId = null;
       return;
@@ -8996,6 +9016,7 @@
     // electrical panel.
     if (c.location === 'below' && needsCabinLight(state)) {
       c.readingBookId = null;
+      stopActivityDots(); // same reasoning as the completion branch above
       beginBookCloseSequenceOrSkip(state, function (s) {
         s.pendingChoice = null;
         log(s, 'TOO DARK TO SEE');
@@ -11216,21 +11237,30 @@
 
     optionsEl.innerHTML = '';
     clearTempView();
-    printPersistentBlank();
 
-    // Same transientLabel option as runShortAction: normally the label
-    // is printed permanently, same as everything else in the
-    // scrollback; transientLabel opts a specific action out of that --
-    // the label shows only while the dots run and is gone once
-    // resolved, leaving just the result line behind. See
-    // runShortAction's own comment for the full reasoning.
+    // Same transientLabel option as runShortAction: normally the blank
+    // line and the label are printed permanently, same as everything
+    // else in the scrollback; transientLabel opts a specific action out
+    // of BOTH -- the entire block (blank line, label, dots) shows only
+    // while the action runs and is gone once resolved, leaving nothing
+    // behind but whatever the action's own result adds. Previously only
+    // the label was ever made transient here -- the blank line above it
+    // was always printed via the untracked, permanent printPersistentBlank,
+    // which is exactly the leftover gap/spacing artifact this now fixes:
+    // a transient action now removes the SAME blank line it added,
+    // rather than leaving an untracked one behind forever.
+    var blankEl = null;
     var labelEl = null;
     if (config.transientLabel) {
+      blankEl = document.createElement('p');
+      blankEl.className = 'gap';
+      outputEl.insertBefore(blankEl, tempViewEl);
       labelEl = document.createElement('p');
       labelEl.className = 'line heading-label';
       labelEl.textContent = config.label;
       outputEl.insertBefore(labelEl, tempViewEl);
     } else {
+      printPersistentBlank();
       printPersistentLine(config.label, 'heading-label');
     }
 
@@ -11275,6 +11305,7 @@
       clearInterval(dotTimer);
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
       if (labelEl && labelEl.parentNode) labelEl.parentNode.removeChild(labelEl); // transientLabel: gone once resolved, same as runShortAction's own
+      if (blankEl && blankEl.parentNode) blankEl.parentNode.removeChild(blankEl); // the blank line above it goes with it -- see this function's own comment above for why
       if (config.action) config.action(state);
       if (state.pendingChoice === choiceAtStart) state.pendingChoice = null;
       uiBusy = false;
@@ -12113,27 +12144,59 @@
   // rather than fixed-duration (an ongoing activity has no set end time
   // the way a short action does). syncActivityDots is called from
   // renderOptions every time it runs (every action, every live tick,
-  // right after load) and is idempotent: it only starts the timer when
-  // some activity is active and none is running, and only stops it when
-  // one is running but nothing is active anymore — so it never fights
-  // an already-cycling animation, and it self-corrects after ANY way an
-  // activity can end (an explicit stop, natural completion, an
-  // interruption, or resuming mid-activity after a reload) without
-  // needing an explicit stop call scattered at each of those sites.
-  // activityDotsShouldBeVisible is where a future continuous activity
-  // adds its own condition — READ and SLEEP already share this exact
-  // mechanism rather than each having their own copy.
+  // right after load) and is idempotent: it only starts when some
+  // activity is active and none is running, only stops when one is
+  // running but nothing is active anymore, and (defensively) refreshes
+  // the label in place if the active activity itself changes while dots
+  // stay running — so it never fights an already-cycling animation, and
+  // it self-corrects after most ways an activity can end (an explicit
+  // stop, natural completion, an interruption, or resuming mid-activity
+  // after a reload) without needing an explicit stop call scattered at
+  // each of those sites.
+  // The one thing this declarative check can't catch on its own is a
+  // transition straight into ANOTHER audio-synced sequence — e.g. STOP
+  // READING's own CLOSING BOOK. runAudioSyncedAction doesn't call
+  // renderOptions again until IT finishes, so a still-active READING
+  // line would otherwise sit on screen underneath CLOSING BOOK's for
+  // that whole window. performStopReading and syncReadingProgress's own
+  // completion/darkness branches each call stopActivityDots() explicitly,
+  // right before handing off to that next sequence, to cover exactly
+  // that gap — see each of their own comments.
+  // activityDotsInfo is where a future continuous activity adds its own
+  // condition and (optional) label — READ and SLEEP already share this
+  // exact mechanism rather than each having their own copy. A null label
+  // means bare dots with no heading line above them (and no blank line
+  // above that, either) — SLEEP's own presentation, unchanged by READ's
+  // label option existing.
   var activityDotsTimer = null;
   var activityDotsEl = null;
+  var activityDotsBlankEl = null;
+  var activityDotsLabelEl = null;
+  var activityDotsCurrentLabel; // undefined until first started; lets syncActivityDots detect a label change while dots stay running
   var ACTIVITY_DOT_FRAMES = ['.', '..', '...'];
 
-  function activityDotsShouldBeVisible(state) {
-    if (state.pendingChoice && state.pendingChoice.id === 'reading') return true;
-    if (state.crew.watchState === 'sleeping') return true;
-    return false;
+  function activityDotsInfo(state) {
+    if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
+    if (state.crew.watchState === 'sleeping') return { active: true, label: null };
+    return { active: false, label: null };
   }
 
-  function startActivityDots() {
+  function startActivityDots(label) {
+    activityDotsCurrentLabel = label;
+    // Same blank-line-then-label convention as runAudioSyncedAction/
+    // runShortAction's own transientLabel option, and removed the same
+    // tracked way in stopActivityDots below — only created at all when
+    // there IS a label, so SLEEP's existing bare-dots presentation (no
+    // label) is untouched.
+    if (label != null) {
+      activityDotsBlankEl = document.createElement('p');
+      activityDotsBlankEl.className = 'gap';
+      outputEl.insertBefore(activityDotsBlankEl, tempViewEl);
+      activityDotsLabelEl = document.createElement('p');
+      activityDotsLabelEl.className = 'line heading-label';
+      activityDotsLabelEl.textContent = label;
+      outputEl.insertBefore(activityDotsLabelEl, tempViewEl);
+    }
     activityDotsEl = document.createElement('p');
     activityDotsEl.className = 'line dim';
     activityDotsEl.textContent = ACTIVITY_DOT_FRAMES[0];
@@ -12148,15 +12211,26 @@
   function stopActivityDots() {
     if (activityDotsTimer) { clearInterval(activityDotsTimer); activityDotsTimer = null; }
     if (activityDotsEl && activityDotsEl.parentNode) activityDotsEl.parentNode.removeChild(activityDotsEl);
+    if (activityDotsLabelEl && activityDotsLabelEl.parentNode) activityDotsLabelEl.parentNode.removeChild(activityDotsLabelEl);
+    if (activityDotsBlankEl && activityDotsBlankEl.parentNode) activityDotsBlankEl.parentNode.removeChild(activityDotsBlankEl);
     activityDotsEl = null;
+    activityDotsLabelEl = null;
+    activityDotsBlankEl = null;
+    activityDotsCurrentLabel = undefined;
   }
 
   function syncActivityDots(state) {
-    var shouldBeActive = activityDotsShouldBeVisible(state);
-    if (shouldBeActive && !activityDotsTimer) {
-      startActivityDots();
-    } else if (!shouldBeActive && activityDotsTimer) {
+    var info = activityDotsInfo(state);
+    if (info.active && !activityDotsTimer) {
+      startActivityDots(info.label);
+    } else if (!info.active && activityDotsTimer) {
       stopActivityDots();
+    } else if (info.active && activityDotsTimer && info.label !== activityDotsCurrentLabel) {
+      // Defensive: the active activity itself changed (e.g. sleep ->
+      // reading) without an intervening inactive render — restart
+      // cleanly under the new label rather than leaving a stale one.
+      stopActivityDots();
+      startActivityDots(info.label);
     }
   }
 
