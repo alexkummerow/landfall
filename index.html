@@ -12842,6 +12842,24 @@
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
       }
+      // AUDIO CONTEXT RESUME -- the root cause of ambient loops (sea
+      // state, rain) going silent and never coming back after the tab/
+      // app was backgrounded: browsers (iOS Safari in particular) can
+      // suspend the whole AudioContext while hidden, independently of
+      // any individual <audio> element's own paused state. A suspended
+      // context halts ALL processing through it -- masterGain and every
+      // GainNode/slot connected to it (every boat/rain channel) -- so
+      // the underlying elements can be, and often are, still genuinely
+      // playing and looping the whole time; nothing routed through
+      // audioCtx ever gets HEARD again until this is called. This must
+      // happen before updateAudioForState below: its own health checks
+      // (boatChannelIsHealthy/rainChannelIsHealthy) only look at
+      // el.paused/el.ended, which a suspended-but-still-playing element
+      // passes fine, so they alone could never detect or fix this.
+      // resume() is a safe no-op if the context was never suspended.
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(function (e) { console.warn('AudioContext resume failed:', describeError(e)); });
+      }
       // AUDIO RESUME -- always re-synced on return, not just when a
       // catch-up tick actually occurred: the browser can silently pause
       // ambient loops (sea state, rain) while backgrounded even over a
