@@ -5301,6 +5301,7 @@
     applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
     applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
     applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
+    applyMuteToCompanionwayAudio(); // COMPANIONWAY HOOK (upstairs/downstairs transition SFX) -- same reasoning as engine audio
     updateSoundLabel();
   }
 
@@ -5370,8 +5371,26 @@
     return { location: location, windSpeed: windSpeed, exteriorTrack: exteriorTrack, exteriorGainMultiplier: exteriorGainMultiplier, interiorTrack: interiorTrack };
   }
 
+  // While a companionway transition is pending (see the 'go-above-below'
+  // action handler and playCompanionwayTransition), the marine/rain
+  // ambient layers must keep reflecting the location the player is
+  // LEAVING, not the one state.crew.location already flipped to -- the
+  // companionway-timed crossfade (transitionBoatAudioThroughCompanionway/
+  // transitionRainAudioThroughCompanionway) is what's responsible for
+  // actually moving them to the new location, at the right moment.
+  // Without this, the ordinary per-render calls below (from the live
+  // loop, visibility restore, or renderOptions itself right after the
+  // GO ABOVE/GO BELOW short action's 2-second dots finish and flip
+  // state.crew.location) would apply the new location's ambience the
+  // instant the location changes, regardless of whether the
+  // companionway sample -- which can easily run longer than those 2
+  // seconds -- has actually finished. null means no transition is
+  // pending; state.crew.location is used normally.
+  var companionwayHoldLocation = null;
+
   function getBoatAudioState(state) {
-    return getBoatAudioStateFor(state.crew.location, state.weather.windSpeed || 0, state.boat.hatchOpen);
+    var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
+    return getBoatAudioStateFor(location, state.weather.windSpeed || 0, state.boat.hatchOpen);
   }
 
   function makeBoatChannel(name, targetGain) {
@@ -5608,8 +5627,14 @@
   // performBoatChannelCrossfade directly, bypassing these guards on
   // purpose, since a self-loop repeat's whole point is to restart
   // despite the channel already being "healthy" on this exact path.
-  function setBoatChannelTrack(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier) {
+  function setBoatChannelTrack(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSecondsOverride) {
     if (gainMultiplier == null) gainMultiplier = 1;
+    // Defaults to the normal weather/location crossfade duration; the
+    // companionway transition (see transitionBoatAudioThroughCompanionway)
+    // is the one caller that passes its own shorter value here, so it
+    // never has to duplicate this function's guards to get a custom
+    // crossfade length.
+    var crossfadeSeconds = crossfadeSecondsOverride == null ? BOAT_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
     channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
     channel.desiredGainMultiplier = gainMultiplier;
 
@@ -5631,14 +5656,14 @@
         activeSlot.gainTarget = effectiveRegain;
         activeSlot.gain.gain.cancelScheduledValues(nowRegain);
         activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + BOAT_AMBIENCE_CROSSFADE_SECONDS);
+        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
         return;
       }
     }
 
     if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
 
-    performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, BOAT_AMBIENCE_CROSSFADE_SECONDS);
+    performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds);
   }
 
   // Hands a {location, windSpeed, exteriorTrack, exteriorGainMultiplier,
@@ -5648,9 +5673,9 @@
   // implementations of the same crossfade. interior is always at its
   // own full normal level (gainMultiplier 1) -- only exterior's ever
   // reduced, and only below deck with the hatch open.
-  function applyBoatAudioDesiredState(desired) {
-    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack, desired.location, desired.windSpeed, desired.exteriorGainMultiplier);
-    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack, desired.location, desired.windSpeed, 1);
+  function applyBoatAudioDesiredState(desired, crossfadeSecondsOverride) {
+    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack, desired.location, desired.windSpeed, desired.exteriorGainMultiplier, crossfadeSecondsOverride);
+    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack, desired.location, desired.windSpeed, 1, crossfadeSecondsOverride);
   }
 
   // The state-driven entry point, for everything that isn't a location
@@ -5661,18 +5686,26 @@
     applyBoatAudioDesiredState(getBoatAudioState(state));
   }
 
-  // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- not when
-  // it finishes. state.crew.location doesn't flip to targetLocation
-  // until the short action's dots finish running (several seconds
-  // later), so a call that read state.crew.location here would just
-  // re-apply the OLD location's ambience and silently undo nothing.
-  // Taking the target explicitly is what lets the crossfade start on
-  // click and makes both directions genuinely the same code path. The
-  // hatch's own OPEN/CLOSED state is unaffected by this transition (it's
-  // a persistent physical fact, not location-dependent) -- reading it
-  // straight from state is correct either way.
-  function transitionBoatAudioToLocation(state, targetLocation) {
-    applyBoatAudioDesiredState(getBoatAudioStateFor(targetLocation, state.weather.windSpeed || 0, state.boat.hatchOpen));
+  // The hatch's own OPEN/CLOSED state is unaffected by a location
+  // transition (it's a persistent physical fact, not location-dependent)
+  // -- reading it straight from state is correct either way. targetLocation
+  // is taken explicitly (rather than reading state.crew.location) because
+  // the caller -- the companionway sample's near-end callback, see
+  // playCompanionwayTransition -- fires before state.crew.location has
+  // necessarily settled into its final value from the player's
+  // perspective, and because it makes both directions genuinely the
+  // same code path.
+
+  // The companionway-specific variant -- same target-state computation
+  // as updateBoatAudioForState/getBoatAudioState above, but crossfaded
+  // over the short COMPANIONWAY_CROSSFADE_SECONDS window instead of the
+  // normal multi-second weather/location duration. Called once, right
+  // at the end of upstairs.mp3/downstairs.mp3 (see
+  // playCompanionwayTransition), not at the moment the player clicks
+  // GO ABOVE/GO BELOW -- see the 'go-above-below' action handler for
+  // why the two are deliberately no longer the same moment.
+  function transitionBoatAudioThroughCompanionway(state, targetLocation) {
+    applyBoatAudioDesiredState(getBoatAudioStateFor(targetLocation, state.weather.windSpeed || 0, state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
   }
 
   /* --------------------------------------------------------------
@@ -5745,7 +5778,11 @@
   }
 
   function getRainAudioState(state) {
-    return getRainAudioStateFor(state.crew.location, rainLevelForCondition(state.weather.condition), state.boat.hatchOpen);
+    // Same companionwayHoldLocation override as getBoatAudioState above
+    // -- see its comment for the full reasoning; one shared variable
+    // governs both layers, since they transition together.
+    var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
+    return getRainAudioStateFor(location, rainLevelForCondition(state.weather.condition), state.boat.hatchOpen);
   }
 
   function makeRainChannel(name, targetGain) {
@@ -5928,8 +5965,12 @@
   // fades to silence and is paused via the same pauseTimer mechanism,
   // which is exactly "pause/reset the rain audio so it's ready for the
   // next rain event" -- no separate reset step needed.
-  function setRainChannelTrack(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier) {
+  function setRainChannelTrack(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSecondsOverride) {
     if (gainMultiplier == null) gainMultiplier = 1;
+    // Same override reasoning as setBoatChannelTrack -- see its own
+    // comment; the companionway transition is the one caller that
+    // passes a shorter value here.
+    var crossfadeSeconds = crossfadeSecondsOverride == null ? RAIN_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
     channel.desiredPath = desiredPath;
     channel.desiredGainMultiplier = gainMultiplier;
 
@@ -5944,14 +5985,14 @@
         activeSlot.gainTarget = effectiveRegain;
         activeSlot.gain.gain.cancelScheduledValues(nowRegain);
         activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + RAIN_AMBIENCE_CROSSFADE_SECONDS);
+        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
         return;
       }
     }
 
     if (desiredPath != null && channel.loadingPath === desiredPath) return;
 
-    performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, RAIN_AMBIENCE_CROSSFADE_SECONDS);
+    performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds);
   }
 
   // Hands a {location, rainLevel, exteriorTrack, exteriorGainMultiplier,
@@ -5960,9 +6001,9 @@
   // applyBoatAudioDesiredState. interior is always at its own full
   // normal level (gainMultiplier 1) -- only exterior's ever reduced, and
   // only below deck with the hatch open.
-  function applyRainAudioDesiredState(desired) {
-    setRainChannelTrack(rainChannels.exterior, desired.exteriorTrack, desired.location, desired.rainLevel, desired.exteriorGainMultiplier);
-    setRainChannelTrack(rainChannels.interior, desired.interiorTrack, desired.location, desired.rainLevel, 1);
+  function applyRainAudioDesiredState(desired, crossfadeSecondsOverride) {
+    setRainChannelTrack(rainChannels.exterior, desired.exteriorTrack, desired.location, desired.rainLevel, desired.exteriorGainMultiplier, crossfadeSecondsOverride);
+    setRainChannelTrack(rainChannels.interior, desired.interiorTrack, desired.location, desired.rainLevel, 1, crossfadeSecondsOverride);
   }
 
   // The state-driven entry point -- the live loop, restart, offline
@@ -5974,12 +6015,16 @@
     applyRainAudioDesiredState(getRainAudioState(state));
   }
 
-  // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- not when
-  // it finishes, same reasoning as transitionBoatAudioToLocation. The
-  // hatch's own state is unaffected by a location transition -- reading
-  // it straight from state is correct either way.
-  function transitionRainAudioToLocation(state, targetLocation) {
-    applyRainAudioDesiredState(getRainAudioStateFor(targetLocation, rainLevelForCondition(state.weather.condition), state.boat.hatchOpen));
+  // The hatch's own state is unaffected by a location transition --
+  // reading it straight from state is correct either way. targetLocation
+  // is taken explicitly for the same reason as transitionBoatAudioThroughCompanionway's
+  // own comment above.
+
+  // The companionway-specific variant -- see
+  // transitionBoatAudioThroughCompanionway's own comment for the full
+  // reasoning; identical shape, just the rain layer.
+  function transitionRainAudioThroughCompanionway(state, targetLocation) {
+    applyRainAudioDesiredState(getRainAudioStateFor(targetLocation, rainLevelForCondition(state.weather.condition), state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
   }
 
   /* --------------------------------------------------------------
@@ -6094,12 +6139,11 @@
     engineAudio.stop(0);
   }
 
-  // Called immediately when a GO ABOVE/GO BELOW transition begins (same
-  // reasoning as transitionBoatAudioToLocation above -- uses the TARGET
-  // location, since state.crew.location hasn't updated yet), but only
-  // if the engine is actually running. Never plays start.mp3 -- that's
-  // solely beginEngineStartAudio's job, exactly once per engine run;
-  // relocating a running engine always crossfades directly between
+  // Called immediately when a GO ABOVE/GO BELOW transition begins (uses
+  // the TARGET location, since state.crew.location hasn't updated yet),
+  // but only if the engine is actually running. Never plays start.mp3 --
+  // that's solely beginEngineStartAudio's job, exactly once per engine
+  // run; relocating a running engine always crossfades directly between
   // cruise and interior, gaining the same seamless self-loop each then
   // continues with (crossfadeToLoop restarts the near-end schedule for
   // whichever one is now active).
@@ -6254,14 +6298,14 @@
 
   // Called the MOMENT a GO ABOVE/GO BELOW transition begins -- same
   // "act on the TARGET location, not state.crew.location" reasoning as
-  // transitionBoatAudioToLocation/transitionEngineLocationAudio just
-  // below/above: state.crew.location doesn't flip until the short
-  // action's dots finish running, several seconds later. A no-op
-  // whenever there's no element yet or no track actually playing right
-  // now (tape_start.mp3/tape_stop.mp3, a stopped player, or silence) --
-  // nothing to smoothly fade in those cases, and applyTapeLocationAudio
-  // above still correctly sets whatever DOES start playing later to the
-  // right level for wherever the player ends up.
+  // transitionEngineLocationAudio just above: state.crew.location
+  // doesn't flip until the short action's dots finish running, several
+  // seconds later. A no-op whenever there's no element yet or no track
+  // actually playing right now (tape_start.mp3/tape_stop.mp3, a stopped
+  // player, or silence) -- nothing to smoothly fade in those cases, and
+  // applyTapeLocationAudio above still correctly sets whatever DOES
+  // start playing later to the right level for wherever the player
+  // ends up.
   function transitionTapeLocationAudio(state, targetLocation) {
     if (!tapeAudioEl || tapePhase !== 'track') return;
     var target = muted ? 0 : (targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
@@ -10696,6 +10740,148 @@
   }
 
   /* --------------------------------------------------------------
+     COMPANIONWAY TRANSITION AUDIO -- the one-shot physical-movement
+     SFX (upstairs.mp3/downstairs.mp3) layered over the persistent
+     environmental ambience during a GO ABOVE/GO BELOW transition.
+     Built the same lazy-single-element, plain-HTMLAudioElement way as
+     every other simple one-shot domain in this file (NAV STATION's
+     mouse click just above, the cabin switch click) -- never a Web
+     Audio node of its own, never routed through masterGain, same as
+     engine/sails/tape. `loop` is never set (defaults to false): this
+     is always a one-shot, never a loop, regardless of how it's used.
+
+     The one thing this domain does beyond a plain one-shot: it
+     schedules a delayed callback timed to (the file's real decoded
+     duration - COMPANIONWAY_CROSSFADE_SECONDS), so the interior<->
+     exterior ambience crossfade begins right at the END of the sample
+     rather than when it starts -- reusing the exact same "poll for
+     duration, then setTimeout" approach makeCrossfadeLoopController's
+     own near-end scheduling already uses (see crossfadeTo above),
+     rather than inventing a second timing mechanism or hardcoding the
+     sample length. A duration that's never determined, or a file that
+     never even starts playing, both still resolve via their own
+     fallbacks below -- the ambient crossfade (and therefore normal
+     looping picking back up) must never be held hostage by a missing
+     or broken companionway file.
+     -------------------------------------------------------------- */
+  var COMPANIONWAY_AUDIO_FILES = {
+    upstairs: 'audio/companionway/upstairs.mp3',
+    downstairs: 'audio/companionway/downstairs.mp3',
+  };
+  var COMPANIONWAY_CROSSFADE_SECONDS = 0.75; // within the requested ~500-1000ms range
+  // A true last-resort ceiling for when the real duration can never be
+  // determined at all (metadata never loads, playback fails outright) --
+  // deliberately generous, well beyond any realistic companionway sample
+  // length, so it can never fire BEFORE the real duration-based
+  // scheduling above gets a chance to for a normal, successfully-loading
+  // file. This is the one deliberate exception to "don't hardcode the
+  // duration": a bound on how long to wait for a real duration, not a
+  // substitute for it.
+  var COMPANIONWAY_FALLBACK_SECONDS = 10;
+  var companionwayAudioEl = null;
+  // The double-click/overlap lock -- true from the moment GO ABOVE/GO
+  // BELOW is clicked until the companionway sound has resolved (see
+  // playCompanionwayTransition's onNearEnd) and the ambience crossfade
+  // has actually run. Checked at the top of the 'go-above-below' action
+  // handler, which simply does nothing while this is true -- so rapid
+  // repeated clicks, or clicking the opposite direction mid-transition,
+  // can never stack a second upstairs.mp3/downstairs.mp3 or start a
+  // second, overlapping ambience crossfade.
+  var companionwayTransitionActive = false;
+
+  function getCompanionwayAudioEl() {
+    if (companionwayAudioEl) return companionwayAudioEl;
+    var el = new Audio();
+    el.preload = 'auto';
+    el.addEventListener('error', function () {
+      var path = el.currentSrc || el.src;
+      console.error('COMPANIONWAY AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+    });
+    companionwayAudioEl = el;
+    return el;
+  }
+
+  // play() is expected to return a Promise, but not every environment
+  // guarantees that -- same defensive shape as every other safePlayX
+  // in this file.
+  function safePlayCompanionwayAudio(el) {
+    try {
+      var p = el.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function (e) { console.warn('Companionway audio failed to play:', describeError(e)); });
+      }
+    } catch (e) {
+      // fail gracefully -- file genuinely missing, autoplay blocked without a promise, or play() itself throwing
+    }
+  }
+
+  // Plays the one-shot for `direction` ('upstairs' | 'downstairs') and
+  // calls `onNearEnd` exactly once, timed to COMPANIONWAY_CROSSFADE_SECONDS
+  // before the file's real end. Three independent paths can trigger that
+  // single call, whichever happens first -- a `fired` guard makes it
+  // safe for more than one to eventually fire:
+  //   1. the normal case: real duration becomes known, a timer is set
+  //      for (duration - COMPANIONWAY_CROSSFADE_SECONDS) out;
+  //   2. the element's own natural 'ended' event, in case duration was
+  //      never available in time to schedule (1) but the file did
+  //      still play through;
+  //   3. a flat COMPANIONWAY_FALLBACK_SECONDS timer, in case audio is
+  //      locked, the file 404s, or playback fails outright -- this is
+  //      what guarantees navigation and the ambient crossfade can never
+  //      be stuck waiting on a companionway sound that never plays.
+  function playCompanionwayTransition(direction, onNearEnd) {
+    var fired = false;
+    function fireOnce() {
+      if (fired) return;
+      fired = true;
+      onNearEnd();
+    }
+    var fallbackTimer = setTimeout(fireOnce, COMPANIONWAY_FALLBACK_SECONDS * 1000);
+
+    if (!audioUnlocked) { clearTimeout(fallbackTimer); fireOnce(); return; } // matches every other domain's own play function -- silently no-op the sound, but navigation/ambience must still proceed
+
+    var el = getCompanionwayAudioEl();
+    el.onended = null;
+    if (!el.paused) el.pause();
+    el.src = COMPANIONWAY_AUDIO_FILES[direction];
+    el.currentTime = 0;
+    el.playbackRate = 1.0;
+    el.defaultPlaybackRate = 1.0;
+    el.volume = muted ? 0 : 1;
+    safePlayCompanionwayAudio(el);
+    el.onended = function () {
+      el.onended = null;
+      clearTimeout(fallbackTimer);
+      fireOnce();
+    };
+
+    function schedule() {
+      if (fired) return; // already resolved via 'ended' or the fallback
+      var duration = el.duration;
+      if (!isFinite(duration) || duration <= 0) {
+        setTimeout(schedule, 100); // metadata not loaded yet -- keep polling; the fallback timer above still bounds the total wait
+        return;
+      }
+      var delayMs = Math.max(0, (duration - COMPANIONWAY_CROSSFADE_SECONDS) * 1000);
+      setTimeout(function () {
+        clearTimeout(fallbackTimer);
+        fireOnce();
+      }, delayMs);
+    }
+    schedule();
+  }
+
+  // SOUND OFF/SOUND ON hook -- a plain volume sync, never touches
+  // play/pause state, so it can never replay a companionway one-shot
+  // that already finished while muted (same reasoning as every other
+  // applyMuteToXAudio in this file).
+  function applyMuteToCompanionwayAudio() {
+    var el = companionwayAudioEl;
+    if (!el || el.paused) return;
+    el.volume = muted ? 0 : 1;
+  }
+
+  /* --------------------------------------------------------------
      SAILS AUDIO -- raising/lowering one-shots, the luffing loop/fill
      pair, and the winch one-shot, which now specifically represents the
      player physically trimming the sails (see cmdTrimSails/
@@ -12051,11 +12237,26 @@
           // "You go above.", stays in the scrollback, and even that isn't
           // a timestamped voyage-log entry — too minor and too frequent
           // to be worth a permanent log line every time.
+          if (companionwayTransitionActive) break; // a transition is already underway -- ignore repeated/overlapping clicks (see the lock's own comment)
           var goingBelow = state.crew.location !== 'below';
-          transitionBoatAudioToLocation(state, goingBelow ? 'below' : 'above');
-          transitionRainAudioToLocation(state, goingBelow ? 'below' : 'above');
-          transitionEngineLocationAudio(state, goingBelow ? 'below' : 'above');
-          transitionTapeLocationAudio(state, goingBelow ? 'below' : 'above');
+          var companionwayTargetLocation = goingBelow ? 'below' : 'above';
+          // ENGINE and CASSETTE transition immediately, exactly as
+          // before -- neither is part of the marine/rain "environmental
+          // soundscape" the companionway effect is specifically about,
+          // so their timing is deliberately left untouched. Only the
+          // ambient layers are held back, via companionwayHoldLocation,
+          // to crossfade at the end of the companionway sample instead.
+          transitionEngineLocationAudio(state, companionwayTargetLocation);
+          transitionTapeLocationAudio(state, companionwayTargetLocation);
+          companionwayHoldLocation = state.crew.location; // hold the ambience at the location being LEFT until the sample actually ends
+          companionwayTransitionActive = true;
+          playCompanionwayTransition(goingBelow ? 'downstairs' : 'upstairs', function () {
+            companionwayHoldLocation = null;
+            companionwayTransitionActive = false;
+            if (!GAME) return; // defensive -- e.g. a restart happened during the pending window
+            transitionBoatAudioThroughCompanionway(GAME, companionwayTargetLocation);
+            transitionRainAudioThroughCompanionway(GAME, companionwayTargetLocation);
+          });
           runShortAction(state, {
             label: goingBelow ? 'GOING BELOW' : 'GOING ABOVE',
             transientLabel: true,
