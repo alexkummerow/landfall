@@ -377,6 +377,28 @@
     padding: 0.8rem 1.2rem calc(0.7rem + env(safe-area-inset-bottom));
   }
 
+  /* PONG -- lives INSIDE the computer environment, reusing the exact
+     same .ships-computer-overlay/.ships-computer-screen-area/
+     .ships-computer-screen shell the home screen itself uses (see
+     those classes' own notes) rather than a parallel overlay system --
+     #pong-overlay is just another element wearing those same classes.
+     .pong-canvas is the one new piece: a single <canvas>, absolutely
+     filling its already aspect-ratio-locked .ships-computer-screen
+     parent, drawn at a FIXED internal resolution (PONG_W x PONG_H, see
+     the JS) that CSS then scales as one unit -- so game physics/
+     collision math never has to know or care what size the canvas
+     happens to be on screen, only its own fixed logical coordinate
+     space. touch-action:none stops the browser's own scroll/zoom
+     gestures from fighting the player's drag-to-move input. */
+  .pong-canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+
   .line {
     margin: 0 0 0.35rem;
     line-height: 1.55;
@@ -625,6 +647,24 @@
     </div>
     <div class="ships-computer-shutdown-area">
       <button id="ships-computer-shutdown-btn" type="button" class="option">SHUT DOWN</button>
+    </div>
+  </div>
+
+  <!-- PONG -- same family/shell as SHIP'S COMPUTER HOME just above (see
+       .ships-computer-overlay's own CSS notes): the game itself is the
+       one <canvas>, drawn fresh every frame by the JS PONG section
+       (search "PONG" below cmdShipsComputerMenu); nothing here is
+       static beyond the shell and the RETURN control, in the exact
+       same position/style as every other full-screen computer app's
+       own RETURN/BACK. -->
+  <div id="pong-overlay" class="ships-computer-overlay" hidden>
+    <div class="ships-computer-screen-area" id="pong-screen-area">
+      <div class="ships-computer-screen" id="pong-screen">
+        <canvas id="pong-canvas" class="pong-canvas"></canvas>
+      </div>
+    </div>
+    <div class="ships-computer-shutdown-area">
+      <button id="pong-return-btn" type="button" class="option">← RETURN</button>
     </div>
   </div>
 
@@ -6870,32 +6910,48 @@
   var shipsComputerScreenAreaEl = document.querySelector('.ships-computer-screen-area');
   var shipsComputerScreenEl = document.querySelector('.ships-computer-screen');
   var shipsComputerShutdownBtn = document.getElementById('ships-computer-shutdown-btn');
+  var pongOverlayEl = document.getElementById('pong-overlay');
+  var pongScreenAreaEl = document.getElementById('pong-screen-area');
+  var pongScreenEl = document.getElementById('pong-screen');
+  var pongCanvasEl = document.getElementById('pong-canvas');
+  var pongReturnBtn = document.getElementById('pong-return-btn');
 
-  // Sizes .ships-computer-screen to the largest 1440x2560 box that
-  // fits inside its own flex-centered parent (.ships-computer-screen-area)
-  // without cropping either dimension -- the JS equivalent of an
-  // <img>'s object-fit:contain, needed here because that CSS property
-  // doesn't apply to a plain container div (see .ships-computer-screen's
-  // own CSS comment for why a pure-CSS aspect-ratio attempt didn't
-  // reliably letterbox in both directions). Every icon inside is
-  // positioned in percentages of THIS element, so as long as it keeps
-  // the reference image's exact 1440:2560 ratio, the whole layout
-  // scales as one locked unit. Called once whenever the home screen
-  // opens (cmdShipsComputerMenu) and again on every window resize
-  // while it's open -- harmless, cheap no-op work on any OTHER screen,
-  // since the overlay stays hidden then regardless of its own size.
+  // Sizes an aspect-ratio-locked box (boxEl) to the largest refW x refH
+  // box that fits inside its own flex-centered parent (areaEl) without
+  // cropping either dimension -- the JS equivalent of an <img>'s
+  // object-fit:contain, needed here because that CSS property doesn't
+  // apply to a plain container div (see .ships-computer-screen's own
+  // CSS comment for why a pure-CSS aspect-ratio attempt didn't reliably
+  // letterbox in both directions). Shared by SHIP'S COMPUTER HOME and
+  // PONG below (fitShipsComputerScreen/fitPongScreen), rather than each
+  // keeping its own copy of the same math.
   var SHIPS_COMPUTER_REF_W = 1440, SHIPS_COMPUTER_REF_H = 2560;
-  function fitShipsComputerScreen() {
-    var availW = shipsComputerScreenAreaEl.clientWidth;
-    var availH = shipsComputerScreenAreaEl.clientHeight;
+  function fitAspectRatioBox(areaEl, boxEl, refW, refH) {
+    var availW = areaEl.clientWidth;
+    var availH = areaEl.clientHeight;
     if (availW <= 0 || availH <= 0) return; // area not laid out yet (e.g. overlay still hidden) -- next real resize/open will retry
-    var scale = Math.min(availW / SHIPS_COMPUTER_REF_W, availH / SHIPS_COMPUTER_REF_H);
-    shipsComputerScreenEl.style.width = (SHIPS_COMPUTER_REF_W * scale) + 'px';
-    shipsComputerScreenEl.style.height = (SHIPS_COMPUTER_REF_H * scale) + 'px';
+    var scale = Math.min(availW / refW, availH / refH);
+    boxEl.style.width = (refW * scale) + 'px';
+    boxEl.style.height = (refH * scale) + 'px';
+  }
+  // Every icon (or, for PONG, every game element) inside is positioned/
+  // drawn in a fixed logical coordinate space matching refW x refH, so
+  // as long as the box itself keeps that exact ratio, the whole layout
+  // scales as one locked unit regardless of viewport size. Called once
+  // whenever each screen opens and again on every window resize while
+  // it's open -- harmless, cheap no-op work on any OTHER screen, since
+  // both overlays stay hidden then regardless of their own size.
+  function fitShipsComputerScreen() {
+    fitAspectRatioBox(shipsComputerScreenAreaEl, shipsComputerScreenEl, SHIPS_COMPUTER_REF_W, SHIPS_COMPUTER_REF_H);
+  }
+  function fitPongScreen() {
+    fitAspectRatioBox(pongScreenAreaEl, pongScreenEl, SHIPS_COMPUTER_REF_W, SHIPS_COMPUTER_REF_H);
   }
   window.addEventListener('resize', function () {
     if (!shipsComputerOverlayEl.hidden) fitShipsComputerScreen();
+    if (!pongOverlayEl.hidden) fitPongScreen();
   });
+
 
   /* --------------------------------------------------------------
      TWO SEPARATE RENDER SURFACES, both inside #output:
@@ -6965,6 +7021,14 @@
     // themselves before deciding whether to reopen it, exactly like
     // the other two overlays.
     shipsComputerOverlayEl.hidden = true;
+    // PONG's own full-viewport overlay -- same reasoning as the other
+    // three, PLUS closePong() itself: this is the one defensive path
+    // that guarantees the game loop/pointer listeners always actually
+    // stop, even if PONG is left via some navigation other than its
+    // own RETURN button or a completed match (e.g. typing a command
+    // mid-game) -- closePong() is a no-op if PONG wasn't open at all.
+    if (!pongOverlayEl.hidden) closePong();
+    pongOverlayEl.hidden = true;
   }
 
   function printPersistentLine(text, cls) {
@@ -9009,6 +9073,356 @@
     vesselLogBodyEl.scrollTop = 0; // always opens scrolled to the top (current day), regardless of where a previous visit left off
     vesselLogOverlayEl.hidden = false;
     state.pendingChoice = { id: 'vessel-log', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
+  }
+
+  /* ============================================================
+     PONG -- a small game built INTO the Ship's Computer, reusing its
+     shell (.ships-computer-overlay family, see #pong-overlay's own
+     HTML/CSS notes), its background/text colors (read live from
+     --bg/--phosphor-bright below, never duplicated as separate hex
+     values), its monospace font, its click sound, and its home-screen
+     navigation functions (cmdShipsComputerMenu) -- not a parallel
+     mini-app architecture.
+
+     VERTICAL pong: the computer defends the TOP goal, the player
+     defends the BOTTOM goal, no center net/line. All physics run in a
+     fixed PONG_W x PONG_H logical coordinate space -- the canvas's own
+     on-screen SIZE can change (fitPongScreen, on open and on resize)
+     without the game itself ever needing to know or care, since CSS
+     alone scales the whole drawing surface as one unit (the canvas's
+     internal width/height attributes, its actual pixel grid, are set
+     once and never touched again).
+
+     Game state (pongGame) is a plain module-level variable, never part
+     of the saved state.* tree and never restored on reload -- every
+     open is a genuinely fresh match, per this feature's own
+     requirement, so there is nothing here that NEEDS to survive one.
+     -------------------------------------------------------------- */
+
+  var PONG_W = 1440, PONG_H = 2560; // same logical reference size as SHIPS_COMPUTER_REF_W/H -- keeps PONG visually consistent with the home screen it lives inside
+  var PONG_PADDLE_W = 260, PONG_PADDLE_H = 26;
+  var PONG_PADDLE_MARGIN = 190; // distance from the top/bottom edge to each paddle's own center -- clears the score text's own vertical footprint (see pongDraw's 58px score font at y=56/PONG_H-56) with real headroom, confirmed visually; a smaller margin here visibly overlapped the paddle and the score text
+  var PONG_BALL_SIZE = 40; // slightly larger than a strict 34px square for on-screen visibility at typical phone widths, confirmed visually -- still clearly smaller than the paddle's own footprint
+  var PONG_BASE_SPEED = 1300; // px/sec (logical) at serve -- moderately fast, not a sluggish opening rally
+  var PONG_SPEED_INCREASE = 1.06; // per paddle hit
+  var PONG_MAX_SPEED = 2600; // caps the rally so it excites without becoming unplayable
+  var PONG_AI_MAX_SPEED = 950; // deliberately below what's needed to track a fast, sharply-angled ball -- this, not perfect tracking, is what makes it beatable
+  var PONG_WIN_SCORE = 5;
+  var PONG_SERVE_DELAY = 0.7; // seconds the ball sits frozen at center before each serve, for readability
+
+  var pongGame = null; // null whenever PONG isn't open; see newPongGame()
+  var pongCtx = null; // 2D context, fetched once when PONG first opens
+  var pongRAF = null; // requestAnimationFrame handle -- always cancelled on close, never left running invisibly behind the home screen
+  var pongLastFrameMs = null;
+  var pongColors = { bg: '#050806', green: '#c9f5da', font: 'monospace' }; // placeholder defaults, immediately overwritten by pongReadColors() the moment PONG opens -- never hard-coded duplicates of --bg/--phosphor-bright in practice
+  var pongPointerId = null; // the one pointer currently dragging the paddle, if any -- ignores any others (e.g. an accidental second touch) until it's released
+
+  function pongReadColors() {
+    var cs = getComputedStyle(document.documentElement);
+    pongColors.bg = cs.getPropertyValue('--bg').trim() || pongColors.bg;
+    pongColors.green = cs.getPropertyValue('--phosphor-bright').trim() || pongColors.green;
+    var fontEl = getComputedStyle(document.body);
+    pongColors.font = fontEl.fontFamily || pongColors.font;
+  }
+
+  function newPongGame() {
+    var g = {
+      playerX: PONG_W / 2,
+      computerX: PONG_W / 2,
+      ballX: PONG_W / 2, ballY: PONG_H / 2,
+      ballVX: 0, ballVY: 0,
+      playerScore: 0, computerScore: 0,
+      phase: 'serving', // 'serving' (frozen, brief pause) -> 'playing' -> 'ended'
+      serveTimer: 0,
+      winner: null, // 'player' | 'computer', once phase is 'ended'
+      aiTargetX: PONG_W / 2,
+      aiRetargetTimer: 0,
+    };
+    pongServe(g, Math.random() < 0.5);
+    return g;
+  }
+
+  // Resets the ball to center at the normal base speed (never carrying
+  // over a rally's accumulated speed -- see PONG_SPEED_INCREASE's own
+  // call site for where that accumulation actually happens) and a
+  // freshly randomized horizontal component, then holds it there,
+  // motionless, for PONG_SERVE_DELAY -- pongUpdate's own 'serving'
+  // branch is what actually counts that down and releases it.
+  // towardPlayer: true sends this serve down toward the player (used
+  // after the COMPUTER scores, giving the player the very next
+  // touch), false sends it up toward the computer.
+  function pongServe(g, towardPlayer) {
+    g.ballX = PONG_W / 2;
+    g.ballY = PONG_H / 2;
+    var angle = (Math.random() * 0.8 - 0.4); // radians, roughly +-23 degrees off straight vertical -- real horizontal variety without the serve ever reading as a sideways shot
+    var dir = towardPlayer ? 1 : -1;
+    g.ballVX = Math.sin(angle) * PONG_BASE_SPEED;
+    g.ballVY = Math.cos(angle) * PONG_BASE_SPEED * dir;
+    g.phase = 'serving';
+    g.serveTimer = PONG_SERVE_DELAY;
+  }
+
+  // Classic Pong "English": how far from the paddle's own center the
+  // ball struck (-1 left edge .. +1 right edge) decides how sharply it
+  // comes back, on top of the flat per-hit speed increase. sendDown:
+  // true for the computer paddle sending the ball back down toward the
+  // player, false for the player paddle sending it back up.
+  function pongBounceOffPaddle(g, paddleX, sendDown) {
+    var offset = clamp((g.ballX - paddleX) / (PONG_PADDLE_W / 2), -1, 1);
+    var speed = Math.min(Math.sqrt(g.ballVX * g.ballVX + g.ballVY * g.ballVY) * PONG_SPEED_INCREASE, PONG_MAX_SPEED);
+    var maxAngle = 60 * Math.PI / 180;
+    var angle = offset * maxAngle;
+    var dir = sendDown ? 1 : -1;
+    g.ballVX = Math.sin(angle) * speed;
+    g.ballVY = Math.cos(angle) * speed * dir;
+  }
+
+  function pongPlay(key) { playNavStationOneShot(key); }
+
+  function pongUpdate(dt) {
+    var g = pongGame;
+    if (!g) return;
+
+    if (g.phase === 'serving') {
+      g.serveTimer -= dt;
+      if (g.serveTimer <= 0) g.phase = 'playing';
+      // AI and player paddles still track during the serve pause --
+      // only the ball itself stays frozen -- so play doesn't feel like
+      // it's stuttering to a halt between points.
+    }
+
+    // AI -- re-targets periodically rather than every frame (a simple
+    // stand-in for reaction lag), with a random error term on top of
+    // wherever the ball actually is, then chases that target at a
+    // capped speed. Both the cap and the imprecision are what make it
+    // beatable -- see PONG_AI_MAX_SPEED's own comment.
+    g.aiRetargetTimer -= dt;
+    if (g.aiRetargetTimer <= 0) {
+      g.aiRetargetTimer = 0.12 + Math.random() * 0.18;
+      var error = (Math.random() - 0.5) * 240;
+      g.aiTargetX = clamp(g.ballX + error, PONG_PADDLE_W / 2, PONG_W - PONG_PADDLE_W / 2);
+    }
+    var aiDx = g.aiTargetX - g.computerX;
+    var aiMaxStep = PONG_AI_MAX_SPEED * dt;
+    g.computerX += clamp(aiDx, -aiMaxStep, aiMaxStep);
+    g.computerX = clamp(g.computerX, PONG_PADDLE_W / 2, PONG_W - PONG_PADDLE_W / 2);
+
+    if (g.phase !== 'playing') return; // ball stays frozen during 'serving', and nothing else here applies once 'ended'
+
+    g.ballX += g.ballVX * dt;
+    g.ballY += g.ballVY * dt;
+
+    // Side walls -- reflect, reposition exactly to the boundary (so the
+    // ball is never still overlapping the wall next frame), play once.
+    var half = PONG_BALL_SIZE / 2;
+    if (g.ballX - half <= 0 && g.ballVX < 0) {
+      g.ballX = half;
+      g.ballVX = -g.ballVX;
+      pongPlay('pongWall');
+    } else if (g.ballX + half >= PONG_W && g.ballVX > 0) {
+      g.ballX = PONG_W - half;
+      g.ballVX = -g.ballVX;
+      pongPlay('pongWall');
+    }
+
+    // Player paddle (bottom) -- only while genuinely descending toward
+    // it, so a ball already heading back up can never re-trigger this
+    // on the very next frame even if it's still technically within
+    // range vertically.
+    var playerPaddleY = PONG_H - PONG_PADDLE_MARGIN;
+    if (g.ballVY > 0 && g.ballY + half >= playerPaddleY - PONG_PADDLE_H / 2
+        && g.ballY - half <= playerPaddleY + PONG_PADDLE_H / 2
+        && Math.abs(g.ballX - g.playerX) <= PONG_PADDLE_W / 2 + half) {
+      g.ballY = playerPaddleY - PONG_PADDLE_H / 2 - half;
+      pongBounceOffPaddle(g, g.playerX, false);
+      pongPlay('pongHit');
+    }
+
+    // Computer paddle (top) -- same reasoning, mirrored.
+    var computerPaddleY = PONG_PADDLE_MARGIN;
+    if (g.ballVY < 0 && g.ballY - half <= computerPaddleY + PONG_PADDLE_H / 2
+        && g.ballY + half >= computerPaddleY - PONG_PADDLE_H / 2
+        && Math.abs(g.ballX - g.computerX) <= PONG_PADDLE_W / 2 + half) {
+      g.ballY = computerPaddleY + PONG_PADDLE_H / 2 + half;
+      pongBounceOffPaddle(g, g.computerX, true);
+      pongPlay('pongHit');
+    }
+
+    // Scoring -- past the GOAL (the playfield's own top/bottom edge),
+    // not just past the paddle, so a miss genuinely sails all the way
+    // out exactly like a real point.
+    if (g.ballY - half > PONG_H) {
+      g.computerScore++;
+      if (g.computerScore >= PONG_WIN_SCORE) { pongEndMatch('computer'); return; }
+      pongPlay('pongComputerScore');
+      pongServe(g, true); // serve toward the player, who just conceded the point
+    } else if (g.ballY + half < 0) {
+      g.playerScore++;
+      if (g.playerScore >= PONG_WIN_SCORE) { pongEndMatch('player'); return; }
+      pongPlay('pongPlayerScore');
+      pongServe(g, false);
+    }
+  }
+
+  // The winning point never also plays the ordinary point-scored sound
+  // underneath it (see this feature's own "prioritize the WIN audio,
+  // don't layer" requirement) -- pongUpdate's own scoring branch
+  // returns immediately into this function instead of falling through
+  // to its usual pongPlay('pong...Score') call. Freezes the ball
+  // (phase 'ended' -- pongDraw skips drawing it entirely, and
+  // pongUpdate's own early-return above stops all further ball/scoring
+  // logic) and holds the win/lose message on screen for exactly as
+  // long as the winning audio itself runs, via its onEnded callback --
+  // never a guessed/hard-coded timeout.
+  function pongEndMatch(winner) {
+    var g = pongGame;
+    if (!g) return;
+    g.phase = 'ended';
+    g.winner = winner;
+    g.ballVX = 0; g.ballVY = 0;
+    var key = winner === 'player' ? 'pongPlayerWins' : 'pongComputerWins';
+    playNavStationOneShot(key, function () {
+      if (!GAME || pongGame !== g) return; // PONG was already closed (e.g. RETURN pressed right as the win landed) -- don't navigate a second time
+      pongReturnToHome(GAME);
+    });
+  }
+
+  function pongDraw() {
+    var g = pongGame;
+    if (!g || !pongCtx) return;
+    var ctx = pongCtx;
+
+    ctx.fillStyle = pongColors.bg;
+    ctx.fillRect(0, 0, PONG_W, PONG_H);
+
+    ctx.fillStyle = pongColors.green;
+    ctx.strokeStyle = pongColors.green;
+
+    // Side boundary lines only -- explicitly NO center net/line, per
+    // this feature's own requirement; the middle of the playfield
+    // stays completely open.
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(3, 0); ctx.lineTo(3, PONG_H);
+    ctx.moveTo(PONG_W - 3, 0); ctx.lineTo(PONG_W - 3, PONG_H);
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.font = '600 58px ' + pongColors.font;
+    ctx.textBaseline = 'top';
+    ctx.fillText('COMPUTER  ' + g.computerScore, PONG_W / 2, 56);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('PLAYER  ' + g.playerScore, PONG_W / 2, PONG_H - 56);
+
+    ctx.fillRect(g.computerX - PONG_PADDLE_W / 2, PONG_PADDLE_MARGIN - PONG_PADDLE_H / 2, PONG_PADDLE_W, PONG_PADDLE_H);
+    ctx.fillRect(g.playerX - PONG_PADDLE_W / 2, PONG_H - PONG_PADDLE_MARGIN - PONG_PADDLE_H / 2, PONG_PADDLE_W, PONG_PADDLE_H);
+
+    if (g.phase !== 'ended') {
+      ctx.fillRect(g.ballX - PONG_BALL_SIZE / 2, g.ballY - PONG_BALL_SIZE / 2, PONG_BALL_SIZE, PONG_BALL_SIZE);
+    } else {
+      ctx.textBaseline = 'middle';
+      ctx.font = '700 130px ' + pongColors.font;
+      ctx.fillText(g.winner === 'player' ? 'YOU WIN' : 'YOU LOSE', PONG_W / 2, PONG_H / 2);
+    }
+  }
+
+  function pongFrame(nowMs) {
+    if (!pongGame) return; // closed since the last scheduled frame -- stop, don't reschedule
+    var dt = pongLastFrameMs == null ? 0 : Math.min((nowMs - pongLastFrameMs) / 1000, 0.05); // capped so a dropped/backgrounded frame can't suddenly teleport the ball
+    pongLastFrameMs = nowMs;
+    pongUpdate(dt);
+    pongDraw();
+    pongRAF = requestAnimationFrame(pongFrame);
+  }
+
+  function pongLogicalXFromEvent(e) {
+    var rect = pongCanvasEl.getBoundingClientRect();
+    var fraction = (e.clientX - rect.left) / rect.width;
+    return clamp(fraction * PONG_W, PONG_PADDLE_W / 2, PONG_W - PONG_PADDLE_W / 2);
+  }
+  function pongOnPointerDown(e) {
+    if (!pongGame) return;
+    pongPointerId = e.pointerId;
+    pongGame.playerX = pongLogicalXFromEvent(e);
+    if (pongCanvasEl.setPointerCapture) { try { pongCanvasEl.setPointerCapture(e.pointerId); } catch (err) {} }
+    e.preventDefault();
+  }
+  function pongOnPointerMove(e) {
+    if (!pongGame || pongPointerId !== e.pointerId) return; // ignore any pointer other than the one currently dragging
+    pongGame.playerX = pongLogicalXFromEvent(e);
+    e.preventDefault();
+  }
+  function pongOnPointerUp(e) {
+    if (pongPointerId === e.pointerId) pongPointerId = null;
+  }
+
+  function pongAttachInput() {
+    pongCanvasEl.addEventListener('pointerdown', pongOnPointerDown);
+    pongCanvasEl.addEventListener('pointermove', pongOnPointerMove);
+    pongCanvasEl.addEventListener('pointerup', pongOnPointerUp);
+    pongCanvasEl.addEventListener('pointercancel', pongOnPointerUp);
+  }
+  function pongDetachInput() {
+    pongCanvasEl.removeEventListener('pointerdown', pongOnPointerDown);
+    pongCanvasEl.removeEventListener('pointermove', pongOnPointerMove);
+    pongCanvasEl.removeEventListener('pointerup', pongOnPointerUp);
+    pongCanvasEl.removeEventListener('pointercancel', pongOnPointerUp);
+    pongPointerId = null;
+  }
+
+  // Opened only from SHIP'S COMPUTER HOME's own PONG icon (see the
+  // computer-icon-hit click handler below) -- by the time the player
+  // can see that screen, cmdShipsComputer's own power/darkness gates
+  // have already passed, so this needs no gate of its own, same
+  // reasoning as cmdVesselLog. Always a completely fresh match
+  // (newPongGame) -- nothing about a previous game is ever preserved.
+  function cmdPong(state) {
+    playNavStationOneShot('mouse');
+    pongReadColors();
+    if (!pongCtx) pongCtx = pongCanvasEl.getContext('2d');
+    pongCanvasEl.width = PONG_W;
+    pongCanvasEl.height = PONG_H; // the one-time, fixed logical drawing resolution -- see this section's own top comment for why this never changes again, even on resize
+    pongGame = newPongGame();
+    pongOverlayEl.hidden = false;
+    fitPongScreen();
+    pongAttachInput();
+    pongLastFrameMs = null;
+    if (pongRAF) cancelAnimationFrame(pongRAF); // defensive -- should be impossible to reach here with one already running, but never risk two loops
+    pongRAF = requestAnimationFrame(pongFrame);
+    state.pendingChoice = { id: 'pong', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
+  }
+
+  // Stops the game loop and input listeners -- called on every way of
+  // leaving PONG (RETURN, the automatic post-win transition, and
+  // clearTempView's own defensive cleanup on any other navigation) so
+  // it can never keep running invisibly behind whatever screen comes
+  // next. Idempotent: safe to call even if PONG isn't currently open.
+  function closePong() {
+    if (pongRAF) { cancelAnimationFrame(pongRAF); pongRAF = null; }
+    pongDetachInput();
+    pongGame = null;
+    // Reset/stop any PONG sound still playing (e.g. RETURN pressed
+    // mid-rally) -- same shared nav-station element pool as every
+    // other sound here, so this just pauses/rewinds whichever of the
+    // six PONG keys happens to still be going.
+    ['pongHit', 'pongWall', 'pongPlayerScore', 'pongComputerScore', 'pongPlayerWins', 'pongComputerWins'].forEach(function (key) {
+      var el = navStationAudioEls[key];
+      if (el && !el.paused) { el.pause(); el.currentTime = 0; }
+    });
+  }
+
+  // Shared by PONG's own RETURN button and the automatic transition
+  // once a win/lose audio finishes -- always closes PONG first, then
+  // goes back to the computer's home screen exactly the way
+  // vesselLogBackBtn's own click handler does (computerOn untouched,
+  // no startup/shutdown audio, same render/save/scroll tail).
+  function pongReturnToHome(state) {
+    closePong();
+    clearTempView();
+    cmdShipsComputerMenu(state);
+    renderOptions(state);
+    saveGameState(state);
+    scrollToBottom();
   }
 
   // SHUT DOWN -- the only way out of the computer's own menu. If the
@@ -11498,6 +11912,15 @@
     fuseRepair: 'audio/nav_station/fuse_repair.mp3',
     engineRepair: 'audio/nav_station/engine_repair.mp3',
     putAwayTools: 'audio/nav_station/put_away_tools.mp3',
+    // PONG -- see the PONG section below (search "PONG"). Same domain/
+    // element-pool as every sound above (playNavStationOneShot), not a
+    // separate audio system of its own.
+    pongHit: 'audio/nav_station/pong_hit.mp3',
+    pongWall: 'audio/nav_station/pong_wall.mp3',
+    pongPlayerScore: 'audio/nav_station/pong_player_score.mp3',
+    pongComputerScore: 'audio/nav_station/pong_computer_score.mp3',
+    pongPlayerWins: 'audio/nav_station/pong_player_wins.mp3',
+    pongComputerWins: 'audio/nav_station/pong_computer_wins.mp3',
   };
   var NAV_STATION_AUDIO_VOLUME = {
     computerStartup: 0.5,
@@ -11508,6 +11931,12 @@
     fuseRepair: 0.5,
     engineRepair: 0.5,
     putAwayTools: 0.5,
+    pongHit: 0.5,
+    pongWall: 0.5,
+    pongPlayerScore: 0.5,
+    pongComputerScore: 0.5,
+    pongPlayerWins: 0.5,
+    pongComputerWins: 0.5,
   };
   var NAV_STATION_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -13902,9 +14331,22 @@
   // is therefore safe: it can't discard an actual pending choice, and
   // it simply lets the normal contextual menu (wherever the player
   // physically is) take back over on the very next render.
+  // A reload mid-Pong-match has nothing real to resume: pongGame is
+  // deliberately never part of state.* (see PONG's own top comment --
+  // every open is meant to be a fresh match), so there is no ball
+  // position or score to restore, and #pong-overlay itself starts
+  // hidden again on a fresh page load regardless of what
+  // pendingChoice says. Recovering to the computer's own home screen
+  // (which IS fully reconstructible, from state.boat.computerOn alone)
+  // is the correct landing spot -- not the empty-options fallback
+  // above, which would drop the player at a bare room menu instead of
+  // back into the computer they were actually inside.
   function migrateStalePendingChoiceIfNeeded(state) {
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'pong') {
+      cmdShipsComputerMenu(state);
     }
   }
 
@@ -13978,6 +14420,22 @@
     scrollToBottom();
   });
 
+  // PONG's RETURN -- permanently wired once, same reasoning as
+  // vesselLogBackBtn just above. Mid-match: closes the game outright
+  // (via pongReturnToHome -> closePong), never counting anything as a
+  // win/loss. During the brief YOU WIN/YOU LOSE ending sequence
+  // (pongGame.phase === 'ended'), disabled entirely rather than
+  // allowed to cut it short -- the task's own preferred choice -- so
+  // the full win/lose presentation and its audio always finish
+  // exactly the way pongEndMatch's own onEnded callback expects to run
+  // uninterrupted.
+  pongReturnBtn.addEventListener('click', function () {
+    if (!GAME || uiBusy) return;
+    if (pongGame && pongGame.phase === 'ended') return;
+    playNavStationOneShot('mouse');
+    pongReturnToHome(GAME);
+  });
+
   // SHIP'S COMPUTER HOME's five app icons -- permanently wired once,
   // same reasoning as shipsPlanBackBtn/vesselLogBackBtn above (the
   // overlay covers where #options would be, so these live outside the
@@ -13986,10 +14444,10 @@
   // listeners. The computer NEVER leaves this screen for WEATHER MAP/
   // CHART (unchanged external-link behavior, moved here from the old
   // #options text buttons it used to be -- see the shared logic
-  // below) or for JOURNAL/PONG (click sound only, no placeholder, no
-  // alert, nothing else, per the task that added these two); VESSEL
-  // LOG is the one real navigation, to its own full-viewport overlay,
-  // exactly like clicking it used to work as a text option.
+  // below) or for JOURNAL (click sound only, no placeholder, no alert,
+  // nothing else). VESSEL LOG and PONG are the two real navigations,
+  // each to its own full-viewport overlay, exactly like clicking
+  // VESSEL LOG used to work as a text option.
   Array.prototype.forEach.call(document.querySelectorAll('.computer-icon-hit'), function (btn) {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy) return;
@@ -14033,8 +14491,16 @@
         scrollToBottom();
         return;
       }
-      // JOURNAL / PONG -- click sound only, for now. No placeholder, no
-      // alert, no navigation: stay right here on the home screen.
+      if (app === 'pong') {
+        clearTempView(); // closes THIS overlay; cmdPong (which plays its own mouse click) opens its own right after
+        cmdPong(GAME);
+        renderOptions(GAME);
+        saveGameState(GAME);
+        scrollToBottom();
+        return;
+      }
+      // JOURNAL -- click sound only, for now. No placeholder, no alert,
+      // no navigation: stay right here on the home screen.
       playNavStationOneShot('mouse');
     });
   });
