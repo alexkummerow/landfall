@@ -2616,17 +2616,33 @@
   }
 
 
+  // Angle between the boat's heading and the direction the wind comes
+  // FROM. 0deg = sailing straight into the wind ("in irons" -- next to
+  // no drive). 90deg = wind on the beam (the fastest angle for most
+  // boats). 180deg = sailing dead downwind (comfortable, but not the
+  // fastest angle). A smooth, continuous curve through representative
+  // values for each named point of sail (see pointOfSailLabel's own
+  // 35/50/80/100/150 boundaries, unchanged and untouched by this --
+  // those stay exactly what the HELM display's POINT OF SAIL label
+  // reads; this only governs how much of the base sailing-speed curve
+  // actually gets through at a given angle) rather than a step
+  // function jumping abruptly at each of those boundaries.
+  var POINT_OF_SAIL_CURVE = [
+    [0, 0.0],      // dead into the wind -- no drive at all
+    [20, 0.05],    // deep in LUFFING
+    [35, 0.15],    // LUFFING/CLOSE HAULED boundary
+    [42, 0.55],    // mid CLOSE HAULED -- reduced performance
+    [50, 0.75],    // CLOSE HAULED/CLOSE REACH boundary
+    [65, 0.93],    // mid CLOSE REACH -- good performance
+    [80, 0.99],    // CLOSE REACH/BEAM REACH boundary
+    [90, 1.0],     // beam reach -- the strongest angle
+    [100, 0.97],   // BEAM REACH/BROAD REACH boundary
+    [125, 0.88],   // mid BROAD REACH -- slightly reduced from beam
+    [150, 0.8],    // BROAD REACH/RUNNING boundary
+    [180, 0.72],   // dead run -- somewhat slower than a beam reach
+  ];
   function pointOfSailFactor(headingDeg, windFromDeg) {
-    // Angle between the boat's heading and the direction the wind comes FROM.
-    // 0deg = sailing straight into the wind ("in irons" — very slow)
-    // 90deg = wind on the beam (an efficient, fast angle for most boats)
-    // 180deg = sailing dead downwind (comfortable, but not the fastest angle)
-    var diff = angleDiff(headingDeg, windFromDeg);
-    if (diff < 35) return 0.05;
-    if (diff < 50) return 0.55;
-    if (diff < 100) return 1.0;
-    if (diff < 150) return 0.85;
-    return 0.65;
+    return lerpTable(angleDiff(headingDeg, windFromDeg), POINT_OF_SAIL_CURVE);
   }
 
   // Player-facing point-of-sail LABEL for the HELM display -- reads the
@@ -2673,12 +2689,64 @@
     };
   }
 
+  // Piecewise-linear interpolation through a sorted [x, y] control-point
+  // table -- shared by the sailing-speed curve and the point-of-sail
+  // factor below, so both can express a smooth, continuous shape as
+  // simple data rather than a hand-tuned formula or step function.
+  // Clamps to the table's own first/last y outside its x range.
+  function lerpTable(x, points) {
+    if (x <= points[0][0]) return points[0][1];
+    var last = points.length - 1;
+    if (x >= points[last][0]) return points[last][1];
+    for (var i = 0; i < last; i++) {
+      var a = points[i], b = points[i + 1];
+      if (x >= a[0] && x <= b[0]) {
+        var t = (x - a[0]) / (b[0] - a[0]);
+        return a[1] + (b[1] - a[1]) * t;
+      }
+    }
+    return points[last][1]; // unreachable given the bounds checks above -- defensive only
+  }
+
+  // BASE SAILING-SPEED CURVE -- true wind speed (kt) -> speed through
+  // water (kt) for a properly trimmed, undamaged boat at an efficient
+  // (beam-reach-equivalent) angle, i.e. with pointOfSailFactor and
+  // sailConfigFactor both at/near 1.0 -- those two are what then scale
+  // this DOWN for a worse angle or a reduced sail plan; this curve is
+  // the ceiling they scale from.
+  // Modeled on Solace -- a ~35ft, 1970s cruising sailboat -- rather
+  // than a light modern hull: a heavy displacement boat needs real
+  // wind before it truly gets moving (the steep early climb from 0),
+  // picks up well through the middle of the range, then flattens
+  // toward hull speed (HULL_SPEED_KT=7.3) as more wind mostly means
+  // more heel and weather helm rather than more speed. Every point
+  // here sits at (or very near) the middle of Landfall's own target
+  // STW-vs-true-wind table, so the interpolated curve tracks that
+  // table closely at every explicitly specified wind speed, not just
+  // near these knots.
+  var SAIL_SPEED_CURVE = [
+    [0, 0],
+    [1, 0.35],
+    [2, 0.75],
+    [3, 1.1],
+    [4, 1.5],
+    [5, 2.1],
+    [6, 2.6],
+    [7, 3.05],
+    [8, 3.5],
+    [9, 3.9],
+    [10, 4.3],
+    [12, 5.0],
+    [15, 5.6],
+    [18, 5.95],
+    [20, 6.15],
+    [25, 6.55],
+    [30, 6.8],
+    [40, 6.95],
+    [60, 7.0], // effectively flat from here -- a heavy displacement hull simply doesn't go faster no matter how hard it's blowing; sailConfigFactor's own overpowered penalty (full sail past 25kt) is what actually costs speed in a real gale, not this curve
+  ];
   function baseSpeedForWind(speedKt) {
-    if (speedKt < 6) return 2.5;
-    if (speedKt < 12) return 4.5;
-    if (speedKt < 20) return 6.3;
-    if (speedKt < 28) return 7.2;
-    return 6.0; // past this, more wind mostly means more danger, not more speed
+    return lerpTable(speedKt, SAIL_SPEED_CURVE);
   }
 
   function sailConfigFactor(sailConfig, windSpeed) {
@@ -2691,12 +2759,16 @@
   /* --------------------------------------------------------------
      PROPULSION
 
-     ONE authoritative speed calculation, built from three independent
-     contributors — sails, engine, and a small baseline drift/current —
-     that are always computed, then combined. Nothing else in the
-     simulation is allowed to invent a second speed number: simTick(),
-     the ENGINE menu, and the live POSITION readout all call
-     computeBoatSpeed() below.
+     ONE authoritative SPEED THROUGH WATER calculation, built from two
+     independent contributors — sails and engine — that are always
+     computed, then combined. This is deliberately NOT speed over
+     ground: current plays no part here at all (see computeDriftSpeed's
+     own updated notes, and combineWithCurrent, which every real caller
+     of computeBoatSpeed feeds this value into to get the actual SOG/
+     course over ground — current affects THAT step, never this one).
+     Nothing else in the simulation is allowed to invent a second speed
+     number: simTick(), the ENGINE menu, and the live POSITION readout
+     all call computeBoatSpeed() below.
      -------------------------------------------------------------- */
   var BASE_ENGINE_SPEED_KT = 5.5;    // this size of auxiliary diesel, in calm conditions — see "approximately 5-6 knots"
   var HULL_SPEED_KT = 7.3;           // ~1.34*sqrt(waterline) for a boat this size — where a displacement hull really starts fighting its own wake
@@ -3365,7 +3437,7 @@
     state.water.gallons = Math.max(0, state.water.gallons - amountGal);
   }
 
-  var DRIFT_BASE_KT = 0.2;           // ambient current/windage on the hull — present even with sails furled and the engine off
+  var DRIFT_BASE_KT = 0.2;           // ambient current/windage on the hull — used for an abandoned life raft's own drift (see computeDriftSpeed); present even with sails furled and the engine off
   var DRIFT_WIND_FACTOR = 0.025;     // more wind pushes an unpowered hull a little faster over the ground
   var DRIFT_MAX_KT = 1.0;            // this is NOT propulsion — keep it small and capped
 
@@ -3395,11 +3467,14 @@
   }
 
   function computeDriftSpeed(state) {
-    // A small, ever-present contribution from current and wind acting on
-    // the hull itself, independent of sail or engine — this is what keeps
-    // a furled, unpowered boat from reading a flatly impossible 0.0kt.
-    // Not propulsion: it never meaningfully adds to real sailing or
-    // motoring speed, only fills in when nothing else is pushing.
+    // Used ONLY for an abandoned life raft now (see computeBoatSpeed's
+    // inLifeRaft branch) -- a small, wind-shaped stand-in for its
+    // motion since it has no sail/engine/heading of its own to speak
+    // of. No longer added to normal sailing/motoring speed through the
+    // water: a boat with nothing actually propelling it (no wind on
+    // the sails, engine off) now correctly reads 0 STW, exactly as a
+    // real becalmed boat would -- current's own separate effect still
+    // shows up in SOG, through combineWithCurrent, same as always.
     return clamp(DRIFT_BASE_KT + state.weather.windSpeed * DRIFT_WIND_FACTOR, 0.1, DRIFT_MAX_KT);
   }
 
@@ -3426,7 +3501,10 @@
     if (state.crew.inLifeRaft) {
       // Nothing to sail or motor anymore — the raft only goes where the
       // current and wind take it, same drift term as a furled, engine-off
-      // boat, and nothing more.
+      // boat, and nothing more. (This is the one case where this function
+      // is NOT pure speed-through-water — an abandoned, unmanned raft has
+      // no "through the water" heading of its own to speak of, so the
+      // drift baseline stands in for its entire motion.)
       return +computeDriftSpeed(state).toFixed(2);
     }
     var sailSpeed = computeSailSpeed(state, heading);
@@ -3456,12 +3534,16 @@
       var headroom = clamp(1 - primary / HULL_SPEED_KT, SECONDARY_ASSIST_FLOOR, 1);
       propelled = primary + secondary * headroom;
     }
-    // Drift/current is a small, separate baseline that's always present —
-    // it's what a furled, engine-off boat has left (pure DRIFTING), and it
-    // still nudges the total a little even under sail or power, same as a
-    // real current would.
-    var total = propelled + computeDriftSpeed(state);
-    return +Math.min(total, MAX_REALISTIC_SPEED_KT).toFixed(2);
+    // This IS speed through the water now — no drift/current term mixed
+    // in (that would double-count current: combineWithCurrent, called by
+    // every actual caller of this function, already applies the real
+    // current vector on TOP of this to get speed over ground; adding a
+    // second, wind-shaped stand-in for it here too was the old bug that
+    // kept a becalmed boat reading well over a knot of "speed" it didn't
+    // actually have through the water — see the sailing-speed curve's own
+    // notes for why 0 true wind now genuinely means 0 STW, sail or power
+    // alike, the moment nothing is actually propelling the boat).
+    return +Math.min(propelled, MAX_REALISTIC_SPEED_KT).toFixed(2);
 
   }
 
