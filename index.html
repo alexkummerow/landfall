@@ -9236,9 +9236,10 @@
   var PONG_BASE_SPEED = 1300; // px/sec (logical) at serve -- moderately fast, not a sluggish opening rally
   var PONG_SPEED_INCREASE = 1.06; // per paddle hit
   var PONG_MAX_SPEED = 2600; // caps the rally so it excites without becoming unplayable
-  var PONG_AI_MAX_SPEED = 1100; // deliberately below what's needed to track a fast, sharply-angled ball at full rally speed -- this, not perfect tracking, is what keeps it beatable (moderately faster than before -- see this file's own AI-tuning history for the prior 950)
-  var PONG_AI_RETARGET_MIN = 0.06, PONG_AI_RETARGET_RANGE = 0.10; // seconds between AI re-evaluations (0.06-0.16, reaction lag) -- shorter than before, so it notices a new shot sooner
-  var PONG_AI_ERROR_RANGE = 100; // +-50 units of random imprecision layered onto the AI's own target -- smaller than before, so it aims noticeably closer to the truth
+  var PONG_AI_MAX_SPEED = 1000; // deliberately below what's needed to track a fast, sharply-angled ball at full rally speed -- this, not perfect tracking, is what keeps it beatable (see this file's own AI-tuning history: 950 -> 1100 -> back down to this, as the AI grew a full wall-bounce-aware prediction and had to be pulled back to compensate)
+  var PONG_AI_RETARGET_MIN = 0.10, PONG_AI_RETARGET_RANGE = 0.14; // seconds between AI re-evaluations (0.10-0.24, reaction lag)
+  var PONG_AI_ERROR_RANGE = 180; // +-90 units of random imprecision layered onto the AI's own target
+  var PONG_AI_PREDICTION_WEIGHT = 0.75; // how much of the anticipated arrival X (vs. the ball's own CURRENT X) the AI's target is built from -- see this constant's own call site for why blending, not using the prediction outright, is what keeps the prediction from reading as exact future knowledge
   var PONG_WIN_SCORE = 5;
   var PONG_SERVE_DELAY = 0.7; // seconds the ball sits frozen at center before each serve, for readability
 
@@ -9317,22 +9318,25 @@
     // AI -- re-targets periodically rather than every frame (a simple
     // stand-in for reaction lag), then chases that target at a capped
     // speed. While the ball is heading toward the computer's own goal,
-    // the target is an ANTICIPATED arrival X -- where the ball will
-    // actually cross the paddle's own Y line, projected forward from
-    // its current position/velocity and "folded" off the side walls
-    // the same number of times the real ball would bounce off them
-    // (a straight-line reflection projection, exact for the physics
-    // here since the ball never curves in flight) -- rather than just
-    // chasing wherever the ball happens to be sitting RIGHT NOW. While
-    // the ball is heading away, there's no arrival to anticipate yet,
-    // so it just stays loosely positioned on the ball's current X.
-    // Beatability still comes from three places even with this
-    // upgrade: the random error term below (smaller than before, but
-    // real), the retarget delay (shorter, but real -- most exposed
-    // right as the ball changes direction off the player's paddle),
-    // and, above all, PONG_AI_MAX_SPEED itself -- a sharp, fast rally
-    // shot can still demand more horizontal speed than the AI has,
-    // accurate prediction or not.
+    // the AI still projects forward where the ball will actually cross
+    // the paddle's own Y line, "folded" off the side walls the same
+    // number of times the real ball would bounce off them (a straight-
+    // line reflection projection, exact for the physics here since the
+    // ball never curves in flight) -- it isn't blind to where the ball
+    // is headed. But that projection is treated as a HUNCH, not exact
+    // future knowledge: the actual target blends it with the ball's
+    // own CURRENT X (PONG_AI_PREDICTION_WEIGHT toward the projection,
+    // the rest toward the ball's current position), so the AI reads as
+    // anticipating the shot rather than knowing its landing point down
+    // to the pixel the instant it leaves the player's paddle. While the
+    // ball is heading away, there's no arrival to anticipate yet, so it
+    // just stays loosely positioned on the ball's current X.
+    // Beatability comes from four places together: the blend above
+    // (never the raw prediction), the random error term below, the
+    // retarget delay (most exposed right as the ball changes direction
+    // off the player's paddle), and PONG_AI_MAX_SPEED itself -- a
+    // sharp, fast rally shot can still demand more horizontal speed
+    // than the AI has, accurate projection or not.
     g.aiRetargetTimer -= dt;
     if (g.aiRetargetTimer <= 0) {
       g.aiRetargetTimer = PONG_AI_RETARGET_MIN + Math.random() * PONG_AI_RETARGET_RANGE;
@@ -9342,7 +9346,8 @@
         var rawX = g.ballX + g.ballVX * timeToArrive;
         var period = 2 * PONG_W;
         var folded = ((rawX % period) + period) % period; // normalize into [0, period)
-        targetX = folded <= PONG_W ? folded : period - folded; // reflect back in for every wall bounce along the way
+        var predictedX = folded <= PONG_W ? folded : period - folded; // reflect back in for every wall bounce along the way
+        targetX = g.ballX * (1 - PONG_AI_PREDICTION_WEIGHT) + predictedX * PONG_AI_PREDICTION_WEIGHT;
       } else {
         targetX = g.ballX;
       }
