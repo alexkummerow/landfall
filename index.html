@@ -985,7 +985,6 @@
           lon: null,
           windSpeedKt: null,
           windDirectionDeg: null,
-          gustsKt: null,
           temperatureF: null,
           condition: null,
           forecastLine: null,    // pre-summarized 1-2 line FORECAST text, or null to fall back to the existing simulated forecast lines
@@ -2356,7 +2355,6 @@
     return {
       windSpeedKt: cur.wind_speed_10m,
       windDirectionDeg: typeof cur.wind_direction_10m === 'number' ? cur.wind_direction_10m : null,
-      gustsKt: typeof cur.wind_gusts_10m === 'number' ? cur.wind_gusts_10m : null,
       temperatureF: cur.temperature_2m,
       condition: wmoCodeToCondition(cur.weather_code, cur.wind_speed_10m),
       forecastLine: summarizeForecast(raw.hourly, cur.time),
@@ -2385,7 +2383,6 @@
       startIdx: startIdx,
       windSpeedKt: hourly.wind_speed_10m,
       windDirectionDeg: hourly.wind_direction_10m || null,
-      gustsKt: hourly.wind_gusts_10m || null,
       temperatureF: hourly.temperature_2m || null,
       condition: hourly.weather_code
         ? hourly.weather_code.map(function (code, i) { return wmoCodeToCondition(code, hourly.wind_speed_10m[i]); })
@@ -2414,7 +2411,6 @@
     return {
       windSpeedKt: windSpeedKt,
       windDirectionDeg: hourly.windDirectionDeg && typeof hourly.windDirectionDeg[idx] === 'number' ? hourly.windDirectionDeg[idx] : null,
-      gustsKt: hourly.gustsKt && typeof hourly.gustsKt[idx] === 'number' ? hourly.gustsKt[idx] : null,
       temperatureF: hourly.temperatureF && typeof hourly.temperatureF[idx] === 'number' ? hourly.temperatureF[idx] : null,
       condition: hourly.condition ? hourly.condition[idx] : null,
     };
@@ -2429,19 +2425,15 @@
   // section needs real hourly data out to +72 hours, and depending what
   // hour "now" falls on within day 1, that can reach into a 4th
   // calendar day -- 2 was enough for the old ~12-hour forecastLine
-  // summary alone, not for this. wind_gusts_10m added to both current
-  // and hourly (current conditions and every forecast period both show
-  // GUSTS now), wind_direction_10m/temperature_2m added to hourly
-  // (needed for the forecast periods' own WIND/TEMPERATURE, mirroring
-  // what current already provided) -- see this section's own task
-  // notes for why these three, and no others (e.g. pressure), were
-  // added rather than left as a display-only derived guess.
+  // summary alone, not for this. wind_direction_10m/temperature_2m
+  // added to hourly (needed for the forecast periods' own WIND/
+  // TEMPERATURE, mirroring what current already provided).
   async function fetchRealWeather(lat, lon) {
     var url = 'https://api.open-meteo.com/v1/forecast'
       + '?latitude=' + encodeURIComponent(lat.toFixed(2))
       + '&longitude=' + encodeURIComponent(lon.toFixed(2))
-      + '&current=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code'
-      + '&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,temperature_2m,weather_code,precipitation_probability'
+      + '&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code'
+      + '&hourly=wind_speed_10m,wind_direction_10m,temperature_2m,weather_code,precipitation_probability'
       + '&forecast_days=4&wind_speed_unit=kn&temperature_unit=fahrenheit&timezone=UTC';
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
@@ -2487,7 +2479,6 @@
         lat: lat, lon: lon,
         windSpeedKt: result.windSpeedKt,
         windDirectionDeg: result.windDirectionDeg,
-        gustsKt: result.gustsKt,
         temperatureF: result.temperatureF,
         condition: result.condition,
         forecastLine: result.forecastLine,
@@ -8415,8 +8406,8 @@
      sailing simulation's own blending (see blendTowardRealAnchor) --
      this reads that cache, never a second, parallel weather
      implementation, and never state.weather's own simulated
-     windSpeed/windDirection/condition/trend directly. GUSTS,
-     WEATHER, and TEMPERATURE (current AND forecast) are real Open-
+     windSpeed/windDirection/condition/trend directly. WIND, WEATHER,
+     and TEMPERATURE (current AND forecast) are real Open-
      Meteo fields (see fetchRealWeather's own current=/hourly=
      parameters); SEAS/SWELL/VISIBILITY/PRESSURE are gone entirely
      rather than kept as simulated or invented stand-ins, since
@@ -8433,7 +8424,7 @@
   var MARINE_FORECAST_HOURS = [6, 12, 24, 48, 72];
 
   // One "LABEL value" row, exactly like VESSEL LOG's own .vessel-log-
-  // stat rows -- shared by WIND/GUSTS/WEATHER/TEMPERATURE (current
+  // stat rows -- shared by WIND/WEATHER/TEMPERATURE (current
   // conditions and every forecast period alike, via
   // appendMarineWeatherRealStats below), which keep this grid
   // treatment deliberately. UPDATED/POSITION moved off it to plain
@@ -8455,7 +8446,7 @@
   // rows across the game use (see .data-row's own CSS notes on why
   // those moved away from the shared grid). Used for UPDATED/POSITION
   // specifically (renderMarineWeatherBody below): unlike this screen's
-  // WIND/GUSTS/WEATHER/TEMPERATURE readings, which stay on the
+  // WIND/WEATHER/TEMPERATURE readings, which stay on the
   // vessel-log-stat grid deliberately, UPDATED/POSITION read as plain
   // text. text is the full "LABEL: value" string already assembled by
   // the caller, exactly like printLine's own callers build their own
@@ -8482,9 +8473,9 @@
     container.appendChild(p);
   }
 
-  // WIND/GUSTS/WEATHER/TEMPERATURE -- the four real-observation fields
+  // WIND/WEATHER/TEMPERATURE -- the three real-observation fields
   // CURRENT CONDITIONS and every FORECAST period alike show, from a
-  // {windDirectionDeg, windSpeedKt, gustsKt, temperatureF, condition}
+  // {windDirectionDeg, windSpeedKt, temperatureF, condition}
   // reading (or null -- see the two call sites in renderMarineWeatherBody
   // for where each of those actually comes from). data itself being
   // null means no real reading exists for this point AT ALL (nothing
@@ -8505,7 +8496,6 @@
     }
     var windText = (data.windDirectionDeg != null ? compassPoint(data.windDirectionDeg) + ' ' : '') + Math.round(data.windSpeedKt) + ' KT';
     appendMarineWeatherStat(container, 'WIND', windText);
-    appendMarineWeatherStat(container, 'GUSTS', data.gustsKt != null ? Math.round(data.gustsKt) + ' KT' : 'NO DATA');
     appendMarineWeatherStat(container, 'WEATHER', data.condition != null ? data.condition.toUpperCase() : 'NO DATA');
     appendMarineWeatherStat(container, 'TEMPERATURE', data.temperatureF != null ? Math.round(data.temperatureF) + '\u00B0F' : 'NO DATA');
   }
@@ -8563,7 +8553,6 @@
     var currentData = realWx.fetchedRealMs != null ? {
       windDirectionDeg: realWx.windDirectionDeg,
       windSpeedKt: realWx.windSpeedKt,
-      gustsKt: realWx.gustsKt,
       temperatureF: realWx.temperatureF,
       condition: realWx.condition,
     } : null;
@@ -15361,15 +15350,14 @@
     if (!w.realWx) {
       w.realWx = {
         fetchedRealMs: null, lat: null, lon: null,
-        windSpeedKt: null, windDirectionDeg: null, gustsKt: null, temperatureF: null,
+        windSpeedKt: null, windDirectionDeg: null, temperatureF: null,
         condition: null, forecastLine: null, hourly: null,
       };
     }
-    // gustsKt/hourly are newer than realWx itself -- a save with realWx
-    // already present (from before these existed) just gets them as
-    // null, identical to "no real data for this yet" until the next
-    // successful fetch populates them for real.
-    if (w.realWx.gustsKt === undefined) w.realWx.gustsKt = null;
+    // hourly is newer than realWx itself -- a save with realWx already
+    // present (from before it existed) just gets it as null, identical
+    // to "no real data for this yet" until the next successful fetch
+    // populates it for real.
     if (w.realWx.hourly === undefined) w.realWx.hourly = null;
     if (!w.oceanCurrent) {
       w.oceanCurrent = { fetchedRealMs: null, lat: null, lon: null, speedKt: null, directionDeg: null, northSample: null, southSample: null };
