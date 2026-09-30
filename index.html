@@ -161,31 +161,6 @@
     text-shadow: var(--output-glow);
   }
 
-  /* NAV STATION only. #output keeps its ordinary flex:1 above --
-     unchanged -- so it still fully absorbs whatever vertical space is
-     left over after #controls claims its own, and #crt's children
-     always sum to exactly 100dvh with nothing unclaimed sitting below
-     #controls (the excess-scrollable-space bug a shrink-to-content
-     version of this fix caused: freeing that space from #output just
-     left it unclaimed at the bottom of #crt instead). What actually
-     needed fixing was where the CONTENT sits within that unchanged
-     box: normally it's top-aligned, so on a roomy viewport the unused
-     room shows up as a gap between this screen's last status line and
-     the first electrical control below it. display:flex here turns
-     #output into a flex column so the #temp-view rule right below can
-     pin this screen's own content -- and only that content, any
-     earlier persistent log entries are untouched -- flush against
-     #output's own bottom edge instead, exactly where #controls
-     begins, using ordinary auto-margin space distribution rather than
-     any measured/inserted height. */
-  #output.nav-station-bottom-pin {
-    display: flex;
-    flex-direction: column;
-  }
-  #output.nav-station-bottom-pin #temp-view {
-    margin-top: auto;
-  }
-
   /* SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
      markup notes above #ships-plan-overlay, and cmdShipsPlan below).
      position:fixed + inset:0 covers the entire viewport regardless of
@@ -196,9 +171,8 @@
      toward 0 on any save with real playthrough history -- see prior
      notes on that bug). flex-direction:column with the image area as
      flex:1 (all remaining height) and the back area sized to its own
-     content is the same shape as #output.nav-station-bottom-pin's own
-     technique elsewhere in this file, just applied to a dedicated
-     full-screen container instead of #output.
+     content keeps the visible image full-size regardless of that log,
+     applied to a dedicated full-screen container instead of #output.
      z-index:100 -- unused everywhere else in this file -- simply
      needs to clear #crt's own stacking (including #scanlines' CRT
      flicker), which it isn't given an explicit value of its own. */
@@ -7151,10 +7125,6 @@
 
   function clearTempView() {
     tempViewEl.innerHTML = '';
-    // NAV STATION's own #output positioning (see its CSS notes and
-    // cmdNavStation) -- reset here, at the start of every screen
-    // transition, so it never lingers onto any other screen.
-    outputEl.classList.remove('nav-station-bottom-pin');
     // SHIP'S PLAN's full-viewport overlay (see its CSS notes and
     // cmdShipsPlan) -- same reasoning: closed here, at the start of
     // every transition, so leaving it (by any path) always cleans up,
@@ -7614,8 +7584,27 @@
      ============================================================ */
   // Space-padded columns, not inventoryLine's dot-fill — STATUS and
   // ELECTRICAL PANEL read as a short instrument panel, not a supply list.
+  // Used ABOVE deck only (STATUS itself, and the REPAIR sub-screen it
+  // opens) -- see belowDeckStatusLine just below for the separate,
+  // dedicated formatter the six Below Deck screens use instead. Two
+  // functions, not one shared one, specifically so a Below Deck
+  // typography pass can never silently reach into and change how
+  // STATUS/REPAIR (out of that pass's own stated scope) look.
   function statusLine(label, value) {
     return label + ' '.repeat(Math.max(2, 12 - label.length)) + value;
+  }
+
+  // Below Deck's own status-row format -- LABEL: VALUE, used by every
+  // player-condition or room-condition readout across the six Below
+  // Deck screens (the main menu's HUNGER/THIRST/ENERGY/MORALE, HEAD's
+  // HYGIENE, CABIN's COMFORT, NAV STATION's CABIN TEMP/CABIN/BATTERY/
+  // SOLAR CHARGING) so they all share one exact typographic convention,
+  // regardless of which room they happen to live in. Deliberately
+  // separate from statusLine (used above deck only, by STATUS/REPAIR)
+  // -- see that function's own comment for why keeping them apart
+  // matters here.
+  function belowDeckStatusLine(label, value) {
+    return label + ': ' + value;
   }
 
   // The DISPLAYED/perceived condition — COLD/COMFORTABLE/HOT. Distinct
@@ -8685,7 +8674,7 @@
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
     printBlank();
-    printLine(statusLine('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]));
+    printLine(belowDeckStatusLine('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]));
     state.pendingChoice = {
       id: 'head-menu',
       options: [
@@ -8923,7 +8912,7 @@
   // temperature calculation.
   function cmdCabin(state) {
     printBlank();
-    printLine(statusLine('COMFORT', comfortLabel(state)));
+    printLine(belowDeckStatusLine('COMFORT', comfortLabel(state)));
     var options = [
       { label: 'SLEEP', action: 'cmd:sleep' },
       { label: 'CHANGE', action: 'cmd:clothing' },
@@ -8950,10 +8939,10 @@
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    printLine(statusLine('CABIN TEMP', cabinTempDisplay));
-    printLine(statusLine('CABIN', cabinStatusWord(state)));
+    printLine(belowDeckStatusLine('CABIN TEMP', cabinTempDisplay));
+    printLine(belowDeckStatusLine('CABIN', cabinStatusWord(state)));
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
-    printLine(statusLine('BATTERY', batteryLabel));
+    printLine(belowDeckStatusLine('BATTERY', batteryLabel));
     // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
     // threshold span (0% included): the separate all-caps NO POWER
     // wording this used to show at exactly 0% was redundant next to the
@@ -8970,7 +8959,7 @@
     if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
     }
-    printLine(statusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
+    printLine(belowDeckStatusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
@@ -9023,18 +9012,12 @@
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
-
-    // Pins this screen's own content (echo through SOLAR/the DAMAGED
-    // note) flush against #output's own bottom edge -- see the CSS
-    // notes on #output.nav-station-bottom-pin for why, and for why
-    // #output's own size is deliberately left alone here rather than
-    // shrunk to fit. Whenever the full content (this plus any earlier
-    // persistent log history) already exceeds #output's height, the
-    // normal scrollToBottom() call in runCommand's own generic tail
-    // (which always runs right after this function returns) already
-    // shows the latest lines flush at the bottom with the echo
-    // scrolled above it -- nothing extra to do here for that case.
-    outputEl.classList.add('nav-station-bottom-pin');
+    // This screen's own content (echo through SOLAR/the DAMAGED note)
+    // top-aligns in #output exactly like every other Below Deck room
+    // now -- a bottom-pinning treatment unique to this one screen was
+    // tried in an earlier revision and then deliberately removed, per
+    // the Below Deck typography pass's own "make Nav Station stop
+    // feeling like it has its own layout treatment" goal.
   }
 
   // Darkness gate FIRST, before either power check -- per the task
@@ -13550,10 +13533,10 @@
       var c = state.crew;
       return groupedOptions([
         [
-          { status: true, text: statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]) },
-          { status: true, text: statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]) },
-          { status: true, text: statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]) },
-          { status: true, text: statusLine('MORALE', moraleLevel(c.morale)) },
+          { status: true, text: belowDeckStatusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]) },
+          { status: true, text: belowDeckStatusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]) },
+          { status: true, text: belowDeckStatusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]) },
+          { status: true, text: belowDeckStatusLine('MORALE', moraleLevel(c.morale)) },
         ],
         [
           { label: 'CABIN', action: 'cmd:cabin' },
@@ -13736,6 +13719,44 @@
     document.documentElement.style.setProperty('--output-glow', 'none');
   }
 
+  // Below Deck's own half of the top-left header (rule 1 of the Below
+  // Deck typography pass): S/V SOLACE -- <LOCATION>, with <LOCATION>
+  // reflecting whichever of the six Below Deck screens is actually
+  // showing right now, in place of the generic UNDERWAY that otherwise
+  // sits there the entire rest of the voyage. Deliberately keyed off
+  // pendingChoice.id (each room's own menu id, set by cmdCabin/cmdHead/
+  // cmdSaloon/cmdGalley/cmdNavStation) rather than a duplicate of the
+  // location logic elsewhere -- the five explicit id checks below are
+  // this pass's own full, exact scope (the six named screens in the
+  // task this implements): any OTHER pendingChoice while still below
+  // (an EAT/DRINK/CLOTHING sub-screen reached from one of those rooms,
+  // for instance) falls back to the general BELOW DECK label rather
+  // than guessing which room it nested under, since sub-screens were
+  // never part of this rule's own stated scope. Above deck is
+  // untouched -- UNDERWAY there is exactly what setVesselLine already
+  // set at departure/resume, restored here every render specifically
+  // so leaving a Below Deck room doesn't leave its name stuck in the
+  // header. Called from renderOptions, which already runs on every
+  // relevant state change (including startLiveLoop's own periodic
+  // ticks) -- setVesselLine is a plain textContent set, so re-running
+  // it with an unchanged value on every one of those is harmless,
+  // exactly like updateNavStrip just above it.
+  var BELOW_DECK_ROOM_LABELS = {
+    'cabin-menu': 'CABIN',
+    'head-menu': 'HEAD',
+    'saloon-menu': 'SALOON',
+    'galley-menu': 'GALLEY',
+    'nav-station-menu': 'NAV STATION',
+  };
+  function updateVesselLineForLocation(state) {
+    if (state.crew.location !== 'below') {
+      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+      return;
+    }
+    var roomLabel = (state.pendingChoice && BELOW_DECK_ROOM_LABELS[state.pendingChoice.id]) || 'BELOW DECK';
+    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + roomLabel);
+  }
+
   function renderOptions(state) {
     applyCabinLighting(state);
     applyNaturalLightDimming(state);
@@ -13744,6 +13765,7 @@
     updateRainAudioForState(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
+    updateVesselLineForLocation(state); // same reasoning -- see that function's own comment
     optionsEl.innerHTML = '';
     // NAV STATION only -- see the CSS notes on #options.nav-station-fit
     // for why. Toggled here, every render, the same way #controls'
