@@ -3974,22 +3974,27 @@
       // simulation waits for a final value.
       state.boat.speed = computeBoatSpeed(state, nav.heading);
 
-      // If the player is currently looking at the AT THE HELM screen,
-      // this updates its live HEADING/SPEED THROUGH WATER/SOG/POINT OF
-      // SAIL/VMG lines in place (see printHelmAtHelmHeader's auto-
-      // attach) — harmless no-op otherwise (headerRefs is only ever set
-      // while that screen is actually the one on display). All five are
-      // heading-dependent, recomputed together via the same
-      // computeHelmLiveFigures the initial render itself uses, so a
-      // mid-turn view is never stale or inconsistent with what's shown
-      // once the turn settles.
+      // If the player is currently looking at the HELM screen, this
+      // updates its live HEADING/SPEED THROUGH WATER/SPEED OVER GROUND/
+      // POINT OF SAIL/VELOCITY MADE GOOD lines in place (see
+      // printHelmAtHelmHeader's auto-attach) — harmless no-op otherwise
+      // (headerRefs is only ever set while that screen is actually the
+      // one on display). All five are heading-dependent, recomputed
+      // together via the same computeHelmLiveFigures the initial render
+      // itself uses, so a mid-turn view is never stale or inconsistent
+      // with what's shown once the turn settles. helmLine, not the
+      // shared inventoryLine -- see that function's own comment for why
+      // HELM needs its own wider dotted-leader column; every mid-turn
+      // update has to keep using the exact same formatter the initial
+      // render did, or these five rows would suddenly misalign against
+      // the rest of the (unchanged) screen the moment a turn begins.
       if (activeTurn.headerRefs) {
         var liveFigures = computeHelmLiveFigures(state, nav.heading);
-        activeTurn.headerRefs.headingEl.textContent = inventoryLine('HEADING', Math.round(nav.heading) + '\u00B0');
-        activeTurn.headerRefs.stwEl.textContent = inventoryLine('SPEED THROUGH WATER', liveFigures.stw.toFixed(1) + ' KT');
-        activeTurn.headerRefs.sogEl.textContent = inventoryLine('SOG', liveFigures.sog.toFixed(1) + ' KT');
-        activeTurn.headerRefs.pointOfSailEl.textContent = inventoryLine('POINT OF SAIL', liveFigures.pointOfSail);
-        activeTurn.headerRefs.vmgEl.textContent = inventoryLine('VMG', liveFigures.vmg.toFixed(1) + ' KT');
+        activeTurn.headerRefs.headingEl.textContent = helmLine('HEADING', Math.round(nav.heading) + '\u00B0');
+        activeTurn.headerRefs.stwEl.textContent = helmLine('SPEED THROUGH WATER', liveFigures.stw.toFixed(1) + ' KT');
+        activeTurn.headerRefs.sogEl.textContent = helmLine('SPEED OVER GROUND', liveFigures.sog.toFixed(1) + ' KT');
+        activeTurn.headerRefs.pointOfSailEl.textContent = helmLine('POINT OF SAIL', liveFigures.pointOfSail);
+        activeTurn.headerRefs.vmgEl.textContent = helmLine('VELOCITY MADE GOOD', liveFigures.vmg.toFixed(1) + ' KT');
       }
       updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
 
@@ -8415,18 +8420,19 @@
     state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { label: 'BACK', action: 'cancel' }] };
   }
 
-  // The persistent "AT THE HELM" instrumentation block -- the full set
-  // established for the unified Helm screen: HEADING/COURSE, SPEED
-  // THROUGH WATER/SOG, WIND FROM/WIND/POINT OF SAIL, BEARING TO
-  // NĀWILIWILI/VMG, SAIL TRIM/AUTOPILOT. Shared by cmdHelm (the normal,
-  // steering-OK case) and cmdChangeCourse (so it stays visible above
-  // the dial controls) -- both now always reach this with
-  // state.crew.atHelm true, since HELM itself means AT THE HELM. Only
-  // the heading-dependent figures (HEADING, SPEED THROUGH WATER, SOG,
-  // POINT OF SAIL, VMG -- all recomputed live via computeHelmLiveFigures)
-  // get their own DOM refs for beginCourseTurn's rotation timer to
-  // update in place each tick; COURSE, WIND FROM/WIND, BEARING, SAIL
-  // TRIM and AUTOPILOT don't change mid-turn so they're plain printLine
+  // The persistent "HELM" instrumentation block -- the full set
+  // established for the unified Helm screen: HEADING/COURSE/BEARING TO
+  // NĀWILIWILI/VELOCITY MADE GOOD, SPEED THROUGH WATER/SPEED OVER
+  // GROUND, WIND FROM/WIND SPEED/POINT OF SAIL, SAIL TRIM/AUTOPILOT.
+  // Shared by cmdHelm (the normal, steering-OK case) and cmdChangeCourse
+  // (so it stays visible above the dial controls) -- both now always
+  // reach this with state.crew.atHelm true, since HELM itself means AT
+  // THE HELM. Only the heading-dependent figures (HEADING, SPEED
+  // THROUGH WATER, SPEED OVER GROUND, POINT OF SAIL, VELOCITY MADE
+  // GOOD -- all recomputed live via computeHelmLiveFigures) get their
+  // own DOM refs for beginCourseTurn's rotation timer to update in
+  // place each tick; COURSE, BEARING, WIND FROM/WIND SPEED, SAIL TRIM
+  // and AUTOPILOT don't change mid-turn so they're plain printLine
   // calls. Whenever a real-time turn is currently running (activeTurn),
   // this ALSO (re-)attaches that turn's live updates to whichever lines
   // were just rendered here — this is what makes the header "live"
@@ -8440,9 +8446,46 @@
     return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
   }
 
-  // headingLabel overrides the printed heading ('AT THE HELM' by
-  // default) -- used only by cmdHelm's damaged-steering branch, which
-  // passes 'HELM' since the player isn't actually steering there.
+  // HELM's own dotted-leader formatter -- deliberately separate from
+  // the shared inventoryLine (used by INVENTORY/CLOTHING and others):
+  // HELM's own labels now run longer than inventoryLine's fixed
+  // 22-column width comfortably allows (BEARING TO NĀWILIWILI, VELOCITY
+  // MADE GOOD, SPEED THROUGH WATER all exceed it), and inventoryLine's
+  // own max(2, ...) clamp would otherwise collapse those rows to a bare
+  // two dots while every other screen using inventoryLine keeps its
+  // existing spacing untouched. A wider fixed 28-column label field
+  // gives every current HELM label a proportionate dotted leader with
+  // the same fixed alignment inventoryLine itself uses.
+  //
+  // That fixed 28-column width alone isn't quite enough, though: a few
+  // rows can carry a genuinely long VALUE, not just a long label --
+  // POINT OF SAIL's CLOSE HAULED, SAIL TRIM's NEEDS TRIM -- and at the
+  // full 28-column dot count those specific label+value combinations
+  // are long enough to wrap to a second line on the current iPhone
+  // layout (empirically measured: 38 characters, label+space+dots+
+  // space+value all together, is the longest that still fits on one
+  // line here; 39 wraps). maxDotsForOneLine below is what actually
+  // enforces that -- for every row with a short value (a heading in
+  // degrees, a speed in KT, ON/OFF) it's always well above the ideal
+  // 28-column dot count and never bites at all, so those rows keep
+  // their full, fixed-column dot count unchanged; it only ever
+  // shortens the dots for the rare row/value combination long enough
+  // to need it, tightening the leader exactly as this task's own
+  // "tighten spacing rather than shrink the font" instruction asks
+  // for, and only by as much as that one line actually needs.
+  function helmLine(label, valueText) {
+    var idealDots = 28 - label.length;
+    var maxDotsForOneLine = 38 - label.length - 2 - valueText.length;
+    var dots = Math.max(2, Math.min(idealDots, maxDotsForOneLine));
+    return label + ' ' + '.'.repeat(dots) + ' ' + valueText;
+  }
+
+  // headingLabel overrides the printed heading ('HELM' by default) --
+  // used only by cmdHelm's damaged-steering branch, which passes 'HELM'
+  // explicitly since the player isn't actually steering there; both now
+  // display the same word, so the override itself is harmless, kept
+  // only because removing it would be more than this wording-only pass
+  // calls for.
   function printHelmAtHelmHeader(state, headingLabel) {
     var nav = state.nav;
     function liveLine(text) {
@@ -8454,23 +8497,22 @@
     }
     var figures = computeHelmLiveFigures(state, nav.heading);
 
-    printLine(headingLabel || 'AT THE HELM', 'heading-label');
+    printLine(headingLabel || 'HELM', 'heading-label');
     printBlank();
-    var headingEl = liveLine(inventoryLine('HEADING', Math.round(nav.heading) + '\u00B0'));
-    printLine(inventoryLine('COURSE', Math.round(nav.setCourse) + '\u00B0'));
+    var headingEl = liveLine(helmLine('HEADING', Math.round(nav.heading) + '\u00B0'));
+    printLine(helmLine('COURSE', Math.round(nav.setCourse) + '\u00B0'));
+    printLine(helmLine('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0'));
+    var vmgEl = liveLine(helmLine('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT'));
     printBlank();
-    var stwEl = liveLine(inventoryLine('SPEED THROUGH WATER', figures.stw.toFixed(1) + ' KT'));
-    var sogEl = liveLine(inventoryLine('SOG', figures.sog.toFixed(1) + ' KT'));
+    var stwEl = liveLine(helmLine('SPEED THROUGH WATER', figures.stw.toFixed(1) + ' KT'));
+    var sogEl = liveLine(helmLine('SPEED OVER GROUND', figures.sog.toFixed(1) + ' KT'));
     printBlank();
-    printLine(inventoryLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
-    printLine(inventoryLine('WIND', Math.round(state.weather.windSpeed) + ' KT'));
-    var pointOfSailEl = liveLine(inventoryLine('POINT OF SAIL', figures.pointOfSail));
+    printLine(helmLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
+    printLine(helmLine('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT'));
+    var pointOfSailEl = liveLine(helmLine('POINT OF SAIL', figures.pointOfSail));
     printBlank();
-    printLine(inventoryLine('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0'));
-    var vmgEl = liveLine(inventoryLine('VMG', figures.vmg.toFixed(1) + ' KT'));
-    printBlank();
-    printLine(inventoryLine('SAIL TRIM', sailTrimLabel(state)));
-    printLine(inventoryLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
+    printLine(helmLine('SAIL TRIM', sailTrimLabel(state)));
+    printLine(helmLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
 
     var refs = { headingEl: headingEl, stwEl: stwEl, sogEl: sogEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
     if (activeTurn) activeTurn.headerRefs = refs;
@@ -8544,7 +8586,7 @@
       printLine('Rudder is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
       var damagedHelmOpts = [];
       if (nav.sailTrimState === 'needsTrim') damagedHelmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
-      damagedHelmOpts.push({ label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' });
+      damagedHelmOpts.push({ label: state.boat.autopilotOn ? 'TURN AUTOPILOT OFF' : 'TURN AUTOPILOT ON', action: 'toggle-autopilot' });
       damagedHelmOpts.push({ label: 'BACK', action: 'cancel' });
       state.pendingChoice = { id: 'helm-menu', options: damagedHelmOpts };
       return;
@@ -8555,8 +8597,8 @@
       // performed: announce it, drop any stale drift-tracking value so
       // the NEXT unattended period (if any) starts fresh, and turn the
       // boat toward courseSteeringTarget in real time exactly like
-      // CHANGE COURSE/SET FOR NĀWILIWILI/AUTOPILOT re-engaging do —
-      // never an instant snap.
+      // CHANGE COURSE/SET COURSE FOR NĀWILIWILI/AUTOPILOT re-engaging do
+      // — never an instant snap.
       state.crew.atHelm = true;
       nav.driftHeading = null;
       printLine('You take the helm.', 'dim');
@@ -8571,8 +8613,8 @@
     }
     var helmOpts = [{ label: 'CHANGE COURSE', action: 'cmd:change-course' }];
     if (nav.sailTrimState === 'needsTrim') helmOpts.push({ label: 'TRIM SAILS', action: 'trim-sails' });
-    helmOpts.push({ label: 'AUTOPILOT \u2014 ' + (state.boat.autopilotOn ? 'ON' : 'OFF'), action: 'toggle-autopilot' });
-    helmOpts.push({ label: 'SET FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' });
+    helmOpts.push({ label: state.boat.autopilotOn ? 'TURN AUTOPILOT OFF' : 'TURN AUTOPILOT ON', action: 'toggle-autopilot' });
+    helmOpts.push({ label: 'SET COURSE FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' });
     helmOpts.push({ label: 'BACK', action: 'leave-helm' });
     state.pendingChoice = { id: 'helm-menu', options: helmOpts };
   }
@@ -8592,7 +8634,7 @@
   function cmdTrimSails(state) {
     if (state.nav.sailTrimState !== 'needsTrim') { cmdHelm(state); return; }
     runAudioSyncedAction(state, {
-      label: 'TRIMMING SAILS',
+      label: 'TRIMMING SAILS...',
       playAudio: function (onEnded) { return playSailsOneShot('winch', onEnded, state); },
       action: function (s) {
         s.nav.sailTrimState = 'good';
