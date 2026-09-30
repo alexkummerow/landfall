@@ -5777,6 +5777,39 @@
   var masterGain = null;
   var muted = false;
 
+  /* --------------------------------------------------------------
+     AUDIO RECOVERY LAYER -- module-level state for recoverLandfallAudio/
+     rebuildLandfallAudio (see those functions, further down, for the
+     full design). Declared here, alongside audioCtx/masterGain, since
+     it's the same kind of persistent runtime state.
+
+     audioRuntimeGeneration (section 7 of the task this implements) is
+     bumped by EVERY hard rebuild. It exists specifically for the
+     recovery layer's OWN asynchronous operations (health-check
+     timeouts, the watchdog interval) to check against, so a check
+     scheduled against the OLD runtime can recognize a rebuild happened
+     while it was waiting and bail out rather than act on a since-
+     disposed graph. The existing per-channel `generation` counters on
+     boatChannels/rainChannels (see makeBoatChannel) already give the
+     self-loop timer/crossfade/commit callbacks their own, independent
+     staleness protection -- a hard rebuild creates entirely FRESH
+     channel objects (see rebuildLandfallAudio) rather than mutating the
+     old ones in place, which orphans every old callback's captured
+     channel reference from the module-level boatChannels/rainChannels
+     variables automatically: even if an old timer still fires, it can
+     no longer reach or affect anything the rest of the system uses.
+     audioRuntimeGeneration is the belt to that suspenders, for the
+     recovery layer's own code.
+     -------------------------------------------------------------- */
+  var audioRuntimeGeneration = 0;
+  var audioRecoveryInProgress = false;
+  var audioRecoveryNeedsGesture = false; // section 12 -- set when automatic recovery can't complete due to autoplay/media policy; cleared once a gesture-triggered attempt actually succeeds
+  var lastHardRebuildAtMs = 0;
+  var AUDIO_RECOVERY_COOLDOWN_MS = 4000;   // section 14 -- minimum real-world gap between two hard rebuilds, so a still-broken environment logs and waits rather than rebuilding in a tight loop
+  var AUDIO_HEALTH_CHECK_WAIT_MS = 850;    // section 3 -- within the suggested 750-1000ms window
+  var AUDIO_WATCHDOG_INTERVAL_MS = 7000;   // section 13 -- within the suggested 5-10s window
+  var audioWatchdogTimer = null;
+
   // AUDIO DEBUG -- off by default, never ships enabled. Flip to true
   // only for local troubleshooting of a specific playback issue; every
   // one-shot/loop start below calls audioDebugLog at the moment it's
@@ -6069,6 +6102,7 @@
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       buildAudioGraph();
+      startAudioWatchdog(); // section 13 -- one persistent watchdog for the life of this page, started once alongside the AudioContext itself
     } catch (e) {
       console.warn('Audio unavailable:', describeError(e));
     }
@@ -6245,7 +6279,23 @@
     if (channel.slots[index] || !audioCtx) return;
     try {
       var el = new Audio();
-      el.loop = true; // defensive fallback only -- see the section comment above makeCrossfadeLoopController: if a backgrounded tab throttles the self-loop timer below and this native loop fires first, the worst case is a brief early jump instead of a moment of dead silence, and the slot is paused correctly the instant the (late) scheduled crossfade below actually runs
+      // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
+      // "defensive fallback" true: the custom self-loop system below
+      // (scheduleBoatChannelSelfLoop/performBoatChannelCrossfade) is now
+      // the ONE authoritative source of repetition for this element.
+      // Native looping firing independently of that system was never
+      // actually harmless -- if a backgrounded tab throttled the self-
+      // loop timer below and the element reached its own natural end
+      // first, native loop would silently restart the SAME element from
+      // 0 with none of this system's own bookkeeping (generation,
+      // selfLoopTimer, the already-scheduled crossfade) aware it had
+      // happened; the self-loop timer, still armed for the ORIGINAL
+      // play-through's own duration, would then fire against audio that
+      // had already re-started and was no longer where it expected --
+      // exactly the kind of desync that produced the reported ~0.5s
+      // glitch loop. One authoritative repetition system, not two
+      // racing each other, is what section 2 of this fix requires.
+      el.loop = false;
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
       var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
@@ -6295,6 +6345,7 @@
     var slot = channel.slots[channel.activeIndex];
     if (!slot) return false;
     var el = slot.el;
+    if (el.paused && !el.ended) audioDebugLog('boat ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
     var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
     return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
   }
@@ -6315,7 +6366,7 @@
   // against scheduling it twice if both confirmation paths fire for
   // the same attempt.
   function commitBoatChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) return; // stale -- superseded before this could commit
+    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (boat commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
     channel.currentPath = path;
     channel.loadingPath = null;
     audioDebugLog('started: ' + path + ' (boat)');
@@ -6337,7 +6388,10 @@
     var duration = slot.el.duration;
     if (!isFinite(duration) || duration <= 0) {
       slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) return;
+        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
+          audioDebugLog('stale generation callback ignored (boat self-loop duration poll, ' + channel.name + ')');
+          return;
+        }
         scheduleBoatChannelSelfLoop(channel, slot, path, myGeneration);
       }, 100);
       return;
@@ -6345,10 +6399,17 @@
     var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
     slot.selfLoopTimer = setTimeout(function () {
       slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) return; // a newer attempt (any kind) has already superseded this one
+      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (boat self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
       var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) return; // this slot is no longer the channel's active, wanted track
-      performBoatChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS);
+      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (boat self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
+      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
+      // isSelfLoop=true -- see performBoatChannelCrossfade's own notes
+      // on why this specific call must always force currentTime=0 in
+      // the incoming slot, even when that slot already has this exact
+      // path loaded (which, once a track has looped even once before,
+      // it very likely does -- the two slots keep trading this same
+      // src back and forth).
+      performBoatChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
     }, delayMs);
   }
 
@@ -6364,7 +6425,29 @@
   // self-loop repeat can use the new, shorter LOOP_CROSSFADE_SECONDS
   // instead -- see the section comment above BOAT_AMBIENCE_CROSSFADE_SECONDS
   // for why these two durations are deliberately different constants.
-  function performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds) {
+  //
+  // isSelfLoop (AUDIO STABILITY FIX) -- explicit, not inferred from
+  // locationForLog or any other heuristic: true only when this call
+  // came from scheduleBoatChannelSelfLoop above, i.e. this is an
+  // intentional repetition of the SAME track, never an ordinary
+  // location/weather transition. This is the one thing that must
+  // override the "same src already loaded in this slot -> resume in
+  // place" optimization just below: for an ordinary transition, the
+  // incoming slot having the same src already loaded means it's being
+  // reused mid-fade-out (e.g. a quick back-and-forth between two
+  // states) and really should resume from wherever it still is. For a
+  // self-loop, the incoming slot having the same src loaded is the
+  // NORMAL case once a track has looped even once before (the two
+  // slots keep trading the same file back and forth), and that
+  // "wherever it still is" position is wherever THIS SAME element was
+  // paused at the end of its own previous play-through -- i.e. right
+  // near the very end of the file. Resuming there instead of
+  // restarting is exactly the reported bug: the self-loop timer (armed
+  // for a fresh full play-through) then fires again almost immediately,
+  // producing a rapid, glitched ~0.5s repeat. A self-loop repetition is
+  // always a NEW play-through of the file and must always start at 0,
+  // regardless of what this slot was doing before.
+  function performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
     channel.generation++;
     var myGeneration = channel.generation;
     var now = audioCtx.currentTime;
@@ -6409,7 +6492,13 @@
       if (!alreadyLoaded) {
         incoming.el.src = desiredPath;
         incoming.el.currentTime = 0;
-      } // else: same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
+      } else if (isSelfLoop) {
+        // Explicit self-loop restart -- see this function's own notes
+        // above. Same file already loaded in this slot, but this is a
+        // NEW repetition, not a resume of an interrupted earlier one.
+        incoming.el.currentTime = 0;
+        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
+      } // else: ordinary transition, same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
       var effectiveGain = channel.targetGain * gainMultiplier;
       incoming.gainTarget = effectiveGain;
       incoming.gain.gain.cancelScheduledValues(now);
@@ -6637,7 +6726,7 @@
     if (channel.slots[index] || !audioCtx) return;
     try {
       var el = new Audio();
-      el.loop = true; // defensive fallback only -- see the note above ensureBoatChannelSlot
+      el.loop = false; // AUDIO STABILITY FIX -- see the note above ensureBoatChannelSlot; the custom self-loop below is the one authoritative repetition system for this element too
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
       var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
@@ -6673,6 +6762,7 @@
     var slot = channel.slots[channel.activeIndex];
     if (!slot) return false;
     var el = slot.el;
+    if (el.paused && !el.ended) audioDebugLog('rain ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
     var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
     return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
   }
@@ -6681,7 +6771,7 @@
   // own comment for the full explanation of the idempotent double-
   // confirmation-path handling and the seamless self-loop scheduling.
   function commitRainChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) return;
+    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (rain commit, ' + channel.name + '): ' + path); return; }
     channel.currentPath = path;
     channel.loadingPath = null;
     audioDebugLog('started: ' + path + ' (rain)');
@@ -6696,7 +6786,10 @@
     var duration = slot.el.duration;
     if (!isFinite(duration) || duration <= 0) {
       slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) return;
+        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
+          audioDebugLog('stale generation callback ignored (rain self-loop duration poll, ' + channel.name + ')');
+          return;
+        }
         scheduleRainChannelSelfLoop(channel, slot, path, myGeneration);
       }, 100);
       return;
@@ -6704,10 +6797,11 @@
     var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
     slot.selfLoopTimer = setTimeout(function () {
       slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) return;
+      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (rain self-loop fire, ' + channel.name + ')'); return; }
       var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) return;
-      performRainChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS);
+      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (rain self-loop, slot no longer active, ' + channel.name + ')'); return; }
+      audioDebugLog('self-loop firing (rain ' + channel.name + '): ' + path);
+      performRainChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
     }, delayMs);
   }
 
@@ -6715,8 +6809,10 @@
   // exactly as performBoatChannelCrossfade was extracted from
   // setBoatChannelTrack -- see that function's own comment for the
   // full reasoning, including why a self-loop repeat deliberately
-  // bypasses setRainChannelTrack's own guards by calling this directly.
-  function performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds) {
+  // bypasses setRainChannelTrack's own guards by calling this directly,
+  // and why isSelfLoop (AUDIO STABILITY FIX) must be explicit rather
+  // than inferred -- same reasoning, same fix, applied here too.
+  function performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
     channel.generation++;
     var myGeneration = channel.generation;
     var now = audioCtx.currentTime;
@@ -6761,7 +6857,12 @@
       if (!alreadyLoaded) {
         incoming.el.src = desiredPath;
         incoming.el.currentTime = 0;
-      }
+      } else if (isSelfLoop) {
+        // Explicit self-loop restart -- see performBoatChannelCrossfade's
+        // own notes for the full reasoning; identical fix applied here.
+        incoming.el.currentTime = 0;
+        audioDebugLog('self-loop incoming slot restart (rain ' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
+      } // else: ordinary transition -- resume in place
       var effectiveGain = channel.targetGain * gainMultiplier;
       incoming.gainTarget = effectiveGain;
       incoming.gain.gain.cancelScheduledValues(now);
@@ -7257,8 +7358,12 @@
   // .catch() on whatever it returns without checking would throw an
   // uncaught exception right out of the click handler that triggered
   // it, which is exactly the UI breakage graceful failure is supposed
-  // to prevent. This is the ONLY place tapeAudioEl.play() is ever
-  // called.
+  // to prevent. This is the one place tapeAudioEl.play() is called to
+  // BEGIN one of the three sounds; resumeTapeAudioIfSuspended just below
+  // is the other, separate place it's called, specifically to RESUME
+  // one already in progress that the browser silently paused out from
+  // under it -- see that function's own notes for why the two are kept
+  // apart rather than sharing one call site.
   function safePlayTapeAudio() {
     try {
       var p = tapeAudioEl.play();
@@ -7266,6 +7371,479 @@
     } catch (e) {
       // fail gracefully -- e.g. file genuinely missing, autoplay blocked without a promise, or play() itself throwing
     }
+  }
+
+  // CASSETTE RECOVERY (AUDIO STABILITY FIX) -- browsers, Safari/iOS in
+  // particular, can silently pause a playing HTMLAudioElement after tab/
+  // app backgrounding, a system audio interruption, a visibility change,
+  // or resource pressure, with no event the rest of this file's own
+  // 'ended'-driven state machine ever sees. Without this, a track
+  // suspended that way would just stay silent forever -- tapePhase is
+  // still 'track', so nothing else would ever notice or try again.
+  // Deliberately mirrors engineAudio's own resumeIfSuspended (see that
+  // function's own comment): resumes the SAME element, in place, from
+  // wherever it already is.
+  //
+  // Every condition below is a deliberate "this isn't actually a
+  // suspension, leave it alone" case, not an oversight:
+  //   - !tapeAudioEl: nothing has ever been created, so there is
+  //     nothing to resume.
+  //   - tapePhase !== 'track': covers BOTH a tape the player never
+  //     started (or fully, intentionally stopped -- STOP routes through
+  //     resetTapePlaybackImmediately/beginTapeStopSequence, both of
+  //     which move tapePhase away from 'track' immediately) AND the
+  //     two mechanical bookend sounds (tape_start.mp3/tape_stop.mp3,
+  //     phases 'starting'/'stopping') -- this recovery is specifically
+  //     for the music itself, never for those brief, self-contained
+  //     sounds.
+  //   - tapeAudioEl.ended: the track reached its own natural end --
+  //     onTapeAudioEnded already handled that (crediting the listen,
+  //     beginning tape_stop.mp3); a paused-AND-ended element is a
+  //     completed track, not a suspended one, and must never be resumed.
+  //   - !tapeAudioEl.paused: already playing -- nothing to do.
+  // Only once all four of those are ruled out is this a genuine
+  // "browser silently paused music the player never asked to pause"
+  // case. currentTime is never touched (preserves exactly where
+  // playback was interrupted), tape_start.mp3 is never replayed, no new
+  // element is ever created, and activeTapeTitle/tapePhase/the morale
+  // session-qualifying state are all left exactly as they already were
+  // -- this resumes the existing session, it never starts a new one.
+  function resumeTapeAudioIfSuspended() {
+    if (!tapeAudioEl) return;
+    if (tapePhase !== 'track') return;
+    if (tapeAudioEl.ended) return;
+    if (!tapeAudioEl.paused) return;
+    audioDebugLog('cassette unexpectedly paused while tapePhase===track -- resuming in place at ' + tapeAudioEl.currentTime.toFixed(1) + 's');
+    try {
+      var p = tapeAudioEl.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function (err) {
+          audioDebugError('cassette resume', err);
+          console.warn('Cassette resume failed:', describeError(err));
+        });
+      }
+    } catch (e) {
+      audioDebugError('cassette resume', e);
+      console.warn('Cassette resume failed:', describeError(e));
+    }
+  }
+
+  // AUDIO DEBUG SNAPSHOT -- a manually-invoked, one-shot health dump,
+  // never called automatically from anywhere in this file (so it can
+  // never spam the console on its own); exposed as
+  // window.debugLandfallAudio so it can be run directly from the
+  // browser console as debugLandfallAudio() when troubleshooting a
+  // reported playback issue. Deliberately reads every field fresh at
+  // call time rather than tracking any history -- a snapshot of exactly
+  // what's true right now, matching this feature's own "compact debug
+  // helper" brief rather than a running log. Each channel/slot section
+  // below tolerates a channel not existing yet at all (audio never
+  // unlocked, or the specific slot never built) by printing 'none'
+  // rather than throwing.
+  function boatOrRainChannelSnapshot(channel) {
+    if (!channel) return null;
+    var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
+    return {
+      desiredPath: channel.desiredPath,
+      currentPath: channel.currentPath,
+      loadingPath: channel.loadingPath,
+      activeIndex: channel.activeIndex,
+      generation: channel.generation,
+      activeSlotPaused: activeSlot ? activeSlot.el.paused : null,
+      activeSlotEnded: activeSlot ? activeSlot.el.ended : null,
+      activeSlotCurrentTime: activeSlot ? activeSlot.el.currentTime : null,
+      activeSlotDuration: activeSlot ? activeSlot.el.duration : null,
+      activeSlotGainTarget: activeSlot ? activeSlot.gainTarget : null,
+    };
+  }
+  function debugAudioState() {
+    console.log('[AUDIO DEBUG] ---- Landfall audio snapshot ----');
+    console.log('[AUDIO DEBUG] AUDIO CONTEXT', { state: audioCtx ? audioCtx.state : 'none (not yet unlocked)' });
+    console.log('[AUDIO DEBUG] TAPE', tapeAudioEl ? {
+      tapePhase: tapePhase,
+      activeTapeTitle: activeTapeTitle,
+      paused: tapeAudioEl.paused,
+      ended: tapeAudioEl.ended,
+      currentTime: tapeAudioEl.currentTime,
+      duration: tapeAudioEl.duration,
+      currentSrc: tapeAudioEl.currentSrc,
+    } : { tapePhase: tapePhase, note: 'tapeAudioEl not yet created' });
+    console.log('[AUDIO DEBUG] BOAT EXTERIOR', boatOrRainChannelSnapshot(boatChannels.exterior));
+    console.log('[AUDIO DEBUG] BOAT INTERIOR', boatOrRainChannelSnapshot(boatChannels.interior));
+    console.log('[AUDIO DEBUG] RAIN EXTERIOR', boatOrRainChannelSnapshot(rainChannels.exterior));
+    console.log('[AUDIO DEBUG] RAIN INTERIOR', boatOrRainChannelSnapshot(rainChannels.interior));
+    var engineEl = engineAudio.getActiveEl();
+    console.log('[AUDIO DEBUG] ENGINE', {
+      engineActiveKey: engineActiveKey,
+      active: engineAudio.isActive(),
+      paused: engineEl ? engineEl.paused : null,
+      ended: engineEl ? engineEl.ended : null,
+      currentTime: engineEl ? engineEl.currentTime : null,
+    });
+    console.log('[AUDIO DEBUG] ---- end snapshot ----');
+  }
+  window.debugLandfallAudio = debugAudioState;
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // REAL PLAYBACK HEALTH CHECK (section 3 of the recovery-layer task
+  // this implements) -- !paused/!ended/correct-path checks can all
+  // report "healthy" even when the browser has silently stopped
+  // actually advancing a channel, which is exactly the gap the
+  // reported bug points at: Landfall's own state still looked fine
+  // while the sound itself had gone dead. This instead watches the
+  // element's own currentTime move forward over a short real-world
+  // wait. An element that naturally reaches its end DURING the wait is
+  // reported as advancing -- ended is a legitimate, non-stalled outcome
+  // (section 10: natural ends are never mistaken for failures), not a
+  // stall -- and a missing element is reported as not advancing (there
+  // is nothing to measure). The 0.05s tolerance absorbs ordinary timer
+  // jitter without letting a genuinely stalled element slip through.
+  // Deliberately NOT run on any frame loop or tight interval -- only
+  // ever awaited from a recovery check or the watchdog (see each's own
+  // notes on why).
+  function measureElementProgress(el, waitMs) {
+    return new Promise(function (resolve) {
+      if (!el) { resolve({ advancing: false, reason: 'no element' }); return; }
+      var before = el.currentTime;
+      setTimeout(function () {
+        if (el.ended) { resolve({ advancing: true, reason: 'ended naturally', before: before, after: el.currentTime }); return; }
+        var after = el.currentTime;
+        var delta = after - before;
+        resolve({ advancing: delta > 0.05, before: before, after: after, delta: delta });
+      }, waitMs);
+    });
+  }
+
+  // Every persistent (non-one-shot) audio channel the CURRENT game
+  // state says should actually be playing right now -- never a channel
+  // that's correctly silent (nothing currently desired, engine off,
+  // cassette stopped/between phases). Deliberately independent of mute:
+  // muting only ever changes gain/volume in this codebase (masterGain
+  // for boat/rain, .volume for engine/cassette -- see toggleMute/
+  // applyMuteToTapeAudio), never pauses anything, so an element SHOULD
+  // still be genuinely advancing while muted, and a stall caught then
+  // is exactly as real (and exactly as worth fixing before the player
+  // unmutes) as one caught while audible. 'boatOrRain' entries are the
+  // ones a confirmed stall can escalate to a hard rebuild for (section
+  // 4/5 -- a stalled boat/rain channel is what indicates the
+  // AudioContext graph itself is wedged); 'engine'/'cassette' entries
+  // are reported the same way but their own recovery stays the
+  // existing, separate soft paths (resumeEngineAudioIfSuspended/
+  // resumeTapeAudioIfSuspended) -- engine and cassette are plain
+  // HTMLAudioElements with no AudioContext involvement at all, so
+  // rebuilding the Web Audio graph could never be what fixes them.
+  function collectExpectedPlayingAudio() {
+    var expected = [];
+    [['boat exterior', boatChannels.exterior], ['boat interior', boatChannels.interior],
+     ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
+      var label = pair[0], channel = pair[1];
+      if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex]) {
+        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'boatOrRain' });
+      }
+    });
+    if (tapeAudioEl && tapePhase === 'track') {
+      expected.push({ label: 'cassette', el: tapeAudioEl, group: 'cassette' });
+    }
+    if (GAME && GAME.boat.engineOn) {
+      var engineEl = engineAudio.getActiveEl();
+      if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'engine' });
+    }
+    return expected;
+  }
+
+  // Awaits measureElementProgress for every currently-expected channel
+  // in parallel (one shared ~850ms wait, not one per channel) and logs
+  // a HEALTH CHECK line for each when AUDIO_DEBUG is on. Returns the
+  // list of entries that failed to advance.
+  async function findStalledPersistentAudio() {
+    var expected = collectExpectedPlayingAudio();
+    if (expected.length === 0) return [];
+    var results = await Promise.all(expected.map(function (entry) {
+      return measureElementProgress(entry.el, AUDIO_HEALTH_CHECK_WAIT_MS).then(function (result) {
+        audioDebugLog('HEALTH CHECK (' + entry.label + '): before=' + (result.before != null ? result.before.toFixed(2) : '?') + ' after=' + (result.after != null ? result.after.toFixed(2) : '?') + ' advancing=' + result.advancing);
+        return { entry: entry, result: result };
+      });
+    }));
+    return results.filter(function (r) { return !r.result.advancing; }).map(function (r) { return r.entry; });
+  }
+
+  // DISPOSE (section 6) -- every timer/automation/reference tied to one
+  // ambience channel's two slots, cleared before the channel object
+  // itself is discarded. Wrapped in try/catch throughout: this runs
+  // specifically because the audio runtime may already be in a broken
+  // state, so even a normally-safe call like el.pause() is not assumed
+  // safe here.
+  function disposeAmbienceChannel(channel) {
+    channel.slots.forEach(function (slot) {
+      if (!slot) return;
+      if (slot.pauseTimer) { clearTimeout(slot.pauseTimer); slot.pauseTimer = null; }
+      if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
+      try { if (slot.gain) slot.gain.gain.cancelScheduledValues(0); } catch (e) { /* the old AudioContext may already be unusable -- nothing more to do */ }
+      try { slot.el.pause(); } catch (e) {}
+      try { slot.el.src = ''; } catch (e) {}
+    });
+  }
+
+  // CASSETTE HARD RECOVERY (section 9) -- separate from the Web Audio
+  // graph entirely (the cassette has never used AudioContext at all;
+  // see the TAPE PLAYER module's own notes), so it is never touched by
+  // rebuildLandfallAudio's own dispose/reconstruct steps and has to be
+  // checked and, if needed, recovered in its own right. Tries the
+  // existing SOFT path first (resumeTapeAudioIfSuspended -- same
+  // element, same position); only replaces the element outright if
+  // that alone doesn't leave it genuinely advancing a moment later.
+  // Every piece of session state (activeTapeTitle, tapePhase, the
+  // qualifying-session flag, morale) is left completely untouched
+  // either way -- this only ever swaps which underlying element is
+  // producing the sound, never what Landfall itself thinks is
+  // happening or has already credited.
+  async function recoverCassetteHard() {
+    if (!tapeAudioEl || tapePhase !== 'track') return;
+    resumeTapeAudioIfSuspended();
+    var progress = await measureElementProgress(tapeAudioEl, AUDIO_HEALTH_CHECK_WAIT_MS);
+    if (progress.advancing) return; // soft recovery alone was enough
+
+    audioDebugLog('cassette element appears wedged -- replacing element in place, preserving position ' + tapeAudioEl.currentTime.toFixed(1) + 's');
+    var preservedTime = tapeAudioEl.currentTime;
+    var preservedSrc = tapeAudioEl.src;
+    try { tapeAudioEl.pause(); } catch (e) {}
+
+    var freshEl = new Audio();
+    freshEl.preload = 'auto';
+    freshEl.addEventListener('ended', onTapeAudioEnded);
+    freshEl.addEventListener('timeupdate', onTapeTimeUpdate);
+    freshEl.playbackRate = 1.0;
+    freshEl.defaultPlaybackRate = 1.0;
+    freshEl.src = preservedSrc;
+    tapeAudioEl = freshEl;
+    applyTapeLocationAudio(GAME);
+    var seekToPreservedTime = function () {
+      try { freshEl.currentTime = preservedTime; } catch (e) {}
+    };
+    seekToPreservedTime();
+    freshEl.addEventListener('loadedmetadata', seekToPreservedTime); // some browsers only accept the seek once metadata is ready -- calling it again once it is, is harmless if the first call already worked
+    try {
+      var p = freshEl.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function (err) {
+          audioDebugError('cassette hard recovery play', err);
+          console.warn('Cassette hard recovery failed:', describeError(err));
+        });
+      }
+    } catch (e) {
+      audioDebugError('cassette hard recovery play', e);
+      console.warn('Cassette hard recovery failed:', describeError(e));
+    }
+  }
+
+  // HARD AUDIO REBUILD (sections 5-8) -- the last resort, used only
+  // when soft recovery (resume + reassert + a confirmed real stall;
+  // see recoverLandfallAudio) shows the boat/rain ambience graph is
+  // genuinely wedged, not merely paused. Rebuilds ONLY the audio
+  // runtime: the game object, save data, and everything else in this
+  // file are completely untouched, and this never reloads the page.
+  //
+  // Order matters: dispose everything tied to the OLD AudioContext
+  // first (timers, gain automation, the elements themselves) so no
+  // stale callback can act on it once discarded; only THEN close() it
+  // and build a genuinely fresh one. boatChannels/rainChannels are
+  // replaced with entirely NEW channel objects (via makeBoatChannel/
+  // makeRainChannel, reusing each channel's own existing targetGain --
+  // never a new hardcoded value, per this task's own "do not change
+  // volume levels") rather than the old ones mutated in place -- this
+  // is what makes every in-flight callback from the old graph (a
+  // self-loop timer, a play() promise, a 'playing' listener already
+  // queued when the rebuild began) harmless even if one still fires
+  // late: it can only ever touch an object the rest of the system no
+  // longer references at all. audioRuntimeGeneration is bumped before
+  // any of this starts, so a SECOND rebuild firing while this one is
+  // still awaiting close()/construction can supersede it cleanly (the
+  // generation check right before buildAudioGraph below).
+  //
+  // Reconstruction (section 8) reuses buildAudioGraph exactly as
+  // unlockAudio's own first call does: masterGain, then
+  // updateAudioForState(GAME) (boat/rain/luffing/mute, all freshly
+  // derived from current state -- never a one-shot), then -- only if
+  // the engine is actually on -- the same "resumed save" engine-loop
+  // logic that starts straight into the correct cruise/interior loop
+  // with no engine-start.mp3 replay. Cassette recovery is handled
+  // separately afterward (see recoverCassetteHard) since it was never
+  // part of this graph to begin with.
+  async function rebuildLandfallAudio(triggerSource) {
+    var now = Date.now();
+    if (now - lastHardRebuildAtMs < AUDIO_RECOVERY_COOLDOWN_MS) {
+      audioDebugLog('HARD AUDIO REBUILD skipped -- within cooldown (' + (now - lastHardRebuildAtMs) + 'ms since the last one)');
+      return;
+    }
+    lastHardRebuildAtMs = now;
+    var oldGeneration = audioRuntimeGeneration;
+    audioRuntimeGeneration++;
+    var newGeneration = audioRuntimeGeneration;
+    console.warn('HARD AUDIO REBUILD START (trigger: ' + triggerSource + ', generation ' + oldGeneration + ' -> ' + newGeneration + ')');
+
+    if (boatChannels.exterior) disposeAmbienceChannel(boatChannels.exterior);
+    if (boatChannels.interior) disposeAmbienceChannel(boatChannels.interior);
+    if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
+    if (rainChannels.interior) disposeAmbienceChannel(rainChannels.interior);
+
+    var oldCtx = audioCtx;
+    audioCtx = null;
+    masterGain = null;
+    boatChannels = { exterior: makeBoatChannel('exterior', boatChannels.exterior.targetGain), interior: makeBoatChannel('interior', boatChannels.interior.targetGain) };
+    rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
+
+    if (oldCtx) {
+      try {
+        await oldCtx.close();
+      } catch (e) {
+        console.warn('AudioContext close failed:', describeError(e));
+      }
+    }
+    if (newGeneration !== audioRuntimeGeneration) { audioDebugLog('HARD AUDIO REBUILD aborted -- superseded by a newer rebuild while closing the old context'); return; }
+
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      console.warn('Audio unavailable (rebuild):', describeError(e));
+      return;
+    }
+    if (newGeneration !== audioRuntimeGeneration) return; // superseded while constructing the new context
+
+    buildAudioGraph();
+    audioDebugLog('HARD AUDIO REBUILD complete -- restored boat exterior=' + boatChannels.exterior.desiredPath + ' interior=' + boatChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
+
+    await recoverCassetteHard();
+  }
+  window.rebuildLandfallAudio = rebuildLandfallAudio;
+
+  // THE CENTRAL RECOVERY FUNCTION (section 1) -- the one entry point
+  // every automatic trigger (visibilitychange, pageshow, focus, the
+  // user-gesture fallback) and the watchdog all funnel through. Two
+  // levels, run in sequence, never independently:
+  //   LEVEL 1, SOFT (section 2): resume audioCtx if it isn't running,
+  //     then reassert expected state in place via the EXISTING,
+  //     already-idempotent entry points (updateAudioForState for boat/
+  //     rain/luffing/mute, resumeEngineAudioIfSuspended,
+  //     resumeTapeAudioIfSuspended) -- none of these restart anything
+  //     already healthy by their own existing paused/ended/path checks,
+  //     so if everything really is fine this whole level is a safe,
+  //     cheap no-op.
+  //   LEVEL 2, HARD (sections 4-5): only reached if, after a short real
+  //     wait, a REAL progress check (section 3 -- see
+  //     findStalledPersistentAudio) shows a boat or rain channel that
+  //     SHOULD be playing has not actually advanced. A stalled engine
+  //     or cassette entry does NOT trigger a hard rebuild on its own --
+  //     neither one depends on the AudioContext at all, so rebuilding
+  //     it could never be what fixes them; their own recovery already
+  //     happened via the soft calls above (cassette also gets its own
+  //     dedicated hard path, recoverCassetteHard, but only as part of
+  //     rebuildLandfallAudio itself, and only because a genuinely wedged
+  //     AudioContext and a genuinely wedged cassette element are likely
+  //     symptoms of the very same underlying interruption).
+  //
+  // audioRecoveryInProgress is a plain boolean guard against two
+  // recovery attempts overlapping (section 11's own "do not create
+  // multiple simultaneous recovery attempts") -- a trigger that fires
+  // while one is already running just logs and returns rather than
+  // queuing or stacking a second one.
+  async function recoverLandfallAudio(triggerSource) {
+    if (audioRecoveryInProgress) {
+      audioDebugLog('RECOVERY skipped -- one already in progress (trigger: ' + triggerSource + ')');
+      return;
+    }
+    if (!audioUnlocked || !audioCtx) return; // nothing has ever been unlocked -- nothing to recover yet
+    audioRecoveryInProgress = true;
+    var myRuntimeGeneration = audioRuntimeGeneration;
+    audioDebugLog('RECOVERY START (trigger: ' + triggerSource + ')');
+    try {
+      var ctxStateBefore = audioCtx.state;
+      if (audioCtx.state !== 'running') {
+        try {
+          await audioCtx.resume();
+          audioDebugLog('AUDIO CONTEXT state before=' + ctxStateBefore + ' after=' + audioCtx.state);
+        } catch (e) {
+          console.warn('AudioContext resume failed:', describeError(e));
+          audioRecoveryNeedsGesture = true;
+          audioDebugLog('recovery requires a user gesture to proceed -- will retry on the next player action (see the handleAction fallback)');
+        }
+      }
+      if (myRuntimeGeneration !== audioRuntimeGeneration) return; // a rebuild already happened elsewhere while this awaited resume()
+
+      // SOFT REASSERT -- in place, idempotent, never restarts anything
+      // already healthy; see each function's own guards.
+      if (GAME) {
+        updateAudioForState(GAME);
+        if (GAME.boat.engineOn) resumeEngineAudioIfSuspended();
+      }
+      resumeTapeAudioIfSuspended();
+
+      var stalled = await findStalledPersistentAudio();
+      if (myRuntimeGeneration !== audioRuntimeGeneration) return;
+
+      var stalledBoatOrRain = stalled.filter(function (e) { return e.group === 'boatOrRain'; });
+      audioDebugLog('SOFT RECOVERY RESULT: ' + stalled.length + ' stalled (' + stalled.map(function (e) { return e.label; }).join(', ') + ')');
+
+      if (stalledBoatOrRain.length > 0) {
+        // The AudioContext graph itself is wedged and resume() alone
+        // did not bring it back -- section 4's "do not continue
+        // trusting it forever". Escalate.
+        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledBoatOrRain.map(function (e) { return e.label; }).join(','));
+      } else if (stalled.some(function (e) { return e.group === 'cassette'; })) {
+        // Boat/rain are fine (so the AudioContext itself isn't the
+        // problem), but the cassette -- a completely separate plain
+        // element -- is still stalled after the soft resume above.
+        // Its own hard path doesn't need the Web Audio graph rebuilt
+        // around it.
+        await recoverCassetteHard();
+      }
+
+      if (audioRecoveryNeedsGesture && audioCtx.state === 'running') {
+        audioRecoveryNeedsGesture = false; // resume actually succeeded this time, despite an earlier failed attempt
+      }
+    } finally {
+      audioRecoveryInProgress = false;
+    }
+  }
+  window.recoverLandfallAudio = recoverLandfallAudio;
+
+  // LIGHTWEIGHT WATCHDOG (section 13) -- a conservative periodic safety
+  // net for the case nothing else (visibilitychange/pageshow/focus)
+  // happened to fire even though playback quietly died anyway (e.g. an
+  // interruption iOS itself resolves without ever toggling document
+  // visibility or window focus). Runs only every
+  // AUDIO_WATCHDOG_INTERVAL_MS (7s, within the suggested 5-10s window),
+  // only while the page is actually visible (no point polling while
+  // backgrounded -- the visibility/pageshow/focus triggers already
+  // cover the return from that), and only when nothing else is already
+  // checking. Deliberately does a CHEAP pre-check first -- is the
+  // AudioContext not running, or is anything that should currently be
+  // playing outright paused -- rather than running the full ~850ms
+  // real-progress confirmation unconditionally on every tick; only
+  // when that cheap check already looks suspicious does it hand off to
+  // recoverLandfallAudio, which is what actually confirms a real stall
+  // (not just one anomalous sample) before ever considering a hard
+  // rebuild. This is what keeps the watchdog itself lightweight while
+  // still relying on the one, single, rigorous recovery path for the
+  // actual decision.
+  function audioWatchdogTick() {
+    if (!GAME || !audioUnlocked || !audioCtx) return;
+    if (document.visibilityState !== 'visible') return;
+    if (audioRecoveryInProgress) return;
+    var suspicious = audioCtx.state !== 'running';
+    if (!suspicious) {
+      suspicious = collectExpectedPlayingAudio().some(function (entry) { return entry.el.paused && !entry.el.ended; });
+    }
+    if (suspicious) {
+      audioDebugLog('WATCHDOG: suspicious state detected, invoking recovery');
+      recoverLandfallAudio('watchdog');
+    }
+  }
+  function startAudioWatchdog() {
+    if (audioWatchdogTimer) return; // already running -- never a second, overlapping interval
+    audioWatchdogTimer = setInterval(audioWatchdogTick, AUDIO_WATCHDOG_INTERVAL_MS);
   }
 
   // The ONE place a src is loaded and playback started, for any of the
@@ -15148,6 +15726,42 @@
       return;
     }
 
+    // CASSETTE RECOVERY -- lightweight fallback: if the browser refused
+    // to resume a suspended cassette automatically on visibility
+    // return (some media-policy implementations only honor play() again
+    // once a genuine, fresh user gesture has occurred), the very next
+    // real action the player takes gets one lightweight, silent retry
+    // here. Every action in this file already flows through this one
+    // function, so this is the natural "next genuine user interaction"
+    // point -- never a per-frame poll, never anything that could fire
+    // without the player actually doing something. resumeTapeAudioIfSuspended
+    // is already a cheap no-op in the overwhelming majority of calls (it
+    // bails immediately unless tapePhase is actually 'track' AND the
+    // element is actually paused-but-not-ended), so this adds no
+    // meaningful cost to ordinary play; it only ever does real work in
+    // the rare case there's something to recover.
+    resumeTapeAudioIfSuspended();
+
+    // USER-GESTURE RECOVERY FALLBACK (section 12) -- the broader
+    // version of the cassette-only check just above: audioRecoveryNeedsGesture
+    // is only ever set (by recoverLandfallAudio) when a PRIOR automatic
+    // recovery attempt (visibility/pageshow/focus/the watchdog) tried
+    // audioCtx.resume() and it was rejected outright -- exactly the
+    // "browser is refusing to resume anything until a genuine user
+    // gesture happens" case section 12 describes. When that's true, the
+    // player's own next real action IS that genuine gesture, so a full
+    // recovery attempt (not just the cassette-only one above) is worth
+    // retrying here. recoverLandfallAudio's own audioRecoveryInProgress
+    // guard already prevents this from overlapping with an automatic
+    // attempt that happens to be running at the same moment, and it
+    // clears the flag itself once resume() actually succeeds -- this
+    // never clears it unconditionally, so a genuinely still-broken
+    // environment keeps retrying on each subsequent action rather than
+    // silently giving up after one failed attempt.
+    if (audioRecoveryNeedsGesture) {
+      recoverLandfallAudio('user-gesture');
+    }
+
     // performEat() (and in principle other handlers) can legitimately
     // re-open a pendingChoice itself — e.g. re-showing the food list after
     // a blocked cooking attempt. Only clear it in the tail below if nothing
@@ -16288,51 +16902,44 @@
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
       }
-      // AUDIO CONTEXT RESUME -- the root cause of ambient loops (sea
-      // state, rain) going silent and never coming back after the tab/
-      // app was backgrounded: browsers (iOS Safari in particular) can
-      // suspend the whole AudioContext while hidden, independently of
-      // any individual <audio> element's own paused state. A suspended
-      // context halts ALL processing through it -- masterGain and every
-      // GainNode/slot connected to it (every boat/rain channel) -- so
-      // the underlying elements can be, and often are, still genuinely
-      // playing and looping the whole time; nothing routed through
-      // audioCtx ever gets HEARD again until this is called. This must
-      // happen before updateAudioForState below: its own health checks
-      // (boatChannelIsHealthy/rainChannelIsHealthy) only look at
-      // el.paused/el.ended, which a suspended-but-still-playing element
-      // passes fine, so they alone could never detect or fix this.
-      // resume() is a safe no-op if the context was never suspended.
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume().catch(function (e) { console.warn('AudioContext resume failed:', describeError(e)); });
-      }
-      // AUDIO RESUME -- always re-synced on return, not just when a
-      // catch-up tick actually occurred: the browser can silently pause
-      // ambient loops (sea state, rain) while backgrounded even over a
-      // span too short to advance a single simulation tick (a quick
-      // app-switch and back). updateAudioForState's own health checks
-      // (see boatChannelIsHealthy/rainChannelIsHealthy, which explicitly
-      // check !el.paused) mean this call is a safe no-op whenever
-      // everything is already correctly playing -- it only ever
-      // restarts a channel that's actually stale or was paused out from
-      // under it, and it never stacks a duplicate on top of one that's
-      // already healthy.
-      updateAudioForState(GAME);
-      // ENGINE LOOP -- not part of updateAudioForState (engine audio is
-      // deliberately triggered only from the actual start/stop actions
-      // and GO ABOVE/BELOW, never inferred from render state -- see
-      // updateAudioForState's own notes), so it needs its own, equally
-      // safe re-assertion here: resumeEngineAudioIfSuspended resumes the
-      // SAME already-active element in place if the browser silently
-      // paused it, never starting a fresh crossfade, so this can never
-      // create a duplicate/second cruise loop, and does nothing at all
-      // if the engine is actually off (nothing would be active to resume).
-      if (GAME.boat.engineOn) {
-        resumeEngineAudioIfSuspended();
-      }
+      // AUDIO RECOVERY -- see recoverLandfallAudio's own notes for the
+      // full two-level design (soft resume/reassert, escalating to a
+      // hard rebuild only if a real currentTime-progression check
+      // confirms boat/rain ambience is genuinely stalled, not merely
+      // paused). This single call replaces what used to be several
+      // separate inline steps here (AudioContext resume,
+      // updateAudioForState, engine resume, cassette resume) -- all of
+      // that is now centralized in one place so every trigger (this
+      // one, pageshow, focus, the watchdog, the user-gesture fallback)
+      // shares the exact same recovery logic rather than each
+      // reimplementing its own subset of it. Not awaited: the rest of
+      // this handler (save, clock) has no reason to wait on audio
+      // recovery's own health-check delay or a possible hard rebuild.
+      recoverLandfallAudio('visibility');
       saveGameState(GAME);
       updateClock();
     }
+  });
+
+  // PAGESHOW (section 11.B) -- Safari in particular can restore a page
+  // from its back-forward cache (bfcam) on navigation, a path
+  // visibilitychange does not reliably cover on its own; event.persisted
+  // is true specifically for that bfcache-restore case. Harmless to
+  // also fire on an ordinary, non-cached load -- recoverLandfallAudio
+  // is already a safe no-op whenever nothing is actually unhealthy.
+  window.addEventListener('pageshow', function (event) {
+    if (!GAME) return;
+    if (event.persisted) audioDebugLog('pageshow (bfcache restore) -- triggering recovery');
+    recoverLandfallAudio('pageshow');
+  });
+
+  // FOCUS (section 11.C) -- covers the desktop-browser equivalent of
+  // the same interruption (another window/app took focus and gave it
+  // back) that visibilitychange/pageshow are mainly aimed at mobile
+  // Safari for. Same safe-no-op reasoning applies.
+  window.addEventListener('focus', function () {
+    if (!GAME) return;
+    recoverLandfallAudio('focus');
   });
 
   window.addEventListener('pagehide', function () {
