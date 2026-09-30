@@ -789,8 +789,8 @@
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:19.236%; top:14.258%; width:19.375%; height:9.414%;">
-        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">MARINE WEATHER</span>
-        <button type="button" class="computer-icon-hit" data-app="marineWeather" aria-label="MARINE WEATHER"
+        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">WEATHER</span>
+        <button type="button" class="computer-icon-hit" data-app="marineWeather" aria-label="WEATHER"
                 style="left:13.403%; top:12.852%; width:31.389%; height:16.758%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
@@ -8279,16 +8279,29 @@
   // readings; FORECAST only ever shows rounded ranges for what's
   // expected next, never duplicating WEATHER's own readout.
   var FORECAST_WEEKDAY_NAMES = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-  var FORECAST_ISSUANCE_HOURS = [0, 6, 12, 18]; // scheduled forecast issuance slots
 
-  // The most recent scheduled 0000/0600/1200/1800 issuance at or
-  // before the current GAME time (never the player's real-world
-  // clock) — e.g. 1345 -> 1200, 1930 -> 1800.
-  function forecastIssuedHHMM(state) {
-    var now = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var slot = FORECAST_ISSUANCE_HOURS[0];
-    FORECAST_ISSUANCE_HOURS.forEach(function (h) { if (now.getHours() >= h) slot = h; });
-    return String(slot).padStart(2, '0') + '00';
+  // MARINE WEATHER's own "UPDATED" time -- the actual wall-clock HH:MM
+  // (four digits, no colon, same convention this screen's own +NN HR
+  // forecast labels already use) at which the most recent successful
+  // real-weather fetch completed. Derived directly from
+  // realWx.fetchedRealMs -- a Date.now() snapshot taken at that fetch
+  // (see that field's own comment) -- rather than from the current
+  // moment: 1 real minute is always exactly 1 game minute (see
+  // catchUpFromRealTime's own comment on why that equivalence holds),
+  // so the two clocks read identically and fetchedRealMs's own local
+  // hours/minutes ARE the in-voyage time the fetch happened at. This
+  // is deliberately NOT "the current time rounded to the nearest
+  // synoptic slot" (0000/0600/1200/1800), which would silently drift
+  // forward on every render even when no new fetch has actually
+  // occurred -- exactly the "just show the current clock time"
+  // mistake this field needs to avoid. Returns null when no real
+  // fetch has ever succeeded yet (fetchedRealMs itself still null);
+  // the one caller (renderMarineWeatherBody) shows NO DATA for that
+  // case rather than ever inventing a time.
+  function realWeatherUpdatedHHMM(realWx) {
+    if (realWx.fetchedRealMs == null) return null;
+    var d = new Date(realWx.fetchedRealMs);
+    return String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
   }
 
   // Condition severity ladder Landfall's four-condition weather model
@@ -8408,8 +8421,11 @@
   var MARINE_FORECAST_HOURS = [6, 12, 24, 48, 72];
 
   // One "LABEL value" row, exactly like VESSEL LOG's own .vessel-log-
-  // stat rows -- shared by every field this screen shows, current and
-  // forecast alike, so all of them share one visual/DOM pattern.
+  // stat rows -- shared by WIND/GUSTS/WEATHER/TEMPERATURE (current
+  // conditions and every forecast period alike, via
+  // appendMarineWeatherRealStats below), which keep this grid
+  // treatment deliberately. UPDATED/POSITION moved off it to plain
+  // "LABEL: value" text instead -- see appendPlainLine just below.
   function appendMarineWeatherStat(container, label, value) {
     var row = document.createElement('div');
     row.className = 'vessel-log-stat';
@@ -8420,6 +8436,26 @@
     row.appendChild(labelEl);
     row.appendChild(valueEl);
     container.appendChild(row);
+  }
+
+  // A single plain "LABEL: value" line -- ONE space after the colon,
+  // no fixed-width column, same treatment the other colon-based status
+  // rows across the game use (see .data-row's own CSS notes on why
+  // those moved away from the shared grid). Used for UPDATED/POSITION
+  // specifically (renderMarineWeatherBody below): unlike this screen's
+  // WIND/GUSTS/WEATHER/TEMPERATURE readings, which stay on the
+  // vessel-log-stat grid deliberately, UPDATED/POSITION read as plain
+  // text. text is the full "LABEL: value" string already assembled by
+  // the caller, exactly like printLine's own callers build their own
+  // "LABEL: value" strings -- this is that same pattern, just
+  // appending to an arbitrary container instead of tempViewEl, since
+  // this screen builds its own body fresh via renderMarineWeatherBody
+  // rather than going through printLine.
+  function appendPlainLine(container, text) {
+    var p = document.createElement('p');
+    p.className = 'line';
+    p.textContent = text;
+    container.appendChild(p);
   }
 
   // A single plain warning-toned line (the SAME .amber class used
@@ -8493,9 +8529,10 @@
     titleGap.className = 'gap';
     body.appendChild(titleGap);
 
-    appendMarineWeatherStat(body, 'UPDATED', forecastIssuedHHMM(state));
+    var updatedHHMM = realWeatherUpdatedHHMM(state.weather.realWx);
+    appendPlainLine(body, 'UPDATED: ' + (updatedHHMM != null ? updatedHHMM : 'NO DATA'));
     var fix = currentLatLon(state);
-    appendMarineWeatherStat(body, 'POSITION', formatLatLon(fix.lat, fix.lon));
+    appendPlainLine(body, 'POSITION: ' + formatLatLon(fix.lat, fix.lon));
 
     var conditionsGap = document.createElement('p');
     conditionsGap.className = 'gap';
@@ -9049,7 +9086,7 @@
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
     printBlank();
-    printDataRow('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
+    printLine('HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
     state.pendingChoice = {
       id: 'head-menu',
       options: [
@@ -9318,7 +9355,7 @@
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
     printLine('CABIN TEMP: ' + cabinTempDisplay);
-    printDataRow('CABIN', cabinStatusWord(state), 'data-row-md');
+    printLine('CABIN: ' + cabinStatusWord(state));
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
     printLine('BATTERY: ' + batteryLabel);
     // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
@@ -9378,8 +9415,6 @@
     var options = groupedOptions([
       electricalRows,
       [
-        { label: 'POSITION', action: 'cmd:position' },
-        { label: 'WEATHER', action: 'cmd:weather' },
         { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' },
       ],
       [
