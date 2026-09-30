@@ -559,6 +559,23 @@
   }
   .option:focus-visible { outline: 1px dashed var(--phosphor); outline-offset: 2px; }
 
+  /* Plain status rows inside #options (e.g. BELOW DECK's own HUNGER/
+     THIRST/ENERGY/MORALE snapshot) -- ordinary, non-interactive
+     information sitting among the room buttons, not a command. Same
+     font-size/padding/letter-spacing as .option for visual rhythm, but
+     --phosphor (normal/soft, "all normal non-interactive game text"
+     per that variable's own :root comment) rather than .option's own
+     --phosphor-bright, which is reserved for selectable actions --
+     and a <div>, never a <button>: no cursor, no hover/focus outline,
+     nothing implying it can be clicked. */
+  .option-status {
+    color: var(--phosphor);
+    font-family: inherit;
+    font-size: 0.92rem;
+    padding: 0.15rem 0;
+    letter-spacing: 0.02em;
+  }
+
   /* A row that ends in an indicator lamp (e.g. the NAV STATION
   /* A row that ends in an indicator lamp (e.g. the NAV STATION
      electrical panel): the label and the lamp are laid out as two flex
@@ -8652,9 +8669,6 @@
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
     printBlank();
-    var c = state.crew;
-    printLine(statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
-    printLine(statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
     var options = [
       { label: 'EAT', action: 'cmd:eat' },
       { label: 'DRINK', action: 'cmd:drink' },
@@ -8855,7 +8869,6 @@
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
     printBlank();
-    printLine(statusLine('MORALE', moraleLevel(state.crew.morale)));
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
@@ -8910,8 +8923,6 @@
   // temperature calculation.
   function cmdCabin(state) {
     printBlank();
-    var c = state.crew;
-    printLine(statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
     printLine(statusLine('COMFORT', comfortLabel(state)));
     var options = [
       { label: 'SLEEP', action: 'cmd:sleep' },
@@ -13517,7 +13528,28 @@
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
 
     if (state.crew.location === 'below') {
+      // BELOW DECK is the wellness snapshot: HUNGER/THIRST/ENERGY/
+      // MORALE together, above the room list, answering "how am I
+      // doing?" before the player even picks a room -- each individual
+      // room answers "what can I do here?" instead (see GALLEY/SALOON/
+      // CABIN, which no longer show the one status this consolidates
+      // out of them). Plain status rows (opt.status, rendered as
+      // non-interactive text in renderOptions), reusing the EXACT
+      // existing lookups every other screen already reads from --
+      // HUNGER_LABELS/THIRST_LABELS/ENERGY_LABELS/moraleLevel and
+      // statusLine's own formatting -- never a second calculation of
+      // any of these four. Its own group, so groupedOptions' own
+      // divider naturally separates it from the room buttons below,
+      // matching CABIN/HEAD/SALOON/GALLEY/NAV STATION's own existing
+      // order exactly.
+      var c = state.crew;
       return groupedOptions([
+        [
+          { status: true, text: statusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]) },
+          { status: true, text: statusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]) },
+          { status: true, text: statusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]) },
+          { status: true, text: statusLine('MORALE', moraleLevel(c.morale)) },
+        ],
         [
           { label: 'CABIN', action: 'cmd:cabin' },
           { label: 'HEAD', action: 'cmd:head' },
@@ -13718,6 +13750,20 @@
         var div = document.createElement('div');
         div.className = 'option-divider';
         optionsEl.appendChild(div);
+        return;
+      }
+      if (opt.status) {
+        // A plain status row (e.g. BELOW DECK's HUNGER/THIRST/ENERGY/
+        // MORALE snapshot) -- a <div>, never a <button>: getContextualOptions
+        // recomputes these fresh on every single render (including
+        // startLiveLoop's own periodic ones), so this NEEDS to be a
+        // plain overwrite each time, not appended printLine-style text,
+        // or the same four lines would pile up in the scrollback every
+        // few seconds the player just sits on this screen.
+        var statusDiv = document.createElement('div');
+        statusDiv.className = 'option-status';
+        statusDiv.textContent = opt.text;
+        optionsEl.appendChild(statusDiv);
         return;
       }
       var btn = document.createElement('button');
