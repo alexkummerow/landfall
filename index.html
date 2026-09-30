@@ -8658,6 +8658,9 @@
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
     printBlank();
+    var c = state.crew;
+    printLine(belowDeckStatusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
+    printLine(belowDeckStatusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
     var options = [
       { label: 'EAT', action: 'cmd:eat' },
       { label: 'DRINK', action: 'cmd:drink' },
@@ -8858,6 +8861,7 @@
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
     printBlank();
+    printLine(belowDeckStatusLine('MORALE', moraleLevel(state.crew.morale)));
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
@@ -8912,6 +8916,8 @@
   // temperature calculation.
   function cmdCabin(state) {
     printBlank();
+    var c = state.crew;
+    printLine(belowDeckStatusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
     printLine(belowDeckStatusLine('COMFORT', comfortLabel(state)));
     var options = [
       { label: 'SLEEP', action: 'cmd:sleep' },
@@ -9646,15 +9652,16 @@
   // limitation this task exists to fix). A VECTOR source is what
   // actually makes a genuine, fully-palette-restricted restyle
   // possible: buildChartMapStyle below draws only a small, deliberately
-  // reduced set of layers (ocean, land, coastlines, the coarsest
-  // country boundaries) straight from this one source's raw geometry,
-  // each layer's own paint color pulled from shipsComputerColors --
-  // nothing here is a filter or a tint over someone else's colors, and
-  // everything not explicitly listed (roads, buildings, transit,
-  // POIs, land-use shading, and -- per this file's own later revision
-  // -- every ordinary place name too) is simply never added as a
-  // layer, rather than hidden after the fact.
+  // reduced set of layers (ocean, land, coastlines, sparse city/place
+  // labels) straight from this one source's raw geometry, each layer's
+  // own paint color pulled from shipsComputerColors -- nothing here is
+  // a filter or a tint over someone else's colors, and everything not
+  // explicitly listed (roads, road labels, buildings, transit, POIs,
+  // business labels, land-use shading, and political/admin boundaries
+  // of any kind) is simply never added as a layer, rather than hidden
+  // after the fact.
   var CHART_VECTOR_SOURCE_URL = 'https://tiles.openfreemap.org/planet';
+  var CHART_GLYPHS_URL = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf'; // needed for the city/place label layer below; map-rendered text is limited to whatever font this glyph service itself hosts (Noto Sans) -- unlike the HTML overlays (NĀWILIWILI, attribution), which use Landfall's own --font-mono directly, a vector-tile symbol layer's text-font can only ever reference glyphs the tile provider has actually rendered, and no such set exists for Landfall's own monospace face
   // OpenFreeMap's own required credit line (openfreemap.org/quick_start
   // -- "OpenFreeMap (c) OpenMapTiles Data from OpenStreetMap", three
   // separate links) -- the ONE thing on this basemap that is NOT a
@@ -9671,16 +9678,18 @@
   // ComputerColors() is always called immediately before this, in
   // buildChartMap. Deliberately minimal: water (the ocean, plus every
   // lake/river polygon -- everything else left as the plain background
-  // reads as land) is the only geometry drawn at all -- no roads,
-  // buildings, transit, land-use shading, POIs, place labels, or
-  // political/admin boundaries of any kind (a country-border layer and
-  // two place-label layers were both tried in earlier revisions of
-  // this section and then deliberately removed -- the chart reads as
-  // geography, not geopolitics, and its only label is the HTML overlay
-  // in buildChartDestMarkerEl, NĀWILIWILI, using Landfall's own
-  // --font-mono directly, never MapLibre's own text rendering). No
-  // glyphs URL is declared: with every symbol/text layer gone, a
-  // vector-tile glyph service isn't needed at all.
+  // reads as land), sparse country/city place-name labels, and nothing
+  // else -- no roads, road labels, buildings, transit, land-use
+  // shading, POIs, business labels, or political/admin boundaries of
+  // any kind (a country-border layer was tried in an earlier revision
+  // of this section and deliberately removed -- the chart reads as
+  // geography and navigation, not geopolitics or a general-purpose
+  // map). The place-name labels are the one piece of ordinary map text
+  // here; NĀWILIWILI itself stays the separate HTML overlay in
+  // buildChartDestMarkerEl, using Landfall's own --font-mono directly
+  // and never MapLibre's own text rendering, so it can stay visibly
+  // brighter than these ordinary labels rather than competing with
+  // them for the same tier.
   //
   // Land and its own coastline are deliberately the SAME color
   // (CHART_LAND_COLOR) rather than land-fill-vs-outline being two
@@ -9698,8 +9707,13 @@
   // theme tokens (bg/dim/phosphor/green, plus PONG's own font) --
   // unlike the ocean fill below (c.bg, one of those five, read live so
   // it always matches the rest of the game if that variable ever
-  // changes), land intentionally uses this fixed value regardless.
-  var CHART_LAND_COLOR = '#2C4535';
+  // changes), land intentionally uses this fixed value regardless. The
+  // place labels below, by contrast, use a color that DOES match one
+  // of those five tokens (dim/--phosphor-dim, already exactly the hex
+  // value asked for here) -- read live via c.dim rather than a second
+  // hard-coded copy of the same value, so they'd stay in sync with the
+  // rest of Landfall's own palette if that variable ever changed.
+  var CHART_LAND_COLOR = '#182d20';
   function buildChartMapStyle() {
     var c = shipsComputerColors;
     return {
@@ -9707,11 +9721,34 @@
       sources: {
         'chart-basemap': { type: 'vector', url: CHART_VECTOR_SOURCE_URL, attribution: CHART_ATTRIBUTION_HTML },
       },
+      glyphs: CHART_GLYPHS_URL,
       layers: [
         { id: 'chart-bg', type: 'background', paint: { 'background-color': CHART_LAND_COLOR } },
         {
           id: 'chart-water', type: 'fill', source: 'chart-basemap', 'source-layer': 'water',
           paint: { 'fill-color': c.bg, 'fill-outline-color': CHART_LAND_COLOR },
+        },
+        // Country names -- broad geographic context at wide-open-ocean
+        // zoom levels only (maxzoom 6); gone once the player is close
+        // enough for city names below to matter more.
+        {
+          id: 'chart-place-country', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
+          filter: ['all', ['==', ['get', 'class'], 'country'], ['<=', ['get', 'rank'], 3]],
+          maxzoom: 6,
+          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 10, 'text-transform': 'uppercase', 'text-letter-spacing': 0.1 },
+          paint: { 'text-color': c.dim },
+        },
+        // City names -- sparse, small, and the same dim tone as the
+        // country labels above (never phosphor/bright -- ordinary
+        // geographic context only, deliberately never competing with
+        // the vessel marker, the traveled track, the reference line,
+        // or NĀWILIWILI's own brighter destination label).
+        {
+          id: 'chart-place-city', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
+          filter: ['==', ['get', 'class'], 'city'],
+          minzoom: 3,
+          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-transform': 'uppercase', 'text-letter-spacing': 0.08 },
+          paint: { 'text-color': c.dim },
         },
       ],
     };
@@ -13516,28 +13553,13 @@
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
 
     if (state.crew.location === 'below') {
-      // BELOW DECK is the wellness snapshot: HUNGER/THIRST/ENERGY/
-      // MORALE together, above the room list, answering "how am I
-      // doing?" before the player even picks a room -- each individual
-      // room answers "what can I do here?" instead (see GALLEY/SALOON/
-      // CABIN, which no longer show the one status this consolidates
-      // out of them). Plain status rows (opt.status, rendered as
-      // non-interactive text in renderOptions), reusing the EXACT
-      // existing lookups every other screen already reads from --
-      // HUNGER_LABELS/THIRST_LABELS/ENERGY_LABELS/moraleLevel and
-      // statusLine's own formatting -- never a second calculation of
-      // any of these four. Its own group, so groupedOptions' own
-      // divider naturally separates it from the room buttons below,
-      // matching CABIN/HEAD/SALOON/GALLEY/NAV STATION's own existing
-      // order exactly.
-      var c = state.crew;
+      // BELOW DECK is primarily the room navigation screen -- HUNGER/
+      // THIRST/ENERGY/MORALE briefly lived here as one consolidated
+      // snapshot, then moved back to their original rooms (GALLEY/
+      // GALLEY/CABIN/SALOON respectively) at the task's own request, so
+      // this is back to just the room list + GO ABOVE, matching CABIN/
+      // HEAD/SALOON/GALLEY/NAV STATION's own existing order exactly.
       return groupedOptions([
-        [
-          { status: true, text: belowDeckStatusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]) },
-          { status: true, text: belowDeckStatusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]) },
-          { status: true, text: belowDeckStatusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]) },
-          { status: true, text: belowDeckStatusLine('MORALE', moraleLevel(c.morale)) },
-        ],
         [
           { label: 'CABIN', action: 'cmd:cabin' },
           { label: 'HEAD', action: 'cmd:head' },
@@ -13719,43 +13741,14 @@
     document.documentElement.style.setProperty('--output-glow', 'none');
   }
 
-  // Below Deck's own half of the top-left header (rule 1 of the Below
-  // Deck typography pass): S/V SOLACE -- <LOCATION>, with <LOCATION>
-  // reflecting whichever of the six Below Deck screens is actually
-  // showing right now, in place of the generic UNDERWAY that otherwise
-  // sits there the entire rest of the voyage. Deliberately keyed off
-  // pendingChoice.id (each room's own menu id, set by cmdCabin/cmdHead/
-  // cmdSaloon/cmdGalley/cmdNavStation) rather than a duplicate of the
-  // location logic elsewhere -- the five explicit id checks below are
-  // this pass's own full, exact scope (the six named screens in the
-  // task this implements): any OTHER pendingChoice while still below
-  // (an EAT/DRINK/CLOTHING sub-screen reached from one of those rooms,
-  // for instance) falls back to the general BELOW DECK label rather
-  // than guessing which room it nested under, since sub-screens were
-  // never part of this rule's own stated scope. Above deck is
-  // untouched -- UNDERWAY there is exactly what setVesselLine already
-  // set at departure/resume, restored here every render specifically
-  // so leaving a Below Deck room doesn't leave its name stuck in the
-  // header. Called from renderOptions, which already runs on every
-  // relevant state change (including startLiveLoop's own periodic
-  // ticks) -- setVesselLine is a plain textContent set, so re-running
-  // it with an unchanged value on every one of those is harmless,
-  // exactly like updateNavStrip just above it.
-  var BELOW_DECK_ROOM_LABELS = {
-    'cabin-menu': 'CABIN',
-    'head-menu': 'HEAD',
-    'saloon-menu': 'SALOON',
-    'galley-menu': 'GALLEY',
-    'nav-station-menu': 'NAV STATION',
-  };
-  function updateVesselLineForLocation(state) {
-    if (state.crew.location !== 'below') {
-      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
-      return;
-    }
-    var roomLabel = (state.pendingChoice && BELOW_DECK_ROOM_LABELS[state.pendingChoice.id]) || 'BELOW DECK';
-    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + roomLabel);
-  }
+  // Below Deck's header used to show S/V SOLACE -- <LOCATION> here,
+  // room-by-room -- rolled back at the task's own explicit request,
+  // restoring the plain, constant UNDERWAY every below-deck screen
+  // already inherits from setVesselLine's own departure/resume call
+  // (boot()) with nothing here overriding it again on every render.
+  // The room itself is still identified the same way it always was:
+  // the click-echo line, and the room's own place in the navigation
+  // list -- never the header.
 
   function renderOptions(state) {
     applyCabinLighting(state);
@@ -13765,7 +13758,6 @@
     updateRainAudioForState(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
-    updateVesselLineForLocation(state); // same reasoning -- see that function's own comment
     optionsEl.innerHTML = '';
     // NAV STATION only -- see the CSS notes on #options.nav-station-fit
     // for why. Toggled here, every render, the same way #controls'
