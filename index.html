@@ -235,9 +235,9 @@
     margin: 1rem 0;
   }
   .vessel-log-stat {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
+    display: grid;
+    grid-template-columns: 18ch 1fr;
+    column-gap: 1ch;
     font-size: 0.95rem;
     line-height: 1.55;
     color: var(--phosphor);
@@ -402,16 +402,26 @@
      a visual readout, nothing here is interactive. A subtle, mostly-
      transparent dark backing (rgba of the game's own --bg, not a new
      color) only where the text actually sits, per this feature's own
-     "no prominent panel" requirement -- letterboxed to each line's own
-     content width via inline-block, not a single wide rectangle
-     spanning the container. Labels use --phosphor-dim (secondary
-     information, same tier CHART's own place-name labels already use)
-     and values --phosphor (the game's normal, "all non-interactive
-     game text" tier) -- deliberately NOT --phosphor-bright anywhere
-     here, since bright is reserved for the vessel/track/destination
-     layer on the map itself and for selectable commands elsewhere;
-     this overlay is read-only instrumentation, not another light
-     competing with those for attention.
+     "no prominent panel" requirement -- each row sized to its own
+     content (grid-template-columns' second column is max-content, not
+     1fr, so the row shrinks to exactly label+value rather than
+     stretching), not a single wide rectangle spanning the container.
+     Labels use --phosphor-dim (secondary information, same tier
+     CHART's own place-name labels already use) and values --phosphor
+     (the game's normal, "all non-interactive game text" tier) --
+     deliberately NOT --phosphor-bright anywhere here, since bright is
+     reserved for the vessel/track/destination layer on the map itself
+     and for selectable commands elsewhere; this overlay is read-only
+     instrumentation, not another light competing with those for
+     attention. The fixed 22ch label column is this same screen
+     family's own .data-row-lg width (see that class's own CSS notes)
+     -- GPS's longest label, DISTANCE TO NĀWILIWILI, is what sizes it,
+     and using the identical value here keeps this overlay's own
+     label/value alignment logic consistent with the rest of the game
+     even though it lives in its own dedicated class (an absolutely-
+     positioned map overlay needs different positioning/background
+     rules .data-row itself doesn't, so it keeps its own name rather
+     than being just another .data-row modifier).
      safe-area-inset-top keeps this clear of a phone's own status
      bar/notch, matching the same convention used for fixed headers
      elsewhere in this file. */
@@ -430,8 +440,9 @@
     line-height: 1.5;
   }
   .chart-nav-row {
-    display: inline-flex;
-    gap: 0.5em;
+    display: grid;
+    grid-template-columns: 22ch max-content;
+    column-gap: 0.5em;
     background: rgba(5, 8, 6, 0.55);
     padding: 0 0.35em;
     align-self: flex-start;
@@ -502,6 +513,43 @@
   }
 
   .gap { height: 0.7rem; margin: 0; }
+
+  /* Shared label/value row treatment -- HELM, MARINE WEATHER, GPS,
+     electrical/battery, GALLEY/SALOON/CABIN/HEAD status, NAV STATION,
+     INVENTORY, repair/status, and every other structured label/value
+     readout in the game. A fixed-width two-column grid, replacing the
+     earlier per-screen mix of colons, dotted leaders, and manual
+     space-padding (statusLine/belowDeckStatusLine/helmLine/
+     inventoryLine's own former string-building) that used to vary
+     screen to screen. Label flush left in its own column; value
+     starts at a fixed position and is ALSO left-aligned, never right-
+     justified; only a small intentional gap between them (column-gap)
+     -- never a colon, a run of dots, or the wide space those older
+     mechanisms produced. Same font-size/line-height/margin as .line,
+     since this replaces .line-based label/value text rather than
+     introducing a new type scale, and the SAME single text color
+     (inherited, not set here) both spans already had before this
+     change -- this is a layout change only, not a color change.
+     Three width tiers, chosen from each screen family's own longest
+     label, so nothing is forced into one single global width (which
+     would either crowd a screen with long labels or leave a short-
+     label screen sitting in an oversized gap): the bare .data-row
+     default (10ch) fits GALLEY/SALOON/CABIN/HEAD's short wellness
+     labels (HUNGER, THIRST, ENERGY, COMFORT, MORALE, HYGIENE); -md
+     (15ch) fits NAV STATION/STATUS/REPAIR/WEATHER's medium ones (up
+     to SOLAR CHARGING/ELECTRICAL, 14); -lg (22ch) fits HELM's and
+     INVENTORY's longest (BEARING TO NĀWILIWILI, 21; food names like
+     "Chicken Noodle Soup", 20). */
+  .data-row {
+    display: grid;
+    grid-template-columns: 10ch 1fr;
+    column-gap: 1ch;
+    margin: 0 0 0.35rem;
+    line-height: 1.55;
+    font-size: 0.95rem;
+  }
+  .data-row-md { grid-template-columns: 15ch 1fr; }
+  .data-row-lg { grid-template-columns: 22ch 1fr; }
 
   .heading-label {
     color: var(--phosphor);
@@ -4115,19 +4163,18 @@
       // one on display). All five are heading-dependent, recomputed
       // together via the same computeHelmLiveFigures the initial render
       // itself uses, so a mid-turn view is never stale or inconsistent
-      // with what's shown once the turn settles. helmLine, not the
-      // shared inventoryLine -- see that function's own comment for why
-      // HELM needs its own wider dotted-leader column; every mid-turn
-      // update has to keep using the exact same formatter the initial
-      // render did, or these five rows would suddenly misalign against
-      // the rest of the (unchanged) screen the moment a turn begins.
+      // with what's shown once the turn settles. Each ref (from
+      // printDataRow's own return value) is the row's VALUE span
+      // specifically, so this only ever touches the value half of each
+      // row -- the label span next to it is untouched, exactly as it
+      // should be since only the value actually changes mid-turn.
       if (activeTurn.headerRefs) {
         var liveFigures = computeHelmLiveFigures(state, nav.heading);
-        activeTurn.headerRefs.headingEl.textContent = helmLine('HEADING', Math.round(nav.heading) + '\u00B0');
-        activeTurn.headerRefs.stwEl.textContent = helmLine('SPEED THROUGH WATER', liveFigures.stw.toFixed(1) + ' KT');
-        activeTurn.headerRefs.sogEl.textContent = helmLine('SPEED OVER GROUND', liveFigures.sog.toFixed(1) + ' KT');
-        activeTurn.headerRefs.pointOfSailEl.textContent = helmLine('POINT OF SAIL', liveFigures.pointOfSail);
-        activeTurn.headerRefs.vmgEl.textContent = helmLine('VELOCITY MADE GOOD', liveFigures.vmg.toFixed(1) + ' KT');
+        activeTurn.headerRefs.headingEl.textContent = Math.round(nav.heading) + '\u00B0';
+        activeTurn.headerRefs.stwEl.textContent = liveFigures.stw.toFixed(1) + ' KT';
+        activeTurn.headerRefs.sogEl.textContent = liveFigures.sog.toFixed(1) + ' KT';
+        activeTurn.headerRefs.pointOfSailEl.textContent = liveFigures.pointOfSail;
+        activeTurn.headerRefs.vmgEl.textContent = liveFigures.vmg.toFixed(1) + ' KT';
       }
       updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
 
@@ -7256,6 +7303,32 @@
     return p; // most callers ignore this; NAV STATION uses it to scroll its own heading to the top of #output -- see cmdNavStation
   }
 
+  // The shared label/value row builder -- see .data-row's own CSS
+  // notes for the full reasoning. widthCls is one of 'data-row-md'/
+  // 'data-row-lg' (or omitted, for the narrow default) depending on
+  // the calling screen's own longest label; the row itself is always
+  // exactly two <span> children (label, value) so the CSS grid has
+  // real, independent elements to place in its two columns -- never a
+  // single pre-formatted string the way statusLine/helmLine/
+  // inventoryLine/belowDeckStatusLine used to build one. Returns the
+  // VALUE span specifically, not the row -- the one piece a caller
+  // that needs to refresh this row later (HELM's own rotation-timer
+  // live update is the one place that does) actually wants: set
+  // .textContent on exactly what this returns to update the value in
+  // place without touching the label or rebuilding the row.
+  function printDataRow(label, value, widthCls) {
+    var row = document.createElement('div');
+    row.className = 'data-row' + (widthCls ? ' ' + widthCls : '');
+    var labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    var valueEl = document.createElement('span');
+    valueEl.textContent = value;
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    tempViewEl.appendChild(row);
+    return valueEl;
+  }
+
   function printBlank() {
     var p = document.createElement('p');
     p.className = 'gap';
@@ -7603,9 +7676,11 @@
     return pts[Math.round(normalizeDeg(deg) / 22.5) % 16];
   }
 
-  // LABEL column padded to a fixed width so every instrument line in
-  // WEATHER lines up — this only works because the font is monospace;
-  // manual space-padding would NOT align in a proportional font.
+  // LABEL column padded to a fixed width -- WEATHER itself has moved
+  // to printDataRow/.data-row (see that CSS class's own notes); this
+  // remains only for the DRINK menu's own button labels (WATER/
+  // COFFEE/TEA), which stay outside the new grid treatment since
+  // they're clickable options, not plain label/value readouts.
   function instrumentLine(label, value) {
     return label.padEnd(14) + value;
   }
@@ -7746,31 +7821,6 @@
   /* ============================================================
      8. COMMANDS
      ============================================================ */
-  // Space-padded columns, not inventoryLine's dot-fill — STATUS and
-  // ELECTRICAL PANEL read as a short instrument panel, not a supply list.
-  // Used ABOVE deck only (STATUS itself, and the REPAIR sub-screen it
-  // opens) -- see belowDeckStatusLine just below for the separate,
-  // dedicated formatter the six Below Deck screens use instead. Two
-  // functions, not one shared one, specifically so a Below Deck
-  // typography pass can never silently reach into and change how
-  // STATUS/REPAIR (out of that pass's own stated scope) look.
-  function statusLine(label, value) {
-    return label + ' '.repeat(Math.max(2, 12 - label.length)) + value;
-  }
-
-  // Below Deck's own status-row format -- LABEL: VALUE, used by every
-  // player-condition or room-condition readout across the six Below
-  // Deck screens (the main menu's HUNGER/THIRST/ENERGY/MORALE, HEAD's
-  // HYGIENE, CABIN's COMFORT, NAV STATION's CABIN TEMP/CABIN/BATTERY/
-  // SOLAR CHARGING) so they all share one exact typographic convention,
-  // regardless of which room they happen to live in. Deliberately
-  // separate from statusLine (used above deck only, by STATUS/REPAIR)
-  // -- see that function's own comment for why keeping them apart
-  // matters here.
-  function belowDeckStatusLine(label, value) {
-    return label + ': ' + value;
-  }
-
   // The DISPLAYED/perceived condition — COLD/COMFORTABLE/HOT. Distinct
   // from the raw cabinTemperatureF number, which always stays visible
   // and accurate (see formatCabinTemp): a running fan can make an
@@ -7834,13 +7884,13 @@
   function cmdStatus(state) {
     var b = state.boat;
     printBlank();
-    printLine(statusLine('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn)));
-    printLine(statusLine('BATTERY', Math.floor(b.battery) + '%'));
+    printDataRow('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn), 'data-row-md');
+    printDataRow('BATTERY', Math.floor(b.battery) + '%', 'data-row-md');
     printBlank();
-    printLine(statusLine('SAILS', b.sails));
-    printLine(statusLine('RUDDER', b.steering));
-    printLine(statusLine('ENGINE', b.engine));
-    printLine(statusLine('ELECTRICAL', b.electrical));
+    printDataRow('SAILS', b.sails, 'data-row-md');
+    printDataRow('RUDDER', b.steering, 'data-row-md');
+    printDataRow('ENGINE', b.engine, 'data-row-md');
+    printDataRow('ELECTRICAL', b.electrical, 'data-row-md');
     var opts = [];
     // REPAIR is now reachable only from here, and only while there's
     // actually something to repair -- hasRepairableDamage covers the
@@ -8173,16 +8223,16 @@
   function cmdWeather(state) {
     var w = state.weather;
     printBlank();
-    printLine(instrumentLine('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT'));
-    printLine(instrumentLine('SEAS', seaStateShortLabel(w.seaState) + ' \u00B7 ' + seaStateWaveHeightFt(w.seaState) + ' FT'));
-    printLine(instrumentLine('TEMP', Math.round(w.temperatureF) + '\u00B0F'));
-    printLine(instrumentLine('SKY', w.condition.toUpperCase()));
+    printDataRow('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT');
+    printDataRow('SEAS', seaStateShortLabel(w.seaState) + ' \u00B7 ' + seaStateWaveHeightFt(w.seaState) + ' FT');
+    printDataRow('TEMP', Math.round(w.temperatureF) + '\u00B0F');
+    printDataRow('SKY', w.condition.toUpperCase());
     if (w.oceanCurrent.speedKt == null) {
-      printLine(instrumentLine('CURRENT', 'NO DATA'));
+      printDataRow('CURRENT', 'NO DATA');
     } else if (w.oceanCurrent.speedKt < 0.2) {
-      printLine(instrumentLine('CURRENT', 'NEGLIGIBLE'));
+      printDataRow('CURRENT', 'NEGLIGIBLE');
     } else {
-      printLine(instrumentLine('CURRENT', compassPoint(w.oceanCurrent.directionDeg) + ' ' + w.oceanCurrent.speedKt.toFixed(1) + ' KT'));
+      printDataRow('CURRENT', compassPoint(w.oceanCurrent.directionDeg) + ' ' + w.oceanCurrent.speedKt.toFixed(1) + ' KT');
     }
     state.pendingChoice = {
       id: 'weather-menu',
@@ -8563,18 +8613,18 @@
         if (!anyFood) {
           printLine('Nothing left aboard to eat.', 'amber');
         } else {
-          FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printLine(foodItemLine(f, state.food[f.key])); });
+          FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printDataRow(f.name, countCurrentOriginal(state.food[f.key], f.original), 'data-row-lg'); });
         }
-        printLine(inventoryLine('Coffee', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE)));
-        printLine(inventoryLine('Tea', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA)));
+        printDataRow('Coffee', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE), 'data-row-lg');
+        printDataRow('Tea', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA), 'data-row-lg');
         break;
       case 'water':
         printLine('WATER', 'heading-label');
-        printLine(inventoryLine('Water', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS)));
+        printDataRow('Water', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS), 'data-row-lg');
         break;
       case 'fuel':
         printLine('FUEL', 'heading-label');
-        printLine(inventoryLine('Diesel', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS)));
+        printDataRow('Diesel', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS), 'data-row-lg');
         break;
       case 'spares':
         printLine('SPARES', 'heading-label');
@@ -8768,40 +8818,6 @@
     return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
   }
 
-  // HELM's own dotted-leader formatter -- deliberately separate from
-  // the shared inventoryLine (used by INVENTORY/CLOTHING and others):
-  // HELM's own labels now run longer than inventoryLine's fixed
-  // 22-column width comfortably allows (BEARING TO NĀWILIWILI, VELOCITY
-  // MADE GOOD, SPEED THROUGH WATER all exceed it), and inventoryLine's
-  // own max(2, ...) clamp would otherwise collapse those rows to a bare
-  // two dots while every other screen using inventoryLine keeps its
-  // existing spacing untouched. A wider fixed 28-column label field
-  // gives every current HELM label a proportionate dotted leader with
-  // the same fixed alignment inventoryLine itself uses.
-  //
-  // That fixed 28-column width alone isn't quite enough, though: a few
-  // rows can carry a genuinely long VALUE, not just a long label --
-  // POINT OF SAIL's CLOSE HAULED, SAIL TRIM's NEEDS TRIM -- and at the
-  // full 28-column dot count those specific label+value combinations
-  // are long enough to wrap to a second line on the current iPhone
-  // layout (empirically measured: 38 characters, label+space+dots+
-  // space+value all together, is the longest that still fits on one
-  // line here; 39 wraps). maxDotsForOneLine below is what actually
-  // enforces that -- for every row with a short value (a heading in
-  // degrees, a speed in KT, ON/OFF) it's always well above the ideal
-  // 28-column dot count and never bites at all, so those rows keep
-  // their full, fixed-column dot count unchanged; it only ever
-  // shortens the dots for the rare row/value combination long enough
-  // to need it, tightening the leader exactly as this task's own
-  // "tighten spacing rather than shrink the font" instruction asks
-  // for, and only by as much as that one line actually needs.
-  function helmLine(label, valueText) {
-    var idealDots = 28 - label.length;
-    var maxDotsForOneLine = 38 - label.length - 2 - valueText.length;
-    var dots = Math.max(2, Math.min(idealDots, maxDotsForOneLine));
-    return label + ' ' + '.'.repeat(dots) + ' ' + valueText;
-  }
-
   // headingLabel overrides the printed heading ('HELM' by default) --
   // used only by cmdHelm's damaged-steering branch, which passes 'HELM'
   // explicitly since the player isn't actually steering there; both now
@@ -8810,31 +8826,24 @@
   // calls for.
   function printHelmAtHelmHeader(state, headingLabel) {
     var nav = state.nav;
-    function liveLine(text) {
-      var el = document.createElement('p');
-      el.className = 'line';
-      el.textContent = text;
-      tempViewEl.appendChild(el);
-      return el;
-    }
     var figures = computeHelmLiveFigures(state, nav.heading);
 
     printLine(headingLabel || 'HELM', 'heading-label');
     printBlank();
-    var headingEl = liveLine(helmLine('HEADING', Math.round(nav.heading) + '\u00B0'));
-    printLine(helmLine('COURSE', Math.round(nav.setCourse) + '\u00B0'));
-    printLine(helmLine('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0'));
-    var vmgEl = liveLine(helmLine('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT'));
+    var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
+    printDataRow('COURSE', Math.round(nav.setCourse) + '\u00B0', 'data-row-lg');
+    printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
+    var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
     printBlank();
-    var stwEl = liveLine(helmLine('SPEED THROUGH WATER', figures.stw.toFixed(1) + ' KT'));
-    var sogEl = liveLine(helmLine('SPEED OVER GROUND', figures.sog.toFixed(1) + ' KT'));
+    var stwEl = printDataRow('SPEED THROUGH WATER', figures.stw.toFixed(1) + ' KT', 'data-row-lg');
+    var sogEl = printDataRow('SPEED OVER GROUND', figures.sog.toFixed(1) + ' KT', 'data-row-lg');
     printBlank();
-    printLine(helmLine('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0'));
-    printLine(helmLine('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT'));
-    var pointOfSailEl = liveLine(helmLine('POINT OF SAIL', figures.pointOfSail));
+    printDataRow('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0', 'data-row-lg');
+    printDataRow('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT', 'data-row-lg');
+    var pointOfSailEl = printDataRow('POINT OF SAIL', figures.pointOfSail, 'data-row-lg');
     printBlank();
-    printLine(helmLine('SAIL TRIM', sailTrimLabel(state)));
-    printLine(helmLine('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF'));
+    printDataRow('SAIL TRIM', sailTrimLabel(state), 'data-row-lg');
+    printDataRow('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF', 'data-row-lg');
 
     var refs = { headingEl: headingEl, stwEl: stwEl, sogEl: sogEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
     if (activeTurn) activeTurn.headerRefs = refs;
@@ -9023,8 +9032,8 @@
   function cmdGalley(state) {
     printBlank();
     var c = state.crew;
-    printLine(belowDeckStatusLine('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]));
-    printLine(belowDeckStatusLine('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]));
+    printDataRow('HUNGER', HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]);
+    printDataRow('THIRST', THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
     var options = [
       { label: 'EAT', action: 'cmd:eat' },
       { label: 'DRINK', action: 'cmd:drink' },
@@ -9041,7 +9050,7 @@
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
     printBlank();
-    printLine(belowDeckStatusLine('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]));
+    printDataRow('HYGIENE', HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
     state.pendingChoice = {
       id: 'head-menu',
       options: [
@@ -9225,7 +9234,7 @@
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
     printBlank();
-    printLine(belowDeckStatusLine('MORALE', moraleLevel(state.crew.morale)));
+    printDataRow('MORALE', moraleLevel(state.crew.morale));
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
@@ -9281,8 +9290,8 @@
   function cmdCabin(state) {
     printBlank();
     var c = state.crew;
-    printLine(belowDeckStatusLine('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]));
-    printLine(belowDeckStatusLine('COMFORT', comfortLabel(state)));
+    printDataRow('ENERGY', ENERGY_LABELS[energyLevel(c.fatigue)]);
+    printDataRow('COMFORT', comfortLabel(state));
     var options = [
       { label: 'SLEEP', action: 'cmd:sleep' },
       { label: 'CHANGE', action: 'cmd:clothing' },
@@ -9309,10 +9318,10 @@
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    printLine(belowDeckStatusLine('CABIN TEMP', cabinTempDisplay));
-    printLine(belowDeckStatusLine('CABIN', cabinStatusWord(state)));
+    printDataRow('CABIN TEMP', cabinTempDisplay, 'data-row-md');
+    printDataRow('CABIN', cabinStatusWord(state), 'data-row-md');
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
-    printLine(belowDeckStatusLine('BATTERY', batteryLabel));
+    printDataRow('BATTERY', batteryLabel, 'data-row-md');
     // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
     // threshold span (0% included): the separate all-caps NO POWER
     // wording this used to show at exactly 0% was redundant next to the
@@ -9329,7 +9338,7 @@
     if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
     }
-    printLine(belowDeckStatusLine('SOLAR CHARGING', solarOutputWatts(state) + ' W'));
+    printDataRow('SOLAR CHARGING', solarOutputWatts(state) + ' W', 'data-row-md');
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
@@ -11092,11 +11101,6 @@
     }
   }
 
-  function foodItemLine(item, servings) {
-    var dots = '.'.repeat(Math.max(2, 22 - item.name.length));
-    return item.name + ' ' + dots + ' ' + countCurrentOriginal(servings, item.original);
-  }
-
   // Resolves the currently-held catch (if any) into a food-item-shaped
   // object so the rest of performEat/eatFlavorLine can treat it exactly
   // like any other meal — species-specific name, always a cooked meal
@@ -11696,10 +11700,10 @@
     printLine('REPAIR \u2014 ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
     var p = computeRepairPenalties(state);
     p.factors.forEach(function (f) {
-      printLine(statusLine(f.label, f.value));
+      printDataRow(f.label, f.value, 'data-row-md');
     });
     var chance = repairSuccessChance(state);
-    printLine(statusLine('SUCCESS', repairSuccessLabel(chance)));
+    printDataRow('SUCCESS', repairSuccessLabel(chance), 'data-row-md');
     // Spares are unlimited -- the repair action is always offered here
     // (subject only to this screen even being reachable at all, which
     // already requires the system to be DAMAGED -- see
