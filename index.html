@@ -394,6 +394,50 @@
     height: 100%;
     touch-action: none;
   }
+  /* GPS's own navigation readout -- POSITION/COURSE/SPEED/BEARING/
+     DISTANCE laid directly over the map itself (top-left, clear of
+     MapLibre's own bottom-right attribution), never a separate block
+     that pushes the map down. pointer-events:none throughout so it
+     never intercepts the map's own drag/pinch/click handling -- purely
+     a visual readout, nothing here is interactive. A subtle, mostly-
+     transparent dark backing (rgba of the game's own --bg, not a new
+     color) only where the text actually sits, per this feature's own
+     "no prominent panel" requirement -- letterboxed to each line's own
+     content width via inline-block, not a single wide rectangle
+     spanning the container. Labels use --phosphor-dim (secondary
+     information, same tier CHART's own place-name labels already use)
+     and values --phosphor (the game's normal, "all non-interactive
+     game text" tier) -- deliberately NOT --phosphor-bright anywhere
+     here, since bright is reserved for the vessel/track/destination
+     layer on the map itself and for selectable commands elsewhere;
+     this overlay is read-only instrumentation, not another light
+     competing with those for attention.
+     safe-area-inset-top keeps this clear of a phone's own status
+     bar/notch, matching the same convention used for fixed headers
+     elsewhere in this file. */
+  .chart-nav-overlay {
+    position: absolute;
+    top: calc(0.6rem + env(safe-area-inset-top, 0px));
+    left: 0.6rem;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    pointer-events: none;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    line-height: 1.5;
+  }
+  .chart-nav-row {
+    display: inline-flex;
+    gap: 0.5em;
+    background: rgba(5, 8, 6, 0.55);
+    padding: 0 0.35em;
+    align-self: flex-start;
+  }
+  .chart-nav-row span:first-child { color: var(--phosphor-dim); }
+  .chart-nav-row span:last-child { color: var(--phosphor); }
   /* #chart-map (an ID selector) rather than .chart-map here is
      deliberate, not just a naming accident: MapLibre's own CSS
      (maplibre-gl.css) defines .maplibregl-ctrl-attrib.maplibregl-
@@ -658,6 +702,19 @@
     </div>
   </div>
 
+  <!-- MARINE WEATHER -- an in-game offshore forecast screen, same
+       shell/shape as VESSEL LOG just above (fixed, scrollable body,
+       one RETURN control) rather than a parallel overlay system.
+       #marine-weather-body is populated fresh each time cmdMarineWeather
+       opens this, exactly like #vessel-log-body; nothing here is
+       static markup. -->
+  <div id="marine-weather-overlay" class="vessel-log-overlay" hidden>
+    <div id="marine-weather-body" class="vessel-log-body"></div>
+    <div class="vessel-log-back-area">
+      <button id="marine-weather-back-btn" type="button" class="option">← RETURN</button>
+    </div>
+  </div>
+
   <!-- SHIP'S COMPUTER HOME -- the computer's own full-viewport
        "desktop", same family/shape as SHIP'S PLAN and VESSEL LOG above
        (see the .ships-computer-overlay CSS notes and
@@ -685,14 +742,14 @@
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:19.236%; top:14.258%; width:19.375%; height:9.414%;">
-        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">WEATHER MAP</span>
-        <button type="button" class="computer-icon-hit" data-app="weatherMap" aria-label="WEATHER MAP"
+        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">MARINE WEATHER</span>
+        <button type="button" class="computer-icon-hit" data-app="marineWeather" aria-label="MARINE WEATHER"
                 style="left:13.403%; top:12.852%; width:31.389%; height:16.758%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:61.458%; top:14.219%; width:19.375%; height:9.414%;">
-        <span class="computer-icon-label" style="left:71.146%; top:26.562%;">CHART</span>
-        <button type="button" class="computer-icon-hit" data-app="chart" aria-label="CHART"
+        <span class="computer-icon-label" style="left:71.146%; top:26.562%;">GPS</span>
+        <button type="button" class="computer-icon-hit" data-app="chart" aria-label="GPS"
                 style="left:58.958%; top:12.812%; width:24.375%; height:16.797%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
@@ -737,17 +794,29 @@
     </div>
   </div>
 
-  <!-- CHART -- same family/shell as PONG/SHIP'S COMPUTER HOME just
+  <!-- CHART/GPS -- same family/shell as PONG/SHIP'S COMPUTER HOME just
        above (see .ships-computer-overlay's own CSS notes). #chart-map
        is handed to MapLibre GL JS as its own container (search "CHART"
        below the PONG section for the JS that builds and maintains it)
        rather than drawn here; nothing here is static beyond the shell
        and RETURN, in the exact same position/style as every other
-       full-screen computer app's own RETURN/BACK. -->
+       full-screen computer app's own RETURN/BACK. #chart-nav-overlay
+       is the GPS navigation readout (POSITION/COURSE/SPEED/BEARING/
+       DISTANCE) -- plain text absolutely positioned on top of the map
+       itself, never a separate block above or below it; see
+       .chart-nav-overlay's own CSS notes and refreshChartData in the
+       JS for how its five values stay live. -->
   <div id="chart-overlay" class="ships-computer-overlay" hidden>
     <div class="ships-computer-screen-area" id="chart-screen-area">
       <div class="ships-computer-screen" id="chart-screen">
         <div id="chart-map" class="chart-map"></div>
+        <div id="chart-nav-overlay" class="chart-nav-overlay">
+          <div class="chart-nav-row"><span>POSITION</span><span id="chart-nav-position"></span></div>
+          <div class="chart-nav-row"><span>COURSE</span><span id="chart-nav-course"></span></div>
+          <div class="chart-nav-row"><span>SPEED</span><span id="chart-nav-speed"></span></div>
+          <div class="chart-nav-row"><span>BEARING TO NĀWILIWILI</span><span id="chart-nav-bearing"></span></div>
+          <div class="chart-nav-row"><span>DISTANCE TO NĀWILIWILI</span><span id="chart-nav-distance"></span></div>
+        </div>
       </div>
     </div>
     <div class="ships-computer-shutdown-area">
@@ -1567,24 +1636,6 @@
     if (distToFinal > 1845) return 'offshore';
     if (distToFinal > 861) return 'tropics';
     return 'approach';
-  }
-
-  // WEATHER MAP's external link — always built fresh from the boat's
-  // current simulated coordinates, never cached. A read-only
-  // convenience opened in a new tab; nothing about the game reads its
-  // result. (CHART itself no longer opens an external link at all --
-  // see the CHART section, below the PONG section, for its own
-  // in-game MapLibre map.)
-  //
-  // Windy gives genuinely global wind/gust/wave/swell/pressure coverage
-  // with a simple coordinate URL, and is a standard reference among
-  // cruising sailors — always Windy, never NOAA, since the command is
-  // named OPEN IN WINDY and has to be accurate every time it's used.
-  // d:picker opens Windy's location picker AT these exact coordinates
-  // (a visible marker plus the detail panel for that point) rather
-  // than just centering the map there with nothing marking the spot.
-  function windyUrl(lat, lon) {
-    return 'https://www.windy.com/?wind,' + lat.toFixed(4) + ',' + lon.toFixed(4) + ',6,d:picker';
   }
 
   // The ONE shared day/night boundary in this file -- night is 19:00
@@ -6994,6 +7045,9 @@
   var vesselLogOverlayEl = document.getElementById('vessel-log-overlay');
   var vesselLogBodyEl = document.getElementById('vessel-log-body');
   var vesselLogBackBtn = document.getElementById('vessel-log-back-btn');
+  var marineWeatherOverlayEl = document.getElementById('marine-weather-overlay');
+  var marineWeatherBodyEl = document.getElementById('marine-weather-body');
+  var marineWeatherBackBtn = document.getElementById('marine-weather-back-btn');
   var shipsComputerOverlayEl = document.getElementById('ships-computer-overlay');
   var shipsComputerScreenAreaEl = document.querySelector('.ships-computer-screen-area');
   var shipsComputerScreenEl = document.querySelector('.ships-computer-screen');
@@ -7008,6 +7062,11 @@
   var chartScreenEl = document.getElementById('chart-screen');
   var chartMapEl = document.getElementById('chart-map');
   var chartReturnBtn = document.getElementById('chart-return-btn');
+  var chartNavPositionEl = document.getElementById('chart-nav-position');
+  var chartNavCourseEl = document.getElementById('chart-nav-course');
+  var chartNavSpeedEl = document.getElementById('chart-nav-speed');
+  var chartNavBearingEl = document.getElementById('chart-nav-bearing');
+  var chartNavDistanceEl = document.getElementById('chart-nav-distance');
 
   // Sizes an aspect-ratio-locked box (boxEl) to the largest refW x refH
   // box that fits inside its own flex-centered parent (areaEl) without
@@ -7139,6 +7198,8 @@
     // VESSEL LOG's own full-viewport overlay -- same reasoning as
     // SHIP'S PLAN just above.
     vesselLogOverlayEl.hidden = true;
+    // MARINE WEATHER's own full-viewport overlay -- same reasoning.
+    marineWeatherOverlayEl.hidden = true;
     // SHIP'S COMPUTER HOME's own full-viewport overlay -- same
     // reasoning. Its own RETURN-equivalent paths (VESSEL LOG's RETURN,
     // and the individual app click handlers below) call this
@@ -7551,6 +7612,22 @@
       lon += (Math.random() - 0.5) * 0.4;
     }
     return { lat: lat, lon: lon };
+  }
+
+  // GPS's own "COURSE" figure -- the player's actual intended
+  // direction, matching HELM's own use of the word "COURSE" exactly
+  // (nav.setCourse) rather than introducing a second meaning for it.
+  // nav.setCourse is only ever initialized once open water unlocks
+  // manual steering (see cmdHelm) -- before that, during the coastal
+  // corridor, GPS falls back to the exact same live bearing-to-current-
+  // waypoint cmdHelm's own coastal branch already computes and shows,
+  // so this never reads null/blank during that phase. A read-only
+  // convenience function; never writes nav.setCourse itself.
+  function currentCourseDeg(state) {
+    var nav = state.nav;
+    if (nav.setCourse != null) return nav.setCourse;
+    var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
+    return bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon);
   }
 
   function describeGap(minutes) {
@@ -8170,6 +8247,188 @@
       { label: nearLabel, windDir: windDir, windLow: nearWindLow, windHigh: nearWindHigh, seaLow: nearSeaLow, seaHigh: nearSeaHigh, conditionLines: nearConditionLines },
       { label: farLabel, windDir: windDir, windLow: farWindLow, windHigh: farWindHigh, seaLow: farSeaLow, seaHigh: farSeaHigh, conditionLines: farConditionLines },
     ];
+  }
+
+  /* ============================================================
+     MARINE WEATHER -- SHIP'S COMPUTER's offshore forecast screen.
+     ------------------------------------------------------------
+     A handful of marine-specific figures (GUSTS, SWELL, VISIBILITY,
+     PRESSURE) have no existing counterpart anywhere in Landfall's
+     weather model -- state.weather only ever tracked windSpeed/
+     windDirection/seaState/condition/trend (see driftWeather). Rather
+     than growing the simulation itself (a new set of independently-
+     drifting values this task never asked for), each is derived, on
+     read only, as a simple, deterministic function of those SAME
+     existing fields -- nothing here is stored, saved, or fed back into
+     the simulation; two calls with the same state always return the
+     same figures. Real marine conventions, kept deliberately simple:
+     gusts run a fixed ~30% above sustained wind; swell direction
+     follows the wind that raised it (Landfall has no separate distant-
+     system swell source to model); swell height/period both scale with
+     the SAME sea-state tier WEATHER already shows; visibility and
+     pressure both key off the four-condition model directly.
+     -------------------------------------------------------------- */
+  function deriveGustsKt(windSpeedKt) {
+    return Math.round(windSpeedKt * 1.3);
+  }
+
+  function deriveSwell(windDirectionDeg, seaHeightFt) {
+    return {
+      directionDeg: windDirectionDeg,
+      heightFt: Math.max(1, Math.round(seaHeightFt * 0.8)),
+      periodSec: 8 + Math.round(seaHeightFt / 2), // bigger seas -> longer-period swell; calm seas settle near the 8-9s low end typical of wind-driven chop
+    };
+  }
+
+  var MARINE_VISIBILITY_NM = { clear: '10+ NM', overcast: '10+ NM', rain: '5 NM', squall: '2 NM' };
+  function deriveVisibilityNm(condition) {
+    return MARINE_VISIBILITY_NM[condition] || '10+ NM';
+  }
+
+  // Baseline 1017 MB (a typical fair-weather oceanic reading), nudged
+  // by current condition and trend -- lower pressure for wetter/
+  // stormier conditions and a building trend, higher for clear skies
+  // and an easing one, matching the real-world association between
+  // low pressure and deteriorating weather without modeling an
+  // actual independent barometric field.
+  var MARINE_PRESSURE_CONDITION_ADJUST_MB = { clear: 5, overcast: 0, rain: -8, squall: -18 };
+  function derivePressureMb(condition, trend) {
+    var conditionAdj = MARINE_PRESSURE_CONDITION_ADJUST_MB[condition] || 0;
+    var trendAdj = trend === 'building' ? -3 : (trend === 'easing' ? 3 : 0);
+    return Math.round(1017 + conditionAdj + trendAdj);
+  }
+
+  // Projects wind/seas/condition forward by an arbitrary number of
+  // hours, generalizing buildForecastPeriods' own near/far trend-
+  // stepping (+5 KT wind / +2 FT seas / one condition-tier shift per
+  // "step") to MARINE_FORECAST_HOURS' five specific horizons instead of
+  // just two calendar periods. One step is defined as 24 hours of the
+  // CURRENT trend continuing unchanged -- the trend itself can and does
+  // keep drifting (driftWeather), so this is Landfall's own honest
+  // extrapolation of "if conditions keep moving the way they are right
+  // now," exactly what a real offshore forecast is too, never a
+  // guaranteed lookahead at the actual future simulated state. A
+  // 'steady' trend returns the current figures unchanged at every
+  // horizon. Read-only -- never writes state.weather itself.
+  var MARINE_FORECAST_HOURS = [6, 12, 24, 48, 72];
+  function projectWeatherAtHours(state, hours) {
+    var w = state.weather;
+    var steps = hours / 24;
+    var windDelta = 0, seaDelta = 0, conditionSteps = 0;
+    if (w.trend === 'building') { windDelta = 5 * steps; seaDelta = 2 * steps; conditionSteps = Math.round(steps); }
+    if (w.trend === 'easing') { windDelta = -5 * steps; seaDelta = -2 * steps; conditionSteps = -Math.round(steps); }
+
+    var windSpeed = clamp(w.windSpeed + windDelta, 2, 45);
+    var seaHeightFt = Math.max(1, seaStateWaveHeightFt(w.seaState) + seaDelta);
+
+    var idx = FORECAST_CONDITION_ORDER.indexOf(w.condition);
+    if (idx < 0) idx = 1; // unrecognized condition (shouldn't happen) -- treat as overcast, the model's own default (same fallback buildForecastPeriods itself uses)
+    var newIdx = clamp(idx + conditionSteps, 0, FORECAST_CONDITION_ORDER.length - 1);
+
+    return {
+      windDirectionDeg: w.windDirection,
+      windSpeedKt: windSpeed,
+      seaHeightFt: seaHeightFt,
+      condition: FORECAST_CONDITION_ORDER[newIdx],
+    };
+  }
+
+  // One "LABEL value" row, exactly like VESSEL LOG's own .vessel-log-
+  // stat rows -- shared by CURRENT and every FORECAST period so all of
+  // them share one visual/DOM pattern.
+  function appendMarineWeatherStat(container, label, value) {
+    var row = document.createElement('div');
+    row.className = 'vessel-log-stat';
+    var labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    var valueEl = document.createElement('span');
+    valueEl.textContent = value;
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    container.appendChild(row);
+  }
+
+  // WIND/GUSTS/SEAS/SWELL/WEATHER -- the five figures CURRENT and every
+  // FORECAST period all share; CURRENT alone adds VISIBILITY/PRESSURE
+  // on top (see cmdMarineWeather) since those aren't meaningfully
+  // projectable the same way and the task's own spec doesn't ask
+  // FORECAST to repeat them.
+  function appendMarineWeatherCoreStats(container, windDirectionDeg, windSpeedKt, seaHeightFt, condition) {
+    var gusts = deriveGustsKt(windSpeedKt);
+    var swell = deriveSwell(windDirectionDeg, seaHeightFt);
+    appendMarineWeatherStat(container, 'WIND', compassPoint(windDirectionDeg) + ' ' + Math.round(windSpeedKt) + ' KT');
+    appendMarineWeatherStat(container, 'GUSTS', gusts + ' KT');
+    appendMarineWeatherStat(container, 'SEAS', Math.round(seaHeightFt) + ' FT');
+    appendMarineWeatherStat(container, 'SWELL', compassPoint(swell.directionDeg) + ' ' + swell.heightFt + ' FT @ ' + swell.periodSec + ' SEC');
+    appendMarineWeatherStat(container, 'WEATHER', condition.toUpperCase());
+  }
+
+  // Opened only from SHIP'S COMPUTER's own menu, replacing the old
+  // external WEATHER MAP link -- same architecture as cmdVesselLog
+  // (plain mouse click, builds its scrollable body fresh every open,
+  // RETURN goes back to the computer menu). Never touches
+  // state.boat.computerOn, never gates on darkness/power beyond
+  // whatever already gated reaching SHIP'S COMPUTER itself.
+  function cmdMarineWeather(state) {
+    playNavStationOneShot('mouse');
+    renderMarineWeatherBody(state);
+    marineWeatherBodyEl.scrollTop = 0;
+    marineWeatherOverlayEl.hidden = false;
+    state.pendingChoice = { id: 'marine-weather', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
+  }
+
+  function renderMarineWeatherBody(state) {
+    var w = state.weather;
+    var body = marineWeatherBodyEl;
+    body.innerHTML = '';
+
+    var title = document.createElement('p');
+    title.className = 'line heading-label';
+    title.textContent = 'MARINE WEATHER';
+    body.appendChild(title);
+    var titleGap = document.createElement('p');
+    titleGap.className = 'gap';
+    body.appendChild(titleGap);
+
+    appendMarineWeatherStat(body, 'UPDATED', forecastIssuedHHMM(state));
+    var fix = currentLatLon(state);
+    appendMarineWeatherStat(body, 'POSITION', formatLatLon(fix.lat, fix.lon));
+
+    var currentGap = document.createElement('p');
+    currentGap.className = 'gap';
+    body.appendChild(currentGap);
+    var currentHeading = document.createElement('p');
+    currentHeading.className = 'line heading-label';
+    currentHeading.textContent = 'CURRENT';
+    body.appendChild(currentHeading);
+
+    var currentSeaHeightFt = seaStateWaveHeightFt(w.seaState);
+    appendMarineWeatherCoreStats(body, w.windDirection, w.windSpeed, currentSeaHeightFt, w.condition);
+    appendMarineWeatherStat(body, 'VISIBILITY', deriveVisibilityNm(w.condition));
+    appendMarineWeatherStat(body, 'PRESSURE', derivePressureMb(w.condition, w.trend) + ' MB');
+
+    var forecastGap = document.createElement('p');
+    forecastGap.className = 'gap';
+    body.appendChild(forecastGap);
+    var forecastHeading = document.createElement('p');
+    forecastHeading.className = 'line heading-label';
+    forecastHeading.textContent = 'FORECAST';
+    body.appendChild(forecastHeading);
+
+    MARINE_FORECAST_HOURS.forEach(function (hours) {
+      var rule = document.createElement('hr');
+      rule.className = 'vessel-log-rule';
+      body.appendChild(rule);
+      var periodHeading = document.createElement('p');
+      periodHeading.className = 'line heading-label';
+      periodHeading.textContent = '+' + String(hours).padStart(2, '0') + ' HR';
+      body.appendChild(periodHeading);
+      var periodGap = document.createElement('p');
+      periodGap.className = 'gap';
+      body.appendChild(periodGap);
+      var projected = projectWeatherAtHours(state, hours);
+      appendMarineWeatherCoreStats(body, projected.windDirectionDeg, projected.windSpeedKt, projected.seaHeightFt, projected.condition);
+    });
   }
 
   
@@ -9111,8 +9370,8 @@
   // choosing SHUT DOWN (see performShutDownComputer), since this is
   // meant to read as a physical machine rather than another Landfall
   // submenu. Opens the image-based full-viewport desktop
-  // (#ships-computer-overlay) rather than a text menu -- WEATHER MAP/
-  // CHART/VESSEL LOG/JOURNAL/PONG are that overlay's own icon hit
+  // (#ships-computer-overlay) rather than a text menu -- MARINE
+  // WEATHER/GPS/VESSEL LOG/JOURNAL/PONG are that overlay's own icon hit
   // buttons (wired once, permanently, alongside shipsComputerShutdownBtn
   // below), not #options entries, so pendingChoice's own options array
   // here is a placeholder only (never actually rendered while the
@@ -9253,8 +9512,8 @@
   // handled in handleAction like any other normal action) -- by the
   // time the player can even see that menu, cmdShipsComputer's own
   // power/darkness gates have already passed, so this needs no gate of
-  // its own. Plays the SAME plain mouse-click one-shot WEATHER MAP/
-  // CHART already use (never computer_startup.mp3/computer_shutdown.mp3
+  // its own. Plays the SAME plain mouse-click one-shot MARINE WEATHER/
+  // GPS already use (never computer_startup.mp3/computer_shutdown.mp3
   // -- the computer stays on, this is just another screen on it) and
   // never touches state.boat.computerOn at all. pendingChoice still
   // gets a normal, non-empty options array (same reasoning as
@@ -9643,12 +9902,16 @@
   }
 
   /* ============================================================
-     CHART -- an in-game nautical chart built into the Ship's Computer
-     with MapLibre GL JS, replacing the old "open Google Maps in a new
-     tab" behavior (WEATHER MAP keeps that external-tab pattern
-     unchanged; only CHART's own icon now opens this instead). Same
-     shell/RETURN/no-startup-replay reasoning as PONG's own top
-     comment -- see there for the family this belongs to.
+     CHART/GPS -- an in-game nautical chart built into the Ship's
+     Computer with MapLibre GL JS (labeled GPS on the home screen
+     itself; internal names below stay "chart" throughout, since this
+     section's own behavior didn't change, only its label and the
+     navigation overlay added on top of it -- see .chart-nav-overlay's
+     own HTML/CSS notes and refreshChartData below for that). WEATHER
+     MAP's own old external-tab behavior is gone entirely and unrelated
+     to this section -- see cmdMarineWeather for its in-game
+     replacement. Same shell/RETURN/no-startup-replay reasoning as
+     PONG's own top comment -- see there for the family this belongs to.
 
      This is deliberately NOT a routing engine: no driving/walking/
      marine route is ever calculated. It draws exactly three things
@@ -9986,6 +10249,24 @@
 
     var destLon = unwrapLon(nav.lon, NAWILIWILI_HARBOR.lon);
     chartMap.getSource('chart-reference').setData(chartLineStringFeature([[nav.lon, nav.lat], [destLon, NAWILIWILI_HARBOR.lat]]));
+
+    // GPS's own navigation readout (see .chart-nav-overlay's HTML/CSS
+    // notes) -- refreshed here alongside everything else the map itself
+    // shows, so it's live on the exact same schedule (open, and every
+    // tick while still open) rather than a second, separate update
+    // path. Every figure is read from the SAME existing calculations
+    // HELM/POSITION already use -- currentLatLon/formatLatLon (POSITION,
+    // including its own uncertain-fix jitter when electrical is
+    // damaged), currentCourseDeg (COURSE, open-ocean setCourse or the
+    // coastal waypoint bearing), computeHelmLiveFigures (SPEED, i.e.
+    // SOG), and bearingBetween/distanceBetween (BEARING/DISTANCE to
+    // Nāwiliwili) -- never a duplicate calculation of any of them.
+    var fix = currentLatLon(state);
+    chartNavPositionEl.textContent = formatLatLon(fix.lat, fix.lon);
+    chartNavCourseEl.textContent = Math.round(currentCourseDeg(state)) + '\u00B0';
+    chartNavSpeedEl.textContent = computeHelmLiveFigures(state, nav.heading).sog.toFixed(1) + ' KT';
+    chartNavBearingEl.textContent = Math.round(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)) + '\u00B0';
+    chartNavDistanceEl.textContent = Math.round(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)).toLocaleString() + ' NM';
   }
 
   // The live-update half of this feature's own "if CHART stays
@@ -14995,7 +15276,7 @@
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
     }
-    if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart')) {
+    if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) {
       cmdShipsComputerMenu(state);
     }
   }
@@ -15072,6 +15353,18 @@
     scrollToBottom();
   });
 
+  // MARINE WEATHER's RETURN control -- identical shape/reasoning to
+  // vesselLogBackBtn just above.
+  marineWeatherBackBtn.addEventListener('click', function () {
+    if (!GAME || uiBusy) return;
+    playNavStationOneShot('mouse');
+    clearTempView();
+    cmdShipsComputerMenu(GAME);
+    renderOptions(GAME);
+    saveGameState(GAME);
+    scrollToBottom();
+  });
+
   // PONG's RETURN -- permanently wired once, same reasoning as
   // vesselLogBackBtn just above. Mid-match: closes the game outright
   // (via pongReturnToHome -> closePong), never counting anything as a
@@ -15103,44 +15396,25 @@
   // overlay covers where #options would be, so these live outside the
   // normal rendering pipeline entirely). One shared handler dispatches
   // on each button's own data-app rather than five near-identical
-  // listeners. The computer NEVER leaves this screen for WEATHER MAP
-  // (unchanged external-link behavior, moved here from the old
-  // #options text buttons it used to be -- see the shared logic
-  // below) or for JOURNAL (click sound only, no placeholder, no alert,
-  // nothing else). VESSEL LOG, PONG, and CHART are the three real
-  // navigations, each to its own full-viewport overlay, exactly like
-  // clicking VESSEL LOG used to work as a text option.
+  // listeners. The computer NEVER leaves this screen for JOURNAL
+  // (click sound only, no placeholder, no alert, nothing else).
+  // VESSEL LOG, PONG, MARINE WEATHER, and CHART (labeled GPS on the
+  // home screen itself -- data-app stays 'chart' internally, see the
+  // CHART section's own notes) are the four real navigations, each to
+  // its own full-viewport overlay, exactly like clicking VESSEL LOG
+  // used to work as a text option. WEATHER MAP's old external-link
+  // behavior (opening Windy in a new tab) is gone entirely -- MARINE
+  // WEATHER is now an in-game screen, see cmdMarineWeather below.
   Array.prototype.forEach.call(document.querySelectorAll('.computer-icon-hit'), function (btn) {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy) return;
       var app = btn.dataset.app;
-      if (app === 'weatherMap') {
-        // Pure external side effect, unchanged from before this task:
-        // plays the mouse click (selecting an app on the computer),
-        // then immediately opens Windy at Solace's CURRENT simulated
-        // coordinates, read fresh right here rather than at boot time
-        // -- the boat keeps moving, so a WINDY visit now must use
-        // wherever the boat actually is at that exact moment. Never
-        // navigates or re-renders anything in Landfall itself -- the
-        // computer home screen underneath stays exactly as it was, so
-        // returning from the new tab leaves the player looking at
-        // this exact same screen, still open.
-        var lat = GAME.nav.lat, lon = GAME.nav.lon;
-        if (!isFinite(lat) || !isFinite(lon)) {
-          // Defensive -- should never happen (nav.lat/lon are always
-          // real numbers, maintained by the simulation itself), but
-          // never guess a location if it somehow did; fail gracefully
-          // in the existing Landfall style instead.
-          clearTempView();
-          printBlank();
-          printLine('Position unavailable.', 'amber');
-          GAME.pendingChoice = { id: 'computer-position-unavailable', options: [{ label: 'BACK', action: 'cmd:ships-computer' }] };
-          renderOptions(GAME);
-          scrollToBottom();
-          return;
-        }
-        playNavStationOneShot('mouse');
-        window.open(windyUrl(lat, lon), '_blank');
+      if (app === 'marineWeather') {
+        clearTempView(); // closes THIS overlay; cmdMarineWeather (which plays its own mouse click) opens its own right after
+        cmdMarineWeather(GAME);
+        renderOptions(GAME);
+        saveGameState(GAME);
+        scrollToBottom();
         return;
       }
       if (app === 'chart') {
