@@ -411,8 +411,8 @@
      A few small MapLibre UI pieces (attribution, the vessel/
      destination markers) are restyled below to Landfall's own dark/
      monospace/green look rather than MapLibre's default light,
-     modern-map-app styling -- see MAP_STYLE and the marker-building
-     functions in the JS for the basemap itself. */
+     modern-map-app styling -- see buildChartMapStyle and the marker-
+     building functions in the JS for the basemap itself. */
   .chart-map {
     position: absolute;
     inset: 0;
@@ -429,14 +429,28 @@
      one, it would otherwise win the cascade purely on load order and
      this restyling would silently do nothing -- confirmed directly by
      screenshot before switching to the ID form below, which
-     outranks it regardless of load order. */
+     outranks it regardless of load order. Colors here read straight
+     from Landfall's own CSS variables (never a duplicated hex
+     literal): --bg for the background (matching the basemap's own
+     ocean fill almost exactly, so this never reads as a separate
+     "box" sitting on top of the chart), --phosphor-dim for the
+     required-attribution text itself (least-important information on
+     the whole screen, per this task's own color hierarchy), and
+     --phosphor-bright for its links -- OpenFreeMap's own required
+     credit (see CHART_ATTRIBUTION_HTML in the JS) now carries three
+     separate links, so max-width/white-space here let it wrap onto a
+     couple of short lines instead of overflowing the narrow computer
+     screen, rather than trying to force it onto one. */
   #chart-map .maplibregl-ctrl-attrib,
   #chart-map .maplibregl-ctrl-attrib.maplibregl-compact,
   #chart-map .maplibregl-ctrl-attrib.maplibregl-compact-show {
-    background: rgba(5, 8, 6, 0.75);
-    color: var(--phosphor);
+    background: var(--bg);
+    color: var(--phosphor-dim);
     font-family: var(--font-mono);
     font-size: 0.55rem;
+    max-width: 11rem;
+    white-space: normal;
+    line-height: 1.4;
   }
   #chart-map .maplibregl-ctrl-attrib a { color: var(--phosphor-bright); }
   #chart-map .maplibregl-ctrl-attrib-button { background-color: transparent; }
@@ -7048,14 +7062,22 @@
 
   // Shared by every Ship's Computer app that needs Landfall's own
   // colors/font rather than drawing with independent hard-coded values
-  // (PONG's canvas, CHART's map markers) -- reads --bg/--phosphor-
-  // bright/the body's own font live from actual computed CSS, so all
-  // of them automatically stay in sync with the rest of the game's
-  // palette with nothing to duplicate or keep updated by hand.
-  var shipsComputerColors = { bg: '#050806', green: '#c9f5da', font: 'monospace' }; // placeholder defaults, immediately overwritten by readShipsComputerColors() the moment any app using them first opens
+  // (PONG's canvas, CHART's map style/markers) -- reads all five of
+  // the game's own palette variables plus the body's own font live
+  // from actual computed CSS, so all of them automatically stay in
+  // sync with the rest of the game's palette with nothing to
+  // duplicate or keep updated by hand. bg/green/font are PONG's own
+  // original three fields, kept exactly as they were (PONG's canvas
+  // code already reads them by these names); bgLit/dim/phosphor are
+  // additions for CHART's own restyle, covering the two colors PONG
+  // never needed.
+  var shipsComputerColors = { bg: '#050806', bgLit: '#0a0f0c', dim: '#4d7a5e', phosphor: '#8fd7ac', green: '#c9f5da', font: 'monospace' }; // placeholder defaults, immediately overwritten by readShipsComputerColors() the moment any app using them first opens
   function readShipsComputerColors() {
     var cs = getComputedStyle(document.documentElement);
     shipsComputerColors.bg = cs.getPropertyValue('--bg').trim() || shipsComputerColors.bg;
+    shipsComputerColors.bgLit = cs.getPropertyValue('--bg-lit').trim() || shipsComputerColors.bgLit;
+    shipsComputerColors.dim = cs.getPropertyValue('--phosphor-dim').trim() || shipsComputerColors.dim;
+    shipsComputerColors.phosphor = cs.getPropertyValue('--phosphor').trim() || shipsComputerColors.phosphor;
     shipsComputerColors.green = cs.getPropertyValue('--phosphor-bright').trim() || shipsComputerColors.green;
     var fontEl = getComputedStyle(document.body);
     shipsComputerColors.font = fontEl.fontFamily || shipsComputerColors.font;
@@ -9587,14 +9609,14 @@
 
      This is deliberately NOT a routing engine: no driving/walking/
      marine route is ever calculated. It draws exactly three things
-     over a restrained, keyless basemap (standard OpenStreetMap
-     raster tiles -- see CHART_MAP_STYLE's own comment for why, and
-     for the CARTO source this replaced): the vessel's live
-     simulated position, Nāwiliwili Harbor, the vessel's OWN actual
-     traveled track (solid), and a plain, undashed-need-not-apply
-     straight reference line toward Nāwiliwili (dashed, visually
-     distinct on purpose -- never call it a "route" anywhere in
-     comments or UI text, it isn't one).
+     over a restrained, fully-recolored vector basemap (see
+     buildChartMapStyle's own comment for the source and why a vector
+     style, not raster tiles, is what makes this possible): the
+     vessel's live simulated position, Nāwiliwili Harbor, the vessel's
+     OWN actual traveled track (solid), and a plain, undashed-need-
+     not-apply straight reference line toward Nāwiliwili (dashed,
+     visually distinct on purpose -- never call it a "route" anywhere
+     in comments or UI text, it isn't one).
 
      MapLibre GL JS itself is loaded lazily from a CDN (never bundled
      inline -- it's a large, versioned third-party library) the first
@@ -9618,33 +9640,89 @@
   // of whatever MapLibre ships after today.
   var MAPLIBRE_JS_URL = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js';
   var MAPLIBRE_CSS_URL = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css';
-  // Basemap tiles -- the standard OpenStreetMap raster tile server,
-  // needing no API key, no account, and no secret to keep out of a
-  // static, key-less page. (CARTO's own free basemap tiles, used here
-  // originally, began requiring a key in late August 2026 -- after
-  // this file was first written -- and without one now render every
-  // tile stamped "API KEY REQUIRED"; this replaces that broken source
-  // only, not the map/markers/lines drawn on top of it.) maxzoom
-  // matches OSM's own tile server limit, so MapLibre correctly
-  // over-zooms its last real tile rather than requesting a level that
-  // was never rendered if a player zooms in past it.
-  var CHART_MAP_STYLE = {
-    version: 8,
-    sources: {
-      'chart-basemap': {
-        type: 'raster',
-        tiles: [
-          'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-          'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-          'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        ],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution: '\u00A9 OpenStreetMap contributors',
+  // Basemap -- OpenFreeMap's planet-wide vector tiles (OpenMapTiles
+  // schema), needing no API key, no account, and no secret to keep
+  // out of a static, key-less page. This REPLACES two earlier basemap
+  // attempts in this file's own history: CARTO's free raster tiles
+  // (began requiring a key in late August 2026, after this file was
+  // first written) and, after that, plain OpenStreetMap raster tiles
+  // (which render, but bake their own colors into each tile image, so
+  // they can never be recolored layer by layer -- exactly the
+  // limitation this task exists to fix). A VECTOR source is what
+  // actually makes a genuine, fully-palette-restricted restyle
+  // possible: buildChartMapStyle below draws only a small, deliberately
+  // reduced set of layers (ocean, land, coastlines, the coarsest
+  // country boundaries, and a sparse country/city label set) straight
+  // from this one source's raw geometry, each layer's own paint color
+  // pulled from shipsComputerColors -- nothing here is a filter or a
+  // tint over someone else's colors, and everything not explicitly
+  // listed (roads, buildings, transit, POIs, land-use shading) is
+  // simply never added as a layer, rather than hidden after the fact.
+  var CHART_VECTOR_SOURCE_URL = 'https://tiles.openfreemap.org/planet';
+  var CHART_GLYPHS_URL = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf'; // needed for the two label layers below; map-rendered text is limited to whatever font this glyph service itself hosts (Noto Sans) -- unlike the HTML overlays (NĀWILIWILI, attribution), which use Landfall's own --font-mono directly, a vector-tile symbol layer's text-font can only ever reference glyphs the tile provider has actually rendered, and no such set exists for Landfall's own monospace face
+  // OpenFreeMap's own required credit line (openfreemap.org/quick_start
+  // -- "OpenFreeMap (c) OpenMapTiles Data from OpenStreetMap", three
+  // separate links) -- the ONE thing on this basemap that is NOT a
+  // Landfall color by necessity (it's a legal notice, not a map
+  // layer), restyled as unobtrusively as the palette allows in the
+  // .maplibregl-ctrl-attrib CSS below rather than left in MapLibre's
+  // own default light styling.
+  var CHART_ATTRIBUTION_HTML = '<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> \u00A9 <a href="https://www.openmaptiles.org/" target="_blank">OpenMapTiles</a> Data from <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>';
+
+  // Built fresh each time buildChartMap runs (never cached as a plain
+  // object) so its every paint color is read live from
+  // shipsComputerColors at that moment, per this task's own "read
+  // colors from the existing CSS variables" requirement -- readShips
+  // ComputerColors() is always called immediately before this, in
+  // buildChartMap. Deliberately minimal: water (the ocean, plus every
+  // lake/river polygon -- everything else left as the plain background
+  // reads as land), the coarsest country-level boundaries only, and
+  // two label layers (country, city) -- no roads, buildings, transit,
+  // land-use shading, or POIs of any kind, matching this task's own
+  // "reduce clutter aggressively" direction for what is fundamentally
+  // a nautical reference, not a street map. The color hierarchy
+  // throughout follows this task's own tiers exactly: bgLit for the
+  // land default, bg for the ocean fill (matching the computer's own
+  // background almost exactly), dim for the coastline/boundary/
+  // country-label tier, phosphor for ordinary (city) labels -- bright
+  // is reserved entirely for the vessel/destination/track layer above
+  // the basemap, added separately in buildChartMap, never used here.
+  function buildChartMapStyle() {
+    var c = shipsComputerColors;
+    return {
+      version: 8,
+      sources: {
+        'chart-basemap': { type: 'vector', url: CHART_VECTOR_SOURCE_URL, attribution: CHART_ATTRIBUTION_HTML },
       },
-    },
-    layers: [{ id: 'chart-basemap-layer', type: 'raster', source: 'chart-basemap' }],
-  };
+      glyphs: CHART_GLYPHS_URL,
+      layers: [
+        { id: 'chart-bg', type: 'background', paint: { 'background-color': c.bgLit } },
+        {
+          id: 'chart-water', type: 'fill', source: 'chart-basemap', 'source-layer': 'water',
+          paint: { 'fill-color': c.bg, 'fill-outline-color': c.dim },
+        },
+        {
+          id: 'chart-boundary', type: 'line', source: 'chart-basemap', 'source-layer': 'boundary',
+          filter: ['all', ['==', ['get', 'admin_level'], 2], ['!=', ['get', 'maritime'], 1], ['!=', ['get', 'disputed'], 1]],
+          paint: { 'line-color': c.dim, 'line-opacity': 0.5, 'line-width': 0.75, 'line-dasharray': [2, 2] },
+        },
+        {
+          id: 'chart-place-country', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
+          filter: ['all', ['==', ['get', 'class'], 'country'], ['<=', ['get', 'rank'], 3]],
+          maxzoom: 6,
+          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 10, 'text-transform': 'uppercase', 'text-letter-spacing': 0.1 },
+          paint: { 'text-color': c.dim },
+        },
+        {
+          id: 'chart-place-city', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
+          filter: ['==', ['get', 'class'], 'city'],
+          minzoom: 3,
+          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-transform': 'uppercase', 'text-letter-spacing': 0.08 },
+          paint: { 'text-color': c.phosphor },
+        },
+      ],
+    };
+  }
   var CHART_TRACK_MIN_DISTANCE_NM = 3; // how far (actual nm sailed, via nav.distanceTraveled) between recorded track points -- frequent enough for a smooth-looking track over a ~2800nm voyage, coarse enough to keep the save small and never add a point every single tick
   var CHART_MAX_TRACK_POINTS = 2000; // a generous safety cap -- the full Seattle-Kaua'i voyage at the interval above is well under 1000 points; this only ever matters for an unusually long/wandering session
 
@@ -9764,7 +9842,7 @@
     readShipsComputerColors();
     chartMap = new maplibregl.Map({
       container: chartMapEl,
-      style: CHART_MAP_STYLE,
+      style: buildChartMapStyle(),
       center: [state.nav.lon, state.nav.lat],
       zoom: 3,
       attributionControl: false,
@@ -9778,12 +9856,18 @@
       chartMap.addLayer({
         id: 'chart-track-line', type: 'line', source: 'chart-track',
         layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': shipsComputerColors.green, 'line-width': 2, 'line-opacity': 0.85 },
+        paint: { 'line-color': shipsComputerColors.green, 'line-width': 2.5, 'line-opacity': 0.9 },
       });
       chartMap.addSource('chart-reference', { type: 'geojson', data: chartLineStringFeature([]) });
       chartMap.addLayer({
+        // Deliberately the medium (--phosphor) tier, not bright -- a
+        // dimmer color AND a thinner width AND a dashed pattern all
+        // agreeing that this line is the lower-priority one, rather
+        // than relying on opacity alone to separate two same-colored
+        // lines. This is a plain geographic reference toward Nāwiliwili,
+        // never a route -- see this file's own top comment.
         id: 'chart-reference-line', type: 'line', source: 'chart-reference',
-        paint: { 'line-color': shipsComputerColors.green, 'line-width': 1.5, 'line-opacity': 0.5, 'line-dasharray': [2, 2] },
+        paint: { 'line-color': shipsComputerColors.phosphor, 'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [2, 2] },
       });
 
       chartVesselMarker = new maplibregl.Marker({ element: buildChartVesselMarkerEl() })
