@@ -938,9 +938,20 @@
           lon: null,
           windSpeedKt: null,
           windDirectionDeg: null,
+          gustsKt: null,
           temperatureF: null,
           condition: null,
           forecastLine: null,    // pre-summarized 1-2 line FORECAST text, or null to fall back to the existing simulated forecast lines
+          // Real hourly forecast table for MARINE WEATHER's own FORECAST
+          // section -- see normalizeRealWeather/realWeatherForecastAtHours.
+          // startIdx is which hourly[*] index IS "now" as of this fetch
+          // (Open-Meteo's own current.time located within its hourly.time
+          // array); +H hours out is simply startIdx+H, since hourly data
+          // is one entry per hour by construction. null (not just an
+          // empty object) whenever a fetch hasn't produced a usable
+          // table, so callers can tell "no forecast data" apart from
+          // "an empty one."
+          hourly: null,
         },
         // Same caching pattern as realWx, separate provider (Open-Meteo's
         // marine API, not the atmospheric one) and separate cadence — see
@@ -2298,9 +2309,67 @@
     return {
       windSpeedKt: cur.wind_speed_10m,
       windDirectionDeg: typeof cur.wind_direction_10m === 'number' ? cur.wind_direction_10m : null,
+      gustsKt: typeof cur.wind_gusts_10m === 'number' ? cur.wind_gusts_10m : null,
       temperatureF: cur.temperature_2m,
       condition: wmoCodeToCondition(cur.weather_code, cur.wind_speed_10m),
       forecastLine: summarizeForecast(raw.hourly, cur.time),
+      hourly: buildHourlyForecastTable(raw.hourly, cur.time),
+    };
+  }
+
+  // A compact, display-ready hourly forecast table for MARINE WEATHER's
+  // FORECAST section -- parallel arrays straight from Open-Meteo's own
+  // hourly block, condition already reduced through the SAME
+  // wmoCodeToCondition Landfall's simulated condition already uses (so
+  // FORECAST and CURRENT CONDITIONS share one vocabulary), plus
+  // startIdx: where "now" (raw.current.time) falls within hourly.time,
+  // found the same way summarizeForecast already locates it (a plain
+  // indexOf on the matching ISO string -- Open-Meteo's current and
+  // hourly blocks share the same timestamp format, so an exact string
+  // match is exact, no date parsing/timezone math needed). null
+  // (rather than a table with a -1 startIdx) whenever the hourly block
+  // is missing or malformed, or "now" can't be located in it, so
+  // callers get one clear signal for "no usable forecast table."
+  function buildHourlyForecastTable(hourly, currentIso) {
+    if (!hourly || !hourly.time || !hourly.wind_speed_10m) return null;
+    var startIdx = hourly.time.indexOf(currentIso);
+    if (startIdx < 0) return null;
+    return {
+      startIdx: startIdx,
+      windSpeedKt: hourly.wind_speed_10m,
+      windDirectionDeg: hourly.wind_direction_10m || null,
+      gustsKt: hourly.wind_gusts_10m || null,
+      temperatureF: hourly.temperature_2m || null,
+      condition: hourly.weather_code
+        ? hourly.weather_code.map(function (code, i) { return wmoCodeToCondition(code, hourly.wind_speed_10m[i]); })
+        : null,
+    };
+  }
+
+  // Reads state.weather.realWx's own cached hourly table (see
+  // buildHourlyForecastTable) for the real observation/forecast +hours
+  // out from when it was fetched -- MARINE WEATHER's own FORECAST
+  // section, never the simulation (which keeps using its existing
+  // trend-based behavior independently, untouched by this). Returns
+  // null whenever there's genuinely no real data for that point (no
+  // hourly table cached yet, a field Open-Meteo didn't return for this
+  // request, or an offset past the end of the fetched window) rather
+  // than ever inventing a figure -- callers show a clear NO DATA state
+  // for exactly the fields/periods this returns null for, never a
+  // synthetic stand-in.
+  function realWeatherForecastAtHours(state, hours) {
+    var hourly = state.weather.realWx.hourly;
+    if (!hourly) return null;
+    var idx = hourly.startIdx + hours;
+    if (idx < 0 || idx >= hourly.windSpeedKt.length) return null;
+    var windSpeedKt = hourly.windSpeedKt[idx];
+    if (typeof windSpeedKt !== 'number') return null;
+    return {
+      windSpeedKt: windSpeedKt,
+      windDirectionDeg: hourly.windDirectionDeg && typeof hourly.windDirectionDeg[idx] === 'number' ? hourly.windDirectionDeg[idx] : null,
+      gustsKt: hourly.gustsKt && typeof hourly.gustsKt[idx] === 'number' ? hourly.gustsKt[idx] : null,
+      temperatureF: hourly.temperatureF && typeof hourly.temperatureF[idx] === 'number' ? hourly.temperatureF[idx] : null,
+      condition: hourly.condition ? hourly.condition[idx] : null,
     };
   }
 
@@ -2309,13 +2378,24 @@
   // offline, timeout, an outage, a malformed response, a coordinate the
   // provider can't cover — resolves to null; callers already treat null
   // as "no fresh data this time" and fall back to the simulation.
+  // forecast_days=4 (raised from 2): MARINE WEATHER's own FORECAST
+  // section needs real hourly data out to +72 hours, and depending what
+  // hour "now" falls on within day 1, that can reach into a 4th
+  // calendar day -- 2 was enough for the old ~12-hour forecastLine
+  // summary alone, not for this. wind_gusts_10m added to both current
+  // and hourly (current conditions and every forecast period both show
+  // GUSTS now), wind_direction_10m/temperature_2m added to hourly
+  // (needed for the forecast periods' own WIND/TEMPERATURE, mirroring
+  // what current already provided) -- see this section's own task
+  // notes for why these three, and no others (e.g. pressure), were
+  // added rather than left as a display-only derived guess.
   async function fetchRealWeather(lat, lon) {
     var url = 'https://api.open-meteo.com/v1/forecast'
       + '?latitude=' + encodeURIComponent(lat.toFixed(2))
       + '&longitude=' + encodeURIComponent(lon.toFixed(2))
-      + '&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code'
-      + '&hourly=wind_speed_10m,weather_code,precipitation_probability'
-      + '&forecast_days=2&wind_speed_unit=kn&temperature_unit=fahrenheit&timezone=UTC';
+      + '&current=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code'
+      + '&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,temperature_2m,weather_code,precipitation_probability'
+      + '&forecast_days=4&wind_speed_unit=kn&temperature_unit=fahrenheit&timezone=UTC';
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 8000) : null;
     try {
@@ -2360,9 +2440,11 @@
         lat: lat, lon: lon,
         windSpeedKt: result.windSpeedKt,
         windDirectionDeg: result.windDirectionDeg,
+        gustsKt: result.gustsKt,
         temperatureF: result.temperatureF,
         condition: result.condition,
         forecastLine: result.forecastLine,
+        hourly: result.hourly,
       };
       saveGameState(GAME);
     }).catch(function () {
@@ -8250,92 +8332,35 @@
   }
 
   /* ============================================================
-     MARINE WEATHER -- SHIP'S COMPUTER's offshore forecast screen.
+     MARINE WEATHER -- SHIP'S COMPUTER's real-world offshore weather
+     instrument.
      ------------------------------------------------------------
-     A handful of marine-specific figures (GUSTS, SWELL, VISIBILITY,
-     PRESSURE) have no existing counterpart anywhere in Landfall's
-     weather model -- state.weather only ever tracked windSpeed/
-     windDirection/seaState/condition/trend (see driftWeather). Rather
-     than growing the simulation itself (a new set of independently-
-     drifting values this task never asked for), each is derived, on
-     read only, as a simple, deterministic function of those SAME
-     existing fields -- nothing here is stored, saved, or fed back into
-     the simulation; two calls with the same state always return the
-     same figures. Real marine conventions, kept deliberately simple:
-     gusts run a fixed ~30% above sustained wind; swell direction
-     follows the wind that raised it (Landfall has no separate distant-
-     system swell source to model); swell height/period both scale with
-     the SAME sea-state tier WEATHER already shows; visibility and
-     pressure both key off the four-condition model directly.
+     Deliberately NOT a simulation display: every figure here comes
+     from state.weather.realWx, the SAME Open-Meteo cache
+     maybeRefreshRealWeather already fetches/refreshes for the
+     sailing simulation's own blending (see blendTowardRealAnchor) --
+     this reads that cache, never a second, parallel weather
+     implementation, and never state.weather's own simulated
+     windSpeed/windDirection/condition/trend directly. GUSTS,
+     WEATHER, and TEMPERATURE (current AND forecast) are real Open-
+     Meteo fields (see fetchRealWeather's own current=/hourly=
+     parameters); SEAS/SWELL/VISIBILITY/PRESSURE are gone entirely
+     rather than kept as simulated or invented stand-ins, since
+     Open-Meteo's plain forecast API has no wave/swell/visibility/
+     pressure fields backing them and this screen's whole point is to
+     show only what's genuinely observed. Whenever fresh real data
+     isn't available for a figure or period -- no successful fetch
+     yet, a field the provider didn't return, an hour past the end of
+     the cached forecast window -- this shows a plain, honest NO DATA/
+     UNAVAILABLE state for exactly that piece rather than ever
+     falling back to a simulated or fabricated number; see
+     appendMarineWeatherRealStats below.
      -------------------------------------------------------------- */
-  function deriveGustsKt(windSpeedKt) {
-    return Math.round(windSpeedKt * 1.3);
-  }
-
-  function deriveSwell(windDirectionDeg, seaHeightFt) {
-    return {
-      directionDeg: windDirectionDeg,
-      heightFt: Math.max(1, Math.round(seaHeightFt * 0.8)),
-      periodSec: 8 + Math.round(seaHeightFt / 2), // bigger seas -> longer-period swell; calm seas settle near the 8-9s low end typical of wind-driven chop
-    };
-  }
-
-  var MARINE_VISIBILITY_NM = { clear: '10+ NM', overcast: '10+ NM', rain: '5 NM', squall: '2 NM' };
-  function deriveVisibilityNm(condition) {
-    return MARINE_VISIBILITY_NM[condition] || '10+ NM';
-  }
-
-  // Baseline 1017 MB (a typical fair-weather oceanic reading), nudged
-  // by current condition and trend -- lower pressure for wetter/
-  // stormier conditions and a building trend, higher for clear skies
-  // and an easing one, matching the real-world association between
-  // low pressure and deteriorating weather without modeling an
-  // actual independent barometric field.
-  var MARINE_PRESSURE_CONDITION_ADJUST_MB = { clear: 5, overcast: 0, rain: -8, squall: -18 };
-  function derivePressureMb(condition, trend) {
-    var conditionAdj = MARINE_PRESSURE_CONDITION_ADJUST_MB[condition] || 0;
-    var trendAdj = trend === 'building' ? -3 : (trend === 'easing' ? 3 : 0);
-    return Math.round(1017 + conditionAdj + trendAdj);
-  }
-
-  // Projects wind/seas/condition forward by an arbitrary number of
-  // hours, generalizing buildForecastPeriods' own near/far trend-
-  // stepping (+5 KT wind / +2 FT seas / one condition-tier shift per
-  // "step") to MARINE_FORECAST_HOURS' five specific horizons instead of
-  // just two calendar periods. One step is defined as 24 hours of the
-  // CURRENT trend continuing unchanged -- the trend itself can and does
-  // keep drifting (driftWeather), so this is Landfall's own honest
-  // extrapolation of "if conditions keep moving the way they are right
-  // now," exactly what a real offshore forecast is too, never a
-  // guaranteed lookahead at the actual future simulated state. A
-  // 'steady' trend returns the current figures unchanged at every
-  // horizon. Read-only -- never writes state.weather itself.
   var MARINE_FORECAST_HOURS = [6, 12, 24, 48, 72];
-  function projectWeatherAtHours(state, hours) {
-    var w = state.weather;
-    var steps = hours / 24;
-    var windDelta = 0, seaDelta = 0, conditionSteps = 0;
-    if (w.trend === 'building') { windDelta = 5 * steps; seaDelta = 2 * steps; conditionSteps = Math.round(steps); }
-    if (w.trend === 'easing') { windDelta = -5 * steps; seaDelta = -2 * steps; conditionSteps = -Math.round(steps); }
-
-    var windSpeed = clamp(w.windSpeed + windDelta, 2, 45);
-    var seaHeightFt = Math.max(1, seaStateWaveHeightFt(w.seaState) + seaDelta);
-
-    var idx = FORECAST_CONDITION_ORDER.indexOf(w.condition);
-    if (idx < 0) idx = 1; // unrecognized condition (shouldn't happen) -- treat as overcast, the model's own default (same fallback buildForecastPeriods itself uses)
-    var newIdx = clamp(idx + conditionSteps, 0, FORECAST_CONDITION_ORDER.length - 1);
-
-    return {
-      windDirectionDeg: w.windDirection,
-      windSpeedKt: windSpeed,
-      seaHeightFt: seaHeightFt,
-      condition: FORECAST_CONDITION_ORDER[newIdx],
-    };
-  }
 
   // One "LABEL value" row, exactly like VESSEL LOG's own .vessel-log-
-  // stat rows -- shared by CURRENT and every FORECAST period so all of
-  // them share one visual/DOM pattern.
+  // stat rows -- shared by every field this screen shows, current and
+  // forecast alike, so all of them share one visual/DOM pattern.
   function appendMarineWeatherStat(container, label, value) {
     var row = document.createElement('div');
     row.className = 'vessel-log-stat';
@@ -8348,19 +8373,44 @@
     container.appendChild(row);
   }
 
-  // WIND/GUSTS/SEAS/SWELL/WEATHER -- the five figures CURRENT and every
-  // FORECAST period all share; CURRENT alone adds VISIBILITY/PRESSURE
-  // on top (see cmdMarineWeather) since those aren't meaningfully
-  // projectable the same way and the task's own spec doesn't ask
-  // FORECAST to repeat them.
-  function appendMarineWeatherCoreStats(container, windDirectionDeg, windSpeedKt, seaHeightFt, condition) {
-    var gusts = deriveGustsKt(windSpeedKt);
-    var swell = deriveSwell(windDirectionDeg, seaHeightFt);
-    appendMarineWeatherStat(container, 'WIND', compassPoint(windDirectionDeg) + ' ' + Math.round(windSpeedKt) + ' KT');
-    appendMarineWeatherStat(container, 'GUSTS', gusts + ' KT');
-    appendMarineWeatherStat(container, 'SEAS', Math.round(seaHeightFt) + ' FT');
-    appendMarineWeatherStat(container, 'SWELL', compassPoint(swell.directionDeg) + ' ' + swell.heightFt + ' FT @ ' + swell.periodSec + ' SEC');
-    appendMarineWeatherStat(container, 'WEATHER', condition.toUpperCase());
+  // A single plain warning-toned line (the SAME .amber class used
+  // elsewhere for "something's unavailable" states, e.g. NAV STATION's
+  // own SYSTEMS UNAVAILABLE line) rather than a normal stat row --
+  // deliberately reads as different from an ordinary reading, since it
+  // IS one: there's genuinely no real observation to show here.
+  function appendMarineWeatherUnavailable(container, message) {
+    var p = document.createElement('p');
+    p.className = 'line amber';
+    p.textContent = message;
+    container.appendChild(p);
+  }
+
+  // WIND/GUSTS/WEATHER/TEMPERATURE -- the four real-observation fields
+  // CURRENT CONDITIONS and every FORECAST period alike show, from a
+  // {windDirectionDeg, windSpeedKt, gustsKt, temperatureF, condition}
+  // reading (or null -- see the two call sites in renderMarineWeatherBody
+  // for where each of those actually comes from). data itself being
+  // null means no real reading exists for this point AT ALL (nothing
+  // cached yet, or -- for a forecast period -- past the end of the
+  // fetched window): one clear UNAVAILABLE line stands in for the
+  // whole block. When data exists but one particular field within it
+  // is missing (Open-Meteo returned some fields but not others), that
+  // one row alone reads NO DATA while its neighbors still show their
+  // real values -- never a fabricated number standing in for either
+  // case. windSpeedKt itself is the one field every caller already
+  // guarantees is a real number whenever data is non-null (see
+  // normalizeRealWeather/realWeatherForecastAtHours), so WIND always
+  // has at least a speed to show, direction permitting.
+  function appendMarineWeatherRealStats(container, data) {
+    if (!data) {
+      appendMarineWeatherUnavailable(container, 'WEATHER DATA UNAVAILABLE');
+      return;
+    }
+    var windText = (data.windDirectionDeg != null ? compassPoint(data.windDirectionDeg) + ' ' : '') + Math.round(data.windSpeedKt) + ' KT';
+    appendMarineWeatherStat(container, 'WIND', windText);
+    appendMarineWeatherStat(container, 'GUSTS', data.gustsKt != null ? Math.round(data.gustsKt) + ' KT' : 'NO DATA');
+    appendMarineWeatherStat(container, 'WEATHER', data.condition != null ? data.condition.toUpperCase() : 'NO DATA');
+    appendMarineWeatherStat(container, 'TEMPERATURE', data.temperatureF != null ? Math.round(data.temperatureF) + '\u00B0F' : 'NO DATA');
   }
 
   // Opened only from SHIP'S COMPUTER's own menu, replacing the old
@@ -8368,7 +8418,12 @@
   // (plain mouse click, builds its scrollable body fresh every open,
   // RETURN goes back to the computer menu). Never touches
   // state.boat.computerOn, never gates on darkness/power beyond
-  // whatever already gated reaching SHIP'S COMPUTER itself.
+  // whatever already gated reaching SHIP'S COMPUTER itself. Never
+  // triggers a fetch of its own -- maybeRefreshRealWeather (called
+  // from simTick, on its existing ~45-real-minute/60nm cadence) is
+  // the only thing that ever calls out to Open-Meteo; opening this
+  // screen just displays whatever it has cached at that moment, per
+  // this task's own "don't spam the API every render" requirement.
   function cmdMarineWeather(state) {
     playNavStationOneShot('mouse');
     renderMarineWeatherBody(state);
@@ -8378,7 +8433,6 @@
   }
 
   function renderMarineWeatherBody(state) {
-    var w = state.weather;
     var body = marineWeatherBodyEl;
     body.innerHTML = '';
 
@@ -8394,18 +8448,28 @@
     var fix = currentLatLon(state);
     appendMarineWeatherStat(body, 'POSITION', formatLatLon(fix.lat, fix.lon));
 
-    var currentGap = document.createElement('p');
-    currentGap.className = 'gap';
-    body.appendChild(currentGap);
-    var currentHeading = document.createElement('p');
-    currentHeading.className = 'line heading-label';
-    currentHeading.textContent = 'CURRENT';
-    body.appendChild(currentHeading);
+    var conditionsGap = document.createElement('p');
+    conditionsGap.className = 'gap';
+    body.appendChild(conditionsGap);
 
-    var currentSeaHeightFt = seaStateWaveHeightFt(w.seaState);
-    appendMarineWeatherCoreStats(body, w.windDirection, w.windSpeed, currentSeaHeightFt, w.condition);
-    appendMarineWeatherStat(body, 'VISIBILITY', deriveVisibilityNm(w.condition));
-    appendMarineWeatherStat(body, 'PRESSURE', derivePressureMb(w.condition, w.trend) + ' MB');
+    // CURRENT CONDITIONS -- no heading of its own (this screen no
+    // longer has a section literally labeled CURRENT, per this task's
+    // own field-removal list); the real-weather cache directly, never
+    // state.weather's own simulated fields. realWx.fetchedRealMs null
+    // means no real observation has ever been cached for this voyage
+    // yet (offline since departure, or the very first tick before the
+    // first fetch resolves) -- appendMarineWeatherRealStats's own null
+    // branch handles that the same way it handles a missing forecast
+    // period.
+    var realWx = state.weather.realWx;
+    var currentData = realWx.fetchedRealMs != null ? {
+      windDirectionDeg: realWx.windDirectionDeg,
+      windSpeedKt: realWx.windSpeedKt,
+      gustsKt: realWx.gustsKt,
+      temperatureF: realWx.temperatureF,
+      condition: realWx.condition,
+    } : null;
+    appendMarineWeatherRealStats(body, currentData);
 
     var forecastGap = document.createElement('p');
     forecastGap.className = 'gap';
@@ -8426,8 +8490,7 @@
       var periodGap = document.createElement('p');
       periodGap.className = 'gap';
       body.appendChild(periodGap);
-      var projected = projectWeatherAtHours(state, hours);
-      appendMarineWeatherCoreStats(body, projected.windDirectionDeg, projected.windSpeedKt, projected.seaHeightFt, projected.condition);
+      appendMarineWeatherRealStats(body, realWeatherForecastAtHours(state, hours));
     });
   }
 
@@ -15225,10 +15288,16 @@
     if (!w.realWx) {
       w.realWx = {
         fetchedRealMs: null, lat: null, lon: null,
-        windSpeedKt: null, windDirectionDeg: null, temperatureF: null,
-        condition: null, forecastLine: null,
+        windSpeedKt: null, windDirectionDeg: null, gustsKt: null, temperatureF: null,
+        condition: null, forecastLine: null, hourly: null,
       };
     }
+    // gustsKt/hourly are newer than realWx itself -- a save with realWx
+    // already present (from before these existed) just gets them as
+    // null, identical to "no real data for this yet" until the next
+    // successful fetch populates them for real.
+    if (w.realWx.gustsKt === undefined) w.realWx.gustsKt = null;
+    if (w.realWx.hourly === undefined) w.realWx.hourly = null;
     if (!w.oceanCurrent) {
       w.oceanCurrent = { fetchedRealMs: null, lat: null, lon: null, speedKt: null, directionDeg: null, northSample: null, southSample: null };
     }
