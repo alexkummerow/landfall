@@ -4852,9 +4852,21 @@
   var FAILURE_CHAIN_MAX_HOURS = 36;
   var BOAT_FAIL_SYSTEMS = ['sails', 'steering', 'engine', 'electrical'];
   // A successful repair shields that one system from the NORMAL draw
-  // for roughly this many hours — see performSystemRepairAttempt.
-  var REPAIR_PROTECTION_MIN_HOURS = 96;
-  var REPAIR_PROTECTION_MAX_HOURS = 120;
+  // for a span of hours that depends on the repair's own QUALITY (see
+  // computeRepairQuality/performSystemRepairAttempt below) -- SOLID
+  // repairs (a well-rested, high-morale sailor) hold the longest;
+  // PATCHED ones (severely impaired) barely hold at all. Replaces the
+  // old flat REPAIR_PROTECTION_MIN_HOURS/MAX_HOURS (96-120h for every
+  // repair regardless of condition) now that repair success itself is
+  // deterministic rather than a chance roll -- SOLID's own range is
+  // that exact old flat window, unchanged, since a well-rested repair
+  // was always meant to be reliable.
+  var REPAIR_QUALITY_PROTECTION_HOURS = {
+    SOLID: [96, 120],
+    GOOD: [60, 84],
+    TEMPORARY: [24, 48],
+    PATCHED: [8, 18],
+  };
 
   function scheduleNextFailure(state, chained) {
     var hrs = chained
@@ -11657,108 +11669,135 @@
     engine: ['The engine turns over and settles into its rhythm.', 'She catches, coughs once, then runs clean.'],
     electrical: ['New fuse in. The panel comes back to life.', 'Power\u2019s back. The panel lights up again.'],
   };
-  var REPAIR_FAILURE_LINES = {
-    sails: ['The patch pulls loose as soon as it takes load.', 'Can\u2019t get the seam to hold.'],
-    steering: ['The repair does not hold.', 'Whatever\u2019s wrong down there, this didn\u2019t fix it.'],
-    engine: ['You put it back together and try the starter. Nothing.', 'Turns over, but won\u2019t catch.'],
-    electrical: ['The new fuse goes immediately.', 'Still dead \u2014 the problem\u2019s elsewhere in the run.'],
-  };
 
-  // Centralized so the GOOD/FAIR/UNCERTAIN/POOR bands are easy to retune
-  // without touching the penalty math itself.
-  var REPAIR_SUCCESS_LABEL_THRESHOLDS = [
-    { min: 0.70, text: 'GOOD' },
-    { min: 0.50, text: 'FAIR' },
-    { min: 0.30, text: 'UNCERTAIN' },
-    { min: 0, text: 'POOR' },
-  ];
-  function repairSuccessLabel(chance) {
-    for (var i = 0; i < REPAIR_SUCCESS_LABEL_THRESHOLDS.length; i++) {
-      if (chance >= REPAIR_SUCCESS_LABEL_THRESHOLDS[i].min) return REPAIR_SUCCESS_LABEL_THRESHOLDS[i].text;
-    }
-    return 'POOR';
-  }
+  // Repair quality's own four tiers, worst-first, matching the index
+  // computeRepairQuality's own finalTier (0-3) already lands on.
+  var REPAIR_QUALITIES = ['SOLID', 'GOOD', 'TEMPORARY', 'PATCHED'];
 
-  var REPAIR_BASE_SUCCESS_CHANCE = 0.95;
-  var REPAIR_SUCCESS_FLOOR = 0.15; // no single bad factor, or even several, fully prohibits an attempt
-  var REPAIR_SUCCESS_CEILING = 0.95;
-
-  // Only the factors actually hurting the attempt are returned — a clean
-  // bill of health on any one just leaves it off the list, per the spec.
-  // Labels/thresholds mirror STATUS's own wellbeing bands, no new
-  // vocabulary invented for this screen.
-  function computeRepairPenalties(state) {
+  // Repairs are deterministic -- ANY permitted repair always succeeds
+  // once its audio finishes (see performSystemRepairAttempt below).
+  // What the player's condition actually decides is QUALITY: how long
+  // the repaired system is then shielded from the NORMAL scheduled
+  // failure draw (REPAIR_QUALITY_PROTECTION_HOURS) -- never whether
+  // the repair itself works. ENERGY and MORALE are the primary
+  // inputs, each mapped onto the same four-tier ladder
+  // (0=SOLID-worthy .. 3=PATCHED-worthy) and then combined by taking
+  // the WORSE (max) of the two, so either one alone bottoming out is
+  // enough to drag the whole repair down to PATCHED -- matching
+  // "EXHAUSTED OR DEPLETED" (not AND) for that tier. HUNGER/THIRST/
+  // SEA STATE are secondary: any one of them being meaningfully bad
+  // can pull the result down by exactly one further tier, but never
+  // more than one combined, and never below PATCHED on their own --
+  // only the exact ENERGY:EXHAUSTED + MORALE:DEPLETED combination
+  // (checked first, separately, and never softened by anything else)
+  // blocks a repair outright. Thresholds for what counts as
+  // "meaningfully bad" reuse the same named level constants the rest
+  // of the game already defines (HUNGER_HUNGRY, THIRST_THIRSTY) or
+  // the same seaState>=4 (ROUGH+) cutoff computeRepairPenalties used
+  // to use, rather than inventing new ones. conditionLines is only
+  // ever the labels actually worth showing the player -- ENERGY/
+  // MORALE whenever they're not at their best tier (the primary
+  // drivers of the result), HUNGER/THIRST/SEA STATE only when they're
+  // the "meaningfully bad" secondary factor -- never a full readout
+  // of every input regardless of whether it's relevant.
+  function computeRepairQuality(state) {
     var c = state.crew, w = state.weather;
-    var factors = [];
-
-    var eLvl = energyLevel(c.fatigue); // 0=EXHAUSTED..5=RESTED
-    var energyPenalty = [0.35, 0.20, 0.10, 0.04, 0, 0][eLvl];
-    // Carried sleep debt slightly dulls concentration on top of whatever
-    // the energy state already costs -- only ever folded into an
-    // already-listed ENERGY factor, never a new line of its own.
-    if (energyPenalty > 0) energyPenalty += Math.min(0.06, sleepDebtCarry(state) * 0.01);
-    if (energyPenalty > 0) factors.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl], penalty: energyPenalty });
-
-    var hLvl = hungerLevel(c.hoursSinceMeal); // 0=FULL..6=STARVING
-    var hungerPenalty = [0, 0, 0, 0.04, 0.12, 0.20, 0.24][hLvl];
-    if (hungerPenalty > 0) factors.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl], penalty: hungerPenalty });
-
+    var eLvl = energyLevel(c.fatigue);   // 0=EXHAUSTED..5=RESTED
+    var mLabel = moraleLevel(c.morale);  // DEPLETED/LOW/CONTENT/GOOD/UPBEAT
+    var hLvl = hungerLevel(c.hoursSinceMeal);
     var tLvl = thirstLevel(c.hoursSinceWater);
-    var thirstPenalty = [0, 0, 0.03, 0.12, 0.24][tLvl];
-    if (thirstPenalty > 0) factors.push({ label: 'THIRST', value: THIRST_LABELS[tLvl], penalty: thirstPenalty });
 
-    var moralePenalty = 0, moraleLabelText = null;
-    if (c.morale < 20) { moralePenalty = 0.22; moraleLabelText = 'DEPLETED'; }
-    else if (c.morale < 40) { moralePenalty = 0.12; moraleLabelText = 'LOW'; }
-    if (moralePenalty > 0) factors.push({ label: 'MORALE', value: moraleLabelText, penalty: moralePenalty });
+    // The one exact hard-block state -- checked first and never
+    // overridden by anything else, including hunger/thirst/sea state.
+    if (eLvl === ENERGY_EXHAUSTED && mLabel === 'DEPLETED') {
+      return {
+        blocked: true,
+        conditionLines: [
+          { label: 'ENERGY', value: ENERGY_LABELS[eLvl] },
+          { label: 'MORALE', value: mLabel },
+        ],
+      };
+    }
 
-    var seaPenalty = 0;
-    if (w.seaState >= 5) seaPenalty = 0.30;       // VERY ROUGH / HIGH
-    else if (w.seaState === 4) seaPenalty = 0.15; // ROUGH
-    if (seaPenalty > 0) factors.push({ label: 'SEA STATE', value: SEA_STATE_SHORT_LABELS[w.seaState], penalty: seaPenalty });
+    var energyTier = eLvl >= 4 ? 0 : eLvl === 3 ? 1 : eLvl >= 1 ? 2 : 3;
+    var moraleTier = (mLabel === 'UPBEAT' || mLabel === 'GOOD') ? 0
+      : mLabel === 'CONTENT' ? 1
+      : mLabel === 'LOW' ? 2
+      : 3; // DEPLETED
+    var baseTier = Math.max(energyTier, moraleTier);
 
-    var totalPenalty = factors.reduce(function (sum, f) { return sum + f.penalty; }, 0);
-    return { factors: factors, totalPenalty: totalPenalty };
+    var hungerBad = hLvl >= HUNGER_HUNGRY;
+    var thirstBad = tLvl >= THIRST_THIRSTY;
+    // SEA STATE has two separate cutoffs, deliberately different: it's
+    // worth SHOWING to the player from ROUGH (4) upward -- the same
+    // point computeRepairPenalties used to start penalizing it at all
+    // -- but only counts toward the actual one-tier-down secondary
+    // penalty from VERY ROUGH (5) upward, matching section 4's own
+    // explicit example ("GOOD + very rough sea -> TEMPORARY") and the
+    // section 7 UI example (ENERGY: TIRED + MORALE: LOW, both already
+    // at TEMPORARY on their own, + SEA STATE: ROUGH shown alongside
+    // -> REPAIR QUALITY stays TEMPORARY, not pushed down to PATCHED).
+    // A plain seaState>=4 cutoff for the penalty itself would silently
+    // contradict that exact example.
+    var seaDisplay = w.seaState >= 4;   // ROUGH or worse -- shown
+    var seaBad = w.seaState >= 5;       // VERY ROUGH or worse -- penalized
+    var secondaryPenalty = (hungerBad || thirstBad || seaBad) ? 1 : 0;
+    var finalTier = Math.min(baseTier + secondaryPenalty, 3);
+
+    var conditionLines = [];
+    if (energyTier > 0) conditionLines.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl] });
+    if (moraleTier > 0) conditionLines.push({ label: 'MORALE', value: mLabel });
+    if (hungerBad) conditionLines.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl] });
+    if (thirstBad) conditionLines.push({ label: 'THIRST', value: THIRST_LABELS[tLvl] });
+    if (seaDisplay) conditionLines.push({ label: 'SEA STATE', value: SEA_STATE_SHORT_LABELS[w.seaState] });
+
+    return { blocked: false, quality: REPAIR_QUALITIES[finalTier], conditionLines: conditionLines };
   }
 
-  function repairSuccessChance(state) {
-    var p = computeRepairPenalties(state);
-    return clamp(REPAIR_BASE_SUCCESS_CHANCE - p.totalPenalty, REPAIR_SUCCESS_FLOOR, REPAIR_SUCCESS_CEILING);
-  }
-
-  // The decision screen for one damaged system: only negative factors,
-  // the resulting SUCCESS label, and — if a spare remains — the button
-  // to actually attempt it. No confirmation beyond this screen itself.
+  // The decision screen for one damaged system: the condition lines
+  // actually relevant right now, then either the resulting REPAIR
+  // QUALITY and its action button, or -- in the one hard-block state
+  // -- a plain blocked message and no button at all. No confirmation
+  // beyond this screen itself.
   function cmdRepairSystem(state, systemKey) {
     printBlank();
     printLine('REPAIR \u2014 ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
-    var p = computeRepairPenalties(state);
-    p.factors.forEach(function (f) {
-      printDataRow(f.label, f.value, 'data-row-md');
+    var q = computeRepairQuality(state);
+    q.conditionLines.forEach(function (f) {
+      printLine(f.label + ': ' + f.value);
     });
-    var chance = repairSuccessChance(state);
-    printDataRow('SUCCESS', repairSuccessLabel(chance), 'data-row-md');
-    // Spares are unlimited -- the repair action is always offered here
-    // (subject only to this screen even being reachable at all, which
-    // already requires the system to be DAMAGED -- see
-    // buildDamagedSystemsList/cmdRepair).
-    var options = [{ label: REPAIR_ACTION_LABEL[systemKey], action: 'attempt-repair:' + systemKey }];
+    var options = [];
+    if (q.blocked) {
+      printBlank();
+      printLine('TOO EXHAUSTED TO REPAIR.', 'amber');
+    } else {
+      printBlank();
+      printLine('REPAIR QUALITY: ' + q.quality);
+      // Spares are unlimited -- the repair action is always offered
+      // here whenever the player's condition permits it at all
+      // (subject only to this screen even being reachable, which
+      // already requires the system to be DAMAGED -- see
+      // buildDamagedSystemsList/cmdRepair).
+      options.push({ label: REPAIR_ACTION_LABEL[systemKey], action: 'attempt-repair:' + systemKey });
+    }
     options.push({ label: 'BACK', action: 'cmd:repair' });
     state.pendingChoice = { id: 'repair-decision', options: options };
   }
 
-  // The actual attempt: unlimited spares now (see section on repair
-  // spares becoming informational-only), some fatigue either way, and
-  // — only on success — the system restored to GOOD. A failed attempt
-  // leaves the system DAMAGED; it never damages anything else. Success/
-  // failure is still decided by the SAME chance computed here, from the
-  // player's condition at the moment they click the repair button
-  // (repairSuccessChance/computeRepairPenalties, both untouched) --
-  // only WHEN the outcome is applied and shown changed, to the moment
-  // the repair audio actually finishes (see below), not the click
-  // itself or a fixed timer.
+  // The actual attempt: unlimited spares, the same fatigue/hygiene/
+  // thirst cost every time, and -- since a permitted repair always
+  // succeeds now -- the system unconditionally restored to GOOD with
+  // protection set from the quality computed here. Quality is read
+  // from the player's condition at the moment they click the repair
+  // button (matching what cmdRepairSystem just showed them), not
+  // re-rolled or re-derived when the audio finishes; the blocked
+  // check is only a defensive backstop (the button is never rendered
+  // in that state to begin with -- see cmdRepairSystem) against a
+  // stale or replayed action slipping through.
   function performSystemRepairAttempt(state, systemKey) {
-    var chance = repairSuccessChance(state);
+    var q = computeRepairQuality(state);
+    if (q.blocked) { cmdRepairSystem(state, systemKey); return; }
+    var hours = REPAIR_QUALITY_PROTECTION_HOURS[q.quality];
     runAudioSyncedAction(state, {
       label: REPAIR_WORKING_LABEL[systemKey],
       playAudio: function (onEnded) { return playNavStationOneShot(REPAIR_AUDIO_KEY[systemKey], onEnded); },
@@ -11767,15 +11806,11 @@
         bumpHygiene(s, 1.5);            // grease, sweat, cramped work
         s.crew.hoursSinceWater += 0.4;  // strenuous -- thirst arrives a little sooner
         if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
-        if (Math.random() < chance) {
-          s.boat[systemKey] = 'GOOD';
-          if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
-          s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(REPAIR_PROTECTION_MIN_HOURS, REPAIR_PROTECTION_MAX_HOURS) * 60;
-          log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
-          logVesselLogRepair(s, systemKey); // VESSEL LOG -- only on genuine success, never on a failed attempt
-        } else {
-          log(s, pickFromPool(REPAIR_FAILURE_LINES[systemKey]));
-        }
+        s.boat[systemKey] = 'GOOD';
+        if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
+        s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(hours[0], hours[1]) * 60;
+        log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
+        logVesselLogRepair(s, systemKey);
         flushNewLogEntries(s);
         cmdRepair(s);
       },
