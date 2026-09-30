@@ -1284,6 +1284,8 @@
         galleyNarrated: false,
         lastMilestone: 0,
         arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
+        breakwaterObservationShown: false, // guards the coastal-tutorial "room for sail now" observation (Shilshole Exit arrival) so it fires exactly once per voyage
+        pacificObservationShown: false,    // guards the coastal-tutorial "course is mine now" observation (Cape Flattery arrival, open-water threshold) so it fires exactly once per voyage
       },
       rescue: {
         epirbOn: false,
@@ -1873,6 +1875,28 @@
     printBlank();
     printLine('TOO DARK TO SEE', 'amber');
     state.pendingChoice = { id: 'navlights-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
+  }
+
+  // COASTAL TUTORIAL LOCK -- the one guard behind CHANGE COURSE, SET
+  // COURSE FOR NĀWILIWILI, and (when trying to turn it OFF specifically)
+  // AUTOPILOT, all three of which stay visible at the HELM throughout
+  // the coastal passage per this feature's own task but must not
+  // actually DO anything yet: the existing authored coastal route
+  // (simTick's own waypoint-by-waypoint steering) is what's flying the
+  // boat until open water, and letting any of these three fire early
+  // would hand control to a system (beginCourseTurn toward a player- or
+  // autopilot-chosen heading) that competes with it. Each call site
+  // checks nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX itself and
+  // calls this INSTEAD of its real logic when true -- this never
+  // touches course, waypoint, autopilot, or heading state itself, only
+  // prints the message and returns to the HELM (cmdHelm, called
+  // directly rather than via runCommand since this is reached from
+  // deep inside an action handler, exactly like other mid-action
+  // "return to HELM" call sites already do in this file).
+  function blockedByCoastalLock(state) {
+    printBlank();
+    printLine('OPEN SAILING BEGINS IN THE PACIFIC.', 'amber');
+    cmdHelm(state);
   }
 
 
@@ -4512,6 +4536,27 @@
           if (state.nav.tack) state.nav.tackDistanceNm += distToWp;
           nmRemaining -= distToWp;
           log(state, waypointArrivalLine(wp));
+          // COASTAL TUTORIAL -- two one-time observations layered onto
+          // this same existing arrival moment (see blockedByCoastalLock/
+          // cmdHelm's own notes for the rest of this feature), never a
+          // second navigation system: Shilshole Exit is the breakwater/
+          // marina exit itself (WAYPOINTS[1]; wp here is still the
+          // waypoint just reached, before the increment below), and
+          // Cape Flattery (WAYPOINTS[11]) is the waypoint whose arrival
+          // is what actually pushes waypointIndex to
+          // OPEN_WATER_WAYPOINT_INDEX (12) a few lines down -- i.e. the
+          // exact existing moment open water begins. Each flag guards
+          // its own line so a save loaded after either moment (or a
+          // multi-tick offline catch-up that crosses one) never replays
+          // it.
+          if (wp.name === 'Shilshole Exit' && !state.flags.breakwaterObservationShown) {
+            state.flags.breakwaterObservationShown = true;
+            log(state, 'The breakwater slips astern. There\u2019s room for sail now. I can shut the engine down and let the wind take over.');
+          }
+          if (wp.name === 'Cape Flattery' && !state.flags.pacificObservationShown) {
+            state.flags.pacificObservationShown = true;
+            log(state, 'Cape Flattery falls away astern. Ahead, nothing but Pacific. The course is mine now.');
+          }
           state.nav.waypointIndex++;
           heading = computeHeading(state); // fresh bearing (and fresh wobble/tack) for the next leg — or, once past OPEN_WATER_WAYPOINT_INDEX, the initial open-ocean course toward Nāwiliwili
           speedThroughWater = computeBoatSpeed(state, heading);
@@ -7928,8 +7973,25 @@
   // furled (that would be an increase, not a reduction). The current
   // configuration is left off the list (it's already shown above this in
   // cmdSails) rather than offered as a do-nothing button.
+  //
+  // COASTAL: a simplified two-state version of the same idea, per the
+  // coastal-tutorial task this implements -- FULL/REEF/MINIMAL aren't
+  // offered yet, only RAISE SAILS (furled -> automatically the right
+  // one of those three for current conditions, see performSailChange's
+  // own 'sail-raise-auto' caller in handleAction) or FURL SAILS (any
+  // canvas up -> furled, via the existing 'sail-furled' action
+  // unchanged). Reuses the exact same OPEN_WATER_WAYPOINT_INDEX
+  // threshold cmdHelm/blockedByCoastalLock already use, not a second,
+  // separate "tutorial phase" flag.
   function sailOptions(state) {
     var cfg = state.boat.sailConfig;
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      var coastalOpts = cfg === 'furled'
+        ? [{ label: 'RAISE SAILS', action: 'sail-raise-auto' }]
+        : [{ label: 'FURL SAILS', action: 'sail-furled' }];
+      coastalOpts.push({ label: 'BACK', action: 'cancel' });
+      return coastalOpts;
+    }
     var configs = [
       { key: 'full', label: 'FULL', action: 'sail-full' },
       { key: 'reefed', label: 'REEF', action: 'sail-reefed' },
@@ -8207,6 +8269,23 @@
   function performAutopilotToggle(state, returnTo) {
     var render = returnTo || cmdHelm;
     var b = state.boat;
+    if (b.autopilotOn && state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      // AUTOPILOT must stay ON and un-toggleable throughout the coastal
+      // passage (see blockedByCoastalLock's own notes on why) -- this
+      // only ever fires when trying to turn it OFF (b.autopilotOn
+      // already true), since autopilotOn:true is newGameState's own
+      // default from the very start of the voyage and nothing here
+      // ever needs to force it on. Deliberately NOT blockedByCoastalLock
+      // itself (which always returns to cmdHelm specifically): this
+      // function is reached from NAV STATION's own electrical panel
+      // too, so it uses the same render() every other guard below
+      // already returns through, sending the player back to whichever
+      // screen they actually toggled this from.
+      printBlank();
+      printLine('OPEN SAILING BEGINS IN THE PACIFIC.', 'amber');
+      render(state);
+      return;
+    }
     if (!b.autopilotOn && b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged.', 'amber');
@@ -8983,6 +9062,15 @@
   // display the same word, so the override itself is harmless, kept
   // only because removing it would be more than this wording-only pass
   // calls for.
+  // COURSE uses currentCourseDeg (nav.setCourse once open water has set
+  // it, otherwise the live bearing to the current coastal waypoint) so
+  // this same, single HELM renderer is safe to call during the coastal
+  // passage too -- nav.setCourse itself stays exactly as it always has
+  // (null until open water unlocks it; see currentCourseDeg's own
+  // notes), never written here. Every other figure below already comes
+  // from computeHelmLiveFigures/state.weather directly, independent of
+  // setCourse, so this is the one adjustment needed to make the full
+  // instrumentation coastal-safe.
   function printHelmAtHelmHeader(state, headingLabel) {
     var nav = state.nav;
     var figures = computeHelmLiveFigures(state, nav.heading);
@@ -8990,7 +9078,7 @@
     printLine(headingLabel || 'HELM', 'heading-label');
     printBlank();
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
-    printDataRow('COURSE', Math.round(nav.setCourse) + '\u00B0', 'data-row-lg');
+    printDataRow('COURSE', Math.round(currentCourseDeg(state)) + '\u00B0', 'data-row-lg');
     printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
     var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
     printBlank();
@@ -9022,40 +9110,47 @@
   // (formerly LEAVE THE HELM, see the 'leave-helm' action) is what
   // actually ends manual steering and lets unattended wander resume if
   // autopilot is off.
+  //
+  // COASTAL vs OPEN WATER: this is now ONE renderer for both, per the
+  // coastal-tutorial task this implements -- the player sees the exact
+  // same full instrumentation (printHelmAtHelmHeader, already coastal-
+  // safe: see that function's own notes on currentCourseDeg) and the
+  // exact same three navigation buttons (CHANGE COURSE/SET COURSE FOR
+  // NĀWILIWILI/TURN AUTOPILOT OFF) in both phases. What differs is only
+  // what clicking those buttons actually DOES: during coastal, each one
+  // is intercepted by its own blockedByCoastalLock guard
+  // (cmdChangeCourse, the 'set-for-nawiliwili' case, and
+  // performAutopilotToggle each check this before doing anything) and
+  // never reaches the real logic beneath it -- see that helper's own
+  // notes. Two things stay conditional on phase right here, both
+  // because acting on them during coastal would fight the existing
+  // automatic coastal steering rather than because the display itself
+  // needs to differ:
+  //   - nav.intendedCourse is only overwritten with the bearing to
+  //     FINAL_DEST once open water is reached -- during coastal it's
+  //     the EXISTING per-tick coastal simulation's own value (the
+  //     current waypoint's bearing; see simTick), never touched here.
+  //   - first entry's beginCourseTurn (steering toward
+  //     courseSteeringTarget) only runs in open water. Coastal
+  //     steering is already fully automatic every tick regardless of
+  //     atHelm; courseSteeringTarget's own autopilot-on branch would
+  //     compute a heading toward FINAL_DEST directly, which would
+  //     start a second, competing turn fighting the authored waypoint
+  //     route. atHelm itself still becomes true either way (so "You
+  //     take the helm." shows normally, and going below still clears
+  //     it), just without that one side effect during coastal.
   function cmdHelm(state) {
     var nav = state.nav;
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printBlank();
 
-    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
-      // COASTAL: fully automatic. SET COURSE is the current leg's
-      // bearing (auto-updates as the boat clears each waypoint);
-      // ACTUAL HEADING reflects whatever the coastal auto-tack is doing
-      // right now, which can differ from it. No manual control here —
-      // the corridor is authored-safe and the player isn't required to
-      // navigate it (nor is the manual-helm system relevant here — see
-      // the module notes on computeHeading). Bearing/distance are
-      // computed fresh here rather than read from nav.intendedCourse,
-      // which only updates once per simTick and can be a stale tick
-      // behind when just viewed.
-      printLine('HELM', 'heading-label');
-      var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
-      printLine('SET COURSE ' + Math.round(bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon)) + '\u00B0');
-      printLine('ACTUAL HEADING ' + Math.round(nav.heading) + '\u00B0');
-      if (nav.tack) {
-        printLine('BEATING TO WINDWARD \u2014 AUTO-TACK (' + nav.tack.toUpperCase() + ' TACK)', 'dim');
-      }
-      printLine('NEXT ' + wp.name);
-      printLine('DISTANCE ' + Math.round(distanceBetween(nav.lat, nav.lon, wp.lat, wp.lon)).toLocaleString() + ' NM');
-      printBlank();
-      printLine('Automatic through the coastal passage \u2014 course control unlocks in open water.', 'dim');
-      state.pendingChoice = { id: 'helm-menu', options: [{ label: 'BACK', action: 'cancel' }] };
-      return;
-    }
+    var isCoastal = nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX;
 
-    nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-    if (nav.setCourse == null) {
-      nav.setCourse = Math.round(nav.intendedCourse);
+    if (!isCoastal) {
+      nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+      if (nav.setCourse == null) {
+        nav.setCourse = Math.round(nav.intendedCourse);
+      }
     }
 
     if (state.boat.steering === 'DAMAGED') {
@@ -9085,7 +9180,8 @@
     if (!state.crew.atHelm) {
       // Fresh entry -- the exact same transition TAKE THE HELM always
       // performed: announce it, drop any stale drift-tracking value so
-      // the NEXT unattended period (if any) starts fresh, and turn the
+      // the NEXT unattended period (if any) starts fresh, and -- open
+      // water only, see this function's own notes above -- turn the
       // boat toward courseSteeringTarget in real time exactly like
       // CHANGE COURSE/SET COURSE FOR NĀWILIWILI/AUTOPILOT re-engaging do
       // — never an instant snap.
@@ -9093,7 +9189,9 @@
       nav.driftHeading = null;
       printLine('You take the helm.', 'dim');
       printBlank();
-      beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+      if (!isCoastal) {
+        beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+      }
     }
 
     printHelmAtHelmHeader(state);
@@ -9138,13 +9236,18 @@
 
   // The player's way of picking any of 000-359 through a button-only
   // interface: dial a draft value up or down from the current course,
-  // then confirm. Only ever reachable once open ocean unlocks it, and
-  // only from the unified HELM screen -- which always means
-  // state.crew.atHelm is already true by the time this is reached (no
-  // separate "not at the helm" path exists any more), so the full
-  // instrumentation header is always shown above the dial controls.
+  // then confirm. Reachable from the unified HELM screen in EITHER
+  // phase now (see cmdHelm's own notes) -- state.crew.atHelm is already
+  // true by the time this is reached either way (no separate "not at
+  // the helm" path exists any more), so the full instrumentation
+  // header is always shown above the dial controls. The coastal lock
+  // is checked first, before nav.setCourse is ever read (which stays
+  // null throughout coastal; see courseSteeringTarget's own notes) --
+  // this never falls through to the real dial logic below during the
+  // coastal passage.
   function cmdChangeCourse(state) {
     var nav = state.nav;
+    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { blockedByCoastalLock(state); return; }
     if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
@@ -14025,6 +14128,21 @@
   // minimal).
   var SAIL_AREA_ORDER = { furled: 0, minimal: 1, reefed: 2, full: 3 };
 
+  // COASTAL TUTORIAL -- automatic sail selection for RAISE SAILS (see
+  // sailOptions' own coastal branch and the 'sail-raise-auto' case in
+  // handleAction below), per this feature's own stated thresholds.
+  // Reads the same state.weather.windSpeed/condition every other wind
+  // reading in the game already uses -- no new weather data, no hidden
+  // roll. Squall overrides pure wind speed straight to minimal
+  // regardless of how light the wind itself reads, matching the task's
+  // own "OVER 32 KT OR SQUALL" wording.
+  function coastalAutoSailConfig(state) {
+    var w = state.weather;
+    if (w.condition === 'squall' || w.windSpeed > 32) return 'minimal';
+    if (w.windSpeed > 22) return 'reefed';
+    return 'full';
+  }
+
   // FURLED -> FULL (raising the entire sail from nothing) is the only
   // "long" raise; FULL -> FURLED (lowering everything) is the only
   // "long" lower. Every other increase/decrease -- reefing, shaking out
@@ -15217,6 +15335,9 @@
         case 'sail-furled':
           performSailChange(state, 'furled');
           break;
+        case 'sail-raise-auto':
+          performSailChange(state, coastalAutoSailConfig(state));
+          break;
         case 'engine-start':
           if (state.boat.engine === 'DAMAGED') break; // shouldn't be reachable — button isn't shown otherwise
           runShortAction(state, {
@@ -15313,6 +15434,7 @@
         cmdHelm(state);
         break;
       case 'set-for-nawiliwili':
+        if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { blockedByCoastalLock(state); break; }
         if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
         printBlank();
@@ -15517,6 +15639,8 @@
     if (nav.sailTrimState === undefined) nav.sailTrimState = 'good';
     if (nav.lastTrimHeading === undefined || nav.lastTrimHeading === null) nav.lastTrimHeading = nav.heading;
     if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
+    if (state.flags && state.flags.breakwaterObservationShown === undefined) state.flags.breakwaterObservationShown = false;
+    if (state.flags && state.flags.pacificObservationShown === undefined) state.flags.pacificObservationShown = false;
     if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
     var legacyTotal = 2850; // the flat distance old saves' progress was measured against
     var frac = clamp((nav.distanceTraveled || 0) / legacyTotal, 0, 1);
