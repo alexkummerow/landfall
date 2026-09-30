@@ -9652,14 +9652,14 @@
   // actually makes a genuine, fully-palette-restricted restyle
   // possible: buildChartMapStyle below draws only a small, deliberately
   // reduced set of layers (ocean, land, coastlines, the coarsest
-  // country boundaries, and a sparse country/city label set) straight
-  // from this one source's raw geometry, each layer's own paint color
-  // pulled from shipsComputerColors -- nothing here is a filter or a
-  // tint over someone else's colors, and everything not explicitly
-  // listed (roads, buildings, transit, POIs, land-use shading) is
-  // simply never added as a layer, rather than hidden after the fact.
+  // country boundaries) straight from this one source's raw geometry,
+  // each layer's own paint color pulled from shipsComputerColors --
+  // nothing here is a filter or a tint over someone else's colors, and
+  // everything not explicitly listed (roads, buildings, transit,
+  // POIs, land-use shading, and -- per this file's own later revision
+  // -- every ordinary place name too) is simply never added as a
+  // layer, rather than hidden after the fact.
   var CHART_VECTOR_SOURCE_URL = 'https://tiles.openfreemap.org/planet';
-  var CHART_GLYPHS_URL = 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf'; // needed for the two label layers below; map-rendered text is limited to whatever font this glyph service itself hosts (Noto Sans) -- unlike the HTML overlays (NĀWILIWILI, attribution), which use Landfall's own --font-mono directly, a vector-tile symbol layer's text-font can only ever reference glyphs the tile provider has actually rendered, and no such set exists for Landfall's own monospace face
   // OpenFreeMap's own required credit line (openfreemap.org/quick_start
   // -- "OpenFreeMap (c) OpenMapTiles Data from OpenStreetMap", three
   // separate links) -- the ONE thing on this basemap that is NOT a
@@ -9676,17 +9676,33 @@
   // ComputerColors() is always called immediately before this, in
   // buildChartMap. Deliberately minimal: water (the ocean, plus every
   // lake/river polygon -- everything else left as the plain background
-  // reads as land), the coarsest country-level boundaries only, and
-  // two label layers (country, city) -- no roads, buildings, transit,
-  // land-use shading, or POIs of any kind, matching this task's own
-  // "reduce clutter aggressively" direction for what is fundamentally
-  // a nautical reference, not a street map. The color hierarchy
-  // throughout follows this task's own tiers exactly: bgLit for the
-  // land default, bg for the ocean fill (matching the computer's own
-  // background almost exactly), dim for the coastline/boundary/
-  // country-label tier, phosphor for ordinary (city) labels -- bright
-  // is reserved entirely for the vessel/destination/track layer above
-  // the basemap, added separately in buildChartMap, never used here.
+  // reads as land) and the coarsest country-level boundaries only --
+  // no roads, buildings, transit, land-use shading, POIs, or place
+  // labels of any kind (country/city name layers were tried and then
+  // deliberately removed -- see this section's own later revision),
+  // matching this task's own "no consumer-map labeling, not a labeled
+  // road map" direction for what is fundamentally a nautical reference.
+  // No glyphs URL is declared: with every symbol/text layer gone, a
+  // vector-tile glyph service is no longer needed at all -- the one
+  // label CHART still shows (NĀWILIWILI) is the HTML overlay in
+  // buildChartDestMarkerEl, which uses Landfall's own --font-mono
+  // directly and was never drawn by MapLibre's own text rendering.
+  //
+  // Land and its own coastline are deliberately the SAME color
+  // (bgLit) rather than land-fill-vs-outline being two different
+  // tones: fill-outline-color on the water layer paints the border of
+  // EVERY water polygon it draws -- ocean coastline and every inland
+  // lake/reservoir edge alike -- so setting it to match the land
+  // color exactly means that whole border blends into the land it
+  // borders instead of standing out as its own line. The single
+  // remaining edge a viewer can actually see is water's own fill (bg)
+  // meeting land (bgLit) -- one flat, clean transition, not a filled
+  // shape AND a separately-colored outline layered on top of it. This
+  // was tried the other way first (outline in dim, a visibly
+  // different tone from the land fill) and read as fussier, busier
+  // shoreline detail than intended -- especially wherever small inland
+  // lakes added their own little contrasting rings -- which is what
+  // this revision corrects.
   function buildChartMapStyle() {
     var c = shipsComputerColors;
     return {
@@ -9694,35 +9710,21 @@
       sources: {
         'chart-basemap': { type: 'vector', url: CHART_VECTOR_SOURCE_URL, attribution: CHART_ATTRIBUTION_HTML },
       },
-      glyphs: CHART_GLYPHS_URL,
       layers: [
         { id: 'chart-bg', type: 'background', paint: { 'background-color': c.bgLit } },
         {
           id: 'chart-water', type: 'fill', source: 'chart-basemap', 'source-layer': 'water',
-          paint: { 'fill-color': c.bg, 'fill-outline-color': c.dim },
+          paint: { 'fill-color': c.bg, 'fill-outline-color': c.bgLit },
         },
         {
           id: 'chart-boundary', type: 'line', source: 'chart-basemap', 'source-layer': 'boundary',
           filter: ['all', ['==', ['get', 'admin_level'], 2], ['!=', ['get', 'maritime'], 1], ['!=', ['get', 'disputed'], 1]],
           paint: { 'line-color': c.dim, 'line-opacity': 0.5, 'line-width': 0.75, 'line-dasharray': [2, 2] },
         },
-        {
-          id: 'chart-place-country', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
-          filter: ['all', ['==', ['get', 'class'], 'country'], ['<=', ['get', 'rank'], 3]],
-          maxzoom: 6,
-          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 10, 'text-transform': 'uppercase', 'text-letter-spacing': 0.1 },
-          paint: { 'text-color': c.dim },
-        },
-        {
-          id: 'chart-place-city', type: 'symbol', source: 'chart-basemap', 'source-layer': 'place',
-          filter: ['==', ['get', 'class'], 'city'],
-          minzoom: 3,
-          layout: { 'text-field': ['coalesce', ['get', 'name_en'], ['get', 'name']], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-transform': 'uppercase', 'text-letter-spacing': 0.08 },
-          paint: { 'text-color': c.phosphor },
-        },
       ],
     };
   }
+
   var CHART_TRACK_MIN_DISTANCE_NM = 3; // how far (actual nm sailed, via nav.distanceTraveled) between recorded track points -- frequent enough for a smooth-looking track over a ~2800nm voyage, coarse enough to keep the save small and never add a point every single tick
   var CHART_MAX_TRACK_POINTS = 2000; // a generous safety cap -- the full Seattle-Kaua'i voyage at the interval above is well under 1000 points; this only ever matters for an unusually long/wandering session
 
