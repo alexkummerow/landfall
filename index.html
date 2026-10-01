@@ -785,6 +785,28 @@
     text-shadow: 0 0 4px rgba(255, 0, 0, 0.5);
   }
 
+  /* A row that ends in a value instead of a lamp (the CLOTHING/CHANGE
+     menu: TOP/OUTER/BOTTOM/FEET/KNIT CAP/GLOVES/SUNGLASSES, each paired
+     with what's currently selected there) -- same reasoning and same
+     flex-based mechanism as .option-indicator just above, replacing
+     what used to be dotted-leader filler characters
+     (inventoryLine's own former string-building: 'TOP ........ TEE
+     SHIRT') the same way .data-row replaced that pattern for printed
+     label/value lines elsewhere in the game. Never applied to CONFIRM/
+     BACK, which carry no value and stay plain .option buttons.
+     min-width (15ch) is sized off SUNGLASSES, this menu's own longest
+     label, with room to spare -- the same "size each family's own
+     width off its own longest label" approach .data-row-md documents,
+     not a value borrowed from an unrelated screen. */
+  .option-data-row {
+    display: flex;
+    align-items: center;
+    gap: 1ch;
+  }
+  .option-data-row-label {
+    min-width: 15ch;
+  }
+
   @media (max-width: 480px) {
     .line, .entry-text, .option { font-size: 0.98rem; }
     #output, #controls { padding-left: 0.9rem; padding-right: 0.9rem; }
@@ -7688,6 +7710,7 @@
     if (boatChannels.interior) disposeAmbienceChannel(boatChannels.interior);
     if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
     if (rainChannels.interior) disposeAmbienceChannel(rainChannels.interior);
+    disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
 
     var oldCtx = audioCtx;
     audioCtx = null;
@@ -11764,15 +11787,15 @@
       id: 'clothing-menu',
       options: groupedOptions([
         [
-          { label: inventoryLine('TOP', CLOTHING_LABELS.top[clo.top] + clothingStatusSuffix(state, clo.top)), action: 'cmd:clothing-top' },
-          { label: inventoryLine('OUTER', CLOTHING_LABELS.outer[clo.outer] + clothingStatusSuffix(state, clo.outer)), action: 'cmd:clothing-outer' },
-          { label: inventoryLine('BOTTOM', CLOTHING_LABELS.bottom[clo.bottom] + clothingStatusSuffix(state, clo.bottom)), action: 'cmd:clothing-bottom' },
-          { label: inventoryLine('FEET', CLOTHING_LABELS.feet[clo.feet] + clothingStatusSuffix(state, clo.feet)), action: 'cmd:clothing-feet' },
+          { label: 'TOP', value: CLOTHING_LABELS.top[clo.top] + clothingStatusSuffix(state, clo.top), action: 'cmd:clothing-top' },
+          { label: 'OUTER', value: CLOTHING_LABELS.outer[clo.outer] + clothingStatusSuffix(state, clo.outer), action: 'cmd:clothing-outer' },
+          { label: 'BOTTOM', value: CLOTHING_LABELS.bottom[clo.bottom] + clothingStatusSuffix(state, clo.bottom), action: 'cmd:clothing-bottom' },
+          { label: 'FEET', value: CLOTHING_LABELS.feet[clo.feet] + clothingStatusSuffix(state, clo.feet), action: 'cmd:clothing-feet' },
         ],
         [
-          { label: inventoryLine('KNIT CAP', (clo.beanie ? 'ON' : 'OFF') + clothingStatusSuffix(state, 'beanie')), action: 'toggle-pending:beanie' },
-          { label: inventoryLine('GLOVES', (clo.gloves ? 'ON' : 'OFF') + clothingStatusSuffix(state, 'gloves')), action: 'toggle-pending:gloves' },
-          { label: inventoryLine('SUNGLASSES', clo.sunglasses ? 'ON' : 'OFF'), action: 'toggle-pending:sunglasses' },
+          { label: 'KNIT CAP', value: (clo.beanie ? 'ON' : 'OFF') + clothingStatusSuffix(state, 'beanie'), action: 'toggle-pending:beanie' },
+          { label: 'GLOVES', value: (clo.gloves ? 'ON' : 'OFF') + clothingStatusSuffix(state, 'gloves'), action: 'toggle-pending:gloves' },
+          { label: 'SUNGLASSES', value: clo.sunglasses ? 'ON' : 'OFF', action: 'toggle-pending:sunglasses' },
         ],
         [
           { label: 'CONFIRM', action: 'commit-clothing' },
@@ -12991,7 +13014,7 @@
     var hours = REPAIR_QUALITY_PROTECTION_HOURS[q.quality];
     runAudioSyncedAction(state, {
       label: REPAIR_WORKING_LABEL[systemKey],
-      playAudio: function (onEnded) { return playNavStationOneShot(REPAIR_AUDIO_KEY[systemKey], onEnded); },
+      playAudio: function (onEnded) { return playRepairAudio(systemKey, onEnded); },
       action: function (s) {
         s.crew.fatigue = clamp(s.crew.fatigue + rand(6, 10), 0, 100);
         bumpHygiene(s, 1.5);            // grease, sweat, cramped work
@@ -14183,6 +14206,32 @@
     return el;
   }
 
+  // Called from rebuildLandfallAudio (hard audio rebuild) -- these
+  // elements are plain HTMLAudioElements with no AudioContext
+  // involvement at all, so a rebuild never NEEDS to touch them the way
+  // it needs to touch the boat/rain graph; they survive one untouched
+  // by default. But they CAN independently become wedged by the exact
+  // same browser interruption behavior that motivated the rebuild in
+  // the first place (same underlying cause as the cassette element;
+  // see recoverCassetteHard's own notes), and a hard rebuild is meant
+  // to be a genuinely fresh start for the audio runtime -- so any one
+  // of them still carrying a stale _fadeTimer or onended handler from
+  // whatever it was doing when the interruption hit is cleared out
+  // here too, and the whole pool is discarded so the next repair (or
+  // mouse click, or pong sound) lazily creates a brand new element
+  // exactly the way getNavStationAudioEl already does on first use --
+  // never replaying whatever any of them were mid-playing.
+  function disposeNavStationAudioEls() {
+    Object.keys(navStationAudioEls).forEach(function (key) {
+      var el = navStationAudioEls[key];
+      if (!el) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.onended = null;
+      try { el.pause(); } catch (e) {}
+    });
+    navStationAudioEls = {};
+  }
+
   // Identical in shape to fadeSaloonVolume/fadeHeadVolume/etc. -- see
   // those functions' own comments for why each audio system keeps its
   // own independent copy rather than sharing one.
@@ -14239,6 +14288,89 @@
       };
     }
     return el;
+  }
+
+  // REPAIR AUDIO -- a narrowly-scoped wrapper around the SAME
+  // nav-station element pool playNavStationOneShot already uses (same
+  // getNavStationAudioEl, same fadeNavStationVolume, same
+  // NAV_STATION_AUDIO_FILES/VOLUME), built specifically to fix one
+  // failure mode that matters uniquely for a REPAIR and nowhere else
+  // playNavStationOneShot is used: that function calls onEnded()
+  // immediately whenever audio isn't unlocked or play() rejects,
+  // treating "audio failed to even start" as equivalent to "audio
+  // finished playing". For mouse clicks, pong SFX, and
+  // computerStartup/Shutdown that's a harmless, correct fallback -- for
+  // a repair, runAudioSyncedAction's own config.action (which this
+  // gates) applies the repair outcome, so calling onEnded on a failed
+  // play silently completes the repair -- consequences and all --
+  // without the player ever hearing it. That is the exact bug this
+  // fixes. playNavStationOneShot itself, and every one of its other
+  // callers, is completely unchanged; this exists alongside it, used
+  // ONLY by performSystemRepairAttempt.
+  //
+  // Never calls onEnded on a failure path. Exactly one recovery-and-
+  // retry is attempted: unlockAudio() + retry if audio was never
+  // unlocked at all, or recoverLandfallAudio() + retry if a play() call
+  // itself rejected despite audio reporting unlocked (the "browser
+  // audio silently wedged independent of Landfall's own unlocked flag"
+  // case the broader recovery layer exists for -- see that function's
+  // own notes). If the retry ALSO fails, this logs a real warning and
+  // deliberately does nothing further -- it never fabricates completion
+  // and never builds a second, separate fallback timer: the ELEMENT
+  // this always returns is the same one runAudioSyncedAction's own
+  // armDurationWatchdog already sizes itself against, and a repair
+  // whose audio never even starts simply never reports a duration,
+  // which is exactly the "we don't know anything yet" case that
+  // watchdog's own generous startupFallbackSeconds ceiling (see
+  // runAudioSyncedAction's own notes) already exists to complete the
+  // action from, with no duplicate mechanism needed here.
+  function playRepairAudio(systemKey, onEnded) {
+    var audioKey = REPAIR_AUDIO_KEY[systemKey];
+    var el = getNavStationAudioEl(audioKey);
+
+    function attempt(isRetry) {
+      audioDebugLog('REPAIR AUDIO START: systemKey=' + systemKey + ' audioKey=' + audioKey + ' src=' + NAV_STATION_AUDIO_FILES[audioKey] + ' muted=' + muted + ' audioUnlocked=' + audioUnlocked + ' paused=' + el.paused + ' readyState=' + el.readyState + ' networkState=' + el.networkState);
+
+      if (!audioUnlocked) {
+        if (isRetry) {
+          console.warn('Repair audio could not start (audio never unlocked): ' + audioKey);
+          return; // never call onEnded -- see this function's own notes above
+        }
+        unlockAudio();
+        attempt(true);
+        return;
+      }
+
+      el.onended = null;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      if (!el.paused) el.pause();
+      el.currentTime = 0;
+      el.volume = 0;
+      el.onended = function () {
+        el.onended = null;
+        audioDebugLog('REPAIR AUDIO ENDED: ' + audioKey);
+        onEnded();
+      };
+      var p = el.play();
+      if (p && p.then) {
+        p.then(function () {
+          audioDebugLog('REPAIR AUDIO PLAYING: ' + audioKey);
+        }, function (e) {
+          el.onended = null; // this attempt is dead -- a retry (or giving up) sets its own fresh handler, never two competing ones
+          console.warn('REPAIR AUDIO PLAY FAILED: audioKey=' + audioKey + ' src=' + NAV_STATION_AUDIO_FILES[audioKey] + ' error.name=' + (e && e.name) + ' error.message=' + (e && e.message));
+          audioDebugError(audioKey, e);
+          if (isRetry) {
+            console.warn('Repair audio could not start after retry: ' + audioKey);
+            return; // genuinely give up -- never call onEnded; see this function's own notes above
+          }
+          recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
+        });
+      }
+      fadeNavStationVolume(el, muted ? 0 : NAV_STATION_AUDIO_VOLUME[audioKey], NAV_STATION_CROSSFADE_SECONDS);
+    }
+
+    attempt(false);
+    return el; // same contract as playNavStationOneShot -- the element itself, for armDurationWatchdog to size its own fallback against
   }
 
   function applyMuteToNavStationAudio() {
@@ -15475,6 +15607,23 @@
         lamp.className = 'lamp ' + (opt.indicator === 'on' ? 'lamp-on' : 'lamp-off');
         lamp.textContent = '\u25CF';
         btn.appendChild(lamp);
+      } else if (opt.value != null) {
+        // A value-bearing row (the CLOTHING/CHANGE menu: TOP/OUTER/
+        // BOTTOM/FEET/KNIT CAP/GLOVES/SUNGLASSES, each paired with
+        // what's currently selected there) -- same two-DOM-node, flex-
+        // column treatment as opt.indicator just above, via
+        // .option-data-row/.option-data-row-label instead of
+        // .option-indicator/.option-indicator-label, replacing what
+        // used to be inventoryLine's own dotted-leader string
+        // concatenation. See .option-data-row's own CSS notes.
+        btn.className = 'option option-data-row';
+        var dataRowLabelSpan = document.createElement('span');
+        dataRowLabelSpan.className = 'option-data-row-label';
+        dataRowLabelSpan.textContent = '> ' + opt.label;
+        btn.appendChild(dataRowLabelSpan);
+        var valueSpan = document.createElement('span');
+        valueSpan.textContent = opt.value;
+        btn.appendChild(valueSpan);
       } else {
         btn.textContent = '> ' + opt.label;
       }
