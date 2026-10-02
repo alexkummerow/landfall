@@ -7074,26 +7074,41 @@
      recorded sound of the engine itself, playing underneath whichever
      of those happen to be audible, never replacing them.
 
-     Deliberately NOT built on the boat-ambience channel machinery
-     above (no desiredPath/currentPath/loadingPath/generation
-     tracking of its own) -- instead built on makeCrossfadeLoopController
-     (see its own notes, near AUDIO_DEBUG above), the same generic
-     seamless-loop/handoff engine the sails luffing loop below also
-     uses. There is no "sync engine audio to current state" function
-     that runs on every render: the actual engine-start/engine-stop
-     action handlers below call these functions directly, at the moment
-     the player's choice actually takes effect (see the engine-start/
-     engine-stop cases and the departure-sequence START ENGINE step).
-     This means engine audio is authored to react to real events, not
-     inferred after the fact from state.boat.engineOn -- though that
-     flag remains the sole source of truth for whether the engine
-     itself is running; nothing here tracks a second, independent
-     notion of "is engine audio on."
+     GainNode-routed through masterGain -- its OWN two-slot crossfade
+     engine here, built directly against the Web Audio graph (NOT
+     makeCrossfadeLoopController, which sails luffing below still uses
+     unchanged, and which drives its fades through plain
+     HTMLMediaElement.volume). That distinction is the entire reason
+     this section exists in this shape: iOS Safari is documented to
+     silently ignore programmatic .volume changes on <audio>/<video>
+     elements -- the element plays at full, system-level volume
+     regardless of what JS sets .volume to, so a fade driven that way
+     produces no audible ramp there at all. Not a gradual version of
+     the real sound, not a shortened one -- a hard cut straight to full
+     volume, with no click (the audio itself still starts cleanly, just
+     at the wrong, unramped level from the first frame). Boat ambience
+     already carries its own explicit comment confirming exactly this
+     ("el.volume = 1 ... the GainNode is what actually controls level",
+     see ensureBoatChannelSlot) -- this section now follows that same,
+     already-proven pattern instead of the one that was silently
+     failing on iOS. There is no "sync engine audio to current state"
+     function that runs on every render: the actual engine-start/
+     engine-stop action handlers below call these functions directly,
+     at the moment the player's choice actually takes effect (see the
+     engine-start/engine-stop cases and the departure-sequence START
+     ENGINE step). This means engine audio is authored to react to real
+     events, not inferred after the fact from state.boat.engineOn --
+     though that flag remains the sole source of truth for whether the
+     engine itself is running; nothing here tracks a second,
+     independent notion of "is engine audio on."
 
-     ENGINE AUDIO SIMPLIFICATION -- just two recordings now, one per
-     perspective, each looping CONTINUOUSLY and GAPLESSLY for as long as
-     the engine runs: no separate start.mp3/cruise.mp3/off.mp3 three-
-     file sequence any more. "Starting"/"stopping" are now purely a
+     Just two recordings, one per perspective, each looping
+     CONTINUOUSLY and GAPLESSLY for as long as the engine runs (every
+     natural loop repetition forces currentTime back to 0 on its own
+     incoming slot -- see engineCrossfadeTo's own isSelfLoop handling --
+     so the loop never audibly restarts or drifts out of sync with
+     itself; it simply keeps going, seam after seam, until the player
+     actually stops the engine). "Starting"/"stopping" are purely a
      VOLUME treatment on these same two loops (0->normal over 3s on
      start, normal->0 over 3s on stop -- see beginEngineLoop/
      beginEngineStopAudio below), timed to the STARTING ENGINE/STOPPING
@@ -7117,32 +7132,196 @@
   // engine-audio timings this task calls for, not one shared number.
   var ENGINE_LOOP_SELF_CROSSFADE_SECONDS = 1;
 
-  var engineAudio = makeCrossfadeLoopController('ENGINE');
-  // Pre-loads BOTH engine files into engineAudio's own two slots
-  // immediately, right here at script startup -- long before the
-  // player could possibly reach START ENGINE (they still have the
-  // whole intro story, CONTINUE, the marina screen, and BOARD ahead of
-  // them first). See preload's own notes for why: a file whose very
-  // first decode/buffer only begins the instant play() is called can
-  // race this controller's own wall-clock volume ramp, eating the
-  // front of the fade and making a correct 0->normal ramp sound like
-  // it jumped in partway through instead. No gesture/audioUnlocked
-  // requirement for this -- setting a plain <audio> element's src is
-  // always allowed, only playback itself needs a gesture.
-  engineAudio.preload(ENGINE_AUDIO_FILES.exterior, 0);
-  engineAudio.preload(ENGINE_AUDIO_FILES.interior, 1);
-  // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
-  // null) -- the controller itself only knows raw paths/volumes, not
-  // domain keys, so this is purely for applyMuteToEngineAudio's
-  // ENGINE_VOLUME lookup on mute toggle; it is not consulted for any
-  // gameplay decision.
+  // engineChannel is engine audio's own two-slot state, the same shape
+  // makeCrossfadeLoopController keeps internally, just not behind that
+  // shared function -- slots[i] is { el, gain, nearEndTimer,
+  // myGeneration } once created, or null until first needed.
+  var engineChannel = { slots: [null, null], activeIndex: -1, generation: 0 };
+
+  // Creates slot `index` (a plain <audio> element, routed through its
+  // own GainNode into masterGain) the first time it's needed, or
+  // returns the existing one. Requires audioCtx/masterGain to already
+  // exist (unlike a plain HTMLMediaElement, a MediaElementAudioSourceNode
+  // can only be created against a real AudioContext) -- a safe no-op,
+  // returning null, if called before unlockAudio() has ever run; every
+  // real call site here is reached only after that (engineAudioPreload's
+  // own callers, and every engine action, all run after unlockAudio()).
+  function ensureEngineSlot(index) {
+    if (engineChannel.slots[index]) return engineChannel.slots[index];
+    if (!audioCtx || !masterGain) return null;
+    try {
+      var el = new Audio();
+      el.loop = false;
+      el.preload = 'auto';
+      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level (see this section's own notes, and ensureBoatChannelSlot's matching comment)
+      el.addEventListener('error', function () {
+        console.error('ENGINE AUDIO FILE ERROR', 'path:', el.currentSrc || el.src, 'code:', el.error ? el.error.code : null);
+      });
+      var source = audioCtx.createMediaElementSource(el);
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain).connect(masterGain);
+      var slot = { el: el, gain: gain, nearEndTimer: null, myGeneration: -1 };
+      engineChannel.slots[index] = slot;
+      return slot;
+    } catch (e) {
+      console.warn('Engine audio unavailable:', describeError(e));
+      return null;
+    }
+  }
+
+  function clearEngineNearEndTimer(slot) {
+    if (slot.nearEndTimer) { clearTimeout(slot.nearEndTimer); slot.nearEndTimer = null; }
+  }
+
+  function safePlayEngine(el) {
+    try {
+      var p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (e) {}
+  }
+
+  // Loads `path` into slot `index` without playing it or touching
+  // activeIndex/generation -- same reasoning as the generic
+  // makeCrossfadeLoopController's own preload (see its notes): a file
+  // whose very first decode/buffer only begins the instant play() is
+  // called can noticeably delay when audio actually becomes audible,
+  // which (with the OLD el.volume-driven fade) could outrace the ramp
+  // outright; harmless now that the fade is GainNode-driven instead
+  // (the ramp is scheduled against the audio clock regardless of when
+  // THIS call happens to run), but still worth doing so the file is
+  // already buffered by the time the player actually reaches START
+  // ENGINE. Call only after unlockAudio() -- ensureEngineSlot is a
+  // no-op before that.
+  function engineAudioPreload(path, index) {
+    var slot = ensureEngineSlot(index);
+    if (!slot) return;
+    if (slot.el.src !== path && !(slot.el.currentSrc && slot.el.currentSrc.indexOf(path) !== -1)) {
+      slot.el.src = path;
+    }
+  }
+
+  // Crossfades engine to `path` at `targetVolume` (a plain number or a
+  // function, re-evaluated at the moment this fade actually begins --
+  // same reasoning as makeCrossfadeLoopController's own crossfadeTo)
+  // over `fadeSeconds`, via GainNode.gain.linearRampToValueAtTime --
+  // never el.volume. isSelfLoop/onNearEnd behave exactly like that
+  // shared controller's own crossfadeTo: a self-loop gets native loop
+  // as a late-timer safety net and ALWAYS restarts currentTime at 0 on
+  // every seam (this is what keeps the engine genuinely looping
+  // gapless and in sync with itself for as long as it runs); a plain
+  // onNearEnd handoff would not force that reset (not used by engine
+  // today, kept only for symmetry with the shared controller's own
+  // shape).
+  function engineCrossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSeconds) {
+    var incoming = ensureEngineSlot(engineChannel.activeIndex === 0 ? 1 : 0);
+    if (!incoming || !audioCtx) return; // not unlocked yet -- matches every other domain's own guard; engineActiveKey is still recorded by the caller, so a later unlock can't silently desync it
+    engineChannel.generation++;
+    var myGeneration = engineChannel.generation;
+    var now = audioCtx.currentTime;
+    var outgoingIndex = engineChannel.activeIndex;
+    var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+    clearEngineNearEndTimer(incoming);
+    incoming.myGeneration = myGeneration;
+    if (!incoming.el.paused) incoming.el.pause();
+    // Skip the src assignment when this slot already has this exact
+    // path loaded (e.g. from engineAudioPreload) -- reassigning .src to
+    // the SAME value still re-triggers the browser's media load
+    // algorithm in most engines, discarding whatever buffering preload
+    // already bought.
+    if (incoming.el.src !== path && !(incoming.el.currentSrc && incoming.el.currentSrc.indexOf(path) !== -1)) {
+      incoming.el.src = path;
+    }
+    incoming.el.currentTime = 0;
+    incoming.el.playbackRate = 1.0;
+    incoming.el.defaultPlaybackRate = 1.0;
+    incoming.gain.gain.cancelScheduledValues(now);
+    incoming.gain.gain.setValueAtTime(0, now);
+    incoming.el.loop = !!isSelfLoop;
+    incoming.el.onended = null;
+    if (onNearEnd && !isSelfLoop) {
+      incoming.el.onended = function () {
+        incoming.el.onended = null;
+        if (incoming.myGeneration !== myGeneration || engineChannel.activeIndex !== incomingIndex) return; // superseded -- stale, do nothing
+        clearEngineNearEndTimer(incoming);
+        onNearEnd();
+      };
+    }
+    safePlayEngine(incoming.el);
+    engineChannel.activeIndex = incomingIndex;
+
+    if (outgoingIndex !== -1 && engineChannel.slots[outgoingIndex]) {
+      var outgoing = engineChannel.slots[outgoingIndex];
+      outgoing.el.onended = null; // a superseded slot's own 'ended' fallback must never fire afterward
+      outgoing.el.loop = false; // and it must not native-loop itself around during its own fade-out
+      clearEngineNearEndTimer(outgoing); // this slot's own pending handoff/self-loop, if any, is superseded the instant it stops being active
+      outgoing.gain.gain.cancelScheduledValues(now);
+      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
+      (function (el) { setTimeout(function () { if (!el.paused) el.pause(); }, fadeSeconds * 1000 + 100); })(outgoing.el);
+    }
+
+    incoming.gain.gain.linearRampToValueAtTime(typeof targetVolume === 'function' ? targetVolume() : targetVolume, now + fadeSeconds);
+
+    if (onNearEnd) {
+      var schedule = function () {
+        if (incoming.myGeneration !== myGeneration || engineChannel.activeIndex !== incomingIndex) return; // superseded before this could even be scheduled
+        var duration = incoming.el.duration;
+        if (!isFinite(duration) || duration <= 0) {
+          incoming.nearEndTimer = setTimeout(schedule, 100); // metadata not loaded yet -- try again shortly rather than never scheduling at all
+          return;
+        }
+        var delayMs = Math.max(0, (duration - fadeSeconds) * 1000);
+        incoming.nearEndTimer = setTimeout(function () {
+          incoming.nearEndTimer = null;
+          if (incoming.myGeneration !== myGeneration || engineChannel.activeIndex !== incomingIndex) return; // superseded while waiting
+          onNearEnd();
+        }, delayMs);
+      };
+      schedule();
+    }
+  }
+
+  // Fades the currently active slot to silence over fadeSeconds (or
+  // instantly if fadeSeconds<=0) via the GainNode, pausing the element
+  // only once it's actually reached 0 -- mirrors
+  // makeCrossfadeLoopController's own stop().
+  function engineAudioStop(fadeSeconds) {
+    engineChannel.generation++;
+    for (var i = 0; i < 2; i++) {
+      var slot = engineChannel.slots[i];
+      if (!slot) continue;
+      clearEngineNearEndTimer(slot);
+      slot.el.onended = null;
+      slot.el.loop = false;
+      if (i === engineChannel.activeIndex && fadeSeconds > 0 && audioCtx) {
+        var now = audioCtx.currentTime;
+        slot.gain.gain.cancelScheduledValues(now);
+        slot.gain.gain.setValueAtTime(slot.gain.gain.value, now);
+        slot.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
+        (function (el) { setTimeout(function () { if (!el.paused) el.pause(); }, fadeSeconds * 1000 + 100); })(slot.el);
+      } else {
+        if (audioCtx) slot.gain.gain.cancelScheduledValues(audioCtx.currentTime);
+        slot.gain.gain.value = 0;
+        if (!slot.el.paused) slot.el.pause();
+      }
+    }
+    engineChannel.activeIndex = -1;
+  }
+
+  // Which ENGINE_AUDIO_FILES key engine audio is currently playing (or
+  // null) -- this layer only knows raw paths/volumes, not domain keys,
+  // so this is purely for applyMuteToEngineAudio's ENGINE_VOLUME
+  // lookup on mute toggle; it is not consulted for any gameplay
+  // decision.
   var engineActiveKey = null;
 
   // The engine's target volume for `key`, as a function so it's
   // re-evaluated at the moment each crossfade actually begins (see
-  // crossfadeTo's notes on function-valued targetVolume) -- this is
-  // what makes starting the engine while muted silent, and what stops
-  // a self-loop seam from restoring a level the player has since muted.
+  // engineCrossfadeTo's notes on function-valued targetVolume) -- this
+  // is what makes starting the engine while muted silent, and what
+  // stops a self-loop seam from restoring a level the player has since
+  // muted.
   function engineTargetVolume(key) {
     return function () { return muted ? 0 : ENGINE_VOLUME[key]; };
   }
@@ -7159,14 +7338,14 @@
   // "how it keeps seamlessly repeating afterward" can never drift
   // apart between the two call sites. Safe to call again while already
   // running (a repeated Start press, a rapid double GO ABOVE/GO BELOW)
-  // -- crossfadeTo always safely supersedes whatever this controller
-  // was already doing, so this can never stack a second loop or
-  // resurrect a stale sequence.
+  // -- engineCrossfadeTo always safely supersedes whatever was already
+  // playing, so this can never stack a second loop or resurrect a
+  // stale sequence.
   function beginEngineLoop(key, initialFadeSeconds) {
     var path = ENGINE_AUDIO_FILES[key];
     engineActiveKey = key;
-    function seam() { engineAudio.crossfadeTo(path, engineTargetVolume(key), seam, true, ENGINE_LOOP_SELF_CROSSFADE_SECONDS); }
-    engineAudio.crossfadeTo(path, engineTargetVolume(key), seam, true, initialFadeSeconds);
+    function seam() { engineCrossfadeTo(path, engineTargetVolume(key), seam, true, ENGINE_LOOP_SELF_CROSSFADE_SECONDS); }
+    engineCrossfadeTo(path, engineTargetVolume(key), seam, true, initialFadeSeconds);
   }
 
   // Called directly from the engine-start action (both the ENGINE menu
@@ -7191,15 +7370,15 @@
   // the fade-out itself spans the full fadeOutSeconds of dots, per this
   // task's own ENGINE STOP section). Simply fades whichever perspective
   // is currently active to silence over fadeOutSeconds and pauses it
-  // only once it actually reaches 0 (engineAudio.stop's own existing
-  // behavior -- see makeCrossfadeLoopController's own notes) -- no
-  // separate off.mp3 any more; "stopping" is purely this fade. location
-  // is accepted for symmetry with beginEngineStartAudio/the existing
-  // call site, though engineAudio.stop itself already fades whichever
-  // slot is actually active regardless of which perspective that is.
+  // only once it actually reaches 0 (engineAudioStop's own existing
+  // behavior) -- no separate off.mp3 any more; "stopping" is purely
+  // this fade. location is accepted for symmetry with
+  // beginEngineStartAudio/the existing call site, though
+  // engineAudioStop itself already fades whichever slot is actually
+  // active regardless of which perspective that is.
   function beginEngineStopAudio(location, fadeOutSeconds) {
     engineActiveKey = null;
-    engineAudio.stop(fadeOutSeconds);
+    engineAudioStop(fadeOutSeconds);
   }
 
   // The one small helper for automatic, abrupt shutdowns (fuel out,
@@ -7212,7 +7391,7 @@
   // failure can never schedule another repetition afterward.
   function stopAllEngineLoops() {
     engineActiveKey = null;
-    engineAudio.stop(0);
+    engineAudioStop(0);
   }
 
   // Called immediately when a GO ABOVE/GO BELOW transition begins (uses
@@ -7231,20 +7410,37 @@
 
   // Applies the current mute state to whichever engine sound is
   // actually active right now, instantly (matching masterGain's own
-  // instant, non-ramped mute toggle) -- called from toggleMute.
+  // instant, non-ramped mute toggle) -- called from toggleMute. Goes
+  // straight at the GainNode, same as every other engine-audio volume
+  // change in this section.
   function applyMuteToEngineAudio() {
-    if (!engineActiveKey) return;
-    engineAudio.applyVolumeInstantly(muted ? 0 : ENGINE_VOLUME[engineActiveKey]);
+    if (!engineActiveKey || engineChannel.activeIndex === -1 || !engineChannel.slots[engineChannel.activeIndex]) return;
+    var slot = engineChannel.slots[engineChannel.activeIndex];
+    if (audioCtx) slot.gain.gain.cancelScheduledValues(audioCtx.currentTime);
+    slot.gain.gain.value = muted ? 0 : ENGINE_VOLUME[engineActiveKey];
   }
 
   // Called on the page becoming visible again (see the
   // visibilitychange handler far below): if the browser silently
   // paused the engine's currently active element while backgrounded,
   // resumes that SAME element in place rather than starting a fresh
-  // crossfadeTo -- so this can never create a duplicate/second cruise
-  // loop, and is a safe no-op whenever nothing is actually paused.
+  // crossfadeTo -- so this can never create a duplicate/second loop,
+  // and is a safe no-op whenever nothing is actually paused.
   function resumeEngineAudioIfSuspended() {
-    engineAudio.resumeIfSuspended();
+    if (engineChannel.activeIndex === -1 || !engineChannel.slots[engineChannel.activeIndex]) return;
+    var el = engineChannel.slots[engineChannel.activeIndex].el;
+    if (el.paused) safePlayEngine(el);
+  }
+
+  // Small read-only accessors for the debug snapshot/hard-rebuild log
+  // below -- same shape makeCrossfadeLoopController's own
+  // getActiveEl/isActive exposed, kept here so those call sites needed
+  // no changes beyond the function name.
+  function engineAudioGetActiveEl() {
+    return engineChannel.activeIndex === -1 || !engineChannel.slots[engineChannel.activeIndex] ? null : engineChannel.slots[engineChannel.activeIndex].el;
+  }
+  function engineAudioIsActive() {
+    return engineChannel.activeIndex !== -1;
   }
 
   /* --------------------------------------------------------------
@@ -7519,7 +7715,7 @@
   // 'ended'-driven state machine ever sees. Without this, a track
   // suspended that way would just stay silent forever -- tapePhase is
   // still 'track', so nothing else would ever notice or try again.
-  // Deliberately mirrors engineAudio's own resumeIfSuspended (see that
+  // Deliberately mirrors resumeEngineAudioIfSuspended (see that
   // function's own comment): resumes the SAME element, in place, from
   // wherever it already is.
   //
@@ -7611,10 +7807,10 @@
     console.log('[AUDIO DEBUG] BOAT INTERIOR', boatOrRainChannelSnapshot(boatChannels.interior));
     console.log('[AUDIO DEBUG] RAIN EXTERIOR', boatOrRainChannelSnapshot(rainChannels.exterior));
     console.log('[AUDIO DEBUG] RAIN INTERIOR', boatOrRainChannelSnapshot(rainChannels.interior));
-    var engineEl = engineAudio.getActiveEl();
+    var engineEl = engineAudioGetActiveEl();
     console.log('[AUDIO DEBUG] ENGINE', {
       engineActiveKey: engineActiveKey,
-      active: engineAudio.isActive(),
+      active: engineAudioIsActive(),
       paused: engineEl ? engineEl.paused : null,
       ended: engineEl ? engineEl.ended : null,
       currentTime: engineEl ? engineEl.currentTime : null,
@@ -7661,34 +7857,39 @@
   // that's correctly silent (nothing currently desired, engine off,
   // cassette stopped/between phases). Deliberately independent of mute:
   // muting only ever changes gain/volume in this codebase (masterGain
-  // for boat/rain, .volume for engine/cassette -- see toggleMute/
+  // for boat/rain/engine, .volume for cassette -- see toggleMute/
   // applyMuteToTapeAudio), never pauses anything, so an element SHOULD
   // still be genuinely advancing while muted, and a stall caught then
   // is exactly as real (and exactly as worth fixing before the player
-  // unmutes) as one caught while audible. 'boatOrRain' entries are the
-  // ones a confirmed stall can escalate to a hard rebuild for (section
-  // 4/5 -- a stalled boat/rain channel is what indicates the
-  // AudioContext graph itself is wedged); 'engine'/'cassette' entries
-  // are reported the same way but their own recovery stays the
-  // existing, separate soft paths (resumeEngineAudioIfSuspended/
-  // resumeTapeAudioIfSuspended) -- engine and cassette are plain
-  // HTMLAudioElements with no AudioContext involvement at all, so
-  // rebuilding the Web Audio graph could never be what fixes them.
+  // unmutes) as one caught while audible. 'webAudioGraph' entries are
+  // the ones a confirmed stall can escalate to a hard rebuild for
+  // (section 4/5 -- a stalled channel in this group is what indicates
+  // the AudioContext graph itself is wedged): boat, rain, AND engine
+  // now, since engine is GainNode-routed through masterGain the same
+  // way boat/rain already are (see the ENGINE AUDIO section's own notes
+  // on why -- iOS Safari silently ignores programmatic .volume changes
+  // on plain <audio> elements, so engine moved onto the same Web Audio
+  // graph those two already prove works correctly there). 'cassette'
+  // entries are reported the same way but their own recovery stays the
+  // existing, separate soft path (resumeTapeAudioIfSuspended) --
+  // cassette alone remains a plain HTMLAudioElement with no AudioContext
+  // involvement at all, so rebuilding the Web Audio graph could never
+  // be what fixes it.
   function collectExpectedPlayingAudio() {
     var expected = [];
     [['boat exterior', boatChannels.exterior], ['boat interior', boatChannels.interior],
      ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
       var label = pair[0], channel = pair[1];
       if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex]) {
-        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'boatOrRain' });
+        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'webAudioGraph' });
       }
     });
     if (tapeAudioEl && tapePhase === 'track') {
       expected.push({ label: 'cassette', el: tapeAudioEl, group: 'cassette' });
     }
     if (GAME && GAME.boat.engineOn) {
-      var engineEl = engineAudio.getActiveEl();
-      if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'engine' });
+      var engineEl = engineAudioGetActiveEl();
+      if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'webAudioGraph' });
     }
     return expected;
   }
@@ -7827,6 +8028,20 @@
     if (boatChannels.interior) disposeAmbienceChannel(boatChannels.interior);
     if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
     if (rainChannels.interior) disposeAmbienceChannel(rainChannels.interior);
+    // Engine joins this disposal now too -- its slots are GainNode-
+    // routed through the SAME AudioContext being discarded below (see
+    // the ENGINE AUDIO section's own notes), so they're exactly as
+    // stale as boat/rain's own old slots once oldCtx closes.
+    // disposeAmbienceChannel's own shape (pauseTimer/selfLoopTimer
+    // checks that simply find nothing on an engine slot and no-op,
+    // gain/el cleanup that applies identically either way) is reused
+    // as-is rather than duplicating a near-identical function; engine's
+    // own nearEndTimer doesn't need a separate explicit clear here --
+    // engineChannel itself is about to be replaced wholesale below, and
+    // any already-in-flight timer's own generation/activeIndex guard
+    // (checked against whatever engineChannel is BY THE TIME it fires)
+    // already makes it a safe no-op against the fresh channel.
+    disposeAmbienceChannel(engineChannel);
     disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
 
     var oldCtx = audioCtx;
@@ -7834,6 +8049,7 @@
     masterGain = null;
     boatChannels = { exterior: makeBoatChannel('exterior', boatChannels.exterior.targetGain), interior: makeBoatChannel('interior', boatChannels.interior.targetGain) };
     rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
+    engineChannel = { slots: [null, null], activeIndex: -1, generation: 0 };
 
     if (oldCtx) {
       try {
@@ -7873,16 +8089,19 @@
   //     cheap no-op.
   //   LEVEL 2, HARD (sections 4-5): only reached if, after a short real
   //     wait, a REAL progress check (section 3 -- see
-  //     findStalledPersistentAudio) shows a boat or rain channel that
-  //     SHOULD be playing has not actually advanced. A stalled engine
-  //     or cassette entry does NOT trigger a hard rebuild on its own --
-  //     neither one depends on the AudioContext at all, so rebuilding
-  //     it could never be what fixes them; their own recovery already
-  //     happened via the soft calls above (cassette also gets its own
+  //     findStalledPersistentAudio) shows a channel in the
+  //     'webAudioGraph' group -- boat, rain, OR engine, all three now
+  //     GainNode-routed through the same AudioContext -- that SHOULD be
+  //     playing has not actually advanced. A stalled cassette entry
+  //     does NOT trigger a hard rebuild on its own -- cassette alone
+  //     stays a plain HTMLAudioElement with no AudioContext involvement
+  //     at all, so rebuilding it could never be what fixes that one;
+  //     its own recovery already happened via the soft call above
+  //     (resumeTapeAudioIfSuspended), and it also gets its own
   //     dedicated hard path, recoverCassetteHard, but only as part of
   //     rebuildLandfallAudio itself, and only because a genuinely wedged
   //     AudioContext and a genuinely wedged cassette element are likely
-  //     symptoms of the very same underlying interruption).
+  //     symptoms of the very same underlying interruption.
   //
   // audioRecoveryInProgress is a plain boolean guard against two
   // recovery attempts overlapping (section 11's own "do not create
@@ -7923,20 +8142,20 @@
       var stalled = await findStalledPersistentAudio();
       if (myRuntimeGeneration !== audioRuntimeGeneration) return;
 
-      var stalledBoatOrRain = stalled.filter(function (e) { return e.group === 'boatOrRain'; });
+      var stalledWebAudioGraph = stalled.filter(function (e) { return e.group === 'webAudioGraph'; });
       audioDebugLog('SOFT RECOVERY RESULT: ' + stalled.length + ' stalled (' + stalled.map(function (e) { return e.label; }).join(', ') + ')');
 
-      if (stalledBoatOrRain.length > 0) {
+      if (stalledWebAudioGraph.length > 0) {
         // The AudioContext graph itself is wedged and resume() alone
         // did not bring it back -- section 4's "do not continue
         // trusting it forever". Escalate.
-        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledBoatOrRain.map(function (e) { return e.label; }).join(','));
+        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledWebAudioGraph.map(function (e) { return e.label; }).join(','));
       } else if (stalled.some(function (e) { return e.group === 'cassette'; })) {
-        // Boat/rain are fine (so the AudioContext itself isn't the
-        // problem), but the cassette -- a completely separate plain
-        // element -- is still stalled after the soft resume above.
-        // Its own hard path doesn't need the Web Audio graph rebuilt
-        // around it.
+        // Boat/rain/engine are all fine (so the AudioContext itself
+        // isn't the problem), but the cassette -- a completely separate
+        // plain element -- is still stalled after the soft resume
+        // above. Its own hard path doesn't need the Web Audio graph
+        // rebuilt around it.
         await recoverCassetteHard();
       }
 
@@ -16714,6 +16933,14 @@
     updateRainAudioForState(GAME);
     updateNoGoZoneAudio(GAME);
     applyMuteToSailsAudio(GAME);
+    // Pre-loads both engine files now that audioCtx/masterGain exist
+    // (unlockAudio() just created them) -- see engineAudioPreload's own
+    // notes. Long before the player could possibly reach START ENGINE
+    // (they still have the whole intro story, CONTINUE, the marina
+    // screen, and BOARD ahead of them first), so this file is already
+    // buffered by the time it's actually needed.
+    engineAudioPreload(ENGINE_AUDIO_FILES.exterior, 0);
+    engineAudioPreload(ENGINE_AUDIO_FILES.interior, 1);
 
     optionsEl.innerHTML = '';
     var btn = document.createElement('button');
@@ -17333,6 +17560,17 @@
     // correctly, with no separate call needed here.
     unlockAudio();
     updateSoundLabel();
+    // Same pre-load as renderIntroStory's own (see its notes) -- a
+    // returning player could reach START ENGINE at any moment, with no
+    // guaranteed lead time the way a brand-new game's own intro
+    // sequence provides. If GAME.boat.engineOn is already true here,
+    // buildAudioGraph's own engine-resume branch (just run, inside
+    // unlockAudio() above) already created and started whichever slot
+    // it needed directly -- this is a harmless, idempotent no-op for
+    // that one (same path already loaded) and still worth doing for
+    // the other, not-yet-needed perspective.
+    engineAudioPreload(ENGINE_AUDIO_FILES.exterior, 0);
+    engineAudioPreload(ENGINE_AUDIO_FILES.interior, 1);
     var ticks = catchUpFromRealTime(GAME);
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
