@@ -4573,7 +4573,11 @@
           // it.
           if (wp.name === 'Shilshole Exit' && !state.flags.breakwaterObservationShown) {
             state.flags.breakwaterObservationShown = true;
-            log(state, 'The breakwater slips astern. There\u2019s room for sail now. I can shut the engine down and let the wind take over.');
+            // Reworded per the intro/departure rewrite's own CLEAR OF
+            // MARINA section -- same trigger, same flag, exact new
+            // wording ("Clear of the marina...", not the earlier
+            // "breakwater slips astern..." text).
+            log(state, 'Clear of the marina. I can shut off the engine, raise the sails and let the wind take over.');
           }
           if (wp.name === 'Cape Flattery' && !state.flags.pacificObservationShown) {
             state.flags.pacificObservationShown = true;
@@ -5977,8 +5981,24 @@
     // activeIndex check must still match for it to fire, so a timer
     // left over from a since-abandoned attempt can never resurrect
     // audio or advance a sequence that's already moved on.
-    function crossfadeTo(path, targetVolume, onNearEnd, isSelfLoop) {
+    // fadeSecondsOverride, when given, replaces LOOP_CROSSFADE_SECONDS
+    // (0.25s) for every timing decision THIS one call makes -- the
+    // outgoing fade-out, the incoming fade-in, AND the near-end
+    // scheduling offset (so the next handoff/self-loop is still timed
+    // to land exactly when this crossfade's own fade-in finishes, not
+    // 0.25s early or late against a longer fade). Omitted, this is
+    // pixel-for-pixel the original behavior every existing caller
+    // (sails luffing, and engine's own non-start/stop seams) already
+    // relies on. Added specifically so engine's own start/stop fades
+    // (3s, tied to the STARTING/STOPPING ENGINE dot animation) and its
+    // own above/below-deck transition (2s, matching
+    // BOAT_AMBIENCE_CROSSFADE_SECONDS -- see beginEngineLoop's own
+    // notes) can use their own, different, explicit durations without
+    // changing the shared default for anything else built on this
+    // controller.
+    function crossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSecondsOverride) {
       if (!audioUnlocked) return; // matches every other domain's own play function -- silently no-op rather than attempt playback that autoplay policy would reject anyway; whatever called this (engineActiveKey, etc.) may still record its own intent, but nothing here starts until unlocked. buildAudioGraph's own resume-mid-run catchup (and the equivalent for any other domain) is what correctly picks this back up once audio actually becomes available.
+      var fadeSeconds = fadeSecondsOverride == null ? LOOP_CROSSFADE_SECONDS : fadeSecondsOverride;
       generation++;
       var myGeneration = generation;
       var outgoingIndex = activeIndex;
@@ -6021,11 +6041,11 @@
         outgoing.el.onended = null; // a superseded slot's own 'ended' fallback must never fire afterward
         outgoing.el.loop = false; // and it must not native-loop itself around during its own fade-out
         clearNearEndTimer(outgoing); // this slot's own pending handoff/self-loop, if any, is superseded the instant it stops being active
-        fadeSlotVolume(outgoing, 0, LOOP_CROSSFADE_SECONDS, function () {
+        fadeSlotVolume(outgoing, 0, fadeSeconds, function () {
           if (!outgoing.el.paused) outgoing.el.pause();
         });
       }
-      fadeSlotVolume(incoming, typeof targetVolume === 'function' ? targetVolume() : targetVolume, LOOP_CROSSFADE_SECONDS);
+      fadeSlotVolume(incoming, typeof targetVolume === 'function' ? targetVolume() : targetVolume, fadeSeconds);
 
       if (onNearEnd) {
         var schedule = function () {
@@ -6035,7 +6055,7 @@
             incoming.nearEndTimer = setTimeout(schedule, 100); // metadata not loaded yet -- try again shortly rather than never scheduling at all
             return;
           }
-          var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
+          var delayMs = Math.max(0, (duration - fadeSeconds) * 1000);
           incoming.nearEndTimer = setTimeout(function () {
             incoming.nearEndTimer = null;
             if (incoming.myGeneration !== myGeneration || activeIndex !== incomingIndex) return; // superseded while waiting
@@ -6048,8 +6068,15 @@
 
     // Convenience wrapper for the common "same file, loop forever until
     // told otherwise" case -- section 1/6's seamless self-loop.
-    function crossfadeToLoop(path, targetVolume) {
-      function self() { crossfadeTo(path, targetVolume, self, true); }
+    // fadeSecondsOverride, when given, is passed through to EVERY
+    // resulting crossfadeTo call, including every subsequent self-loop
+    // seam -- for a track whose seam duration should differ from the
+    // default LOOP_CROSSFADE_SECONDS for as long as it loops (see
+    // beginEngineLoop below, which deliberately does NOT use this for
+    // that reason: engine's own first crossfade-in and its ongoing seam
+    // duration are two DIFFERENT numbers, not one shared override).
+    function crossfadeToLoop(path, targetVolume, fadeSecondsOverride) {
+      function self() { crossfadeTo(path, targetVolume, self, true, fadeSecondsOverride); }
       self();
     }
 
@@ -6137,20 +6164,16 @@
 
     if (GAME) updateAudioForState(GAME);
     if (GAME && GAME.boat.engineOn) {
-      // Catches up a resumed save where the engine was already running
-      // before sound was ever unlocked -- the normal engine-start
-      // trigger only fires from the real START ENGINE action, which
-      // won't fire again on a resume. No start.mp3 here, since the
-      // engine didn't just start; straight into whichever loop matches
-      // the current deck, gaining the same seamless self-loop any other
-      // crossfadeToLoop call does.
-      if (GAME.crew.location === 'above') {
-        engineActiveKey = 'cruise';
-        engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.cruise, engineTargetVolume('cruise'));
-      } else {
-        engineActiveKey = 'interior';
-        engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.interior, engineTargetVolume('interior'));
-      }
+      // Catches up a resumed save (or a hard audio rebuild -- see
+      // rebuildLandfallAudio's own notes) where the engine was already
+      // running before sound was ever (re)unlocked -- the normal
+      // engine-start trigger only fires from the real START ENGINE
+      // action, which won't fire again here. No 3s start fade-in either,
+      // since the engine didn't just start -- straight into whichever
+      // loop matches the current deck, at its own ongoing ~1s self-loop
+      // cadence (beginEngineLoop's own ENGINE_LOOP_SELF_CROSSFADE_SECONDS),
+      // not a fresh ramp from silence.
+      beginEngineLoop(GAME.crew.location === 'above' ? 'exterior' : 'interior', ENGINE_LOOP_SELF_CROSSFADE_SECONDS);
     }
   }
 
@@ -6992,27 +7015,43 @@
      tracking of its own) -- instead built on makeCrossfadeLoopController
      (see its own notes, near AUDIO_DEBUG above), the same generic
      seamless-loop/handoff engine the sails luffing loop below also
-     uses. This is what gives START -> CRUISE -> STOP its required
-     gapless 0.25s crossfades, and what lets CRUISE loop indefinitely
-     with no audible restart at the file's own natural end. There is
-     no "sync engine audio to current state" function that runs on
-     every render: the actual engine-start/engine-stop action handlers
-     below call these functions directly, at the moment the player's
-     choice actually takes effect (see the engine-start/engine-stop
-     cases and the departure-sequence START ENGINE step). This means
-     engine audio is authored to react to real events, not inferred
-     after the fact from state.boat.engineOn -- though that flag
-     remains the sole source of truth for whether the engine itself is
-     running; nothing here tracks a second, independent notion of "is
-     engine audio on."
+     uses. There is no "sync engine audio to current state" function
+     that runs on every render: the actual engine-start/engine-stop
+     action handlers below call these functions directly, at the moment
+     the player's choice actually takes effect (see the engine-start/
+     engine-stop cases and the departure-sequence START ENGINE step).
+     This means engine audio is authored to react to real events, not
+     inferred after the fact from state.boat.engineOn -- though that
+     flag remains the sole source of truth for whether the engine
+     itself is running; nothing here tracks a second, independent
+     notion of "is engine audio on."
+
+     ENGINE AUDIO SIMPLIFICATION -- just two recordings now, one per
+     perspective, each looping CONTINUOUSLY and GAPLESSLY for as long as
+     the engine runs: no separate start.mp3/cruise.mp3/off.mp3 three-
+     file sequence any more. "Starting"/"stopping" are now purely a
+     VOLUME treatment on these same two loops (0->normal over 3s on
+     start, normal->0 over 3s on stop -- see beginEngineLoop/
+     beginEngineStopAudio below), timed to the STARTING ENGINE/STOPPING
+     ENGINE dot animation itself, not a separate recorded sound.
      -------------------------------------------------------------- */
   var ENGINE_AUDIO_FILES = {
-    start: 'audio/engine/start.mp3',
-    cruise: 'audio/engine/cruise.mp3',
+    exterior: 'audio/engine/exterior.mp3',
     interior: 'audio/engine/interior.mp3',
-    off: 'audio/engine/off.mp3',
   };
-  var ENGINE_VOLUME = { start: 0.55, cruise: 0.55, interior: 0.45, off: 0.55 };
+  var ENGINE_VOLUME = { exterior: 0.55, interior: 0.45 };
+
+  // The ordinary, ongoing self-loop seam -- "approximately 1 second"
+  // per this task's own "GAPLESS ENGINE LOOPING" section, used for
+  // EVERY natural loop repetition of exterior.mp3/interior.mp3 once
+  // established, regardless of how that loop was most recently
+  // (re)started. Deliberately its own constant, separate from both the
+  // shared LOOP_CROSSFADE_SECONDS (0.25s, which sails luffing below
+  // still uses unchanged) and BOAT_AMBIENCE_CROSSFADE_SECONDS (2s,
+  // engine's own above/below transition duration -- see
+  // transitionEngineLocationAudio below): three genuinely different
+  // engine-audio timings this task calls for, not one shared number.
+  var ENGINE_LOOP_SELF_CROSSFADE_SECONDS = 1;
 
   var engineAudio = makeCrossfadeLoopController('ENGINE');
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
@@ -7031,63 +7070,69 @@
     return function () { return muted ? 0 : ENGINE_VOLUME[key]; };
   }
 
-  // Called directly from the engine-start action (both the ENGINE menu
-  // toggle and the departure-sequence START ENGINE step) at the moment
-  // state.boat.engineOn actually becomes true -- never inferred later
-  // from render state. Above deck: start.mp3 once, crossfading into
-  // looping cruise.mp3 0.25s before start.mp3's own natural end (never
-  // waiting for it to finish first, and never overlapping by more than
-  // that window) -- see crossfadeTo's onNearEnd. Below deck: straight
-  // into looping interior.mp3, no one-shot intro (today the ENGINE menu
-  // is above-deck only, so this branch isn't reachable in normal play,
-  // but stays correct if that ever changes). Safe to call again while
-  // already running (a repeated Start press, or Start right after Stop)
-  // -- crossfadeTo/crossfadeToLoop always safely supersede whatever
-  // this controller was already doing, so this can never stack a
-  // second loop or resurrect a stale sequence.
-  function beginEngineStartAudio(location) {
-    if (location === 'above') {
-      engineActiveKey = 'start';
-      engineAudio.crossfadeTo(ENGINE_AUDIO_FILES.start, engineTargetVolume('start'), function () {
-        engineActiveKey = 'cruise';
-        engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.cruise, engineTargetVolume('cruise'));
-      });
-    } else {
-      engineActiveKey = 'interior';
-      engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.interior, engineTargetVolume('interior'));
-    }
+  // Starts (or switches) engine's ongoing self-loop to `key`
+  // ('exterior'/'interior'), with THIS FIRST crossfade-in using
+  // `initialFadeSeconds` -- engine-start's own 3s ramp-up from silence,
+  // or a location transition's own BOAT_AMBIENCE_CROSSFADE_SECONDS (2s)
+  // -- and every subsequent natural loop-seam repetition after that
+  // using ENGINE_LOOP_SELF_CROSSFADE_SECONDS (~1s) instead, exactly
+  // this task's own "GAPLESS ENGINE LOOPING" section calls for. This is
+  // the one shared helper both beginEngineStartAudio and
+  // transitionEngineLocationAudio build on, so "how a loop started" and
+  // "how it keeps seamlessly repeating afterward" can never drift
+  // apart between the two call sites. Safe to call again while already
+  // running (a repeated Start press, a rapid double GO ABOVE/GO BELOW)
+  // -- crossfadeTo always safely supersedes whatever this controller
+  // was already doing, so this can never stack a second loop or
+  // resurrect a stale sequence.
+  function beginEngineLoop(key, initialFadeSeconds) {
+    var path = ENGINE_AUDIO_FILES[key];
+    engineActiveKey = key;
+    function seam() { engineAudio.crossfadeTo(path, engineTargetVolume(key), seam, true, ENGINE_LOOP_SELF_CROSSFADE_SECONDS); }
+    engineAudio.crossfadeTo(path, engineTargetVolume(key), seam, true, initialFadeSeconds);
   }
 
-  // Called directly from the engine-stop action at the moment
-  // state.boat.engineOn actually becomes false. Above deck: cruise
-  // crossfades into off.mp3 (0.25s, same as every other connected pair
-  // here) and off.mp3 is then left to finish naturally. Below deck:
-  // interior just fades to silence over the same 0.25s and stops --
-  // off.mp3 is an exterior/cockpit-perspective sound, so it's skipped
-  // below deck rather than played out of place. If STOP is pressed
-  // while start.mp3 is still playing (before its handoff to cruise
-  // fires), crossfadeTo here supersedes that pending handoff exactly
-  // like any other new crossfadeTo call -- the cruise transition is
-  // safely cancelled and cruise never begins.
-  function beginEngineStopAudio(location) {
-    if (location === 'above') {
-      engineActiveKey = 'off';
-      engineAudio.crossfadeTo(ENGINE_AUDIO_FILES.off, engineTargetVolume('off'), null);
-    } else {
-      engineActiveKey = null;
-      engineAudio.stop(LOOP_CROSSFADE_SECONDS);
-    }
+  // Called directly from the engine-start action (both the ENGINE menu
+  // toggle and the departure-sequence START ENGINE step) at the moment
+  // the STARTING ENGINE dot animation BEGINS -- never inferred later
+  // from render state, and never waiting for state.boat.engineOn to
+  // become true first (that happens only once the dots finish; the
+  // fade-in itself spans the full 3 seconds of dots, per this task's
+  // own ENGINE START section). fadeInSeconds is the caller's own
+  // explicit duration (3s from both call sites today), not a hardcoded
+  // default here, so this stays correct if either caller's own timing
+  // ever changes independently. Below deck: same loop, same fade,
+  // using interior.mp3 instead (today the ENGINE menu is above-deck
+  // only, so this branch isn't reachable in normal play, but stays
+  // correct if that ever changes).
+  function beginEngineStartAudio(location, fadeInSeconds) {
+    beginEngineLoop(location === 'above' ? 'exterior' : 'interior', fadeInSeconds);
+  }
+
+  // Called directly from the engine-stop action at the moment the
+  // STOPPING ENGINE dot animation BEGINS (never after it finishes --
+  // the fade-out itself spans the full fadeOutSeconds of dots, per this
+  // task's own ENGINE STOP section). Simply fades whichever perspective
+  // is currently active to silence over fadeOutSeconds and pauses it
+  // only once it actually reaches 0 (engineAudio.stop's own existing
+  // behavior -- see makeCrossfadeLoopController's own notes) -- no
+  // separate off.mp3 any more; "stopping" is purely this fade. location
+  // is accepted for symmetry with beginEngineStartAudio/the existing
+  // call site, though engineAudio.stop itself already fades whichever
+  // slot is actually active regardless of which perspective that is.
+  function beginEngineStopAudio(location, fadeOutSeconds) {
+    engineActiveKey = null;
+    engineAudio.stop(fadeOutSeconds);
   }
 
   // The one small helper for automatic, abrupt shutdowns (fuel out,
-  // engine damage): silences engine
-  // audio immediately, with no fade and no off.mp3 -- this is a safety
-  // net for a genuine mechanical/electrical failure, not the
-  // player-facing shutdown presentation (see beginEngineStopAudio
-  // above for that), so it stays abrupt rather than gaining the new
-  // 0.25s crossfade treatment. Also cancels any pending start->cruise
-  // handoff, so a start.mp3 in progress at the moment of failure can
-  // never go on to start cruise afterward.
+  // engine damage): silences engine audio immediately, with no fade --
+  // this is a safety net for a genuine mechanical/electrical failure,
+  // not the player-facing shutdown presentation (see
+  // beginEngineStopAudio above for that), so it stays abrupt rather
+  // than gaining the new 3s crossfade treatment. Also cancels any
+  // pending self-loop seam, so a loop in progress at the moment of
+  // failure can never schedule another repetition afterward.
   function stopAllEngineLoops() {
     engineActiveKey = null;
     engineAudio.stop(0);
@@ -7095,21 +7140,16 @@
 
   // Called immediately when a GO ABOVE/GO BELOW transition begins (uses
   // the TARGET location, since state.crew.location hasn't updated yet),
-  // but only if the engine is actually running. Never plays start.mp3 --
-  // that's solely beginEngineStartAudio's job, exactly once per engine
-  // run; relocating a running engine always crossfades directly between
-  // cruise and interior, gaining the same seamless self-loop each then
-  // continues with (crossfadeToLoop restarts the near-end schedule for
-  // whichever one is now active).
+  // but only if the engine is actually running. Crossfades directly
+  // between exterior/interior using BOAT_AMBIENCE_CROSSFADE_SECONDS --
+  // "the same timing/behavior Landfall already uses when transitioning
+  // between exterior and interior environmental audio", per this task's
+  // own "ABOVE / BELOW ENGINE PERSPECTIVE" section -- then settles back
+  // into the normal ~1s ongoing self-loop cadence for every repetition
+  // after that (beginEngineLoop's own job).
   function transitionEngineLocationAudio(state, targetLocation) {
     if (!state.boat.engineOn) return;
-    if (targetLocation === 'above') {
-      engineActiveKey = 'cruise';
-      engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.cruise, engineTargetVolume('cruise'));
-    } else {
-      engineActiveKey = 'interior';
-      engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES.interior, engineTargetVolume('interior'));
-    }
+    beginEngineLoop(targetLocation === 'above' ? 'exterior' : 'interior', BOAT_AMBIENCE_CROSSFADE_SECONDS);
   }
 
   // Applies the current mute state to whichever engine sound is
@@ -15857,7 +15897,7 @@
       if (config.thenBeat) {
         // A second silent beat — no new heading, just more dots — before a
         // final action. Used where a moment needs two results in sequence
-        // (e.g., "you ease away from the dock." ... "the voyage has begun.").
+        // (e.g. CALLING FOR HELP's own two-stage rescue sequence below).
         animateDots(config.thenBeat.duration || 3, function () {
           if (config.thenBeat.action) config.thenBeat.action(state);
           finish();
@@ -16105,12 +16145,16 @@
           break;
         case 'engine-start':
           if (state.boat.engine === 'DAMAGED') break; // shouldn't be reachable — button isn't shown otherwise
+          // Fires NOW, before runShortAction's own dots even begin --
+          // per this task's own ENGINE START section, the 0->normal
+          // fade must span the FULL 3 seconds of STARTING ENGINE, not
+          // start only once the dots (and this action callback) finish.
+          beginEngineStartAudio(state.crew.location, 3);
           runShortAction(state, {
             label: 'STARTING ENGINE',
             duration: 3,
             action: function (s) {
-              s.boat.engineOn = true;
-              beginEngineStartAudio(s.crew.location);
+              s.boat.engineOn = true; // becomes true only now, at the END of the 3 seconds, per this task's own spec -- the audio fade above is already well underway/complete by this point
               // Recalculate immediately, using the heading as of the last
               // real tick — never invent a fresh heading here, since
               // computeHeading() also rolls a per-tick drift wobble that
@@ -16126,12 +16170,15 @@
           });
           break;
         case 'engine-stop':
+          // Same reasoning as engine-start just above -- the normal->0
+          // fade must span the full 3 seconds of STOPPING ENGINE,
+          // starting immediately, not after.
+          beginEngineStopAudio(state.crew.location, 3);
           runShortAction(state, {
             label: 'STOPPING ENGINE',
-            duration: 2,
+            duration: 3, // was 2 -- this task's own ENGINE STOP section calls for exactly 3, matching the fade-out above
             action: function (s) {
               s.boat.engineOn = false;
-              beginEngineStopAudio(s.crew.location);
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
               log(s, 'Engine stopped.');
               flushNewLogEntries(s);
@@ -16238,6 +16285,14 @@
       case 'departure-step':
         var step = DEPARTURE_STEPS[state.departure.stageIndex];
         if (step) {
+          // Fires immediately, BEFORE runShortAction's own dots even
+          // begin -- step.onEnter (below) only fires once the dots
+          // finish, which is too late for anything that must span the
+          // dots' own duration rather than follow it (the START ENGINE
+          // step's own 3s audio fade-in, in particular -- see
+          // beginEngineStartAudio's own notes on why that fade must
+          // start at the BEGINNING of STARTING ENGINE's dots, not after).
+          if (step.onStart) step.onStart(state);
           runShortAction(state, {
             label: step.workingLabel || step.label,
             duration: step.duration || 3,
@@ -16276,39 +16331,43 @@
   // REPAIR) — it does not touch the clock; real time is passing throughout
   // exactly as it always does (see PROJECT.md).
   var DEPARTURE_STEPS = [
-    { label: 'BOARD', workingLabel: 'BOARDING', duration: 2, text: "You step aboard." },
+    // Working label matches the button label exactly (BOARD, not
+    // BOARDING) -- per this task's own replacement sequence, which
+    // consistently writes every departure step as "[BUTTON LABEL]. .. …"
+    // (START ENGINE is the one deliberate exception -- that task
+    // section explicitly says the existing STARTING ENGINE wording can
+    // stay). No text log line any more either -- "Do not add a separate
+    // line such as 'You step aboard.'", per this task's own MARINA
+    // OPENING section.
+    { label: 'BOARD', workingLabel: 'BOARD', duration: 2 },
     {
       label: 'START ENGINE',
       workingLabel: 'STARTING ENGINE',
       duration: 3,
+      // Fires at the START of the 3s dots (see the 'departure-step'
+      // case's own onStart handling) -- the 0->normal fade must span
+      // the full 3 seconds, not begin only once onEnter below fires.
+      onStart: function (s) { beginEngineStartAudio(s.crew.location, 3); },
       text: 'BATTERY CHARGING',
-      onEnter: function (s) { s.boat.engineOn = true; beginEngineStartAudio(s.crew.location); },
+      // s.boat.engineOn becomes true only now, at the END of the 3
+      // seconds (onEnter fires once the dots finish) -- per this task's
+      // own ENGINE START section, matching the mid-voyage engine-start
+      // action's own identical timing.
+      onEnter: function (s) { s.boat.engineOn = true; },
     },
-    {
-      label: 'CAST OFF',
-      workingLabel: 'CASTING OFF',
-      duration: 3,
-      // The scripted sequence ends here — sails stay furled, the engine
-      // stays running, and everything from this point on is a player
-      // decision. The closing beat below isn't a separate button: once
-      // the last line is off, there's nothing left to deliberately DO —
-      // the boat just leaves, on its own, as the direct consequence. The
-      // pause before "the voyage has begun" is a second dot-animation
-      // beat (thenBeat), not a separate delay mechanism — the dots ARE
-      // the beat, same real-time short-action system either time.
-      afterLog: function (s) {
-        printPersistentBlank();
-        printPersistentLine('You ease away from the dock.', 'dim');
-      },
-      thenBeat: {
-        duration: 3,
-        action: function (s) {
-          printPersistentBlank();
-          log(s, 'The voyage has begun.');
-          flushNewLogEntries(s);
-        },
-      },
-    },
+    // No text log line, no afterLog, no thenBeat -- "Do not add an
+    // extra narrative line afterward", per this task's own CAST OFF
+    // section. The old "You ease away from the dock."/"The voyage has
+    // begun." beats are gone; CLEAR OF MARINA (the existing marina-exit
+    // trigger, reworded -- see that trigger's own notes) is what now
+    // picks up the story once BRING IN FENDERS below completes.
+    { label: 'CAST OFF', workingLabel: 'CAST OFF', duration: 3 },
+    // New step, per this task's own BRING IN FENDERS section -- "Do not
+    // add an extra confirmation sentence", so no text log line here
+    // either. Sails stay furled, the engine stays running; everything
+    // from here on is a player decision, same as the old sequence's own
+    // ending just moved one step later.
+    { label: 'BRING IN FENDERS', workingLabel: 'BRING IN FENDERS', duration: 3 },
   ];
 
   var liveTimer = null;
@@ -16333,13 +16392,105 @@
     }, LIVE_TICK_SECONDS * 1000);
   }
 
+  // THE OPENING -- the very first thing a brand-new player (no saved
+  // game at all) sees, shown instead of renderPreDeparture by boot()
+  // below. Deliberately, completely silent: no environmental audio, no
+  // engine, no music -- nothing has been unlocked or started yet at
+  // all, per this task's own "The very beginning must be SILENT"
+  // requirement. Plain story text via the same printPersistentLine/
+  // printPersistentBlank pair every other screen in this file already
+  // uses, so it becomes a normal, permanent part of the scrollback
+  // exactly like everything that follows it.
+  function renderIntroStory() {
+    printPersistentLine('Take her home.');
+    printPersistentLine('Dad\u2019s last request.');
+    printPersistentBlank();
+    printPersistentLine('He didn\u2019t say much else.');
+    printPersistentLine('Only that it mattered.');
+    printPersistentBlank();
+    printPersistentLine('He spent a lot of time aboard,');
+    printPersistentLine('but never took her out.');
+    printPersistentBlank();
+    printPersistentLine('I never understood why.');
+
+    optionsEl.innerHTML = '';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'option';
+    btn.textContent = '> CONTINUE';
+    btn.addEventListener('click', function () {
+      optionsEl.innerHTML = '';
+
+      // GAME is created HERE -- the moment CONTINUE is actually
+      // pressed, not any earlier -- so the exterior ambience fade-in
+      // just below has real weather/location state to derive its
+      // target track from. unlockAudio() (the player's first-ever
+      // gesture in this session) happens in the same breath, exactly
+      // like every other "first interaction" moment elsewhere in this
+      // file.
+      GAME = newGameState();
+      unlockAudio();
+      updateSoundLabel();
+      restartBtn.hidden = false;
+      startLiveLoop();
+
+      // The fade-in itself: EXTERIOR sea_state/environment ambience
+      // only (never engine -- that doesn't begin until the departure
+      // sequence's own START ENGINE step, several screens later), 0 ->
+      // normal over the FULL 3 seconds, starting now, concurrent with
+      // the dots below -- not the default updateAudioForState (which
+      // would use the shorter BOAT_AMBIENCE_CROSSFADE_SECONDS, 2s,
+      // instead of this task's own explicit 3s for this one moment).
+      // Rain/luffing/sails-mute are separately, defensively synced too
+      // (a fresh voyage has none of those active, but this matches the
+      // old BOARD handler's own thoroughness) without going through the
+      // same boat-ambience path a second time.
+      applyBoatAudioDesiredState(getBoatAudioState(GAME), 3);
+      updateRainAudioForState(GAME);
+      updateNoGoZoneAudio(GAME);
+      applyMuteToSailsAudio(GAME);
+
+      // A small, standalone dot animation -- GAME exists now, but
+      // runShortAction's own finish() calls the NORMAL
+      // renderOptions(state), driven by state.pendingChoice, which
+      // would immediately overwrite renderPreDeparture's own hand-built
+      // BOARD button the instant this resolved; this stays deliberately
+      // separate, scoped to just this one pre-game moment. Matches
+      // runShortAction's own default (non-transientLabel) visual
+      // treatment exactly: the CONTINUE label persists permanently in
+      // the scrollback (printPersistentLine, same as every other
+      // departure-step label), only the dots themselves are transient.
+      printPersistentBlank();
+      printPersistentLine('CONTINUE', 'heading-label');
+      var dotsLine = document.createElement('p');
+      dotsLine.className = 'line dim';
+      dotsLine.textContent = '.';
+      outputEl.insertBefore(dotsLine, tempViewEl);
+      scrollToBottom();
+
+      var frames = ['.', '..', '...'];
+      var frameIndex = 0;
+      var dotTimer = setInterval(function () {
+        frameIndex = (frameIndex + 1) % frames.length;
+        dotsLine.textContent = frames[frameIndex];
+      }, DOT_FRAME_MS);
+
+      setTimeout(function () {
+        clearInterval(dotTimer);
+        if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+        renderPreDeparture();
+        updateClock();
+      }, 3000);
+    });
+    optionsEl.appendChild(btn);
+  }
+
   function renderPreDeparture() {
     printPersistentLine(VESSEL_NAME + ' \u2014 ' + DEPARTURE_PORT, 'heading-label');
     printPersistentBlank();
-    printPersistentLine('Lines still on the dock. Grey morning, the kind Seattle keeps for departures.');
-    printPersistentLine('Ahead: ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles of open Pacific, and ' + DESTINATION_PORT + ', somewhere past the curve of the world.');
+    printPersistentLine('The marina is quiet. The lines are untied.');
     printPersistentBlank();
-    printPersistentLine('You are sailing alone.');
+    printPersistentLine('Ahead lies ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles to N\u0101wiliwili, Kaua\u02BBi, somewhere past the curve of the earth.');
 
     optionsEl.innerHTML = '';
     var btn = document.createElement('button');
@@ -16347,13 +16498,18 @@
     btn.className = 'option';
     btn.textContent = '> ' + DEPARTURE_STEPS[0].label;
     btn.addEventListener('click', function () {
-      GAME = newGameState();
-      unlockAudio();
-      updateAudioForState(GAME); // safe no-op if audio isn't unlocked yet; keeps a restart's ambience in sync immediately
-      updateSoundLabel();
-      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
-      restartBtn.hidden = false;
-      startLiveLoop();
+      // GAME, audio unlock, the sound label, restartBtn, and the live
+      // loop are all already set up by renderIntroStory's own CONTINUE
+      // handler, which always runs before this screen can even be
+      // reached now -- never re-created or re-run here. Exterior
+      // sea_state audio is deliberately left completely alone too, per
+      // this task's own "Exterior sea_state audio should continue
+      // uninterrupted through BOARD" -- handleAction's own downstream
+      // runShortAction/finish() still calls updateAudioForState once
+      // the BOARD step's own dots resolve (same as it already does for
+      // every later departure step), but that call is idempotent and a
+      // safe no-op for a channel that's already correctly playing --
+      // nothing here restarts or re-crossfades it.
       clearTempView();
       handleAction(GAME, 'departure-step'); // logs, flushes, advances the stage, and renders/saves/scrolls
       updateClock();
@@ -16371,7 +16527,7 @@
     resetOutputEl();
     restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
-    renderPreDeparture();
+    renderIntroStory(); // "starts over exactly like a first visit" (see this function's own comment above) -- the intro story screen is now part of what a first visit looks like
     updateClock();
   }
 
@@ -16826,7 +16982,7 @@
   function boot() {
     var saved = loadGameState();
     if (!saved) {
-      renderPreDeparture();
+      renderIntroStory();
       updateClock();
       return;
     }
