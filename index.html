@@ -2651,6 +2651,13 @@
       && distanceBetween(state.nav.lat, state.nav.lon, anchor.lat, anchor.lon) >= WEATHER_REFRESH_DISTANCE_NM;
     if (!dueByTime && !dueByDistance) return;
 
+    // DEPARTURE SNAP -- whether this call is the voyage's first-ever
+    // real observation, captured from the OLD realWx object before the
+    // fetch resolves (the callback below replaces state.weather.realWx
+    // with a brand-new object, so this reference keeps correctly
+    // reflecting "before" throughout).
+    var isFirstEverFetch = anchor.fetchedRealMs == null;
+
     weatherFetchInFlight = true;
     var lat = state.nav.lat, lon = state.nav.lon;
     fetchRealWeather(lat, lon).then(function (result) {
@@ -2666,6 +2673,26 @@
         forecastLine: result.forecastLine,
         hourly: result.hourly,
       };
+      // DEPARTURE SNAP -- see this function's own early call in
+      // renderIntroStory (kicked off at page load, well before the
+      // scripted defaults have driven any real sailing) and
+      // blendTowardRealAnchor's own notes just below. The voyage's
+      // very first real observation, if it arrives before the boat has
+      // actually made way, is applied OUTRIGHT instead of left for the
+      // normal gradual per-tick blend -- there's no existing simulated
+      // progress yet for a hard snap to disrupt, so the voyage simply
+      // opens with genuine current conditions rather than the scripted
+      // SW 13kt default. Passing a large hrs value forces
+      // blendTowardRealAnchor's own factor to its 1.0 ceiling, so this
+      // reuses its exact field-by-field treatment (the same clamping,
+      // wraparound, and "condition adopted outright" rules the regular
+      // gradual blend already applies) rather than duplicating that
+      // math here. Any later fetch, or one that resolves after the
+      // boat has already started moving, never takes this branch --
+      // normal play keeps today's gradual blend exactly as it was.
+      if (isFirstEverFetch && GAME.nav.distanceTraveled === 0) {
+        blendTowardRealAnchor(GAME.weather, 999);
+      }
       saveGameState(GAME);
     }).catch(function () {
       weatherFetchInFlight = false;
@@ -16956,6 +16983,21 @@
     // RESUMES the context (recoverLandfallAudio), never restarts or
     // re-crossfades anything that's already correctly set up here.
     GAME = newGameState();
+    // DEPARTURE SNAP -- kicked off here, at page load, rather than
+    // waiting for the first simTick (which wouldn't happen until well
+    // after the player has actually departed), so the fetch has the
+    // longest possible head start against the real-world API's own
+    // 8-second timeout. The departure sequence ahead (CONTINUE, BOARD,
+    // START ENGINE, CAST OFF, BRING IN FENDERS) takes well over ten
+    // real seconds on its own, so in the common case this already has
+    // its answer, one way or the other, long before the boat actually
+    // makes way -- see maybeRefreshRealWeather's own DEPARTURE SNAP
+    // notes for what happens once it resolves. A failed or slow fetch
+    // is still completely harmless either way: GAME already has its
+    // normal scripted weather defaults, and simTick's own later calls
+    // to this same function pick the refresh cycle back up exactly as
+    // they always have.
+    maybeRefreshRealWeather(GAME);
     unlockAudio();
     updateSoundLabel();
     applyBoatAudioDesiredState(getBoatAudioState(GAME), 3);
