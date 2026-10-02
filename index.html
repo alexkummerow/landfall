@@ -15278,6 +15278,29 @@
   // somehow never firing on a genuinely broken playback; it is not
   // the normal path, and normal playback always resolves via the real
   // 'ended' event, which fires first.
+  // CHAINED ACTIONS -- a unique sentinel (not a string/boolean, so it
+  // can never collide with a config.action that happens to return
+  // something else) a config.action function can return to tell its
+  // own runner "I already started a second, nested runShortAction/
+  // runAudioSyncedAction of my own -- don't finish normally, that
+  // nested call now owns uiBusy and will reach its own finish/
+  // onAudioDone tail once IT completes." Without this, the OUTER
+  // runner's own unconditional tail (uiBusy = false; renderOptions;
+  // ...) would run immediately after config.action returns, which
+  // races the nested call's own freshly-started animation: the options
+  // panel would re-render (showing whatever comes after the outer
+  // action, since any state change config.action made, like
+  // incrementing departure.stageIndex, already happened) while the
+  // nested transient label/dots are still visible and still running in
+  // the DOM -- exactly the "navigation buttons becoming available
+  // mid-transition" this exists to prevent. See CLEARING THE MARINA's
+  // own notes (BRING IN FENDERS' afterLog, in DEPARTURE_STEPS below)
+  // for the one place this is actually used today. Every other
+  // existing config.action across this file is a plain void function,
+  // so this is completely inert for all of them -- their implicit
+  // `undefined` return never matches this sentinel.
+  var ACTION_CHAINED = {};
+
   function runAudioSyncedAction(state, config) {
     uiBusy = true;
     var choiceAtStart = state.pendingChoice;
@@ -15353,7 +15376,8 @@
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
       if (labelEl && labelEl.parentNode) labelEl.parentNode.removeChild(labelEl); // transientLabel: gone once resolved, same as runShortAction's own
       if (blankEl && blankEl.parentNode) blankEl.parentNode.removeChild(blankEl); // the blank line above it goes with it -- see this function's own comment above for why
-      if (config.action) config.action(state);
+      var actionResult = config.action ? config.action(state) : undefined;
+      if (actionResult === ACTION_CHAINED) return; // see ACTION_CHAINED's own notes above -- a nested action now owns uiBusy/the tail
       if (state.pendingChoice === choiceAtStart) state.pendingChoice = null;
       uiBusy = false;
       renderOptions(state);
@@ -16386,7 +16410,8 @@
     }
 
     animateDots(config.duration || 3, function () {
-      if (config.action) config.action(state);
+      var actionResult = config.action ? config.action(state) : undefined;
+      if (actionResult === ACTION_CHAINED) return; // see ACTION_CHAINED's own notes near runAudioSyncedAction -- a nested action now owns uiBusy/the tail
       if (config.thenBeat) {
         // A second silent beat — no new heading, just more dots — before a
         // final action. Used where a moment needs two results in sequence
@@ -16793,7 +16818,12 @@
               flushNewLogEntries(s);
             }
             s.departure.stageIndex++;
-            if (step.afterLog) step.afterLog(s);
+            // Propagates afterLog's own return value (ACTION_CHAINED, or
+            // undefined for every other step's afterLog) straight back
+            // to the runner that's driving this step -- see
+            // ACTION_CHAINED's own notes and BRING IN FENDERS' afterLog
+            // below (the one step whose afterLog actually returns it).
+            if (step.afterLog) return step.afterLog(s);
           };
           // step.playAudio (BOARD/BRING IN FENDERS -- see their own
           // DEPARTURE_STEPS entries) means the audio clip itself is the
@@ -16853,6 +16883,13 @@
   /* ============================================================
      9. BOOT SEQUENCE
      ============================================================ */
+  // Shared fixed duration for the departure sequence's two longer,
+  // audio-less beats (CAST OFF and the automatic CLEARING THE MARINA
+  // transition below) -- one tunable in one place rather than the same
+  // literal typed twice. Retune only this if the pacing ever needs
+  // adjusting again.
+  var DEPARTURE_LONG_BEAT_SECONDS = 8;
+
   // The departure sequence walks through these one button at a time before
   // normal gameplay opens up. Each step is a plain state change (like EAT or
   // REPAIR) — it does not touch the clock; real time is passing throughout
@@ -16885,31 +16922,60 @@
     // Selectable CAST OFF, animated CASTING OFF. No audio file for this
     // one -- "Do not add another sound for this action" -- so this
     // keeps the fixed-duration runShortAction path (no playAudio field)
-    // at exactly 5 seconds. No text log line, no afterLog, no thenBeat
-    // -- "Do not add extra narration when it completes." CLEAR OF
-    // MARINA (the existing marina-exit trigger) is what picks up the
-    // story once BRING IN FENDERS below completes. transientLabel: same
-    // reasoning as BOARD above -- CASTING OFF itself doesn't stay in
-    // the log either.
-    { label: 'CAST OFF', workingLabel: 'CASTING OFF', duration: 5, transientLabel: true },
+    // at exactly DEPARTURE_LONG_BEAT_SECONDS (8s -- lengthened from a
+    // prior 5s so the final departure beats read as more deliberate).
+    // No text log line, no afterLog, no thenBeat -- "Do not add extra
+    // narration when it completes." CLEAR OF MARINA (the existing
+    // marina-exit trigger) is what picks up the story once CLEARING THE
+    // MARINA, below, completes. transientLabel: same reasoning as BOARD
+    // above -- CASTING OFF itself doesn't stay in the log either.
+    { label: 'CAST OFF', workingLabel: 'CASTING OFF', duration: DEPARTURE_LONG_BEAT_SECONDS, transientLabel: true },
     // Selectable BRING IN FENDERS, animated BRINGING IN FENDERS.
     // fenders.mp3 is this step's own clock too, same reasoning as
-    // BOARD above -- "Do not add an extra confirmation sentence" (no
-    // text field, same as before). afterLog fires the moment this
-    // step's own action resolves (fenders.mp3 ending) -- no extra
-    // click, no intermediate screen -- and shows CLEAR OF MARINA
-    // directly as part of completing this step, per this fix's own
-    // "go directly from fenders to the clear-of-marina line" section.
-    // showClearOfMarinaObservationIfNeeded shares its flag with the
-    // real coastal-tutorial waypoint-arrival trigger (Shilshole Exit,
-    // in simTick) -- see that function's own notes -- so if the boat
-    // later also reaches that waypoint through ordinary navigation, the
-    // observation is already marked shown and is correctly never
-    // repeated. Sails stay furled, the engine stays running; everything
-    // from here on is a player decision.
+    // BOARD above -- "Do not use a fixed timer... use the audio sample
+    // itself as the timing source" (no text field, same as before).
+    //
+    // CLEARING THE MARINA -- afterLog fires the moment this step's own
+    // action resolves (fenders.mp3 ending), with no extra click and no
+    // intermediate screen, exactly as before -- but now, rather than
+    // showing CLEAR OF MARINA directly, it chains straight into a new,
+    // fully automatic 8-second CLEARING THE MARINA transition beat
+    // first (the player never selects it; it simply begins). This
+    // reuses runShortAction itself -- the very same fixed-duration,
+    // transient-label dots treatment CAST OFF above already uses, so
+    // CLEARING THE MARINA. .. … looks and behaves identically to every
+    // other action sequence in this file, just started programmatically
+    // instead of by a click. Returning ACTION_CHAINED tells the OUTER
+    // runAudioSyncedAction call (the one driving BRING IN FENDERS
+    // itself) that this nested runShortAction call now owns uiBusy and
+    // the eventual options-panel refresh -- see ACTION_CHAINED's own
+    // notes above runAudioSyncedAction for exactly why that matters:
+    // without it, the outer call's own tail would re-render the options
+    // panel (already past the end of DEPARTURE_STEPS at this point, so
+    // showing ordinary gameplay options) while CLEARING THE MARINA's
+    // dots are still animating underneath it.
+    //
+    // Only once those 8 seconds finish does showClearOfMarinaObservationIfNeeded
+    // finally run (as THIS nested call's own action, not BRING IN
+    // FENDERS' own afterLog directly any more) and ONLY THEN does
+    // uiBusy actually clear and normal gameplay options appear -- the
+    // whole BRING IN FENDERS -> CLEARING THE MARINA -> CLEAR OF MARINA
+    // span is one unbroken, click-free, un-interruptible sequence from
+    // the player's perspective. showClearOfMarinaObservationIfNeeded
+    // itself is completely unchanged -- same shared flag with the real
+    // coastal-tutorial waypoint-arrival trigger (Shilshole Exit, in
+    // simTick; see that function's own notes), so the observation is
+    // still never shown twice no matter which path reaches it first.
+    // Sails stay furled, the engine stays running, and neither the
+    // exterior ambience nor the engine audio is touched anywhere in
+    // this chain -- nothing here calls anything that would restart or
+    // interrupt either (CLEARING THE MARINA adds no new audio of its
+    // own at all, per this feature's own "no additional sound effect"
+    // requirement).
+    //
     // transientLabel: same reasoning as BOARD/CAST OFF above --
-    // BRINGING IN FENDERS itself doesn't stay in the log either, though
-    // the CLEAR OF MARINA sentence afterLog adds is a real, permanent
+    // BRINGING IN FENDERS and CLEARING THE MARINA don't stay in the log
+    // either, though the CLEAR OF MARINA sentence is a real, permanent
     // log entry and is completely unaffected by this (transientLabel
     // only ever governs the label/dots themselves -- see the
     // 'departure-step' case's own notes on this).
@@ -16917,7 +16983,15 @@
       label: 'BRING IN FENDERS',
       workingLabel: 'BRINGING IN FENDERS',
       playAudio: function (onEnded) { return playMarinaOneShot('fenders', onEnded); },
-      afterLog: function (s) { showClearOfMarinaObservationIfNeeded(s); },
+      afterLog: function (s) {
+        runShortAction(s, {
+          label: 'CLEARING THE MARINA',
+          duration: DEPARTURE_LONG_BEAT_SECONDS,
+          transientLabel: true,
+          action: function (s2) { showClearOfMarinaObservationIfNeeded(s2); },
+        });
+        return ACTION_CHAINED;
+      },
       transientLabel: true,
     },
   ];
