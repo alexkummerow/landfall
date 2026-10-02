@@ -4248,66 +4248,42 @@
     return angleDiff(heading, state.weather.windDirection) < 35;
   }
 
-  // Whether the boat was ALREADY luffing the last time this ran --
-  // deliberately its own tracked flag rather than reading the luffing
-  // audio element's raw .paused, since that lags behind during
+  // Whether the boat is CURRENTLY luffing, per the state machine below
+  // -- deliberately its own tracked flag rather than reading the
+  // luffing audio element's raw .paused, since that lags behind during
   // stopSailsLuffingLoop's fade-out (a repeat call mid-fade would
   // otherwise see .paused still false and misread it as still luffing).
-  // This now exists SOLELY to detect the exact moment the boat exits
-  // the zone, so sail_fill plays exactly once per exit rather than on
-  // every call -- it is deliberately NOT consulted for whether the
-  // audio loop itself should be playing any more (see
-  // updateNoGoZoneAudio's own reconciliation below for why
-  // isInNoGoZone, the real game state, is the only thing that decides
-  // that now).
+  // This is the single source of truth shared by every caller.
   var isCurrentlyLuffing = false;
 
   // The ONE shared no-go-zone audio state machine -- called any time
   // nav.heading may have just changed, for ANY reason (beginCourseTurn's
   // own real-time interval, or an ordinary simTick's autopilot
-  // correction/auto-tack/drift/wobble alike, or a coastal leg change),
-  // AND from updateAudioForState's own general sync pass (every render,
-  // every recovery attempt, every SOUND ON) -- which is what makes the
-  // reconciliation below actually self-correcting rather than only ever
-  // re-checked on a genuine heading change. Reuses isInNoGoZone (the
-  // existing 35 degree boundary, see above) as the only source of truth
-  // for the zone itself -- never a second one, and never the luffing
-  // audio's own playback state, which this function treats as
-  // something to CORRECT, not consult.
-  //
-  // Two separate jobs, deliberately kept apart:
-  //  1. EDGE DETECTION (isCurrentlyLuffing) -- fires sail_fill exactly
-  //     once, the instant the boat actually exits the zone. A pure
-  //     event; nothing about ongoing audio health belongs here.
-  //  2. STATE RECONCILIATION -- runs every single call, independent of
-  //     the edge flag: if the boat IS luffing right now and the loop
-  //     isn't actually active (luffingAudioIsActive(), the real
-  //     playback state -- never a flag), (re)start it; if it ISN'T
-  //     luffing and the loop is somehow still running, stop it. This is
-  //     what fixes a missed initial start (audio not yet unlocked, a
-  //     rejected play() promise, anything), a loop that stalled or was
-  //     silently suspended, or a desync left over from a hard audio
-  //     rebuild -- all self-correct on the very next call, with no
-  //     special-casing and no need to leave LUFFING and re-enter it.
-  //     A loop that's already healthy and already at the correct state
-  //     is left completely alone -- startSailsLuffingLoop is never
-  //     called when luffingAudioIsActive() already agrees, so this
-  //     never destructively restarts healthy audio.
+  // correction/auto-tack/drift/wobble alike, or a coastal leg change).
+  // Reuses isInNoGoZone (the existing 35 degree boundary, see above) as
+  // the only source of truth for the zone itself -- never a second one.
+  // Responds purely to the CURRENT actual heading each time it's
+  // called, so it naturally keeps working correctly across a
+  // beginCourseTurn retarget (see "RETARGETING MUST ALSO WORK WITH
+  // LUFFING") without needing to know anything about targets at all.
+  // On exiting the zone: stop the loop, then immediately play sail_fill
+  // once -- deliberately never chained to winch here. Winch now plays
+  // ONLY from TRIM SAILS (cmdTrimSails/performTrimSails) -- steering
+  // events of any kind (beginCourseTurn completing, autopilot, drift)
+  // never trigger it any more; see that function's own notes.
   function updateNoGoZoneAudio(state) {
     if (state.boat.sailConfig === 'furled') {
-      isCurrentlyLuffing = false;
-      if (luffingAudioIsActive()) stopSailsLuffingLoop();
+      if (isCurrentlyLuffing) { isCurrentlyLuffing = false; stopSailsLuffingLoop(); }
       return;
     }
     var nowLuffing = isInNoGoZone(state, state.nav.heading);
-    if (!nowLuffing && isCurrentlyLuffing) {
-      playSailsOneShot('fill', null, state); // deliberately never chained to winch here -- winch now plays ONLY from TRIM SAILS (cmdTrimSails/performTrimSails); see that function's own notes
-    }
-    isCurrentlyLuffing = nowLuffing;
-    if (nowLuffing) {
-      if (!luffingAudioIsActive()) startSailsLuffingLoop();
-    } else if (luffingAudioIsActive()) {
+    if (nowLuffing && !isCurrentlyLuffing) {
+      isCurrentlyLuffing = true;
+      startSailsLuffingLoop(state);
+    } else if (!nowLuffing && isCurrentlyLuffing) {
+      isCurrentlyLuffing = false;
       stopSailsLuffingLoop();
+      playSailsOneShot('fill', null, state);
     }
   }
 
@@ -7925,32 +7901,26 @@
   // Every persistent (non-one-shot) audio channel the CURRENT game
   // state says should actually be playing right now -- never a channel
   // that's correctly silent (nothing currently desired, engine off,
-  // cassette stopped/between phases, boat not luffing). Deliberately
-  // independent of mute: muting only ever changes gain/volume in this
-  // codebase (masterGain for boat/rain/engine/luffing, .volume for
-  // cassette -- see toggleMute/applyMuteToTapeAudio), never pauses
-  // anything, so an element SHOULD still be genuinely advancing while
-  // muted, and a stall caught then is exactly as real (and exactly as
-  // worth fixing before the player unmutes) as one caught while
-  // audible. 'webAudioGraph' entries are the ones a confirmed stall can
-  // escalate to a hard rebuild for (section 4/5 -- a stalled channel in
-  // this group is what indicates the AudioContext graph itself is
-  // wedged): boat, rain, engine, AND luffing now, since all four are
-  // GainNode-routed through masterGain the same way (see the ENGINE
-  // AUDIO and LUFFING CHANNEL sections' own notes on why -- iOS Safari
-  // silently ignores programmatic .volume changes on plain <audio>
-  // elements, so both moved onto the same Web Audio graph boat/rain
-  // already prove works correctly there). 'cassette' entries are
-  // reported the same way but their own recovery stays the existing,
-  // separate soft path (resumeTapeAudioIfSuspended) -- cassette alone
-  // remains a plain HTMLAudioElement with no AudioContext involvement
-  // at all, so rebuilding the Web Audio graph could never be what fixes
-  // it. Luffing's own "should this be active" check is isInNoGoZone
-  // against the CURRENT heading -- the same authoritative physics check
-  // updateNoGoZoneAudio itself reconciles against, never a cached flag
-  // -- so this always reflects reality even if updateNoGoZoneAudio
-  // hasn't happened to run again since the boat's condition last
-  // changed.
+  // cassette stopped/between phases). Deliberately independent of mute:
+  // muting only ever changes gain/volume in this codebase (masterGain
+  // for boat/rain/engine, .volume for cassette -- see toggleMute/
+  // applyMuteToTapeAudio), never pauses anything, so an element SHOULD
+  // still be genuinely advancing while muted, and a stall caught then
+  // is exactly as real (and exactly as worth fixing before the player
+  // unmutes) as one caught while audible. 'webAudioGraph' entries are
+  // the ones a confirmed stall can escalate to a hard rebuild for
+  // (section 4/5 -- a stalled channel in this group is what indicates
+  // the AudioContext graph itself is wedged): boat, rain, AND engine
+  // now, since engine is GainNode-routed through masterGain the same
+  // way boat/rain already are (see the ENGINE AUDIO section's own notes
+  // on why -- iOS Safari silently ignores programmatic .volume changes
+  // on plain <audio> elements, so engine moved onto the same Web Audio
+  // graph those two already prove works correctly there). 'cassette'
+  // entries are reported the same way but their own recovery stays the
+  // existing, separate soft path (resumeTapeAudioIfSuspended) --
+  // cassette alone remains a plain HTMLAudioElement with no AudioContext
+  // involvement at all, so rebuilding the Web Audio graph could never
+  // be what fixes it.
   function collectExpectedPlayingAudio() {
     var expected = [];
     [['boat exterior', boatChannels.exterior], ['boat interior', boatChannels.interior],
@@ -7966,10 +7936,6 @@
     if (GAME && GAME.boat.engineOn) {
       var engineEl = engineAudioGetActiveEl();
       if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'webAudioGraph' });
-    }
-    if (GAME && GAME.boat.sailConfig !== 'furled' && isInNoGoZone(GAME, GAME.nav.heading)) {
-      var luffingEl = luffingAudioGetActiveEl();
-      if (luffingEl) expected.push({ label: 'luffing', el: luffingEl, group: 'webAudioGraph' });
     }
     return expected;
   }
@@ -8122,16 +8088,6 @@
     // (checked against whatever engineChannel is BY THE TIME it fires)
     // already makes it a safe no-op against the fresh channel.
     disposeAmbienceChannel(engineChannel);
-    // Luffing joins this disposal too, same reasoning as engine just
-    // above -- GainNode-routed through the SAME AudioContext, exactly
-    // as stale once oldCtx closes. No special reconstruction call is
-    // needed for it below (unlike engine's own resumed-save branch
-    // further down): buildAudioGraph's call to updateAudioForState
-    // already runs updateNoGoZoneAudio, which will restart the loop on
-    // its own if the boat is still luffing at rebuild time -- luffing's
-    // whole point is that it's reconciled from state, not re-triggered
-    // by a one-off event the rebuild would otherwise need to replay.
-    disposeAmbienceChannel(luffingChannel);
     disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
 
     var oldCtx = audioCtx;
@@ -8140,7 +8096,6 @@
     boatChannels = { exterior: makeBoatChannel('exterior', boatChannels.exterior.targetGain), interior: makeBoatChannel('interior', boatChannels.interior.targetGain) };
     rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
     engineChannel = { slots: [null, null], activeIndex: -1, generation: 0 };
-    luffingChannel = { slots: [null, null], activeIndex: -1, generation: 0 };
 
     if (oldCtx) {
       try {
@@ -8160,7 +8115,7 @@
     if (newGeneration !== audioRuntimeGeneration) return; // superseded while constructing the new context
 
     buildAudioGraph();
-    audioDebugLog('HARD AUDIO REBUILD complete -- restored boat exterior=' + boatChannels.exterior.desiredPath + ' interior=' + boatChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey + ', luffing active=' + luffingAudioIsActive());
+    audioDebugLog('HARD AUDIO REBUILD complete -- restored boat exterior=' + boatChannels.exterior.desiredPath + ' interior=' + boatChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
 
     await recoverCassetteHard();
   }
@@ -8224,16 +8179,9 @@
 
       // SOFT REASSERT -- in place, idempotent, never restarts anything
       // already healthy; see each function's own guards.
-      // updateAudioForState's own call to updateNoGoZoneAudio already
-      // (re)starts luffing from scratch if it's missing entirely, but
-      // that alone doesn't catch an element that still EXISTS yet was
-      // silently paused by the browser while backgrounded -- same gap
-      // resumeEngineAudioIfSuspended exists to close for engine, so
-      // luffing gets the identical treatment here.
       if (GAME) {
         updateAudioForState(GAME);
         if (GAME.boat.engineOn) resumeEngineAudioIfSuspended();
-        if (luffingAudioIsActive()) resumeLuffingAudioIfSuspended();
       }
       resumeTapeAudioIfSuspended();
 
@@ -15163,13 +15111,9 @@
   // or the sheets being trimmed in once it arrives) are above-deck-only
   // -- raising/lowering canvas is mechanical, ship-wide noise (halyard
   // work) audible below deck too, same as it always was; unaffected by
-  // this. luffing is deliberately NOT in this list any more -- it has
-  // its own, separate below-deck treatment (see
-  // SAILS_BELOW_DECK_LUFFING_FACTOR and sailsAudibleVolume's own
-  // luffing branch just below), never fully silenced below deck.
-  var SAILS_LOCATION_GATED_KEYS = { fill: true, winch: true };
+  // this.
+  var SAILS_LOCATION_GATED_KEYS = { luffing: true, fill: true, winch: true };
   var SAILS_CROSSFADE_SECONDS = 0.1; // quick fade-in every one-shot uses at its own start (click prevention only), same as fishing
-  var SAILS_BELOW_DECK_LUFFING_FACTOR = 0.5; // luffing audible below deck too, at exactly half its normal above-deck volume
 
   var sailsAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as fishingAudioEls
 
@@ -15187,19 +15131,13 @@
   }
 
   // The volume a given sails sound SHOULD actually be heard at right
-  // now -- muted always wins. luffing gets its own rule: audible both
-  // above AND below deck, at half its normal level below (never fully
-  // silenced down there, per this task's own "I want to hear the
-  // luffing audio both above and below deck"). Every other
-  // above-deck-only sound (see SAILS_LOCATION_GATED_KEYS) still goes
-  // silent below deck exactly as before -- the underlying sail physics
-  // keep running identically regardless of location either way (see
-  // isInNoGoZone/computeBoatSpeed, untouched by location).
+  // now -- muted always wins, and the above-deck-only sounds (see
+  // SAILS_LOCATION_GATED_KEYS) go silent below deck specifically
+  // because the player isn't the one hearing the sails work, even
+  // though the underlying sail physics keep running identically either
+  // way (see isInNoGoZone/computeBoatSpeed, untouched by location).
   function sailsAudibleVolume(state, key) {
     if (muted) return 0;
-    if (key === 'luffing') {
-      return SAILS_AUDIO_VOLUME.luffing * (state.crew.location === 'above' ? 1 : SAILS_BELOW_DECK_LUFFING_FACTOR);
-    }
     if (SAILS_LOCATION_GATED_KEYS[key] && state.crew.location !== 'above') return 0;
     return SAILS_AUDIO_VOLUME[key];
   }
@@ -15260,260 +15198,34 @@
     return el;
   }
 
-  /* --------------------------------------------------------------
-     LUFFING CHANNEL -- GainNode-routed through masterGain, the exact
-     same reason and the exact same shape as ENGINE AUDIO above (see
-     that section's own notes in full): makeCrossfadeLoopController
-     drove its fades through plain HTMLMediaElement.volume, which iOS
-     Safari is documented to silently ignore on <audio>/<video>
-     elements -- not a shortened fade, a hard cut straight to full,
-     unramped volume, or in luffing's specific case, potentially no
-     audible change at all if the ramp itself never took hold. Luffing
-     was the LAST remaining caller of that older controller (engine
-     moved off it earlier); this finishes that migration rather than
-     leaving luffing as the one persistent layer still on the
-     old, less reliable mechanism. makeCrossfadeLoopController itself
-     is left in place, unused today but still a correct, generic,
-     reusable engine for any future plain-element system that
-     genuinely doesn't need the Web Audio graph.
+  // The luffing loop -- built on makeCrossfadeLoopController (see its
+  // own notes, near AUDIO_DEBUG) rather than getSailsAudioEl's native
+  // loop=true, so each repetition crossfades seamlessly into the next
+  // rather than waiting for the file to end and restarting cold.
+  var luffingAudio = makeCrossfadeLoopController('SAILS LUFFING');
 
-     Every function below mirrors its ENGINE AUDIO counterpart
-     one-for-one (ensureLuffingSlot/ensureEngineSlot,
-     luffingCrossfadeTo/engineCrossfadeTo, luffingAudioStop/
-     engineAudioStop, ...) -- see each engine equivalent's own fuller
-     notes for the reasoning (generation tokens invalidating stale
-     near-end timers and 'ended' handoffs, the self-loop's forced
-     currentTime=0 on every seam, the late-timer native-loop safety
-     net). The one genuine difference from engine: there is only ONE
-     recording here (sails_luffing_loop.mp3, not a separate exterior/
-     interior pair), so above/below deck is purely a GAIN difference
-     on the SAME playing loop (see applyLuffingVolumeSmoothly/
-     transitionLuffingLocationAudio below), never a different track or
-     a restart.
-     -------------------------------------------------------------- */
-  var luffingChannel = { slots: [null, null], activeIndex: -1, generation: 0 };
-
-  function ensureLuffingSlot(index) {
-    if (luffingChannel.slots[index]) return luffingChannel.slots[index];
-    if (!audioCtx || !masterGain) return null;
-    try {
-      var el = new Audio();
-      el.loop = false;
-      el.preload = 'auto';
-      el.volume = 1; // explicit, defensive -- the GainNode is what actually controls level, never this element's own volume multiplier (see this section's own notes)
-      el.addEventListener('error', function () {
-        console.error('SAILS LUFFING AUDIO FILE ERROR', 'path:', el.currentSrc || el.src, 'code:', el.error ? el.error.code : null);
-      });
-      var source = audioCtx.createMediaElementSource(el);
-      var gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(masterGain);
-      var slot = { el: el, gain: gain, nearEndTimer: null, myGeneration: -1 };
-      luffingChannel.slots[index] = slot;
-      return slot;
-    } catch (e) {
-      console.warn('Luffing audio unavailable:', describeError(e));
-      return null;
-    }
-  }
-
-  function clearLuffingNearEndTimer(slot) {
-    if (slot.nearEndTimer) { clearTimeout(slot.nearEndTimer); slot.nearEndTimer = null; }
-  }
-
-  function safePlayLuffing(el) {
-    try {
-      var p = el.play();
-      if (p && typeof p.catch === 'function') p.catch(function () {});
-    } catch (e) {}
-  }
-
-  // Crossfades luffing to `path` at `targetVolume` (a plain number or a
-  // function, re-evaluated at the moment this fade actually begins) over
-  // `fadeSeconds`, via GainNode.gain.linearRampToValueAtTime -- never
-  // el.volume. See engineCrossfadeTo's own fuller notes; this is the
-  // same function, adapted to luffing's own module-level state.
-  function luffingCrossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSeconds) {
-    var incoming = ensureLuffingSlot(luffingChannel.activeIndex === 0 ? 1 : 0);
-    if (!incoming || !audioCtx) return; // not unlocked yet -- matches every other domain's own guard
-    luffingChannel.generation++;
-    var myGeneration = luffingChannel.generation;
-    var now = audioCtx.currentTime;
-    var outgoingIndex = luffingChannel.activeIndex;
-    var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-    clearLuffingNearEndTimer(incoming);
-    incoming.myGeneration = myGeneration;
-    if (!incoming.el.paused) incoming.el.pause();
-    if (incoming.el.src !== path && !(incoming.el.currentSrc && incoming.el.currentSrc.indexOf(path) !== -1)) {
-      incoming.el.src = path;
-    }
-    incoming.el.currentTime = 0;
-    incoming.el.playbackRate = 1.0;
-    incoming.el.defaultPlaybackRate = 1.0;
-    incoming.gain.gain.cancelScheduledValues(now);
-    incoming.gain.gain.setValueAtTime(0, now);
-    incoming.el.loop = !!isSelfLoop;
-    incoming.el.onended = null;
-    if (onNearEnd && !isSelfLoop) {
-      incoming.el.onended = function () {
-        incoming.el.onended = null;
-        if (incoming.myGeneration !== myGeneration || luffingChannel.activeIndex !== incomingIndex) return; // superseded -- stale, do nothing
-        clearLuffingNearEndTimer(incoming);
-        onNearEnd();
-      };
-    }
-    safePlayLuffing(incoming.el);
-    luffingChannel.activeIndex = incomingIndex;
-
-    if (outgoingIndex !== -1 && luffingChannel.slots[outgoingIndex]) {
-      var outgoing = luffingChannel.slots[outgoingIndex];
-      outgoing.el.onended = null;
-      outgoing.el.loop = false;
-      clearLuffingNearEndTimer(outgoing);
-      outgoing.gain.gain.cancelScheduledValues(now);
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
-      (function (el) { setTimeout(function () { if (!el.paused) el.pause(); }, fadeSeconds * 1000 + 100); })(outgoing.el);
-    }
-
-    incoming.gain.gain.linearRampToValueAtTime(typeof targetVolume === 'function' ? targetVolume() : targetVolume, now + fadeSeconds);
-
-    if (onNearEnd) {
-      var schedule = function () {
-        if (incoming.myGeneration !== myGeneration || luffingChannel.activeIndex !== incomingIndex) return;
-        var duration = incoming.el.duration;
-        if (!isFinite(duration) || duration <= 0) {
-          incoming.nearEndTimer = setTimeout(schedule, 100);
-          return;
-        }
-        var delayMs = Math.max(0, (duration - fadeSeconds) * 1000);
-        incoming.nearEndTimer = setTimeout(function () {
-          incoming.nearEndTimer = null;
-          if (incoming.myGeneration !== myGeneration || luffingChannel.activeIndex !== incomingIndex) return;
-          onNearEnd();
-        }, delayMs);
-      };
-      schedule();
-    }
-  }
-
-  // Fades the currently active slot to silence over fadeSeconds (or
-  // instantly if fadeSeconds<=0) via the GainNode, pausing the element
-  // only once it's actually reached 0 -- mirrors engineAudioStop.
-  function luffingAudioStop(fadeSeconds) {
-    luffingChannel.generation++;
-    for (var i = 0; i < 2; i++) {
-      var slot = luffingChannel.slots[i];
-      if (!slot) continue;
-      clearLuffingNearEndTimer(slot);
-      slot.el.onended = null;
-      slot.el.loop = false;
-      if (i === luffingChannel.activeIndex && fadeSeconds > 0 && audioCtx) {
-        var now = audioCtx.currentTime;
-        slot.gain.gain.cancelScheduledValues(now);
-        slot.gain.gain.setValueAtTime(slot.gain.gain.value, now);
-        slot.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
-        (function (el) { setTimeout(function () { if (!el.paused) el.pause(); }, fadeSeconds * 1000 + 100); })(slot.el);
-      } else {
-        if (audioCtx) slot.gain.gain.cancelScheduledValues(audioCtx.currentTime);
-        slot.gain.gain.value = 0;
-        if (!slot.el.paused) slot.el.pause();
-      }
-    }
-    luffingChannel.activeIndex = -1;
-  }
-
-  // Instant (no fade) re-application of targetVolume to whichever slot
-  // is active right now -- used for mute toggling, which is always
-  // immediate everywhere else in this file too. A no-op if nothing is
-  // currently active.
-  function applyLuffingVolumeInstantly(targetVolume) {
-    if (luffingChannel.activeIndex === -1 || !luffingChannel.slots[luffingChannel.activeIndex]) return;
-    var slot = luffingChannel.slots[luffingChannel.activeIndex];
-    if (audioCtx) slot.gain.gain.cancelScheduledValues(audioCtx.currentTime);
-    slot.gain.gain.value = targetVolume;
-  }
-
-  // Smoothly ramps the ALREADY-PLAYING loop's gain to targetVolume over
-  // `seconds` -- the above/below-deck transition (see
-  // transitionLuffingLocationAudio below), never a restart: the loop
-  // keeps playing the same file at the same position throughout, only
-  // its level moves. A no-op if nothing is currently active (nothing to
-  // ramp).
-  function applyLuffingVolumeSmoothly(targetVolume, seconds) {
-    if (luffingChannel.activeIndex === -1 || !luffingChannel.slots[luffingChannel.activeIndex] || !audioCtx) return;
-    var slot = luffingChannel.slots[luffingChannel.activeIndex];
-    var now = audioCtx.currentTime;
-    slot.gain.gain.cancelScheduledValues(now);
-    slot.gain.gain.setValueAtTime(slot.gain.gain.value, now);
-    slot.gain.gain.linearRampToValueAtTime(targetVolume, now + seconds);
-  }
-
-  // Resumes the currently active slot IN PLACE if the browser has
-  // silently paused it (e.g. after being backgrounded) -- never starts a
-  // fresh crossfade, so this can never create a second, duplicate voice;
-  // a safe no-op if nothing is active or it's already playing. Mirrors
-  // resumeEngineAudioIfSuspended.
-  function resumeLuffingAudioIfSuspended() {
-    if (luffingChannel.activeIndex === -1 || !luffingChannel.slots[luffingChannel.activeIndex]) return;
-    var el = luffingChannel.slots[luffingChannel.activeIndex].el;
-    if (el.paused) safePlayLuffing(el);
-  }
-
-  function luffingAudioGetActiveEl() {
-    return luffingChannel.activeIndex === -1 || !luffingChannel.slots[luffingChannel.activeIndex] ? null : luffingChannel.slots[luffingChannel.activeIndex].el;
-  }
-  function luffingAudioIsActive() {
-    return luffingChannel.activeIndex !== -1;
-  }
-
-  // The luffing loop's own target volume, read fresh at the moment
-  // EVERY crossfade actually begins (including each self-loop seam) --
-  // same reasoning as engineTargetVolume: this is what makes mute and
-  // the above/below-deck level always apply the CURRENT state, never
-  // the state at the moment the loop first started.
-  function luffingTargetVolume() {
-    return sailsAudibleVolume(GAME, 'luffing');
-  }
-
-  // Starts (or restarts) the luffing self-loop. Always begins a fresh
-  // crossfade rather than first checking "is it already running" --
-  // luffingCrossfadeTo's own generation tracking makes that safe even
-  // mid-fade, and this is only ever actually called from
-  // updateNoGoZoneAudio's own reconciliation, which already checks
-  // luffingAudioIsActive() first and skips calling this at all when a
-  // healthy loop is already active (see that function's own notes) --
-  // so in practice this runs once per genuine start, not on every tick.
-  // Starts (silently, if below deck) regardless of audibility -- the
-  // loop tracks the boat's actual luffing condition, not whether anyone
-  // can currently hear it.
-  function startSailsLuffingLoop() {
+  // isCurrentlyLuffing (checked by the sole caller, updateNoGoZoneAudio)
+  // is the authoritative "should this be playing" signal; this always
+  // restarts fresh from the beginning rather than trying to detect
+  // "is it already running" -- crossfadeToLoop's own generation
+  // tracking makes that unconditional restart safe even if called
+  // again during an in-flight fade, and preserves the exact behavior
+  // this replaces: cancelling any in-flight fade and restarting
+  // cleanly every time is deliberate, not redundant -- it's what fixes
+  // luffing failing to restart if the boat re-enters the no-go zone
+  // shortly after leaving it (e.g. a quick direction reversal). Starts
+  // (silently, if below deck) regardless of audibility -- the loop
+  // tracks the boat's actual luffing condition, not whether anyone can
+  // hear it.
+  function startSailsLuffingLoop(state) {
     if (!audioUnlocked) return;
-    function seam() { luffingCrossfadeTo(SAILS_AUDIO_FILES.luffing, luffingTargetVolume, seam, true, LOOP_CROSSFADE_SECONDS); }
-    luffingCrossfadeTo(SAILS_AUDIO_FILES.luffing, luffingTargetVolume, seam, true, LOOP_CROSSFADE_SECONDS);
+    luffingAudio.crossfadeToLoop(SAILS_AUDIO_FILES.luffing, function () { return sailsAudibleVolume(GAME || state, 'luffing'); }); // re-read at every crossfade (incl. each loop seam) so mute and above/below-deck gating always apply to the CURRENT state, never the state at the moment the loop first began
   }
 
   // Fades out over the same LOOP_CROSSFADE_SECONDS window, then stops.
   // A no-op if nothing is currently active.
   function stopSailsLuffingLoop() {
-    luffingAudioStop(LOOP_CROSSFADE_SECONDS);
-  }
-
-  // Called immediately when a GO ABOVE/GO BELOW transition begins (uses
-  // the TARGET location, since state.crew.location hasn't updated yet),
-  // same pattern as transitionEngineLocationAudio -- but only if the
-  // boat is actually luffing right now. Smoothly ramps the SAME
-  // already-playing loop between its above-deck (100%) and below-deck
-  // (50%) level over BOAT_AMBIENCE_CROSSFADE_SECONDS, matching the
-  // existing location-transition timing boat ambience/engine already
-  // use -- never a restart, never a different file, just a gain ramp.
-  // A no-op (via applyLuffingVolumeSmoothly's own guard) if luffing
-  // audio isn't actually active, which also correctly covers "boat
-  // isn't luffing right now" without a redundant isInNoGoZone check
-  // here.
-  function transitionLuffingLocationAudio(state, targetLocation) {
-    var targetVolume = muted ? 0 : SAILS_AUDIO_VOLUME.luffing * (targetLocation === 'above' ? 1 : SAILS_BELOW_DECK_LUFFING_FACTOR);
-    applyLuffingVolumeSmoothly(targetVolume, BOAT_AMBIENCE_CROSSFADE_SECONDS);
+    luffingAudio.stop(LOOP_CROSSFADE_SECONDS);
   }
 
   // Applies the current mute state AND the current above/below-deck
@@ -15524,12 +15236,7 @@
   // own state explicitly), same pattern as applyMuteToFishingAudio
   // otherwise. Never starts, stops, or restarts anything -- purely a
   // volume sync for whatever's already playing. Covers the luffing
-  // loop separately since it no longer lives in sailsAudioEls. This is
-  // deliberately the INSTANT path (applyLuffingVolumeInstantly, not
-  // applyLuffingVolumeSmoothly) -- mute toggling is instant everywhere
-  // else in this file too; only an actual above/below-deck LOCATION
-  // change gets luffing's own smooth ramp (see
-  // transitionLuffingLocationAudio above).
+  // loop separately since it no longer lives in sailsAudioEls.
   function applyMuteToSailsAudio(state) {
     var s = state || GAME;
     Object.keys(sailsAudioEls).forEach(function (key) {
@@ -15538,8 +15245,8 @@
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       el.volume = s ? sailsAudibleVolume(s, key) : (muted ? 0 : (el._baseVolume || 0));
     });
-    if (luffingAudioIsActive()) {
-      applyLuffingVolumeInstantly(s ? sailsAudibleVolume(s, 'luffing') : (muted ? 0 : SAILS_AUDIO_VOLUME.luffing));
+    if (luffingAudio.isActive()) {
+      luffingAudio.applyVolumeInstantly(s ? sailsAudibleVolume(s, 'luffing') : (muted ? 0 : SAILS_AUDIO_VOLUME.luffing));
     }
   }
 
@@ -16907,20 +16614,14 @@
           if (companionwayTransitionActive) break; // a transition is already underway -- ignore repeated/overlapping clicks (see the lock's own comment)
           var goingBelow = state.crew.location !== 'below';
           var companionwayTargetLocation = goingBelow ? 'below' : 'above';
-          // ENGINE, CASSETTE, and LUFFING transition immediately,
-          // exactly as before -- none of the three is part of the
-          // marine/rain "environmental soundscape" the companionway
-          // effect is specifically about, so their timing is
-          // deliberately left untouched. Only the ambient layers are
-          // held back, via companionwayHoldLocation, to crossfade near
-          // the end of the companionway sample instead. Luffing's own
-          // transition is a smooth GAIN ramp on the SAME already-
-          // playing loop (see transitionLuffingLocationAudio's own
-          // notes) -- never a restart, and a safe no-op whenever the
-          // boat isn't actually luffing right now.
+          // ENGINE and CASSETTE transition immediately, exactly as
+          // before -- neither is part of the marine/rain "environmental
+          // soundscape" the companionway effect is specifically about,
+          // so their timing is deliberately left untouched. Only the
+          // ambient layers are held back, via companionwayHoldLocation,
+          // to crossfade near the end of the companionway sample instead.
           transitionEngineLocationAudio(state, companionwayTargetLocation);
           transitionTapeLocationAudio(state, companionwayTargetLocation);
-          transitionLuffingLocationAudio(state, companionwayTargetLocation);
           companionwayHoldLocation = state.crew.location; // hold the ambience at the location being LEFT until the sample actually ends
           companionwayTransitionActive = true;
           // Runs on runAudioSyncedAction, same architecture as a repair:
