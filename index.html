@@ -6037,7 +6037,18 @@
       clearFadeTimer(incoming);
       incoming.myGeneration = myGeneration;
       if (!incoming.el.paused) incoming.el.pause();
-      incoming.el.src = path;
+      // Skip the src assignment entirely when this slot already has
+      // this exact path loaded (e.g. from preload() -- see its own
+      // notes) -- re-assigning .src to the SAME value still re-triggers
+      // the browser's media load algorithm in most engines, discarding
+      // whatever buffering progress preload already bought. currentTime
+      // stays unconditional regardless (a self-loop's own seam still
+      // needs the element to genuinely restart at 0 every time, even
+      // when src never changes -- that's a separate concern from
+      // whether the browser has to re-fetch/re-decode the file).
+      if (incoming.el.src !== path && !(incoming.el.currentSrc && incoming.el.currentSrc.indexOf(path) !== -1)) {
+        incoming.el.src = path;
+      }
       incoming.el.currentTime = 0;
       incoming.el.playbackRate = 1.0;
       incoming.el.defaultPlaybackRate = 1.0;
@@ -6163,6 +6174,28 @@
       if (el.paused) safePlay(el);
     }
 
+    // Loads `path` into slot `i` (creating it if needed) WITHOUT
+    // playing it or touching activeIndex/generation -- a pure "start
+    // buffering this file now" hint, safe to call any time (no
+    // audioUnlocked/gesture requirement at all: a plain <audio>
+    // element's src/preload can be set freely). Exists specifically so
+    // a file that's about to be needed for a real crossfadeTo/
+    // crossfadeToLoop isn't being asked to decode/buffer for the FIRST
+    // time at the exact same instant play() is called -- that race is
+    // invisible to this controller's own volume ramp (a plain
+    // setInterval against wall-clock time, with no idea whether the
+    // element has actually begun producing audible samples yet), so a
+    // real startup/buffering delay can eat the front of an otherwise
+    // correct fade and make it sound like it jumped in partway through
+    // rather than truly started at 0. A no-op if this exact path is
+    // already loaded into this slot.
+    function preload(path, i) {
+      var slot = ensureSlot(i);
+      if (slot.el.src !== path && !(slot.el.currentSrc && slot.el.currentSrc.indexOf(path) !== -1)) {
+        slot.el.src = path;
+      }
+    }
+
     return {
       crossfadeTo: crossfadeTo,
       crossfadeToLoop: crossfadeToLoop,
@@ -6171,6 +6204,7 @@
       getActiveEl: getActiveEl,
       isActive: isActive,
       resumeIfSuspended: resumeIfSuspended,
+      preload: preload,
     };
   }
 
@@ -7084,6 +7118,19 @@
   var ENGINE_LOOP_SELF_CROSSFADE_SECONDS = 1;
 
   var engineAudio = makeCrossfadeLoopController('ENGINE');
+  // Pre-loads BOTH engine files into engineAudio's own two slots
+  // immediately, right here at script startup -- long before the
+  // player could possibly reach START ENGINE (they still have the
+  // whole intro story, CONTINUE, the marina screen, and BOARD ahead of
+  // them first). See preload's own notes for why: a file whose very
+  // first decode/buffer only begins the instant play() is called can
+  // race this controller's own wall-clock volume ramp, eating the
+  // front of the fade and making a correct 0->normal ramp sound like
+  // it jumped in partway through instead. No gesture/audioUnlocked
+  // requirement for this -- setting a plain <audio> element's src is
+  // always allowed, only playback itself needs a gesture.
+  engineAudio.preload(ENGINE_AUDIO_FILES.exterior, 0);
+  engineAudio.preload(ENGINE_AUDIO_FILES.interior, 1);
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
   // null) -- the controller itself only knows raw paths/volumes, not
   // domain keys, so this is purely for applyMuteToEngineAudio's
