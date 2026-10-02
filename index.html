@@ -820,7 +820,7 @@
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
-        <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
+        <button id="sound-btn" class="hdr-btn" type="button">SOUND ON</button>
         <span id="clock">—</span>
       </div>
     </header>
@@ -4571,14 +4571,7 @@
           // its own line so a save loaded after either moment (or a
           // multi-tick offline catch-up that crosses one) never replays
           // it.
-          if (wp.name === 'Shilshole Exit' && !state.flags.breakwaterObservationShown) {
-            state.flags.breakwaterObservationShown = true;
-            // Reworded per the intro/departure rewrite's own CLEAR OF
-            // MARINA section -- same trigger, same flag, exact new
-            // wording ("Clear of the marina...", not the earlier
-            // "breakwater slips astern..." text).
-            log(state, 'Clear of the marina. I can shut off the engine, raise the sails and let the wind take over.');
-          }
+          if (wp.name === 'Shilshole Exit') showClearOfMarinaObservationIfNeeded(state);
           if (wp.name === 'Cape Flattery' && !state.flags.pacificObservationShown) {
             state.flags.pacificObservationShown = true;
             log(state, 'Cape Flattery falls away astern. Ahead, nothing but Pacific. The course is mine now.');
@@ -4786,6 +4779,25 @@
   function log(state, text) {
     var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
     state.log.push({ t: ts, text: text });
+  }
+
+  // Shared by BOTH the real coastal-tutorial waypoint-arrival trigger
+  // (Shilshole Exit, below, reached through ordinary navigation ticks)
+  // AND the scripted departure sequence's own BRING IN FENDERS
+  // completion (see DEPARTURE_STEPS' own afterLog) -- same flag, same
+  // exact wording, shown by whichever of the two reaches it first; the
+  // other then finds the flag already set and stays silent, so the
+  // observation is never shown twice no matter which path gets there
+  // first. flushNewLogEntries is included here (not left to each call
+  // site) since it's a safe, idempotent catch-up either way, and
+  // afterLog's own call site -- outside simTick's own batch flush --
+  // genuinely needs it to make the line appear immediately, with no
+  // extra click, per that feature's own requirement.
+  function showClearOfMarinaObservationIfNeeded(state) {
+    if (state.flags.breakwaterObservationShown) return;
+    state.flags.breakwaterObservationShown = true;
+    log(state, 'Clear of the marina. I can shut off the engine, raise the sails and let the wind take over.');
+    flushNewLogEntries(state);
   }
 
   function checkFuel(state) {
@@ -5802,6 +5814,23 @@
   var audioUnlocked = false;
   var masterGain = null;
   var muted = false;
+  // True once the player's first genuine gesture has happened --
+  // distinct from audioUnlocked, which (since the intro screen now
+  // calls unlockAudio() opportunistically at page load, before any
+  // gesture, so exterior ambience can start from the very beginning --
+  // see renderIntroStory's own notes) can now become true with no
+  // gesture at all. Guards the automatic recovery triggers below
+  // (visibilitychange/pageshow/focus) against firing before this is
+  // true: pageshow in particular fires on every ordinary page load, not
+  // just a bfcache restore, and used to be harmless here only because
+  // GAME didn't exist yet at that point -- now that GAME is created at
+  // the same early page-load moment, an automatic trigger racing in
+  // right after would try to resume a context no gesture has unlocked
+  // yet, and audioCtx.resume() can hang rather than reject in that
+  // state, leaving audioRecoveryInProgress stuck true and silently
+  // blocking the PLAYER's own first genuine gesture (CONTINUE/SOUND)
+  // from ever getting to attempt its own resume at all.
+  var audioFirstGestureDone = false;
 
   /* --------------------------------------------------------------
      AUDIO RECOVERY LAYER -- module-level state for recoverLandfallAudio/
@@ -6212,6 +6241,7 @@
     applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
     applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
     applyMuteToCompanionwayAudio(); // COMPANIONWAY HOOK (upstairs/downstairs transition SFX) -- same reasoning as engine audio
+    applyMuteToMarinaAudio(); // MARINA HOOK (board/fenders/pnw_birds) -- same reasoning as engine audio; crucially this only ever adjusts volume on whatever's already playing, never pauses or restarts it -- SOUND ON must not replay a completed one-shot (section 11's own "SOUND ON does not restart completed one-shot marina sounds"), and applyMuteToMarinaAudio's own el.paused guard (same shape as every other applyMuteToXAudio here) already skips anything not currently playing
     updateSoundLabel();
   }
 
@@ -14081,6 +14111,147 @@
   }
 
   /* --------------------------------------------------------------
+     MARINA AUDIO -- the three new pre-game marina-sequence sounds
+     (BOARD/BRING IN FENDERS' own action sound effects, plus the
+     PNW birds one-time ambience layer). Same lazy-element/fade-in/
+     onEnded shape as HEAD AUDIO above -- a plain HTMLAudioElement per
+     key, independent of the Web Audio masterGain graph (so it needs
+     its own applyMuteToMarinaAudio below, called from toggleMute same
+     as every other one-shot domain in this file), rather than a new,
+     second general ambience system. board/fenders are action-synced
+     one-shots (see runAudioSyncedAction's own notes, and the
+     DEPARTURE_STEPS entries below that use them as playAudio) --
+     playMarinaOneShot's own onEnded wiring is exactly the shape that
+     function's config.playAudio expects, so the audio clip itself
+     becomes the action's own clock, never a fixed timer, and
+     runAudioSyncedAction's own duration-derived watchdog is the
+     existing, reused safety net against a failed/missing file leaving
+     the player stuck. pnwBirds is played differently -- see
+     playPnwBirdsOnce below -- as a single, independent one-time layer
+     on top of whatever boat ambience is already playing, never
+     through this same action-synced path (nothing waits on it, and it
+     must survive BOARD/menu changes completely untouched).
+     -------------------------------------------------------------- */
+  var MARINA_AUDIO_FILES = {
+    board: 'audio/marina/board.mp3',
+    fenders: 'audio/marina/fenders.mp3',
+    pnwBirds: 'audio/marina/pnw_birds.mp3',
+  };
+  var MARINA_AUDIO_VOLUME = {
+    board: 0.6,
+    fenders: 0.6,
+    pnwBirds: 0.35, // a background atmospheric layer sitting UNDER the action sounds and boat ambience's own foreground presence, not competing with either
+  };
+  var MARINA_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+
+  var marinaAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as cabinAudioEls/headAudioEls/etc.
+
+  function getMarinaAudioEl(key) {
+    var el = marinaAudioEls[key];
+    if (el) return el;
+    el = new Audio(MARINA_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Marina audio failed to load (' + key + '): ' + MARINA_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
+    marinaAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeCabinVolume/fadeHeadVolume -- see those
+  // functions' own comments for why each audio system keeps its own
+  // independent copy rather than sharing one.
+  function fadeMarinaVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a marina one-shot once from the beginning, with a quick
+  // fade-in, and fires onEnded (once) when it naturally finishes -- the
+  // exact onEnded wiring runAudioSyncedAction expects from its
+  // config.playAudio, and returns the element itself so its own
+  // duration-derived watchdog can size itself off the real file rather
+  // than a fixed number, same as cabin/head/sails/galley. Resets
+  // currentTime to 0 and re-triggers play() every call, so board/
+  // fenders can never end up with two overlapping copies audible at
+  // once (section 11's own "cannot play twice at the same time") --
+  // each call fully supersedes whatever this same key's element was
+  // already doing.
+  function playMarinaOneShot(key, onEnded) {
+    if (!audioUnlocked) { audioDebugLog('play: marina ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: marina ' + key);
+    var el = getMarinaAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.catch) p.catch(function (e) { console.warn('Marina audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
+    fadeMarinaVolume(el, muted ? 0 : MARINA_AUDIO_VOLUME[key], MARINA_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  // True once pnw_birds.mp3 has ever been started this session --
+  // module-level, not part of state: a purely presentational, one-time
+  // detail for this one pre-game screen, never meant to survive a
+  // save/reload the way a gameplay flag (e.g. the existing
+  // breakwaterObservationShown) would. Guards playPnwBirdsOnce against
+  // ever starting a second time -- called from renderPreDeparture every
+  // time that screen renders (which can legitimately happen more than
+  // once, e.g. after a RESTART brings the player back through the
+  // marina screen again in a fresh session, where this flag itself is
+  // freshly false again too), but BOARD/CAST OFF/BRING IN FENDERS/any
+  // later menu change never re-renders renderPreDeparture itself, so
+  // normal play only ever reaches this once per session regardless.
+  var pnwBirdsStarted = false;
+
+  // The one-time PNW birds ambience layer -- played independently of
+  // runAudioSyncedAction (nothing waits on it, and it must keep playing
+  // untouched through BOARD and every later menu change, not act as
+  // anything's clock). No onEnded callback: it simply ends naturally
+  // when the file does and is never restarted, looped, or replayed --
+  // playMarinaOneShot's own el.onended cleanup still fires internally
+  // (clearing el.onended back to null), it just has nothing to call.
+  function playPnwBirdsOnce() {
+    if (pnwBirdsStarted) return;
+    pnwBirdsStarted = true;
+    playMarinaOneShot('pnwBirds', null);
+  }
+
+  function applyMuteToMarinaAudio() {
+    Object.keys(marinaAudioEls).forEach(function (key) {
+      var el = marinaAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : MARINA_AUDIO_VOLUME[key];
+    });
+  }
+
+  /* --------------------------------------------------------------
      SALOON AUDIO -- the physical hatch sounds (see cmdOpenHatch/
      cmdCloseHatch). Same lazy-element/fade-in/onEnded shape as HEAD
      AUDIO just above, kept as its own small section since these are
@@ -16285,7 +16456,7 @@
       case 'departure-step':
         var step = DEPARTURE_STEPS[state.departure.stageIndex];
         if (step) {
-          // Fires immediately, BEFORE runShortAction's own dots even
+          // Fires immediately, BEFORE either runner's own dots even
           // begin -- step.onEnter (below) only fires once the dots
           // finish, which is too late for anything that must span the
           // dots' own duration rather than follow it (the START ENGINE
@@ -16293,20 +16464,40 @@
           // beginEngineStartAudio's own notes on why that fade must
           // start at the BEGINNING of STARTING ENGINE's dots, not after).
           if (step.onStart) step.onStart(state);
-          runShortAction(state, {
-            label: step.workingLabel || step.label,
-            duration: step.duration || 3,
-            action: function (s) {
-              if (step.onEnter) step.onEnter(s);
-              if (step.text) {
-                log(s, typeof step.text === 'function' ? step.text(s) : step.text);
-                flushNewLogEntries(s);
-              }
-              s.departure.stageIndex++;
-              if (step.afterLog) step.afterLog(s);
-            },
-            thenBeat: step.thenBeat,
-          });
+          var stepAction = function (s) {
+            if (step.onEnter) step.onEnter(s);
+            if (step.text) {
+              log(s, typeof step.text === 'function' ? step.text(s) : step.text);
+              flushNewLogEntries(s);
+            }
+            s.departure.stageIndex++;
+            if (step.afterLog) step.afterLog(s);
+          };
+          // step.playAudio (BOARD/BRING IN FENDERS -- see their own
+          // DEPARTURE_STEPS entries) means the audio clip itself is the
+          // clock for this step, per this task's own "Use the audio
+          // clip itself as the action clock rather than a fixed timer"
+          // -- runAudioSyncedAction (already used elsewhere in this
+          // file for exactly this shape, e.g. TRIMMING SAILS/GETTING
+          // INTO BUNK) already owns that whole behavior, watchdog
+          // fallback against a failed/missing file included. Every
+          // other step (CAST OFF, START ENGINE, or any step with no
+          // playAudio) keeps the existing fixed-duration runShortAction
+          // path exactly as before.
+          if (step.playAudio) {
+            runAudioSyncedAction(state, {
+              label: step.workingLabel || step.label,
+              playAudio: step.playAudio,
+              action: stepAction,
+            });
+          } else {
+            runShortAction(state, {
+              label: step.workingLabel || step.label,
+              duration: step.duration || 3,
+              action: stepAction,
+              thenBeat: step.thenBeat,
+            });
+          }
         }
         break;
       default:
@@ -16331,18 +16522,16 @@
   // REPAIR) — it does not touch the clock; real time is passing throughout
   // exactly as it always does (see PROJECT.md).
   var DEPARTURE_STEPS = [
-    // Working label matches the button label exactly (BOARD, not
-    // BOARDING) -- per this task's own replacement sequence, which
-    // consistently writes every departure step as "[BUTTON LABEL]. .. …"
-    // (START ENGINE is the one deliberate exception -- that task
-    // section explicitly says the existing STARTING ENGINE wording can
-    // stay). No text log line any more either -- "Do not add a separate
-    // line such as 'You step aboard.'", per this task's own MARINA
-    // OPENING section.
-    { label: 'BOARD', workingLabel: 'BOARD', duration: 2 },
+    // The SELECTABLE label stays the plain imperative (BOARD); the
+    // ANIMATED label, shown while the dots run, is the gerund form
+    // (BOARDING). No text log line -- "Do not add a separate line such
+    // as 'You step aboard.'" board.mp3 is now this step's own clock
+    // (playAudio), not a fixed duration -- see the 'departure-step'
+    // case's own playAudio branch, and playMarinaOneShot's own notes.
+    { label: 'BOARD', workingLabel: 'BOARDING', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); } },
     {
       label: 'START ENGINE',
-      workingLabel: 'STARTING ENGINE',
+      workingLabel: 'STARTING ENGINE', // unchanged -- "preserve current STARTING ENGINE behavior"
       duration: 3,
       // Fires at the START of the 3s dots (see the 'departure-step'
       // case's own onStart handling) -- the 0->normal fade must span
@@ -16350,24 +16539,39 @@
       onStart: function (s) { beginEngineStartAudio(s.crew.location, 3); },
       text: 'BATTERY CHARGING',
       // s.boat.engineOn becomes true only now, at the END of the 3
-      // seconds (onEnter fires once the dots finish) -- per this task's
-      // own ENGINE START section, matching the mid-voyage engine-start
-      // action's own identical timing.
+      // seconds (onEnter fires once the dots finish) -- matching the
+      // mid-voyage engine-start action's own identical timing.
       onEnter: function (s) { s.boat.engineOn = true; },
     },
-    // No text log line, no afterLog, no thenBeat -- "Do not add an
-    // extra narrative line afterward", per this task's own CAST OFF
-    // section. The old "You ease away from the dock."/"The voyage has
-    // begun." beats are gone; CLEAR OF MARINA (the existing marina-exit
-    // trigger, reworded -- see that trigger's own notes) is what now
-    // picks up the story once BRING IN FENDERS below completes.
-    { label: 'CAST OFF', workingLabel: 'CAST OFF', duration: 3 },
-    // New step, per this task's own BRING IN FENDERS section -- "Do not
-    // add an extra confirmation sentence", so no text log line here
-    // either. Sails stay furled, the engine stays running; everything
-    // from here on is a player decision, same as the old sequence's own
-    // ending just moved one step later.
-    { label: 'BRING IN FENDERS', workingLabel: 'BRING IN FENDERS', duration: 3 },
+    // Selectable CAST OFF, animated CASTING OFF. No audio file for this
+    // one -- "Do not add another sound for this action" -- so this
+    // keeps the fixed-duration runShortAction path (no playAudio field)
+    // at exactly 5 seconds. No text log line, no afterLog, no thenBeat
+    // -- "Do not add extra narration when it completes." CLEAR OF
+    // MARINA (the existing marina-exit trigger) is what picks up the
+    // story once BRING IN FENDERS below completes.
+    { label: 'CAST OFF', workingLabel: 'CASTING OFF', duration: 5 },
+    // Selectable BRING IN FENDERS, animated BRINGING IN FENDERS.
+    // fenders.mp3 is this step's own clock too, same reasoning as
+    // BOARD above -- "Do not add an extra confirmation sentence" (no
+    // text field, same as before). afterLog fires the moment this
+    // step's own action resolves (fenders.mp3 ending) -- no extra
+    // click, no intermediate screen -- and shows CLEAR OF MARINA
+    // directly as part of completing this step, per this fix's own
+    // "go directly from fenders to the clear-of-marina line" section.
+    // showClearOfMarinaObservationIfNeeded shares its flag with the
+    // real coastal-tutorial waypoint-arrival trigger (Shilshole Exit,
+    // in simTick) -- see that function's own notes -- so if the boat
+    // later also reaches that waypoint through ordinary navigation, the
+    // observation is already marked shown and is correctly never
+    // repeated. Sails stay furled, the engine stays running; everything
+    // from here on is a player decision.
+    {
+      label: 'BRING IN FENDERS',
+      workingLabel: 'BRINGING IN FENDERS',
+      playAudio: function (onEnded) { return playMarinaOneShot('fenders', onEnded); },
+      afterLog: function (s) { showClearOfMarinaObservationIfNeeded(s); },
+    },
   ];
 
   var liveTimer = null;
@@ -16413,6 +16617,31 @@
     printPersistentBlank();
     printPersistentLine('I never understood why.');
 
+    // AUDIO FROM THE VERY BEGINNING -- per this task's own "AUDIO
+    // SHOULD START FROM THE VERY BEGINNING" section: GAME is created
+    // HERE, at page load, not inside CONTINUE's own handler any more,
+    // so the exterior ambience below has real weather/location state
+    // to pick a target track from immediately. unlockAudio() is
+    // attempted opportunistically in the same breath -- almost always
+    // still blocked by autoplay policy this early (no genuine user
+    // gesture has happened yet: the page has only just loaded), but
+    // harmless to try, and some embedding contexts do permit it. The
+    // AudioContext this creates typically stays 'suspended' until a
+    // real gesture resumes it; the <audio> element itself can still be
+    // "playing" underneath that (silently, since a suspended context
+    // mutes the whole graph it feeds), which is exactly what preserves
+    // the correct state for CONTINUE's own click handler below to pick
+    // up: that's the player's first genuine gesture, and it only
+    // RESUMES the context (recoverLandfallAudio), never restarts or
+    // re-crossfades anything that's already correctly set up here.
+    GAME = newGameState();
+    unlockAudio();
+    updateSoundLabel();
+    applyBoatAudioDesiredState(getBoatAudioState(GAME), 3);
+    updateRainAudioForState(GAME);
+    updateNoGoZoneAudio(GAME);
+    applyMuteToSailsAudio(GAME);
+
     optionsEl.innerHTML = '';
     var btn = document.createElement('button');
     btn.type = 'button';
@@ -16421,47 +16650,42 @@
     btn.addEventListener('click', function () {
       optionsEl.innerHTML = '';
 
-      // GAME is created HERE -- the moment CONTINUE is actually
-      // pressed, not any earlier -- so the exterior ambience fade-in
-      // just below has real weather/location state to derive its
-      // target track from. unlockAudio() (the player's first-ever
-      // gesture in this session) happens in the same breath, exactly
-      // like every other "first interaction" moment elsewhere in this
-      // file.
-      GAME = newGameState();
-      unlockAudio();
-      updateSoundLabel();
+      // The player's first genuine gesture -- resumes the AudioContext
+      // if it's still suspended from the opportunistic attempt above,
+      // letting whatever's already silently playing become audible.
+      // Fire-and-forget, same as every other recoverLandfallAudio call
+      // site in this file (never awaited) -- the dot animation below
+      // must not wait on it.
+      audioFirstGestureDone = true; // see this flag's own declaration -- set before the automatic visibilitychange/pageshow/focus triggers can fire with it still false, which is what keeps one of them from ever attempting its own pre-gesture resume() and leaving audioRecoveryInProgress stuck true, silently blocking the real call right below
+      recoverLandfallAudio('intro-continue');
+
       restartBtn.hidden = false;
       startLiveLoop();
-
-      // The fade-in itself: EXTERIOR sea_state/environment ambience
-      // only (never engine -- that doesn't begin until the departure
-      // sequence's own START ENGINE step, several screens later), 0 ->
-      // normal over the FULL 3 seconds, starting now, concurrent with
-      // the dots below -- not the default updateAudioForState (which
-      // would use the shorter BOAT_AMBIENCE_CROSSFADE_SECONDS, 2s,
-      // instead of this task's own explicit 3s for this one moment).
-      // Rain/luffing/sails-mute are separately, defensively synced too
-      // (a fresh voyage has none of those active, but this matches the
-      // old BOARD handler's own thoroughness) without going through the
-      // same boat-ambience path a second time.
-      applyBoatAudioDesiredState(getBoatAudioState(GAME), 3);
-      updateRainAudioForState(GAME);
-      updateNoGoZoneAudio(GAME);
-      applyMuteToSailsAudio(GAME);
 
       // A small, standalone dot animation -- GAME exists now, but
       // runShortAction's own finish() calls the NORMAL
       // renderOptions(state), driven by state.pendingChoice, which
       // would immediately overwrite renderPreDeparture's own hand-built
       // BOARD button the instant this resolved; this stays deliberately
-      // separate, scoped to just this one pre-game moment. Matches
-      // runShortAction's own default (non-transientLabel) visual
-      // treatment exactly: the CONTINUE label persists permanently in
-      // the scrollback (printPersistentLine, same as every other
-      // departure-step label), only the dots themselves are transient.
-      printPersistentBlank();
-      printPersistentLine('CONTINUE', 'heading-label');
+      // separate, scoped to just this one pre-game moment. The blank
+      // line, label and dots are created here the same transient way
+      // (outputEl.insertBefore, not printPersistentLine/
+      // printPersistentBlank) -- but what actually clears them, below,
+      // is resetOutputEl(), the same full-reset mechanism confirmRestart/
+      // renderReturn already use elsewhere. A surgical removal of just
+      // these three elements once covered CONTINUE itself, but left the
+      // opening story text above it (printPersistentLine, permanent)
+      // sitting there forever -- resetOutputEl() wipes the ENTIRE
+      // screen, story text included, so the marina screen that follows
+      // genuinely begins as a clean new screen, never appended
+      // underneath the old one.
+      var blankEl = document.createElement('p');
+      blankEl.className = 'gap';
+      outputEl.insertBefore(blankEl, tempViewEl);
+      var labelEl = document.createElement('p');
+      labelEl.className = 'line heading-label';
+      labelEl.textContent = 'CONTINUE';
+      outputEl.insertBefore(labelEl, tempViewEl);
       var dotsLine = document.createElement('p');
       dotsLine.className = 'line dim';
       dotsLine.textContent = '.';
@@ -16477,7 +16701,7 @@
 
       setTimeout(function () {
         clearInterval(dotTimer);
-        if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
+        resetOutputEl(); // the opening story, CONTINUE's own label, and its dots all go together -- see this block's own notes above
         renderPreDeparture();
         updateClock();
       }, 3000);
@@ -16486,11 +16710,29 @@
   }
 
   function renderPreDeparture() {
-    printPersistentLine(VESSEL_NAME + ' \u2014 ' + DEPARTURE_PORT, 'heading-label');
+    // SOLACE is already introduced in the opening story screen, so this
+    // heading no longer repeats the vessel name -- just the place,
+    // exactly as this task's own MARINA SCREEN HEADER section calls
+    // for. DEPARTURE_PORT itself stays mixed-case (it's used nowhere
+    // else, but there's no reason to force it) -- .toUpperCase() here
+    // is scoped to just this one heading line.
+    printPersistentLine(DEPARTURE_PORT.toUpperCase(), 'heading-label');
     printPersistentBlank();
-    printPersistentLine('The marina is quiet. The lines are untied.');
+    printPersistentLine('The marina is quiet. The lines are untied. Solace waits in front of you, a 35-foot ocean-cruising sailboat.');
     printPersistentBlank();
     printPersistentLine('Ahead lies ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles to N\u0101wiliwili, Kaua\u02BBi, somewhere past the curve of the earth.');
+
+    // PNW BIRDS -- see playPnwBirdsOnce's own notes: a single, one-time
+    // ambience layer begun here, near the start of the marina screen,
+    // on top of whatever exterior boat ambience is already playing
+    // (started earlier, back in renderIntroStory -- never touched,
+    // restarted, or interrupted by this). pnwBirdsStarted's own guard
+    // means this call is a safe no-op on anything that re-renders this
+    // screen without actually being a fresh session (there isn't one
+    // today, but see confirmRestart's own reset of that flag for the
+    // one case -- a genuine restart -- where replaying it again is
+    // correct).
+    playPnwBirdsOnce();
 
     optionsEl.innerHTML = '';
     var btn = document.createElement('button');
@@ -16498,18 +16740,23 @@
     btn.className = 'option';
     btn.textContent = '> ' + DEPARTURE_STEPS[0].label;
     btn.addEventListener('click', function () {
-      // GAME, audio unlock, the sound label, restartBtn, and the live
-      // loop are all already set up by renderIntroStory's own CONTINUE
-      // handler, which always runs before this screen can even be
-      // reached now -- never re-created or re-run here. Exterior
-      // sea_state audio is deliberately left completely alone too, per
-      // this task's own "Exterior sea_state audio should continue
-      // uninterrupted through BOARD" -- handleAction's own downstream
-      // runShortAction/finish() still calls updateAudioForState once
-      // the BOARD step's own dots resolve (same as it already does for
-      // every later departure step), but that call is idempotent and a
-      // safe no-op for a channel that's already correctly playing --
-      // nothing here restarts or re-crossfades it.
+      // GAME, audio unlock, and the sound label are all already set up
+      // by renderIntroStory itself (the page-load moment, not even its
+      // own CONTINUE handler any more -- see that function's own notes
+      // on starting audio from the very beginning); restartBtn/the live
+      // loop are set up by that CONTINUE handler specifically. None of
+      // it is re-created or re-run here. Exterior sea_state audio (and
+      // the pnw_birds layer just started above) are deliberately left
+      // completely alone too, per this task's own "exterior ambience
+      // continues" requirement -- handleAction's own downstream
+      // runAudioSyncedAction/runShortAction finish() still calls
+      // updateAudioForState once BOARD's own board.mp3 (or any later
+      // step) resolves (same as it already does for every departure
+      // step), but that call is idempotent and a safe no-op for a
+      // channel that's already correctly playing -- nothing here
+      // restarts or re-crossfades it, and updateAudioForState has no
+      // knowledge of marina audio at all, so pnw_birds/board/fenders
+      // are never affected by it either way.
       clearTempView();
       handleAction(GAME, 'departure-step'); // logs, flushes, advances the stage, and renders/saves/scrolls
       updateClock();
@@ -16527,6 +16774,7 @@
     resetOutputEl();
     restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
+    pnwBirdsStarted = false; // same "exactly like a first visit" reasoning -- the marina screen's own one-time ambience detail is part of that first impression too, and should play again on a genuinely fresh voyage rather than staying silently "already played" from session state alone
     renderIntroStory(); // "starts over exactly like a first visit" (see this function's own comment above) -- the intro story screen is now part of what a first visit looks like
     updateClock();
   }
@@ -16996,6 +17244,22 @@
     migrateStalePendingChoiceIfNeeded(GAME);
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+    // AUDIO FROM THE VERY BEGINNING -- same opportunistic unlockAudio()
+    // this already does for a brand-new game (see renderIntroStory's
+    // own notes on why this is a harmless attempt, almost always still
+    // blocked by autoplay policy until a real gesture, but worth trying
+    // regardless, and already safe/idempotent to call here). A
+    // returning player (a page reload, or a save resumed later)
+    // deserves the same "SOUND ON" starting state a fresh game gets,
+    // rather than staying on the pre-unlock "SOUND OFF" default until
+    // their first click -- this was the one path that still skipped it
+    // entirely. GAME is already fully migrated above by this point, so
+    // buildAudioGraph's own internal updateAudioForState(GAME) call
+    // (plus its own engine-resume branch, for a save where the engine
+    // was already running) picks up the complete, real resumed state
+    // correctly, with no separate call needed here.
+    unlockAudio();
+    updateSoundLabel();
     var ticks = catchUpFromRealTime(GAME);
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
@@ -17186,6 +17450,18 @@
   });
 
   soundBtn.addEventListener('click', function () {
+    // The intro screen's own unlockAudio() attempt (see
+    // renderIntroStory's own notes on starting audio from the very
+    // beginning) runs at page load now, opportunistically, before any
+    // gesture -- so by the time SOUND is ever clickable, audioUnlocked
+    // is already true, and the AudioContext it created may still be
+    // 'suspended' waiting on a genuine gesture to resume it. If the
+    // player's first interaction is THIS button rather than CONTINUE,
+    // this is that gesture -- fire-and-forget, same as every other
+    // recoverLandfallAudio call site, and a safe no-op (its own guard)
+    // for the ordinary case where CONTINUE already handled this.
+    audioFirstGestureDone = true; // see this flag's own declaration
+    recoverLandfallAudio('sound-button');
     if (!audioUnlocked) {
       unlockAudio();
       if (GAME) updateAudioForState(GAME);
@@ -17222,7 +17498,14 @@
       // reimplementing its own subset of it. Not awaited: the rest of
       // this handler (save, clock) has no reason to wait on audio
       // recovery's own health-check delay or a possible hard rebuild.
-      recoverLandfallAudio('visibility');
+      // Guarded by audioFirstGestureDone (see that flag's own
+      // declaration) -- before the player's first real gesture, trying
+      // to resume a context nothing has unlocked yet is not a recovery
+      // situation at all, and attempting it anyway risks leaving
+      // audioRecoveryInProgress stuck true, silently blocking the
+      // player's own first genuine gesture from ever getting to attempt
+      // its own resume.
+      if (audioFirstGestureDone) recoverLandfallAudio('visibility');
       saveGameState(GAME);
       updateClock();
     }
@@ -17234,8 +17517,13 @@
   // is true specifically for that bfcache-restore case. Harmless to
   // also fire on an ordinary, non-cached load -- recoverLandfallAudio
   // is already a safe no-op whenever nothing is actually unhealthy.
+  // audioFirstGestureDone is what actually keeps that true now, though:
+  // pageshow fires on every ordinary load too, not just a bfcache
+  // restore, and the intro screen's own GAME/audioCtx now exist from
+  // that very first load (see that flag's own declaration for why this
+  // guard is needed here specifically).
   window.addEventListener('pageshow', function (event) {
-    if (!GAME) return;
+    if (!GAME || !audioFirstGestureDone) return;
     if (event.persisted) audioDebugLog('pageshow (bfcache restore) -- triggering recovery');
     recoverLandfallAudio('pageshow');
   });
@@ -17243,9 +17531,10 @@
   // FOCUS (section 11.C) -- covers the desktop-browser equivalent of
   // the same interruption (another window/app took focus and gave it
   // back) that visibilitychange/pageshow are mainly aimed at mobile
-  // Safari for. Same safe-no-op reasoning applies.
+  // Safari for. Same safe-no-op reasoning applies, same
+  // audioFirstGestureDone guard as pageshow just above.
   window.addEventListener('focus', function () {
-    if (!GAME) return;
+    if (!GAME || !audioFirstGestureDone) return;
     recoverLandfallAudio('focus');
   });
 
