@@ -1308,20 +1308,6 @@
         arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
         breakwaterObservationShown: false, // guards the coastal-tutorial "room for sail now" observation (Shilshole Exit arrival) so it fires exactly once per voyage
         pacificObservationShown: false,    // guards the coastal-tutorial "course is mine now" observation (Cape Flattery arrival, open-water threshold) so it fires exactly once per voyage
-        // INITIAL LIGHTING GRACE -- see applyNaturalLightDimming's own
-        // notes for where this is actually read, and
-        // performElectricalToggle's own notes for where it's cleared.
-        // Starts true (text dimming suppressed from the very first
-        // moment of the voyage, even if it begins at night) and is
-        // permanently set false the instant the player completes their
-        // first full CABIN LIGHTS ON -> OFF cycle below deck -- never
-        // true again afterward for the rest of this voyage.
-        // hasUsedCabinLights is the simpler, separate "has this ever
-        // happened" fact that primes it: true the moment CABIN LIGHTS
-        // is first switched ON, regardless of whether the grace period
-        // has already ended by then.
-        hasUsedCabinLights: false,
-        initialLightingGrace: true,
       },
       rescue: {
         epirbOn: false,
@@ -1340,6 +1326,25 @@
     };
     state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see syncCabinTemperature for the ongoing drift
     state.boat.cabinTemperatureLastSyncedAt = 0; // currentGameMinutes() is 0 here too (voyageMinutes and leftoverMinutes both start at 0)
+    // NIGHT START -- a voyage beginning during Landfall's existing
+    // nighttime period (isDark -- the same boundary needsCabinLight/
+    // needsNavLights/the natural-light text-dimming curve all already
+    // use, not a new, separate day/night determination) starts with
+    // CABIN LIGHTS and NAV LIGHTS already switched on, exactly as if
+    // the player had already turned them on themselves before casting
+    // off. This is the ENTIRE mechanism behind night-start lighting:
+    // with the correct light already on, the existing, completely
+    // unmodified applyNaturalLightDimming (text brightness) and
+    // needsCabinLight/needsNavLights (action gating) both naturally
+    // read "lit" from the very first render -- no separate suppression
+    // flag, grace period, or special-cased system of any kind needed.
+    // The player remains free to switch either back off at any point
+    // afterward, at which point normal darkness rules apply
+    // immediately, exactly as they always have.
+    if (isDark(state)) {
+      state.boat.cabinLightsOn = true;
+      state.boat.navLightsOn = true;
+    }
     return state;
   }
 
@@ -9199,25 +9204,6 @@
     if (key === 'accessory' && !turningOn && b.fanOn) {
       b.fanOn = false;
     }
-    // INITIAL LIGHTING GRACE -- see state.flags.initialLightingGrace's
-    // own declaration notes, and applyNaturalLightDimming's own notes
-    // for where it's actually read. Turning CABIN LIGHTS on is what
-    // PRIMES this (hasUsedCabinLights becomes true the first time,
-    // regardless of whether the grace period has already ended by
-    // then -- it's a simple, honest "has this ever happened" fact, not
-    // itself the grace flag). Turning them back OFF, once that's
-    // already true, is the one moment that actually completes the
-    // first full ON -> OFF cycle and ends the grace period -- gated on
-    // initialLightingGrace too so this never needlessly re-fires on
-    // every later OFF toggle for the rest of the voyage, even though
-    // doing so would be harmless (it's already false by then).
-    if (key === 'cabinLights') {
-      if (turningOn) {
-        state.flags.hasUsedCabinLights = true;
-      } else if (state.flags.hasUsedCabinLights && state.flags.initialLightingGrace) {
-        state.flags.initialLightingGrace = false;
-      }
-    }
     cmdNavStation(state);
   }
 
@@ -16047,21 +16033,8 @@
   // variables) is completely unchanged. Indicator lamps (.lamp-on)
   // are a separate, unrelated glow and are never touched here.
   function applyNaturalLightDimming(state) {
-    // INITIAL LIGHTING GRACE -- see state.flags.initialLightingGrace's
-    // own declaration notes (and performElectricalToggle's own notes
-    // for where it ends, on the player's first full CABIN LIGHTS ON ->
-    // OFF cycle below deck). While still active, natural-light dimming
-    // is suppressed entirely -- full brightness regardless of time of
-    // day or which light, if any, is actually on -- covering the
-    // opening story, the marina sequence, BOARDING/STARTING ENGINE/
-    // CASTING OFF/BRINGING IN FENDERS, and the player's own initial
-    // above-deck exploration, even if the voyage begins at night. This
-    // is the ONLY place this flag is ever read; everything else about
-    // this function (the lightsOverrideOn/naturalLightBrightness math,
-    // CABIN LIGHTS/NAV LIGHTS override behavior) is completely
-    // unchanged once the grace period ends.
     var lightsOverrideOn = state.crew.location === 'below' ? !!state.boat.cabinLightsOn : !!state.boat.navLightsOn;
-    var factor = state.flags.initialLightingGrace ? 1 : (lightsOverrideOn ? 1 : naturalLightBrightness(state));
+    var factor = lightsOverrideOn ? 1 : naturalLightBrightness(state);
     if (factor >= 1) {
       NATURAL_LIGHT_TEXT_VARS.forEach(function (name) { document.documentElement.style.removeProperty(name); });
       document.documentElement.style.removeProperty('--output-glow');
@@ -16989,18 +16962,19 @@
     updateRainAudioForState(GAME);
     updateNoGoZoneAudio(GAME);
     applyMuteToSailsAudio(GAME);
-    // INITIAL LIGHTING GRACE -- GAME.flags.initialLightingGrace is true
-    // for a brand-new voyage (see its own declaration notes), so this
-    // call clears text brightness to normal immediately -- not merely a
-    // no-op for a genuinely fresh page load (nothing would have dimmed
-    // it yet anyway), but essential for a RESTART specifically: the
-    // text-color CSS variables applyNaturalLightDimming sets are global
-    // :root overrides that otherwise persist across a restart
-    // untouched, so a player restarting at night with CABIN/NAV LIGHTS
-    // off would otherwise carry the PREVIOUS voyage's own dimmed text
-    // straight into this brand-new one's opening story, before
-    // anything else in this fresh session ever calls
-    // applyNaturalLightDimming again on its own.
+    // Applies text brightness for this brand-new GAME immediately --
+    // not merely a no-op for a genuinely fresh page load (nothing
+    // would have dimmed it yet anyway), but essential for a RESTART
+    // specifically: the text-color CSS variables
+    // applyNaturalLightDimming sets are global :root overrides that
+    // otherwise persist across a restart untouched, so a player
+    // restarting at night would otherwise carry the PREVIOUS voyage's
+    // own dimmed text straight into this brand-new one's opening
+    // story, before anything else in this fresh session ever calls
+    // applyNaturalLightDimming again on its own. For a voyage actually
+    // beginning at night, GAME already has CABIN/NAV LIGHTS on by this
+    // point (see newGameState's own NIGHT START notes), so this
+    // correctly reads back to full brightness rather than dimming it.
     applyNaturalLightDimming(GAME);
     // Pre-loads both engine files now that audioCtx/masterGain exist
     // (unlockAudio() just created them) -- see engineAudioPreload's own
@@ -17087,7 +17061,7 @@
     // is scoped to just this one heading line.
     printPersistentLine(DEPARTURE_PORT.toUpperCase(), 'heading-label');
     printPersistentBlank();
-    printPersistentLine('The marina is quiet. The lines are untied. Solace waits in front of you, a 35-foot ocean-cruising sailboat.');
+    printPersistentLine('The marina is quiet. The lines are untied. Solace rests at the dock, a 35-foot ocean-cruising sailboat.');
     printPersistentBlank();
     printPersistentLine('Ahead lies ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles to N\u0101wiliwili, Kaua\u02BBi, somewhere past the curve of the earth.');
 
@@ -17181,14 +17155,6 @@
     if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
     if (state.flags && state.flags.breakwaterObservationShown === undefined) state.flags.breakwaterObservationShown = false;
     if (state.flags && state.flags.pacificObservationShown === undefined) state.flags.pacificObservationShown = false;
-    // An existing voyage (already in progress before this feature
-    // existed) was never granted a grace period in the first place --
-    // it's already been living under the normal darkness rules this
-    // whole time, so migrating it straight to "grace already ended" is
-    // what actually preserves its existing behavior unchanged, rather
-    // than retroactively handing out brightness protection it never had.
-    if (state.flags && state.flags.hasUsedCabinLights === undefined) state.flags.hasUsedCabinLights = true;
-    if (state.flags && state.flags.initialLightingGrace === undefined) state.flags.initialLightingGrace = false;
     if (typeof nav.lat === 'number' && typeof nav.lon === 'number') return;
     var legacyTotal = 2850; // the flat distance old saves' progress was measured against
     var frac = clamp((nav.distanceTraveled || 0) / legacyTotal, 0, 1);
