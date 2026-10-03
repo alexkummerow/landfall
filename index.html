@@ -1701,8 +1701,65 @@
   function tickProbability(p10) {
     return 1 - Math.pow(1 - p10, TICK_MINUTES / 10);
   }
-  function normalizeDeg(d) { return ((d % 360) + 360) % 360; }
+  // RELIABILITY PASS -- shared, dev-visible warning for any weather-
+  // direction value that turns out non-finite. This file has no
+  // separate "dev mode" flag (see describeError's own notes on the
+  // existing console.warn convention for genuine anomalies); an
+  // unconditional console.warn here is invisible to an ordinary
+  // player (who never opens devtools) but immediately visible during
+  // testing/development -- the same tradeoff every other warn in this
+  // file already makes. context is a plain object with whatever's
+  // known and relevant (field, value, event, phase, etc.), logged
+  // as-is so a glance at the console shows exactly what was happening
+  // when the bad value was caught.
+  var __warnCount = 0; // incremented alongside every warning below -- lightweight, always-on counter for diagnosing how often recovery has fired, if ever
+  function warnInvalidWeatherAngle(context) {
+    __warnCount++;
+    console.warn('[WEATHER DIRECTION ERROR]', context);
+  }
+  // EMERGENCY_FALLBACK_WIND_DEG -- the one fixed, always-valid angle
+  // used only as the last-resort tier of the direction-recovery chain
+  // (see recoverWindDirection below) and by normalizeDeg itself when
+  // even that chain can't run (no state context available). SW: a
+  // generically sailable reach/broad-reach relative to this route's
+  // own ~220-250deg course, never dead upwind, regardless of where on
+  // the route this fires.
+  var EMERGENCY_FALLBACK_WIND_DEG = 225;
+  // RELIABILITY PASS -- this is the single, universal chokepoint
+  // nearly every weather-direction value in the file passes through on
+  // its way to being stored or used, so it's the last line of defense:
+  // if a non-finite value ever reaches here, something upstream has a
+  // bug (and should itself be found and fixed -- see
+  // recoverWindDirection and the validated blend step in
+  // advanceWeatherEngine for where that actually happens), but this
+  // function's own contract -- always returns a finite angle in
+  // [0, 360) -- must hold unconditionally regardless. Warns (so the
+  // real upstream bug stays visible) and returns the fixed emergency
+  // angle rather than silently computing NaN from NaN, which is
+  // exactly what let one bad upstream value turn into a permanently
+  // stuck live wind direction before this existed -- see
+  // nogoBackstopClearanceDeg's own notes for the concrete, confirmed
+  // root cause this was guarding against.
+  function normalizeDeg(d) {
+    if (!Number.isFinite(d)) {
+      warnInvalidWeatherAngle({ issue: 'normalizeDeg received a non-finite value', value: d });
+      return EMERGENCY_FALLBACK_WIND_DEG;
+    }
+    return ((d % 360) + 360) % 360;
+  }
+  // RELIABILITY PASS -- validates both inputs first (section 5 of the
+  // reliability pass this implements: interpolation/diff math must
+  // never run on an invalid value and keep the result). A fallback of
+  // 0 here is deliberate: this is a last-resort safety net, not the
+  // primary recovery path -- real recovery happens upstream, before a
+  // bad value ever reaches this low-level helper -- so the safest
+  // generic choice is "report no difference" rather than guessing a
+  // context-specific magnitude this function has no way to know.
   function angleDiff(a, b) {
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      warnInvalidWeatherAngle({ issue: 'angleDiff received a non-finite value', a: a, b: b });
+      return 0;
+    }
     var d = Math.abs(a - b) % 360;
     return d > 180 ? 360 - d : d;
   }
@@ -3015,6 +3072,20 @@
   var PREVAILING_TRADE_CENTER_DEG = 55;       // ENE -- the classic NE trades; a broad reach/run for this route's ~230-248deg final course
   var PREVAILING_TRADE_SPREAD_DEG = 25;       // narrower -- real trades are steadier than the systems further north
 
+  // RELIABILITY PASS -- a direction field in this section is only
+  // genuinely usable as-is when it's both SET (not null/undefined --
+  // "not yet established") and FINITE (not NaN/Infinity -- "corrupted").
+  // Plain `!= null`/`== null` checks throughout this section only ever
+  // caught the first case: NaN is never == null in JS, so a field that
+  // had gone non-finite would silently pass an `!= null` check and keep
+  // being reused/kept instead of recovered -- confirmed as a real
+  // defensive gap (not the root cause itself, which was
+  // nogoBackstopClearanceDeg -- see its own notes -- but a place a
+  // similar future bug could have gone undetected the same way).
+  function isValidDirectionDeg(v) {
+    return v != null && Number.isFinite(v);
+  }
+
   function prevailingDirectionBandForLat(lat) {
     if (lat <= PREVAILING_TRADE_LAT) return { center: PREVAILING_TRADE_CENTER_DEG, spread: PREVAILING_TRADE_SPREAD_DEG };
     if (lat >= PREVAILING_TRANSITION_LAT) return { center: PREVAILING_TRANSITION_CENTER_DEG, spread: PREVAILING_TRANSITION_SPREAD_DEG };
@@ -3026,9 +3097,41 @@
     };
   }
 
+  // RELIABILITY PASS -- lat is read from state.nav.lat by every caller;
+  // validating it here, at the one place that turns a latitude into a
+  // direction, is cheaper and more robust than trusting every caller to
+  // have already checked it. An invalid lat falls back to the
+  // trade-wind band's own center -- a reasonable, always-sailable
+  // default for this route -- rather than feeding NaN into the
+  // interpolation above.
   function rollPrevailingWindDirection(lat) {
+    if (!Number.isFinite(lat)) {
+      warnInvalidWeatherAngle({ issue: 'rollPrevailingWindDirection received a non-finite lat', lat: lat });
+      lat = PREVAILING_TRADE_LAT;
+    }
     var band = prevailingDirectionBandForLat(lat);
     return normalizeDeg(band.center + (Math.random() - 0.5) * 2 * band.spread);
+  }
+
+  // RELIABILITY PASS -- the shared recovery chain for any direction
+  // field found to be invalid, in priority order: (1) the engine's
+  // current phase target, the most contextually "correct" value since
+  // it's what the weather system actually intends right now; (2) the
+  // persistent background prevailing regime; (3) a fresh,
+  // geographically-sane roll for the boat's current latitude, always
+  // well-defined and never itself dependent on any other possibly-
+  // corrupt state; (4) the fixed emergency fallback. "Last known valid"
+  // (the live w.windDirection itself, if still valid) is deliberately
+  // NOT a tier here -- it's handled by the specific call site in
+  // advanceWeatherEngine's own blend step, which is the only place with
+  // enough context to know whether the live value is the right thing
+  // to keep.
+  function recoverWindDirection(state) {
+    var engine = state.weather.engine;
+    if (isValidDirectionDeg(engine.phaseDirectionAnchorDeg)) return normalizeDeg(engine.phaseDirectionAnchorDeg);
+    if (isValidDirectionDeg(engine.prevailingWindDirectionDeg)) return normalizeDeg(engine.prevailingWindDirectionDeg);
+    if (Number.isFinite(state.nav.lat)) return rollPrevailingWindDirection(state.nav.lat);
+    return EMERGENCY_FALLBACK_WIND_DEG;
   }
 
   // Called from every ordinary (non-majorStorm, non-favorableDeparture)
@@ -3040,7 +3143,19 @@
   function maybeRefreshPrevailingWindDirection(state) {
     var engine = state.weather.engine;
     var band = prevailingDirectionBandForLat(state.nav.lat);
-    if (engine.prevailingWindDirectionDeg == null || angleDiff(engine.prevailingWindDirectionDeg, band.center) > band.spread * 1.5) {
+    // RELIABILITY PASS -- distinguish WHY a refresh is happening. Three
+    // cases, not two: null/undefined ("not yet established" -- the
+    // normal state for every fresh voyage's very first call here) is
+    // routine and must stay silent; a genuinely non-finite value
+    // (present but corrupt -- NaN survived from somewhere) is the real
+    // anomaly and gets a dev-visible warning; a stale-for-the-current-
+    // latitude-band value is also routine (every ordinary latitude-band
+    // crossing). The recovery (re-roll) is identical in all three
+    // cases -- only whether this warns differs.
+    if (engine.prevailingWindDirectionDeg != null && !Number.isFinite(engine.prevailingWindDirectionDeg)) {
+      warnInvalidWeatherAngle({ issue: 'maybeRefreshPrevailingWindDirection found a non-finite prevailingWindDirectionDeg', value: engine.prevailingWindDirectionDeg });
+      engine.prevailingWindDirectionDeg = rollPrevailingWindDirection(state.nav.lat);
+    } else if (!isValidDirectionDeg(engine.prevailingWindDirectionDeg) || angleDiff(engine.prevailingWindDirectionDeg, band.center) > band.spread * 1.5) {
       engine.prevailingWindDirectionDeg = rollPrevailingWindDirection(state.nav.lat);
     }
   }
@@ -3057,7 +3172,7 @@
   var MAJOR_STORM_DIRECTION_OFFSET_DEG = 55;
   function computeStormDirectionDeg(state) {
     var engine = state.weather.engine;
-    var base = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
+    var base = isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
     var sign = engine.stormStrongSide === 'north' ? 1 : -1;
     return normalizeDeg(base + sign * MAJOR_STORM_DIRECTION_OFFSET_DEG);
   }
@@ -3081,7 +3196,22 @@
   // reset of noGoSinceMinutes when either of those begins, so a
   // streak never awkwardly carries across one of them.
   var NOGO_BACKSTOP_MAX_MINUTES = 20 * 60;
-  var NOGO_BACKSTOP_CLEARANCE_DEG = NOGO_ZONE_DEG + 10;
+  // ROOT-CAUSE FIX -- this used to read "NOGO_ZONE_DEG + 10" right here,
+  // but NOGO_ZONE_DEG itself isn't declared/assigned until much later in
+  // the file (see its own declaration below, near resolveAutoTack). var
+  // declarations hoist, but their assignments run in file order -- so at
+  // the moment this line used to execute, NOGO_ZONE_DEG was still
+  // undefined, and undefined + 10 is NaN. That NaN was silently baked
+  // into this constant for the entire session, every single time, and
+  // from then on, any applyNoGoBackstopIfNeeded/applyNoGoBackstopTick
+  // call that actually reached its normalizeDeg(course + side *
+  // NOGO_BACKSTOP_CLEARANCE_DEG) line handed a NaN into phaseDirectionAnchorDeg
+  // -- which only happens after a genuine 20+ hour no-go streak, hence
+  // the long delay before this ever surfaced. This constant is now set
+  // where it's actually used (see the no-go backstop functions below),
+  // reading the real NOGO_ZONE_DEG value, well after that's been
+  // assigned, instead of as a module-load-time expression here.
+  function nogoBackstopClearanceDeg() { return NOGO_ZONE_DEG + 10; }
   function applyNoGoBackstopIfNeeded(state, candidateDeg) {
     var engine = state.weather.engine;
     if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { engine.noGoSinceMinutes = null; return candidateDeg; }
@@ -3094,14 +3224,14 @@
     // actual mechanism behind an intermittent NaN wind direction on
     // long test crossings before this guard existed. Skip cleanly
     // rather than act on a non-finite reference.
-    if (!isFinite(course)) return candidateDeg;
+    if (!Number.isFinite(course)) return candidateDeg;
     var offset = angleDiff(candidateDeg, course);
     if (offset >= NOGO_ZONE_DEG) { engine.noGoSinceMinutes = null; return candidateDeg; }
     if (engine.noGoSinceMinutes == null) engine.noGoSinceMinutes = state.meta.voyageMinutes;
     if (state.meta.voyageMinutes - engine.noGoSinceMinutes < NOGO_BACKSTOP_MAX_MINUTES) return candidateDeg;
     var side = signedAngleDiff(candidateDeg, course) >= 0 ? 1 : -1;
     engine.noGoSinceMinutes = null;
-    return normalizeDeg(course + side * NOGO_BACKSTOP_CLEARANCE_DEG);
+    return normalizeDeg(course + side * nogoBackstopClearanceDeg());
   }
 
   // PHASE 7 -- the backstop's own per-TICK counterpart, run every
@@ -3128,13 +3258,13 @@
     if (eventKey === 'majorStorm' || eventKey === 'earlyRoughWeather' || eventKey === 'favorableDeparture') { engine.noGoSinceMinutes = null; return; }
     if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { engine.noGoSinceMinutes = null; return; }
     var course = state.nav.intendedCourse;
-    if (!isFinite(course)) return; // see applyNoGoBackstopIfNeeded's own identical guard and notes
+    if (!Number.isFinite(course)) return; // see applyNoGoBackstopIfNeeded's own identical guard and notes
     var offset = angleDiff(state.weather.windDirection, course);
     if (offset >= NOGO_ZONE_DEG) { engine.noGoSinceMinutes = null; return; }
     if (engine.noGoSinceMinutes == null) engine.noGoSinceMinutes = state.meta.voyageMinutes;
     if (state.meta.voyageMinutes - engine.noGoSinceMinutes < NOGO_BACKSTOP_MAX_MINUTES) return;
     var side = signedAngleDiff(state.weather.windDirection, course) >= 0 ? 1 : -1;
-    engine.phaseDirectionAnchorDeg = normalizeDeg(course + side * NOGO_BACKSTOP_CLEARANCE_DEG);
+    engine.phaseDirectionAnchorDeg = normalizeDeg(course + side * nogoBackstopClearanceDeg());
     engine.noGoSinceMinutes = null;
   }
 
@@ -3195,12 +3325,22 @@
       // blend step then still closes the gap to THAT target smoothly
       // over the phase's own real duration, exactly as any other
       // phase transition does; this is not a second, separate blend.
+      // RELIABILITY PASS -- every branch below reads engine.stormDirectionDeg
+      // at least once (several read it two or three times), so it's
+      // validated/recovered exactly once here rather than at each
+      // individual use -- computeStormDirectionDeg's own output is
+      // already always finite, but this still guards a save/load path
+      // or future bug that left it stale/corrupt.
+      if (!isValidDirectionDeg(engine.stormDirectionDeg)) {
+        warnInvalidWeatherAngle({ issue: 'beginPhase found a non-finite stormDirectionDeg', value: engine.stormDirectionDeg, event: eventKey, phase: phaseKey });
+        engine.stormDirectionDeg = recoverWindDirection(state);
+      }
       if (phaseKey === 'approach' || phaseKey === 'building') {
         engine.phaseDirectionAnchorDeg = engine.stormDirectionDeg;
       } else if (phaseKey === 'peak') {
         engine.phaseDirectionAnchorDeg = normalizeDeg(engine.stormDirectionDeg + (Math.random() - 0.5) * 2 * phaseDef.directionMaxDeg);
       } else { // easing, clearing
-        var stormBase = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : engine.stormDirectionDeg;
+        var stormBase = isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : engine.stormDirectionDeg;
         var returnFraction = phaseKey === 'easing' ? 0.5 : 1.0;
         var stormDelta = signedAngleDiff(stormBase, engine.stormDirectionDeg);
         engine.phaseDirectionAnchorDeg = normalizeDeg(engine.stormDirectionDeg + stormDelta * returnFraction);
@@ -3226,13 +3366,19 @@
       // trusted blindly either. A non-finite read falls back to
       // keeping whatever anchor already exists (if any), never to
       // computing a fresh one from a bad reference.
-      if (isFinite(state.nav.intendedCourse)) {
-        var fdExistingOffset = engine.phaseDirectionAnchorDeg == null ? null : angleDiff(engine.phaseDirectionAnchorDeg, state.nav.intendedCourse);
+      if (Number.isFinite(state.nav.intendedCourse)) {
+        var fdExistingOffset = isValidDirectionDeg(engine.phaseDirectionAnchorDeg) ? angleDiff(engine.phaseDirectionAnchorDeg, state.nav.intendedCourse) : null;
         if (fdExistingOffset == null || fdExistingOffset < 55 || fdExistingOffset > 115) {
           engine.phaseDirectionAnchorDeg = pickRouteRelativeDirectionDeg(state.nav.intendedCourse, phaseDef.directionMaxDeg);
         }
-      } else if (engine.phaseDirectionAnchorDeg == null) {
-        engine.phaseDirectionAnchorDeg = state.weather.windDirection;
+      } else if (!isValidDirectionDeg(engine.phaseDirectionAnchorDeg)) {
+        // RELIABILITY PASS -- the live windDirection this used to fall
+        // back to unconditionally is itself not guaranteed valid at
+        // this exact moment (e.g. mid-recovery elsewhere); only use it
+        // if it actually is, and fall through the normal recovery
+        // chain otherwise, rather than ever assigning a second
+        // possibly-invalid value here.
+        engine.phaseDirectionAnchorDeg = Number.isFinite(state.weather.windDirection) ? state.weather.windDirection : recoverWindDirection(state);
       }
     } else {
       // PHASE 7 -- every ordinary open-ocean event (fairSailing,
@@ -3249,7 +3395,7 @@
       // unanchored one. 'driftSmall' phases still get their own
       // small per-tick wander on TOP of this (see advanceWeatherEngine,
       // just below) -- unchanged.
-      var ordinaryBase = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
+      var ordinaryBase = isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
       var ordinaryCandidate = normalizeDeg(ordinaryBase + (Math.random() - 0.5) * 2 * phaseDef.directionMaxDeg);
       // PHASE 7 -- the no-go backstop applies to every ordinary event
       // EXCEPT earlyRoughWeather, which (like majorStorm, handled in
@@ -3424,6 +3570,30 @@
       targets.condition = 'squall';
     } else {
       triggerSquallIfDue(state, phaseDef, now);
+    }
+
+    // RELIABILITY PASS -- this is the one place the live, authoritative
+    // w.windDirection is actually written each tick, so it's the most
+    // important chokepoint to guard: both the live value and whatever
+    // this phase/squall computed as its target are validated and, if
+    // needed, recovered HERE, before anything downstream (the stored
+    // target, the blend math, the no-go backstop) ever sees them.
+    // Recovering w.windDirection itself first (rather than skipping the
+    // tick) means a single bad target can never leave it stuck invalid
+    // even for one tick -- the blend simply continues from a good value
+    // from here on. This is what actually guarantees the invariant;
+    // normalizeDeg/angleDiff/signedAngleDiff's own validation elsewhere
+    // is a last-resort safety net on top of this, not the primary
+    // mechanism -- see nogoBackstopClearanceDeg's own notes for the
+    // concrete, confirmed bug this whole pass exists to catch and guard
+    // against recurring.
+    if (!Number.isFinite(w.windDirection)) {
+      warnInvalidWeatherAngle({ issue: 'live windDirection was non-finite entering the blend step', value: w.windDirection, event: engine.currentEvent, phase: engine.currentPhase });
+      w.windDirection = recoverWindDirection(state);
+    }
+    if (!Number.isFinite(targets.windDirection)) {
+      warnInvalidWeatherAngle({ issue: 'targetWindDirection was non-finite entering the blend step', value: targets.windDirection, event: engine.currentEvent, phase: engine.currentPhase });
+      targets.windDirection = recoverWindDirection(state);
     }
 
     engine.targetWindSpeed = targets.windSpeed;
@@ -4697,6 +4867,14 @@
     // (which side of the wind a heading falls on) and by the
     // real-weather blend (closing the gap the short way around the
     // compass).
+    // RELIABILITY PASS -- explicit input validation here too (not just
+    // relying on normalizeDeg's own), matching this file's other
+    // interpolation/diff helpers: both inputs must be finite before any
+    // angle math runs on them at all.
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      warnInvalidWeatherAngle({ issue: 'signedAngleDiff received a non-finite value', a: a, b: b });
+      return 0;
+    }
     var d = normalizeDeg(a - b);
     return d > 180 ? d - 360 : d;
   }
@@ -4993,7 +5171,21 @@
     [150, 0.8],    // BROAD REACH/RUNNING boundary
     [180, 0.72],   // dead run -- somewhat slower than a beam reach
   ];
+  // RELIABILITY PASS -- the single narrowest point every sailing-speed
+  // and auto-tack calculation in the file ultimately funnels through,
+  // so it's the right place for one last explicit guard right before
+  // wind direction reaches movement physics, on top of (not instead
+  // of) the validated blend step in advanceWeatherEngine and the
+  // load-time migration that between them should mean windFromDeg is
+  // always already valid by the time this runs. No state is available
+  // here to run the full recovery chain, so an invalid windFromDeg
+  // recovers to the same fixed emergency angle normalizeDeg itself
+  // falls back to.
   function pointOfSailFactor(headingDeg, windFromDeg) {
+    if (!Number.isFinite(windFromDeg)) {
+      warnInvalidWeatherAngle({ issue: 'pointOfSailFactor received a non-finite windFromDeg', headingDeg: headingDeg, windFromDeg: windFromDeg });
+      windFromDeg = EMERGENCY_FALLBACK_WIND_DEG;
+    }
     return lerpTable(angleDiff(headingDeg, windFromDeg), POINT_OF_SAIL_CURVE);
   }
 
@@ -5793,6 +5985,25 @@
   var DRIFT_WIND_FACTOR = 0.025;     // more wind pushes an unpowered hull a little faster over the ground
   var DRIFT_MAX_KT = 1.0;            // this is NOT propulsion — keep it small and capped
 
+  // RELIABILITY PASS (sailing-speed investigation) -- shared, always-on
+  // warning for a non-finite value anywhere in the speed-calculation
+  // chain, matching warnInvalidWeatherAngle's own established
+  // convention (this file has no separate "dev mode" flag -- an
+  // unconditional console.warn is invisible to an ordinary player who
+  // never opens devtools, but immediately visible during testing). This
+  // investigation found the ONLY real-world cause of a boat "stuck at
+  // 0" to be genuine, working, repairable system damage (DAMAGED sails/
+  // steering, autopilot off, dead battery) left unaddressed -- never a
+  // NaN or other corrupt intermediate value anywhere in this chain. No
+  // such case was ever actually observed across extensive testing. This
+  // guard exists purely as defense in depth against a future regression
+  // (e.g. a malformed curve edit), not because one was found here.
+  var __speedWarnCount = 0; // mirrors __warnCount's own convention, kept separate since this tracks a different subsystem
+  function warnInvalidSpeedValue(context) {
+    __speedWarnCount++;
+    console.warn('[SAILING SPEED ERROR]', context);
+  }
+
   function computeSailSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
     if (b.sailConfig === 'furled') return 0; // furled = no canvas up = no sail propulsion, full stop
@@ -5802,6 +6013,10 @@
       * sailConfigFactor(b.sailConfig, w.windSpeed);
     if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= THIRST_VERY) speed *= 0.9; // poor trim, wandering helm
     if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — asleep
+    if (!Number.isFinite(speed)) {
+      warnInvalidSpeedValue({ issue: 'computeSailSpeed produced a non-finite value', value: speed, windSpeed: w.windSpeed, windDirection: w.windDirection, heading: heading, sailConfig: b.sailConfig });
+      return 0; // never silently propagate NaN into computeBoatSpeed's own combination math below
+    }
     return Math.max(0, speed);
   }
 
@@ -5815,6 +6030,10 @@
     var windEffect = ((windAngle - 90) / 90) * clamp(w.windSpeed / 30, 0, 1) * 0.15;
     speed *= (1 + windEffect);
     if (c.watchState !== 'awake') speed *= 0.85; // unattended — same imprecision penalty as sailing unattended
+    if (!Number.isFinite(speed)) {
+      warnInvalidSpeedValue({ issue: 'computeEngineSpeed produced a non-finite value', value: speed, windSpeed: w.windSpeed, windDirection: w.windDirection, heading: heading });
+      return 0;
+    }
     return Math.max(0, speed);
   }
 
@@ -5866,6 +6085,21 @@
     // still ~0) — see SAIL_TRIM_PENALTY_FRACTION's own notes.
     if (state.nav.sailTrimState === 'needsTrim') sailSpeed *= (1 - SAIL_TRIM_PENALTY_FRACTION);
     var engineSpeed = computeEngineSpeed(state, heading);
+    // RELIABILITY PASS -- belt-and-suspenders re-check right before the
+    // two contributors combine, on top of (not instead of) each
+    // function's own validation above: sailSpeed in particular is
+    // still mutated once more by the trim penalty right above this,
+    // after its own source function already validated it, so this is
+    // the actual last point before either value feeds into the
+    // combination math below.
+    if (!Number.isFinite(sailSpeed)) {
+      warnInvalidSpeedValue({ issue: 'sailSpeed was non-finite entering computeBoatSpeed\u2019s combination step', value: sailSpeed });
+      sailSpeed = 0;
+    }
+    if (!Number.isFinite(engineSpeed)) {
+      warnInvalidSpeedValue({ issue: 'engineSpeed was non-finite entering computeBoatSpeed\u2019s combination step', value: engineSpeed });
+      engineSpeed = 0;
+    }
     var primary = Math.max(sailSpeed, engineSpeed);
     var secondary = Math.min(sailSpeed, engineSpeed);
     var propelled;
@@ -5895,6 +6129,16 @@
     // actually have through the water — see the sailing-speed curve's own
     // notes for why 0 true wind now genuinely means 0 STW, sail or power
     // alike, the moment nothing is actually propelling the boat).
+    // RELIABILITY PASS -- final guard on this function's own contract
+    // (always returns a finite, non-negative number): sailSpeed/engineSpeed
+    // are already validated above, so propelled should already be
+    // finite by construction, but this is the one chokepoint every
+    // caller in the file actually reads from, so it's worth guaranteeing
+    // outright rather than trusting every step in between forever.
+    if (!Number.isFinite(propelled)) {
+      warnInvalidSpeedValue({ issue: 'computeBoatSpeed\u2019s own propelled value was non-finite at the final step', value: propelled, sailSpeed: sailSpeed, engineSpeed: engineSpeed });
+      propelled = 0;
+    }
     return +Math.min(propelled, MAX_REALISTIC_SPEED_KT).toFixed(2);
 
   }
@@ -19528,6 +19772,59 @@
   }
 
 
+  // RELIABILITY PASS -- an old save can already have a corrupted
+  // direction value baked into localStorage from before this pass
+  // existed (NaN, which JSON silently serializes as null -- see
+  // warnInvalidWeatherAngle's own call sites for how that was
+  // confirmed), or any future bug could still do the same. This is the
+  // single point that guarantees every weather-direction field is
+  // valid before anything else in boot() -- the catch-up tick
+  // simulation, or an initial render -- ever reads one, so one corrupt
+  // old save can never permanently stall a voyage even if it predates
+  // every other fix in this pass. Must run after migrateProvisionsIfNeeded,
+  // which is what first guarantees w.engine and its direction fields
+  // exist at all on a save old enough to have predated them.
+  // null is left alone for prevailingWindDirectionDeg/stormDirectionDeg
+  // specifically -- that's their normal "not yet established" value,
+  // distinct from (and never confused with) an actually-corrupt
+  // non-finite one; recoverWindDirection's own chain already treats a
+  // null prevailingWindDirectionDeg as unusable and falls through
+  // correctly on its own.
+  // CRITICAL: this function's whole job is validating data that just
+  // came back from JSON.parse (a real load), where NaN always
+  // round-trips as the literal value null -- never NaN itself. The
+  // global isFinite() silently coerces null to 0 before testing it, so
+  // isFinite(null) is true: a bare isFinite() check here would let a
+  // genuinely corrupted (NaN-that-became-null) save straight through
+  // undetected, completely defeating this function's purpose -- the
+  // exact scenario confirmed by testing this against a real round-
+  // tripped save. Number.isFinite() never coerces, so it alone
+  // correctly treats null as invalid here; every check below uses it
+  // instead of the global function for exactly this reason.
+  function migrateWeatherDirectionIfNeeded(state) {
+    var w = state.weather, engine = w.engine;
+    if (!Number.isFinite(w.windDirection)) {
+      warnInvalidWeatherAngle({ issue: 'migration found a non-finite windDirection on load', value: w.windDirection });
+      w.windDirection = recoverWindDirection(state);
+    }
+    if (!Number.isFinite(engine.targetWindDirection)) {
+      warnInvalidWeatherAngle({ issue: 'migration found a non-finite targetWindDirection on load', value: engine.targetWindDirection });
+      engine.targetWindDirection = w.windDirection;
+    }
+    if (!Number.isFinite(engine.phaseDirectionAnchorDeg)) {
+      warnInvalidWeatherAngle({ issue: 'migration found a non-finite phaseDirectionAnchorDeg on load', value: engine.phaseDirectionAnchorDeg });
+      engine.phaseDirectionAnchorDeg = w.windDirection;
+    }
+    if (engine.prevailingWindDirectionDeg != null && !Number.isFinite(engine.prevailingWindDirectionDeg)) {
+      warnInvalidWeatherAngle({ issue: 'migration found a non-finite prevailingWindDirectionDeg on load', value: engine.prevailingWindDirectionDeg });
+      engine.prevailingWindDirectionDeg = null; // "not yet established" -- the engine re-rolls a real one itself the next time it needs one (see maybeRefreshPrevailingWindDirection)
+    }
+    if (engine.stormDirectionDeg != null && !Number.isFinite(engine.stormDirectionDeg)) {
+      warnInvalidWeatherAngle({ issue: 'migration found a non-finite stormDirectionDeg on load', value: engine.stormDirectionDeg });
+      engine.stormDirectionDeg = null; // safe even mid-storm -- see stormStrongSide's own migration notes just above for why nothing else needs to re-read this for an already-ongoing storm
+    }
+  }
+
   function boot() {
     var saved = loadGameState();
     if (!saved) {
@@ -19540,6 +19837,7 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateWeatherDirectionIfNeeded(GAME);
     migrateVesselLogIfNeeded(GAME);
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
