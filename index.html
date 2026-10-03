@@ -4284,6 +4284,22 @@
   // separate prose, and section 1's own "SYNOPSIS" is meant to read
   // as one coherent sentence or two, not a blow-by-blow.
   var EVENT_SYNOPSIS = {
+    // BUG FIX -- this entry was missing entirely, which is the root
+    // cause of FORECAST failing to open during the departure corridor
+    // (every fresh voyage's first ~20-30 game hours): synopsisTextFor
+    // indexed EVENT_SYNOPSIS.favorableDeparture (undefined) with
+    // ['sailing'], throwing a TypeError inside generateForecastSnapshot.
+    // That exception propagated all the way up through cmdMarineWeather
+    // to the computer-icon-hit click handler, which has no try/catch --
+    // clearTempView() had already hidden shipsComputerOverlayEl by that
+    // point, but marineWeatherOverlayEl never got unhidden (the throw
+    // happened before that line), and renderOptions/saveGameState never
+    // ran either. The player was left looking at whatever stale
+    // #output/#options content predated opening the computer --
+    // typically NAV STATION's own text -- which reads just like the
+    // computer shutting down, even though computerOn/the shutdown audio
+    // were never actually touched.
+    favorableDeparture: 'A favorable southerly wind is expected through the departure corridor.',
     fairSailing: 'High pressure dominates the route. Expect settled conditions.',
     freshWinds: 'A healthy pressure gradient is producing a good sailing breeze.',
     calm: 'Weak gradients across the route. Winds light and variable.',
@@ -4299,8 +4315,30 @@
     },
   };
 
+  // BUG FIX / RELIABILITY PASS -- shared, dev-visible warning for
+  // FORECAST recovering from bad data, same console.warn convention as
+  // warnInvalidWeatherAngle elsewhere in this file (no separate "dev
+  // mode" flag -- invisible to an ordinary player, immediately visible
+  // during testing). Used both by synopsisTextFor's own defensive
+  // fallback just below and by maybeRefreshForecastSnapshot's own
+  // malformed-snapshot recovery further down.
+  function warnForecastRecovery(context) {
+    console.warn('[FORECAST RECOVERY]', context);
+  }
+
+  // RELIABILITY PASS -- this is the exact lookup that threw for a
+  // missing favorableDeparture entry (see EVENT_SYNOPSIS's own notes
+  // above). That specific gap is filled now, but this stays defensive
+  // regardless -- a future event added to WEATHER_EVENTS without a
+  // matching EVENT_SYNOPSIS entry must never again be able to make
+  // FORECAST impossible to open; it should fall back to fairSailing's
+  // own generic line and warn, not throw.
   function synopsisTextFor(eventKey, phaseKey) {
     var entry = EVENT_SYNOPSIS[eventKey];
+    if (entry == null) {
+      warnForecastRecovery({ issue: 'synopsisTextFor found no EVENT_SYNOPSIS entry for event', eventKey: eventKey, phaseKey: phaseKey });
+      return EVENT_SYNOPSIS.fairSailing;
+    }
     if (typeof entry === 'string') return entry;
     return entry[phaseKey] || EVENT_SYNOPSIS.fairSailing;
   }
@@ -4378,6 +4416,49 @@
     };
   }
 
+  // BUG FIX -- buildOutlookPeriod used to report engine.targetWindDirection
+  // (the CURRENT live target) for every one of the three outlook
+  // periods, regardless of which future phase a given period's own
+  // segment actually projects to. For an event whose direction
+  // genuinely moves phase to phase (majorStorm's approach -> building
+  // -> peak -> easing -> clearing, a real directional arc -- see
+  // beginPhase's own majorStorm branch), this silently flattened every
+  // period onto today's direction even when a later period's own known
+  // phase will actually be blowing from somewhere meaningfully
+  // different.
+  //
+  // Mirrors beginPhase's own direction-anchor logic exactly, never a
+  // separate/approximate model: majorStorm's approach/building both
+  // target engine.stormDirectionDeg directly (fixed once at beginEvent,
+  // so it's already fully known even many phases ahead); peak targets
+  // that same center (the real roll adds its own small, bounded random
+  // wobble on top -- not worth reporting as a DIFFERENT compass label
+  // from approach/building here, matching section 9's own "don't add
+  // fake precision"); easing/clearing gradually hand back toward the
+  // stable background prevailingWindDirectionDeg, exactly the same
+  // formula beginPhase itself uses. Every other event's phases all draw
+  // their own anchor from that SAME stable prevailingWindDirectionDeg
+  // center regardless of which phase (see beginPhase's own 'else'
+  // branch) -- so for those, prevailingWindDirectionDeg is already the
+  // best known estimate for a phase that hasn't rolled its own random
+  // offset yet, and is what the CURRENT phase's own anchor was drawn
+  // from too.
+  function projectWindDirectionForSegment(state, segment) {
+    var engine = state.weather.engine;
+    if (segment.eventKey === engine.currentEvent && segment.phaseKey === engine.currentPhase) {
+      return engine.targetWindDirection; // the current phase's own real, live target -- exact, no projection needed
+    }
+    if (segment.eventKey === 'majorStorm') {
+      var stormDir = isValidDirectionDeg(engine.stormDirectionDeg) ? engine.stormDirectionDeg : engine.targetWindDirection;
+      if (segment.phaseKey === 'approach' || segment.phaseKey === 'building' || segment.phaseKey === 'peak') return stormDir;
+      var base = isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : stormDir;
+      var returnFraction = segment.phaseKey === 'easing' ? 0.5 : 1.0; // clearing
+      var delta = signedAngleDiff(base, stormDir);
+      return normalizeDeg(stormDir + delta * returnFraction);
+    }
+    return isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : engine.targetWindDirection;
+  }
+
   // Precursor warning language for a guarantee that hasn't fired yet,
   // driven by Phase 3's own guaranteeUrgency -- real, current state
   // (how close the voyage is to a window whose guarantee is still
@@ -4442,7 +4523,7 @@
     var errorKt = windErrorKt || 0;
     var windLow = Math.max(0, band.windLow + errorKt);
     var windHigh = Math.max(windLow + 5, band.windHigh + errorKt); // keep at least the original band width even after the shift
-    var windDirText = compassPoint(engine.targetWindDirection);
+    var windDirText = compassPoint(projectWindDirectionForSegment(state, segment));
     lines.windLine = windDirText + ' ' + Math.round(windLow) + ' TO ' + Math.round(windHigh) + ' KT';
     lines.seasLine = band.seaLow + ' TO ' + band.seaHigh + ' FT';
     lines.weatherLine = FORECAST_CONDITION_WORDS[band.condition] || FORECAST_CONDITION_WORDS.overcast;
@@ -4559,17 +4640,86 @@
     };
   }
 
+  // ERROR SAFETY -- shape-only validation for an EXISTING snapshot
+  // (one already sitting in a save), never the trigger for generating
+  // one. Deliberately loose about content (a 'low'-confidence period's
+  // own windLine/seasLine/weatherLine are legitimately null -- see
+  // buildOutlookPeriod's own notes -- and routeComparison is
+  // legitimately null whenever buildRouteComparison had nothing to
+  // compare) and strict only about the STRUCTURE every renderer
+  // actually depends on: a bad/migrated snapshot missing or
+  // mis-shaping any of this would otherwise throw inside
+  // renderMarineWeatherBody itself, well past the point
+  // maybeRefreshForecastSnapshot could have caught it.
+  function isValidForecastSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return false;
+    if (!Number.isFinite(snapshot.issuedAt)) return false;
+    if (typeof snapshot.synopsis !== 'string') return false;
+    if (!Array.isArray(snapshot.periods) || snapshot.periods.length !== 3) return false;
+    if (!snapshot.periods.every(function (p) { return p && typeof p.label === 'string'; })) return false;
+    if (snapshot.routeComparison != null && (typeof snapshot.routeComparison.onTrackLine !== 'string' || typeof snapshot.routeComparison.offTrackLine !== 'string')) return false;
+    return true;
+  }
+
+  // ERROR SAFETY -- the one guaranteed-safe snapshot this file can
+  // always produce with no dependency on live engine/arc state at all,
+  // used only if generateForecastSnapshot itself throws (see
+  // maybeRefreshForecastSnapshot's own try/catch) -- something no
+  // currently-known bug actually does any more (the one real cause,
+  // EVENT_SYNOPSIS's missing favorableDeparture entry, is fixed; see
+  // its own notes), but FORECAST must never be able to become
+  // unopenable again regardless of what future change might introduce.
+  // Shaped to pass isValidForecastSnapshot itself, same as any real one.
+  function fallbackForecastSnapshot(now) {
+    return {
+      issuedAt: now,
+      wasUpdated: false,
+      synopsis: 'Forecast data is temporarily unavailable. Try again shortly.',
+      periods: [
+        { label: 'NEXT 12 HOURS', warning: null, windLine: null, seasLine: null, weatherLine: null, note: 'Forecast data is temporarily unavailable.' },
+        { label: '12 TO 24 HOURS', warning: null, windLine: null, seasLine: null, weatherLine: null, note: 'Forecast data is temporarily unavailable.' },
+        { label: '24 TO 48 HOURS', warning: null, windLine: null, seasLine: null, weatherLine: null, note: 'Forecast data is temporarily unavailable.' },
+      ],
+      routeComparison: null,
+    };
+  }
+
   // Regenerates state.weather.forecastSnapshot only once every
   // FORECAST_UPDATE_INTERVAL_HOURS of voyage time -- called from
   // renderMarineWeatherBody right before it reads the snapshot, so a
   // new one is only ever generated the moment the player actually
   // opens the screen AND an update happens to be due, never on a
   // background timer independent of the player looking.
+  // ERROR SAFETY -- an EXISTING snapshot (e.g. from a save made by an
+  // older or buggy build) is now validated by SHAPE, not just age,
+  // before being trusted; a malformed one is discarded and rebuilt
+  // immediately regardless of how fresh its own issuedAt claims to be,
+  // with a dev warning so recovery is visible during testing. The
+  // generation call itself is wrapped too -- if generateForecastSnapshot
+  // throws for any reason (a genuinely unforeseen future bug, not
+  // anything currently known), this falls back to
+  // fallbackForecastSnapshot rather than letting the exception
+  // propagate up into the computer-icon-hit click handler (see this
+  // task's own section 2: that handler has no try/catch of its own,
+  // which is exactly how the EVENT_SYNOPSIS bug made FORECAST
+  // unopenable in the first place). Never touches anything else in
+  // state -- weather engine, voyage clock, position, log, computer
+  // state, and the forecast's own FORECAST_UPDATE_INTERVAL_HOURS
+  // cadence are all untouched by this recovery path.
   function maybeRefreshForecastSnapshot(state) {
     var existing = state.weather.forecastSnapshot;
     var now = state.meta.voyageMinutes;
+    if (existing != null && !isValidForecastSnapshot(existing)) {
+      warnForecastRecovery({ issue: 'maybeRefreshForecastSnapshot found a malformed forecastSnapshot', value: existing });
+      existing = null;
+    }
     if (existing && (now - existing.issuedAt) < FORECAST_UPDATE_INTERVAL_HOURS * 60) return;
-    state.weather.forecastSnapshot = generateForecastSnapshot(state, !!existing);
+    try {
+      state.weather.forecastSnapshot = generateForecastSnapshot(state, !!existing);
+    } catch (err) {
+      warnForecastRecovery({ issue: 'generateForecastSnapshot threw', error: err && err.message });
+      state.weather.forecastSnapshot = fallbackForecastSnapshot(now);
+    }
   }
 
   /* ----------------------------------------------------------------
