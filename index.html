@@ -1111,7 +1111,8 @@
         seaState: 2,
         condition: 'overcast',
         trend: 'steady', // derived each tick from the active phase's own trendHint -- see advanceWeatherEngine/PHASE 2's own notes
-        temperatureF: 56, // a plausible Shilshole-in-fall reading; see estimateTemperatureF for the offline fallback as the boat moves
+        temperatureF: 44, // placeholder -- immediately overwritten below (right after this object literal closes, before cabinTemperatureF copies it) with currentOutsideTemperatureF's own real computation; kept close to that real 0%-progress value here just so this literal reads sensibly on its own
+        tempArcMigrated: true, // a fresh voyage never needs the one-time immediate-reset migrateTemperatureArcIfNeeded does for older saves -- see its own notes
         // PHASE 2 -- EVENT-DRIVEN WEATHER ENGINE's own state. See the
         // WEATHER ENGINE section (near advanceWeatherEngine) for the
         // full system; this is just the persisted shape. A fresh
@@ -1414,6 +1415,14 @@
       pendingChoice: null,
       log: [],
     };
+    // TEMPERATURE ARC -- replaces the placeholder above with the real,
+    // formula-derived outside temperature for this exact departure
+    // moment (passage progress ~0%, the scripted departure condition/
+    // wind above, and the real time of day the player actually
+    // launched at). Must run before the cabin-temperature copy just
+    // below, so the cabin starts at the CORRECTED ambient value, not
+    // the placeholder.
+    state.weather.temperatureF = currentOutsideTemperatureF(state);
     state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see syncCabinTemperature for the ongoing drift
     state.boat.cabinTemperatureLastSyncedAt = 0; // currentGameMinutes() is 0 here too (voyageMinutes and leftoverMinutes both start at 0)
     // NIGHT / LOW-LIGHT START -- a voyage beginning anywhere the
@@ -2579,13 +2588,84 @@
   // existing voyage gets rebased to.
   var FOOD_INVENTORY_VERSION = 5;
 
-  // Fallback temperature from latitude alone, when no real-world reading
-  // is available (or ever arrives) — cool in the mid-40s near Shilshole,
-  // warming to tropical as the boat approaches Kaua'i, so temperature
-  // still tracks the boat's own progress with zero connectivity.
-  function estimateTemperatureF(lat) {
-    var t = clamp((47.7 - lat) / (47.7 - 22.0), 0, 1); // 0 at Shilshole's latitude, 1 at Kaua'i's
-    return 56 + t * 26; // ~56F at the dock, ~82F approaching Kaua'i
+  /* --------------------------------------------------------------
+     TEMPERATURE ARC -- outside/environment temperature only (never
+     cabin temperature, which has its own separate model fed BY this
+     one -- see syncCabinTemperature). Driven by PASSAGE PROGRESS
+     (passageProgressPercent), not latitude and not a fixed voyage
+     day, so this works identically for an 18-day crossing, a 30-day
+     crossing, or a boat delayed by repairs: whatever the voyage's
+     actual pace, temperature always reflects how far along it
+     genuinely is.
+     -------------------------------------------------------------- */
+  // Control points land inside every one of the stated bands (0-10%
+  // 44-50F, 10-30% 46-55F, 30-50% 50-60F, 50-70% 56-66F, 70-90%
+  // 62-72F, 90-100% 68-78F) -- each interior point is the average of
+  // the band ending there and the band beginning there, smoothing the
+  // small overlaps between adjacent bands into one continuous curve
+  // that still honors every number given, rather than picking one
+  // band arbitrarily at each seam. lerpTable (shared with
+  // SAIL_SPEED_CURVE/POINT_OF_SAIL_CURVE elsewhere) gives the same
+  // smooth piecewise-linear shape those use -- no hard jump at any
+  // percentage boundary.
+  var TEMPERATURE_PROGRESS_CURVE = [
+    [0, 44], [10, 48], [30, 52.5], [50, 58], [70, 64], [90, 70], [100, 78],
+  ];
+  function baselineTemperatureForProgress(progress) {
+    return lerpTable(progress, TEMPERATURE_PROGRESS_CURVE);
+  }
+
+  // Condition-based offset layered on top of the progress baseline.
+  // stormChill just below (existing, wind-speed driven) already covers
+  // "rough/cold system reads several degrees cooler"; this covers what
+  // wind speed alone can't distinguish -- rain/frontal vs clear/
+  // settled. clear reads warmer ("clearing/more settled conditions"),
+  // overcast is the unmodified baseline ("near baseline" / ordinary
+  // fair sailing), rain reads cooler ("rain/frontal conditions"),
+  // squall cooler still -- stacking with stormChill so a squall inside
+  // a storm's own peak genuinely reads "several degrees cooler," not
+  // from one oversized constant tuned just for that one case.
+  var WEATHER_TEMPERATURE_CONDITION_OFFSET_F = {
+    clear: 1.5,
+    overcast: 0,
+    rain: -2.5,
+    squall: -3.5,
+  };
+
+  // Modest day/night variation -- restrained, marine-appropriate, never
+  // the wide inland-style swing a land-based model would use. Reuses
+  // the SAME game-clock reconstruction naturalLightBrightness already
+  // uses (departedAt + voyageMinutes) rather than a second, parallel
+  // time system. Peaks in the afternoon (~15:00 local game time),
+  // troughs before dawn (~03:00).
+  var DAY_NIGHT_TEMPERATURE_AMPLITUDE_F = 2.5; // +/-2.5F -- a 5F full swing trough-to-peak
+  function dayNightTemperatureOffsetF(state) {
+    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
+    var hourOfDay = d.getHours() + d.getMinutes() / 60;
+    return Math.sin((hourOfDay - 9) / 24 * 2 * Math.PI) * DAY_NIGHT_TEMPERATURE_AMPLITUDE_F;
+  }
+
+  // The one shared formula for "what should outside temperature be
+  // right NOW" -- baseline (passage progress) + stormChill (wind
+  // speed) + condition offset + day/night, using only state that
+  // already exists (no parallel weather or time model of any kind).
+  // windSpeedForChill defaults to the LIVE state.weather.windSpeed
+  // (the only wind-speed reading that exists outside the per-tick
+  // blend machinery -- used by the one-time immediate-reset migration
+  // below); advanceWeatherEngine's own ongoing blend step instead
+  // passes the current phase's own targets.windSpeed, exactly
+  // matching what it already did before this pass. Both the ongoing
+  // ambient-temperature TARGET and the one-time immediate reset derive
+  // their number from this exact same function, so they can never
+  // disagree about what "correct" means for a given passage progress/
+  // weather/time combination.
+  function currentOutsideTemperatureF(state, windSpeedForChill) {
+    if (windSpeedForChill == null) windSpeedForChill = state.weather.windSpeed;
+    var baseline = baselineTemperatureForProgress(passageProgressPercent(state));
+    var stormChill = clamp((windSpeedForChill - 15) / 25, 0, 1) * 4; // up to ~4F cooler at the strongest winds -- unchanged mechanism from before this pass
+    var conditionOffset = WEATHER_TEMPERATURE_CONDITION_OFFSET_F[state.weather.condition] || 0;
+    var dayNightOffset = dayNightTemperatureOffsetF(state);
+    return baseline - stormChill + conditionOffset + dayNightOffset;
   }
 
   /* ================================================================
@@ -3637,14 +3717,15 @@
 
     w.trend = engine.squall ? 'building' : phaseDef.trendHint;
 
-    // Temperature: the existing latitude-based pull (unchanged
-    // mechanism from before this phase), plus a gentle extra pull
-    // toward whatever this phase's own windSpeed target implies (rough
-    // weather reads a little cooler) -- section 4's own "temperature
-    // tendency if currently used."
-    var tempBaseline = estimateTemperatureF(state.nav.lat);
-    var stormChill = clamp((targets.windSpeed - 15) / 25, 0, 1) * 4; // up to ~4F cooler at the strongest winds
-    var tempTarget = tempBaseline - stormChill;
+    // TEMPERATURE ARC -- target is the shared currentOutsideTemperatureF
+    // formula (passage-progress baseline + this phase's own windSpeed
+    // target for stormChill + condition offset + day/night), passing
+    // targets.windSpeed specifically so the chill pull anticipates
+    // where this phase is actually headed, exactly as the old
+    // windSpeed-driven pull did before this pass. The blend toward
+    // that target (gradual, with its own texture noise) is unchanged
+    // from before -- only what the target itself means has changed.
+    var tempTarget = currentOutsideTemperatureF(state, targets.windSpeed);
     w.temperatureF = w.temperatureF
       + (tempTarget - w.temperatureF) * (1 - Math.pow(1 - WEATHER_BLEND_TEMP_PER_HOUR, hours))
       + (Math.random() - 0.5) * WEATHER_TEXTURE_TEMP_F_PER_HOUR * hours;
@@ -19527,7 +19608,15 @@
     delete b.exteriorLightsOn;
     if (b.accessoryOn === undefined) b.accessoryOn = false;
     if (b.computerOn === undefined) b.computerOn = false;
-    if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = state.weather.temperatureF;
+    // A save old enough to predate cabin temperature entirely also
+    // predates the temperature arc (migrateTemperatureArcIfNeeded,
+    // called from boot() right after this function) -- so
+    // state.weather.temperatureF here could still be this save's own
+    // stale pre-arc reading. Deriving directly from the same shared
+    // formula, rather than copying that still-uncorrected field,
+    // guarantees the cabin starts at the CORRECTED ambient value
+    // either way, regardless of which migration order touches it.
+    if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = currentOutsideTemperatureF(state);
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
     if (b.hatchOpen === undefined) b.hatchOpen = false;
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
@@ -19599,12 +19688,14 @@
     if (!c.lastRoutineAt) {
       c.lastRoutineAt = { wash: null, dress: null, dishes: null, read: null };
     }
-    // Real-world weather anchor and displayed temperature are new too. A
-    // save that predates them just means "no real data yet" — identical
-    // to never having connectivity, which the whole system already has
-    // to handle gracefully.
+    // Real-world weather anchor is new too. A save that predates it
+    // just means "no real data yet" — identical to never having
+    // connectivity, which the whole system already has to handle
+    // gracefully. (temperatureF itself -- defined or not -- is fully
+    // handled by migrateTemperatureArcIfNeeded, called right after this
+    // function from boot(), which derives a correct value either way;
+    // nothing here needs to pre-fill it.)
     var w = state.weather;
-    if (w.temperatureF === undefined) w.temperatureF = estimateTemperatureF(state.nav.lat);
     if (!w.realWx) {
       w.realWx = {
         fetchedRealMs: null, lat: null, lon: null,
@@ -19726,6 +19817,34 @@
     }
   }
 
+  // TEMPERATURE ARC -- the current save may still contain a stale
+  // outside temperature from before this system existed (the old
+  // latitude-only estimate, or simply whatever value was last blended
+  // under that model). Runs once per save (guarded by
+  // weather.tempArcMigrated, same pattern as
+  // migrateCoastalWaypointIndexIfNeeded's own coastalRouteMigrated
+  // above), immediately recomputing the CURRENT outside temperature
+  // from this save's own current passage progress/weather/time -- not
+  // a gradual blend toward the new model, which would leave a stale
+  // reading visible for hours. Only ever touches
+  // state.weather.temperatureF: cabin temperature, heater state,
+  // weather event, wind, rain, sea state, voyage progress, the game
+  // clock, the log, and position are all left completely untouched
+  // (see syncCabinTemperature for how cabin temperature keeps reacting
+  // to this corrected outside value on its own, via its own unchanged
+  // mechanics). Called from boot(), right after
+  // migrateProvisionsIfNeeded (which is what guarantees state.weather
+  // itself is fully settled first) and before catchUpFromRealTime, so
+  // the correction is in place before any offline catch-up ticks or
+  // the first render ever happen -- the player sees a believable value
+  // immediately, never the old stale one even for a moment.
+  function migrateTemperatureArcIfNeeded(state) {
+    var w = state.weather;
+    if (w.tempArcMigrated) return;
+    w.tempArcMigrated = true;
+    w.temperatureF = currentOutsideTemperatureF(state);
+  }
+
   // A handful of automatic sequences (the fishing bite prompt, the
   // fishing reel-in narration, the moment right after committing to
   // RESCUE before its own ending text begins) deliberately set
@@ -19837,6 +19956,7 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateTemperatureArcIfNeeded(GAME);
     migrateWeatherDirectionIfNeeded(GAME);
     migrateVesselLogIfNeeded(GAME);
     migrateChartTrackIfNeeded(GAME);
