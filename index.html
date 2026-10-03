@@ -928,8 +928,8 @@
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:19.236%; top:14.258%; width:19.375%; height:9.414%;">
-        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">WEATHER</span>
-        <button type="button" class="computer-icon-hit" data-app="marineWeather" aria-label="WEATHER"
+        <span class="computer-icon-label" style="left:28.924%; top:26.641%;">FORECAST</span>
+        <button type="button" class="computer-icon-hit" data-app="marineWeather" aria-label="FORECAST"
                 style="left:13.403%; top:12.852%; width:31.389%; height:16.758%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
@@ -2666,6 +2666,30 @@
     var conditionOffset = WEATHER_TEMPERATURE_CONDITION_OFFSET_F[state.weather.condition] || 0;
     var dayNightOffset = dayNightTemperatureOffsetF(state);
     return baseline - stormChill + conditionOffset + dayNightOffset;
+  }
+
+  // BAROMETER (NAV STATION INSTRUMENTS) -- no numeric atmospheric
+  // pressure exists anywhere in the simulation (only flavor text like
+  // "high pressure dominates" in the event synopses). Rather than add a
+  // second, independent weather model with its own persisted state and
+  // blend/tick logic, pressure is a pure, stateless derivation from the
+  // SAME state.weather.windSpeed every other current-conditions reading
+  // already uses -- nothing new to save, nothing that can drift out of
+  // sync with the actual weather engine. This also means it's
+  // automatically "coherent with the active event" without encoding any
+  // per-event-name logic of its own: windSpeed already rises through
+  // earlyRoughWeather/majorStorm's own approach->peak phases and falls
+  // through easing->clearing, so the derived pressure falls and rises
+  // right along with it, matching the task's own FAIR/HIGH->higher,
+  // APPROACHING LOW/STORM->falling, PEAK->lowest, CLEARING->rising
+  // behavior for free. Display-only: nothing reads this value back into
+  // gameplay (sailing, repairs, damage, etc.), matching the explicit
+  // "do not let pressure affect unrelated gameplay" requirement.
+  var BAROMETRIC_PRESSURE_WIND_CURVE = [
+    [2, 1026], [8, 1022], [16, 1015], [25, 1005], [35, 992], [45, 982],
+  ];
+  function currentBarometricPressureMb(state) {
+    return Math.round(lerpTable(state.weather.windSpeed, BAROMETRIC_PRESSURE_WIND_CURVE));
   }
 
   /* ================================================================
@@ -11315,6 +11339,16 @@
     return SEA_STATE_WAVE_HEIGHT_FT[clamp(n, 0, 6)];
   }
 
+  // NAV STATION INSTRUMENTS' own player-facing SEAS range -- the SAME
+  // low/high derivation the forecast's own outlook periods already use
+  // (see buildOutlookPeriod's seaLow/seaHigh just above), reused here
+  // rather than a second, differently-tuned range formula, so a player
+  // comparing the CURRENT reading in INSTRUMENTS against what FORECAST
+  // predicted for this same period sees numbers built the same way.
+  function seaHeightRangeFt(n) {
+    return { low: seaStateWaveHeightFt(n), high: seaStateWaveHeightFt(clamp(n + 1, 0, 6)) + 1 };
+  }
+
   function describeLevel(value, tiers) {
     for (var i = 0; i < tiers.length; i++) {
       if (value <= tiers[i].max) return tiers[i].text;
@@ -12057,28 +12091,29 @@
   }
 
   /* ============================================================
-     MARINE WEATHER -- SHIP'S COMPUTER's weather instrument.
+     FORECAST (formerly MARINE WEATHER) -- SHIP'S COMPUTER's
+     future-conditions app, renderMarineWeatherBody below.
      ------------------------------------------------------------
-     PHASE 1: this used to read state.weather.realWx, a live
-     Open-Meteo cache, entirely separate from the simulated weather
-     actually driving the boat. That real-world fetch has been removed
-     (see the PHASE 1 note above fetchRealWeather's old location);
-     this screen now shows the SAME simulated windDirection/windSpeed/
-     condition/temperatureF the rest of the game already reads, via
-     appendMarineWeatherSimulatedStats below -- current conditions
-     only, never a forecast period, since those always had a real
-     observation for the moment, not interpolated/synthetic data
-     dressed up as one. FORECAST below is a plain, honest UNAVAILABLE
-     placeholder for the same reason -- see that function's own
-     notes. SEAS/SWELL/VISIBILITY/PRESSURE remain absent, same as
-     before.
+     INFORMATION-ARCHITECTURE PASS: this screen used to open with a
+     live current-conditions block (OBSERVED/POSITION/WIND/WEATHER/
+     TEMPERATURE, via a now-removed appendMarineWeatherSimulatedStats)
+     before the forecast itself -- PHASE 1's replacement for an even
+     older live Open-Meteo cache. Current conditions now live only in
+     NAV STATION's own INSTRUMENTS section (instrumentsStatusRows),
+     so this app is FORECAST-only from here down: SYNOPSIS, the cached
+     outlook periods (ISSUED/VALID UNTIL, WIND/SEAS/WEATHER per
+     period), and ROUTE COMPARISON -- never a duplicate of what
+     INSTRUMENTS already shows live. appendMarineWeatherStat below is
+     still shared with those outlook periods even though its own
+     current-conditions caller is gone.
      -------------------------------------------------------------- */
 
   // One "LABEL value" row, exactly like VESSEL LOG's own .vessel-log-
-  // stat rows -- shared by WIND/WEATHER/TEMPERATURE (via
-  // appendMarineWeatherSimulatedStats below), which keep this grid
-  // treatment deliberately. UPDATED/POSITION moved off it to plain
-  // "LABEL: value" text instead -- see appendPlainLine just below.
+  // stat rows -- used by the outlook periods' own WIND/SEAS/WEATHER
+  // lines below (see renderMarineWeatherBody). UPDATED/POSITION used
+  // to sit on this same grid treatment too, before the information-
+  // architecture pass that moved current conditions to INSTRUMENTS and
+  // retired this screen's own live block entirely.
   function appendMarineWeatherStat(container, label, value) {
     var row = document.createElement('div');
     row.className = 'vessel-log-stat';
@@ -12123,18 +12158,6 @@
     container.appendChild(p);
   }
 
-  // WIND/WEATHER/TEMPERATURE, read directly from state.weather --
-  // PHASE 1's replacement for the old real-observation version. These
-  // three fields are always present on the simulation (driftWeather
-  // never leaves any of them unset), so unlike the old real-data
-  // version this never needs a NO DATA/UNAVAILABLE branch of its own.
-  function appendMarineWeatherSimulatedStats(container, weather) {
-    var windText = compassPoint(weather.windDirection) + ' ' + Math.round(weather.windSpeed) + ' KT';
-    appendMarineWeatherStat(container, 'WIND', windText);
-    appendMarineWeatherStat(container, 'WEATHER', weather.condition.toUpperCase());
-    appendMarineWeatherStat(container, 'TEMPERATURE', Math.round(weather.temperatureF) + '\u00B0F');
-  }
-
   // Opened only from SHIP'S COMPUTER's own menu, replacing the old
   // external WEATHER MAP link -- same architecture as cmdVesselLog
   // (plain mouse click, builds its scrollable body fresh every open,
@@ -12155,32 +12178,20 @@
     var body = marineWeatherBodyEl;
     body.innerHTML = '';
 
+    // INFORMATION-ARCHITECTURE PASS -- this screen used to open with
+    // OBSERVED/POSITION and the live simulated WIND/WEATHER/TEMPERATURE
+    // block (appendMarineWeatherSimulatedStats) before the forecast
+    // itself. Current conditions now live only in NAV STATION's own
+    // INSTRUMENTS section (see instrumentsStatusRows) -- this app is
+    // FORECAST-only from here on: future conditions, never a duplicate
+    // of what INSTRUMENTS already shows live.
     var title = document.createElement('p');
     title.className = 'line heading-label';
-    title.textContent = 'MARINE WEATHER';
+    title.textContent = 'FORECAST';
     body.appendChild(title);
     var titleGap = document.createElement('p');
     titleGap.className = 'gap';
     body.appendChild(titleGap);
-
-    appendPlainLine(body, 'OBSERVED: ' + currentClockHHMM());
-    var fix = currentLatLon(state);
-    appendPlainLine(body, 'POSITION: ' + formatLatLon(fix.lat, fix.lon));
-
-    var conditionsGap = document.createElement('p');
-    conditionsGap.className = 'gap';
-    body.appendChild(conditionsGap);
-
-    // CURRENT CONDITIONS -- no heading of its own (matches this
-    // screen's own prior layout). PHASE 1: state.weather's own
-    // simulated fields directly -- the SAME values actually driving
-    // the boat -- rather than a separate real-world cache; see this
-    // section's own header comment above. Deliberately stays LIVE
-    // (OBSERVED just above, not tied to the forecast's own ISSUED/
-    // VALID cadence below) -- the boat's own instruments always read
-    // true, same as a real wind gauge, never "stale" the way an
-    // issued forecast report can be.
-    appendMarineWeatherSimulatedStats(body, state.weather);
 
     // PHASE 6 -- the forecast itself (SYNOPSIS, outlook, route
     // comparison) now reads from a FROZEN snapshot, only regenerated
@@ -12191,9 +12202,6 @@
     var snapshot = state.weather.forecastSnapshot;
     var validUntilMinutes = snapshot.issuedAt + FORECAST_UPDATE_INTERVAL_HOURS * 60;
 
-    var forecastMetaGap = document.createElement('p');
-    forecastMetaGap.className = 'gap';
-    body.appendChild(forecastMetaGap);
     appendPlainLine(body, 'ISSUED: ' + voyageMinutesToClockHHMM(state, snapshot.issuedAt));
     appendPlainLine(body, 'VALID UNTIL: ' + voyageMinutesToClockHHMM(state, validUntilMinutes));
     if (snapshot.wasUpdated) appendPlainLine(body, '(Updated from previous report)');
@@ -13041,12 +13049,46 @@
     state.pendingChoice = { id: 'cabin-menu', options: options };
   }
 
+  // NAV STATION INSTRUMENTS -- live onboard readings (information-
+  // architecture pass: separates CURRENT CONDITIONS, measured here,
+  // from FUTURE CONDITIONS, which now live only in SHIP'S COMPUTER's
+  // own FORECAST app). Rebuilt fresh every time cmdNavStation runs
+  // (never a cached or separately-tracked value), from the exact same
+  // simulated fields actually driving the boat -- the same position/
+  // wind/temperature/sea-state readings every other current-conditions
+  // display in the game already reads, never a second value of any of
+  // them, and never anything pulled from the forecast snapshot.
+  // BAROMETER is the one genuinely new reading -- see
+  // currentBarometricPressureMb's own notes on why it's a pure
+  // derivation from windSpeed rather than a second weather model.
+  // Returns one heading row plus six data rows, inserted as their own
+  // group (see cmdNavStation below) between SOLACE HANDBOOK and SHIP'S
+  // COMPUTER -- a plain, non-interactive block sitting among the
+  // screen's buttons, same shape as option.status elsewhere.
+  function instrumentsStatusRows(state) {
+    var w = state.weather;
+    var fix = currentLatLon(state);
+    var seaRange = seaHeightRangeFt(w.seaState);
+    var readings = [
+      ['POSITION', formatLatLon(fix.lat, fix.lon)],
+      ['WIND FROM', compassPoint(w.windDirection)],
+      ['WIND', Math.round(w.windSpeed) + ' KT'],
+      ['OUTSIDE TEMP', Math.round(w.temperatureF) + '\u00B0F'],
+      ['BAROMETER', currentBarometricPressureMb(state) + ' MB'],
+      ['SEAS', seaRange.low + '\u2013' + seaRange.high + ' FT'],
+    ];
+    return [{ heading: true, text: 'INSTRUMENTS' }].concat(readings.map(function (r) {
+      return { dataRow: true, label: r[0], value: r[1], widthCls: 'data-row-md' };
+    }));
+  }
+
   // NAV STATION -- the boat's operational center: cabin/power status at
   // a glance, the electrical panel embedded directly (no heading of its
-  // own -- the controls are self-explanatory), navigation information,
-  // then inventory/status. Groups are separated by blank vertical
-  // spacing ALONE (groupedOptions' plain invisible spacer) -- no
-  // horizontal rule of any kind anywhere on this screen.
+  // own -- the controls are self-explanatory), then SOLACE HANDBOOK,
+  // live INSTRUMENTS readings (instrumentsStatusRows above), SHIP'S
+  // COMPUTER, and inventory/status. Groups are separated by blank
+  // vertical spacing ALONE (groupedOptions' plain invisible spacer) --
+  // no horizontal rule of any kind anywhere on this screen.
   function cmdNavStation(state) {
     var b = state.boat;
     printBlank();
@@ -13114,10 +13156,9 @@
 
     var options = groupedOptions([
       electricalRows,
-      [
-        { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' },
-        { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' },
-      ],
+      [{ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
+      instrumentsStatusRows(state),
+      [{ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }],
       [
         { label: 'INVENTORY', action: 'cmd:inventory' },
         { label: 'STATUS', action: 'cmd:status' },
@@ -18460,6 +18501,39 @@
         statusDiv.className = 'option-status';
         statusDiv.textContent = opt.text;
         optionsEl.appendChild(statusDiv);
+        return;
+      }
+      if (opt.heading) {
+        // NAV STATION INSTRUMENTS' own section title (the one place
+        // #options needs a heading sitting among its rows rather than
+        // up in #output) -- .option-status for this panel's own
+        // padding/font-size rhythm, plus .heading-label (unchanged,
+        // reused verbatim from every other screen's section headings)
+        // for its distinct wider letter-spacing. Same non-interactive
+        // <div>, same cmdNavStation-rebuilds-it-fresh-every-call
+        // pattern as opt.status above.
+        var headingDiv = document.createElement('div');
+        headingDiv.className = 'option-status heading-label';
+        headingDiv.textContent = opt.text;
+        optionsEl.appendChild(headingDiv);
+        return;
+      }
+      if (opt.dataRow) {
+        // NAV STATION INSTRUMENTS' own live readings (POSITION/WIND
+        // FROM/WIND/OUTSIDE TEMP/BAROMETER/SEAS) -- the EXACT same
+        // .data-row/-md/-lg two-span grid printDataRow builds for
+        // #output, just appended to #options instead, so these rows
+        // line up identically to every other label/value readout in
+        // the game rather than introducing a second visual style.
+        var dataRowDiv = document.createElement('div');
+        dataRowDiv.className = 'data-row' + (opt.widthCls ? ' ' + opt.widthCls : '');
+        var dataRowLabel = document.createElement('span');
+        dataRowLabel.textContent = opt.label;
+        var dataRowValue = document.createElement('span');
+        dataRowValue.textContent = opt.value;
+        dataRowDiv.appendChild(dataRowLabel);
+        dataRowDiv.appendChild(dataRowValue);
+        optionsEl.appendChild(dataRowDiv);
         return;
       }
       var btn = document.createElement('button');
