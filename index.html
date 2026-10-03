@@ -1260,7 +1260,7 @@
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
-        hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears heat-stuffiness immediately (isCabinHeatStuffy), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateBoatAudioForState/updateRainAudioForState)
+        hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears heat-stuffiness immediately (isCabinHeatStuffy), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateSeaAudioForState/updateWindAudioForState/updateRainAudioForState)
       },
       crew: {
         fatigue: 8,
@@ -1402,10 +1402,10 @@
         encounterFlareFired: false,
       },
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
-      // opens up. ambienceSuppressed holds BOTH sea_state and rain
-      // completely silent (see getBoatAudioState/getRainAudioState's
-      // own checks) until CAST OFF's own onStart explicitly clears it
-      // and begins the sea_state fade-in -- the marina is the only
+      // opens up. ambienceSuppressed holds SEA, WIND, and rain all
+      // completely silent (see getSeaAudioState/getWindAudioState/
+      // getRainAudioState's own checks) until CAST OFF's own onStart
+      // explicitly clears it and begins the fade-in -- the marina is the only
       // soundscape until the boat actually leaves the dock; without
       // this, the normal state-driven ambience sync that already runs
       // after every departure step (BOARD, START ENGINE) would start
@@ -7500,31 +7500,40 @@
      ------------------------------------------------------------
      Three independent recorded-file systems share this one
      AudioContext/masterGain, each its own pair of crossfading
-     exterior/interior channels:
+     exterior/interior channels, all sourced from the single
+     audio/environment/ library:
 
-     - MARINE AMBIENCE (audio/sea_state/) -- wind-driven calm/chop/
-       heavy. See getBoatAudioState/updateBoatAudioForState further
-       down: state.crew.location and state.weather.windSpeed are the
-       only inputs.
+     - SEA (water/hull motion) -- calm/moderate/rough/heavy, driven by
+       the game's existing state.weather.seaState (0-6), via the same
+       wave-height mapping (seaStateWaveHeightFt) the WEATHER screen's
+       own SEAS line already uses. See getSeaAudioState/
+       updateSeaAudioForState further down.
 
-     - RAIN (audio/weather/) -- a separate environmental layer on top
-       of marine ambience, driven by state.weather.condition (see
-       rainLevelForCondition/getRainAudioState/updateRainAudioForState
-       just below the marine-ambience system). The two layer
-       naturally: rain never replaces or silences marine ambience, and
-       marine ambience never ducks for rain. There is deliberately no
-       synthesized noise-based rain layer any more -- an earlier
-       version generated filtered white noise for this instead of
-       using recorded files, which is exactly the kind of old
-       procedural ambience the new recordings replace; layering the
-       old procedural version underneath these would just be
-       duplicated/competing sound. Future THUNDER/SPRAY layers are
-       meant to follow this same independent-channel-pair pattern
-       later; nothing here assumes rain is the only such layer.
+     - WIND -- none/light/moderate/heavy, driven directly by the raw
+       state.weather.windSpeed value, never by the current weather
+       EVENT's name (FAIR SAILING at 15kt and MAJOR STORM easing
+       through 19kt both read as MODERATE WIND -- the physical value
+       is what the audio tracks). See getWindAudioState/
+       updateWindAudioForState just below SEA.
 
-     No synthesized layers of any kind remain in this section any
-     more (there was also once a constant 55Hz hum/oscillator, removed
-     even earlier, for the same reason).
+     - RAIN -- none/light/heavy, driven by state.weather.condition
+       (see rainLevelForCondition/getRainAudioState/
+       updateRainAudioForState just below WIND).
+
+     All three layer naturally and independently: none of them
+     replaces, silences, or ducks for either of the others, and each
+     only ever crossfades ITS OWN channel pair when ITS OWN underlying
+     value actually changes tier (see each layer's own hysteresis
+     around its tier thresholds) -- an unrelated layer changing never
+     restarts this one. There is deliberately no synthesized
+     noise-based layer of any kind any more -- an earlier version
+     generated filtered white noise for rain instead of using recorded
+     files, which is exactly the kind of old procedural ambience the
+     recordings replace (there was also once a constant 55Hz hum/
+     oscillator, removed even earlier, for the same reason). Future
+     THUNDER/SPRAY layers are meant to follow this same independent-
+     channel-pair pattern later; nothing here assumes three is the
+     final count.
 
      masterGain feeds audioCtx.destination once; every layer is just a
      source -> gain chain into that one master, so the global mute
@@ -7549,13 +7558,14 @@
      scheduled against the OLD runtime can recognize a rebuild happened
      while it was waiting and bail out rather than act on a since-
      disposed graph. The existing per-channel `generation` counters on
-     boatChannels/rainChannels (see makeBoatChannel) already give the
-     self-loop timer/crossfade/commit callbacks their own, independent
-     staleness protection -- a hard rebuild creates entirely FRESH
-     channel objects (see rebuildLandfallAudio) rather than mutating the
-     old ones in place, which orphans every old callback's captured
-     channel reference from the module-level boatChannels/rainChannels
-     variables automatically: even if an old timer still fires, it can
+     seaChannels/windChannels/rainChannels (see makeSeaChannel) already
+     give the self-loop timer/crossfade/commit callbacks their own,
+     independent staleness protection -- a hard rebuild creates entirely
+     FRESH channel objects (see rebuildLandfallAudio) rather than
+     mutating the old ones in place, which orphans every old callback's
+     captured channel reference from the module-level seaChannels/
+     windChannels/rainChannels variables automatically: even if an old
+     timer still fires, it can
      no longer reach or affect anything the rest of the system uses.
      audioRuntimeGeneration is the belt to that suspenders, for the
      recovery layer's own code.
@@ -7596,9 +7606,9 @@
      that repeats seamlessly, and/or a sequence of DIFFERENT sounds
      handed off from one to the next (e.g. engine start -> cruise ->
      stop) with no silence at any seam. Used by the engine and the
-     sails luffing loop below; the boat/rain ambience channels have
+     sails luffing loop below; the sea/wind/rain ambience channels have
      their own, separate Web-Audio-graph-based crossfade machinery
-     (see makeBoatChannel/setBoatChannelTrack) which this does not
+     (see makeSeaChannel/setSeaChannelTrack) which this does not
      replace -- that system is extended in place, further down, to add
      the same seamless self-loop behavior using its own GainNode ramps
      rather than this element-volume-based one.
@@ -7608,7 +7618,8 @@
      sound or loop-repeat transition happens: masking small MP3 encoder
      gaps/padding at a loop's own seam, and connecting engine
      start->cruise->stop. It is deliberately a NEW, separate constant
-     from BOAT_AMBIENCE_CROSSFADE_SECONDS/RAIN_AMBIENCE_CROSSFADE_SECONDS
+     from SEA_AMBIENCE_CROSSFADE_SECONDS/WIND_AMBIENCE_CROSSFADE_SECONDS/
+     RAIN_AMBIENCE_CROSSFADE_SECONDS
      (2 seconds each) -- those govern the pre-existing, already gapless,
      deliberately slower weather/location crossfades between DIFFERENT
      ambience tracks (calm->chop, exterior->interior, etc.), which
@@ -7906,15 +7917,19 @@
   }
 
   // The single top-level "sync all ambient audio to current state" entry
-  // point -- marine ambience (recorded exterior/interior tracks) and
-  // rain (its own separate recorded exterior/interior pair) each
-  // delegated to their own updateXAudioForState. Engine audio is NOT
-  // synced here -- it's triggered directly from the actual
-  // engine-start/engine-stop actions (see beginEngineStartAudio/
-  // beginEngineStopAudio) and the GO ABOVE/GO BELOW handler
-  // (transitionEngineLocationAudio), not inferred from render state.
+  // point -- SEA, WIND, and RAIN (each its own separate recorded
+  // exterior/interior pair) each delegated to their own
+  // updateXAudioForState, independently (section 7/10 of the
+  // environment-audio task: each layer decides on its own whether it
+  // actually needs to change, so one layer updating never restarts
+  // another). Engine audio is NOT synced here -- it's triggered
+  // directly from the actual engine-start/engine-stop actions (see
+  // beginEngineStartAudio/beginEngineStopAudio) and the GO ABOVE/GO
+  // BELOW handler (transitionEngineLocationAudio), not inferred from
+  // render state.
   function updateAudioForState(state) {
-    updateBoatAudioForState(state);
+    updateSeaAudioForState(state);
+    updateWindAudioForState(state);
     updateRainAudioForState(state);
     // Defensive re-sync only (idempotent — see updateNoGoZoneAudio's own
     // isCurrentlyLuffing guard) for any path that moved nav.heading
@@ -7949,96 +7964,158 @@
   }
 
   /* --------------------------------------------------------------
-     BOAT AMBIENCE (recorded) -- two independent looping channels
-     (exterior, interior), each capable of crossfading between
-     recordings, or to/from silence, without ever overlapping itself.
-     getBoatAudioState() is the single source of truth for which file
-     (if any) each channel should be playing, derived entirely from
-     state.crew.location and state.weather.windSpeed -- no separate
-     "calm/chop/heavy" audio-only weather tier invented, and no second
-     wind-speed variable: this reads the same state.weather.windSpeed
-     the rest of the game already uses. Exterior and interior are
-     mutually exclusive by location. There is no third (creak) channel
-     -- these recordings are the whole ambience mix (wind/environment,
-     with corresponding water/boat sound already mixed in), so nothing
-     else layers on top of them here; future rain/thunder/spray are
-     separate layers for a later task, not part of this system.
+     SEA AMBIENCE (recorded, from audio/environment/) -- two
+     independent looping channels (exterior, interior), each capable
+     of crossfading between recordings, or to/from silence, without
+     ever overlapping itself. getSeaAudioState() is the single source
+     of truth for which file (if any) each channel should be playing,
+     derived from state.crew.location and the game's EXISTING
+     state.weather.seaState (0-6) -- no second sea simulation, no
+     separate audio-only tier: this reuses the same wave-height
+     mapping (seaStateWaveHeightFt) the WEATHER screen's own SEAS line
+     already uses, so the audio and the player-facing numbers always
+     agree. Exterior and interior are mutually exclusive by location.
+     This is the water/hull-motion layer specifically -- WIND and RAIN
+     (below) are separate, independently-crossfading layers on top of
+     it; nothing here mixes wind or rain in.
+
+     Crossfade architecture (two alternating slots per channel, real
+     GainNode ramps, generation counters for staleness, self-loop
+     scheduling) is untouched from its original design -- see
+     makeSeaChannel/ensureSeaChannelSlot/performSeaChannelCrossfade's
+     own comments for the full mechanics, identical to how this
+     worked before this pass, just renamed and re-pointed at the new
+     file set and the new (sea-state-based, not wind-speed-based)
+     categorization below.
      -------------------------------------------------------------- */
-  var BOAT_AUDIO_FILES = {
-    exteriorCalm: 'audio/sea_state/exterior_calm.mp3',
-    exteriorChop: 'audio/sea_state/exterior_chop.mp3',
-    exteriorHeavy: 'audio/sea_state/exterior_heavy.mp3',
-    interiorCalm: 'audio/sea_state/interior_calm.mp3',
-    interiorChop: 'audio/sea_state/interior_chop.mp3',
-    interiorHeavy: 'audio/sea_state/interior_heavy.mp3',
+  var SEA_AUDIO_FILES = {
+    exteriorCalm: 'audio/environment/calm_sea_ext.mp3',
+    exteriorModerate: 'audio/environment/moderate_sea_ext.mp3',
+    exteriorRough: 'audio/environment/rough_sea_ext.mp3',
+    exteriorHeavy: 'audio/environment/heavy_sea_ext.mp3',
+    interiorCalm: 'audio/environment/calm_sea_int.mp3',
+    interiorModerate: 'audio/environment/moderate_sea_int.mp3',
+    interiorRough: 'audio/environment/rough_sea_int.mp3',
+    interiorHeavy: 'audio/environment/heavy_sea_int.mp3',
   };
-  var BOAT_AMBIENCE_CROSSFADE_SECONDS = 2; // shared by location transitions and wind-tier changes alike
+  var SEA_AMBIENCE_CROSSFADE_SECONDS = 2; // shared by location transitions and sea-tier changes alike -- unchanged value/behavior from before this pass
 
-  var HATCH_BLEED_VOLUME_FRACTION = 0.3; // the one shared bleed-volume constant for BOTH marine ambience and rain exterior bleed below deck -- see section 9/10 of the hatch spec
+  var HATCH_BLEED_VOLUME_FRACTION = 0.3; // the one shared bleed-volume constant for marine ambience (sea + wind) and rain exterior bleed below deck -- see section 9/10 of the hatch spec
 
-  // location/windSpeed/hatchOpen -> which file (if any) each channel
+  // Centralized, tunable thresholds (section 20 of the task this
+  // implements) -- wave height in feet, reusing the EXISTING
+  // seaStateWaveHeightFt(seaState) the WEATHER screen's SEAS line
+  // already computes, never a second wave-height source. Approximate
+  // real-world sea-state bands: CALM under 3ft, MODERATE 3-6ft, ROUGH
+  // 6-10ft, HEAVY above 10ft -- matching seaStateWaveHeightFt's own
+  // [1,2,3,4,8,10,12] table, this lands seaState 0-1 in CALM, 2-3 in
+  // MODERATE, 4-5 in ROUGH, and 6 in HEAVY.
+  var SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT = { calmMax: 3, moderateMax: 6, roughMax: 10 };
+  // Hysteresis margin (section 11): once a tier is committed, the
+  // wave height must move this far PAST the next threshold -- not
+  // just past it -- before the tier actually changes, so a value
+  // sitting right on a boundary can't flap back and forth every time
+  // it wobbles a fraction of a foot either way.
+  var SEA_AUDIO_HYSTERESIS_FT = 0.75;
+  var seaAudioTierState = { current: null }; // 'calm' | 'moderate' | 'rough' | 'heavy' | null (not yet established)
+
+  function seaAudioRawTierForWaveHeight(ft) {
+    var t = SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT;
+    if (ft < t.calmMax) return 'calm';
+    if (ft < t.moderateMax) return 'moderate';
+    // <= here, not < -- the spec's own "ROUGH 6-10 FT" / "HEAVY > 10 FT"
+    // is a strict inequality for heavy, so 10ft itself is still rough;
+    // heavy only begins strictly past it. calmMax/moderateMax above are
+    // correctly exclusive as-is (moderate's own stated "3-6" and rough's
+    // "6-10" already overlap at 6, so 6 goes to rough, matching rough's
+    // own range starting there).
+    if (ft <= t.roughMax) return 'rough';
+    return 'heavy';
+  }
+
+  // Applies SEA_AUDIO_HYSTERESIS_FT around whichever threshold the
+  // CURRENT committed tier borders, so a wave height wobbling near a
+  // boundary doesn't repeatedly crossfade back and forth -- see this
+  // section's own header notes. First-ever call (seaAudioTierState.current
+  // still null) has nothing to be hysteretic ABOUT yet, so it just
+  // takes the raw tier.
+  function seaAudioTierFor(seaState) {
+    var ft = seaStateWaveHeightFt(seaState);
+    var t = SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT, h = SEA_AUDIO_HYSTERESIS_FT;
+    var current = seaAudioTierState.current;
+    if (current == null) { seaAudioTierState.current = seaAudioRawTierForWaveHeight(ft); return seaAudioTierState.current; }
+    var next = current;
+    if (current === 'calm' && ft >= t.calmMax + h) next = seaAudioRawTierForWaveHeight(ft);
+    else if (current === 'moderate' && (ft < t.calmMax - h || ft >= t.moderateMax + h)) next = seaAudioRawTierForWaveHeight(ft);
+    else if (current === 'rough' && (ft < t.moderateMax - h || ft >= t.roughMax + h)) next = seaAudioRawTierForWaveHeight(ft);
+    else if (current === 'heavy' && ft < t.roughMax - h) next = seaAudioRawTierForWaveHeight(ft);
+    seaAudioTierState.current = next;
+    return next;
+  }
+
+  // location/seaState/hatchOpen -> which file (if any) each channel
   // wants, and at what fraction of the exterior channel's own normal
-  // level. 0-9kt/10-19kt/20+kt -> calm/chop/heavy, exactly the same
-  // three-way tier for both above and below deck (unlike the old
-  // sea-state version, there's no separate creak layer or extra tier to
-  // fold in here). Staying within a tier while windSpeed changes (e.g.
-  // 12kt -> 17kt) naturally keeps returning the SAME file, so
-  // setBoatChannelTrack's skip-if-unchanged/healthy check means the
-  // recording is never restarted for that. Below deck with the hatch
-  // OPEN, the matching exterior track plays ALONGSIDE the interior one
-  // (not instead of it) at HATCH_BLEED_VOLUME_FRACTION of its own
-  // normal level -- this only ever applies below deck; above deck the
-  // exterior channel is always at its full normal level regardless of
-  // hatch state (the hatch is irrelevant to the above-deck soundscape).
-  // Takes location as a parameter (rather than reading
-  // state.crew.location directly) so a transition in progress can ask
-  // "what should play for the location the player is headed TO", which
-  // state.crew.location doesn't reflect until the GO ABOVE/GO BELOW
-  // action actually commits.
-  function getBoatAudioStateFor(location, windSpeed, hatchOpen) {
-    var tier = windSpeed <= 9 ? 'Calm' : windSpeed <= 19 ? 'Chop' : 'Heavy';
+  // level. Staying within a tier while seaState changes naturally
+  // keeps returning the SAME file, so setSeaChannelTrack's
+  // skip-if-unchanged/healthy check means the recording is never
+  // restarted for that. Below deck with the hatch OPEN, the matching
+  // exterior track plays ALONGSIDE the interior one (not instead of
+  // it) at HATCH_BLEED_VOLUME_FRACTION of its own normal level -- this
+  // only ever applies below deck; above deck the exterior channel is
+  // always at its full normal level regardless of hatch state (the
+  // hatch is irrelevant to the above-deck soundscape). Takes location
+  // as a parameter (rather than reading state.crew.location directly)
+  // so a transition in progress can ask "what should play for the
+  // location the player is headed TO", which state.crew.location
+  // doesn't reflect until the GO ABOVE/GO BELOW action actually
+  // commits.
+  function getSeaAudioStateFor(location, seaState, hatchOpen) {
+    var tier = seaAudioTierFor(seaState);
+    var tierKey = tier.charAt(0).toUpperCase() + tier.slice(1);
     var exteriorTrack = null, exteriorGainMultiplier = 1, interiorTrack = null;
     if (location === 'above') {
-      exteriorTrack = BOAT_AUDIO_FILES['exterior' + tier];
+      exteriorTrack = SEA_AUDIO_FILES['exterior' + tierKey];
     } else {
-      interiorTrack = BOAT_AUDIO_FILES['interior' + tier];
+      interiorTrack = SEA_AUDIO_FILES['interior' + tierKey];
       if (hatchOpen) {
-        exteriorTrack = BOAT_AUDIO_FILES['exterior' + tier];
+        exteriorTrack = SEA_AUDIO_FILES['exterior' + tierKey];
         exteriorGainMultiplier = HATCH_BLEED_VOLUME_FRACTION;
       }
     }
-    return { location: location, windSpeed: windSpeed, exteriorTrack: exteriorTrack, exteriorGainMultiplier: exteriorGainMultiplier, interiorTrack: interiorTrack };
+    return { location: location, seaState: seaState, exteriorTrack: exteriorTrack, exteriorGainMultiplier: exteriorGainMultiplier, interiorTrack: interiorTrack };
   }
 
   // While a companionway transition is pending (see the 'go-above-below'
-  // action handler and startCompanionwayForTransition), the marine/rain
-  // ambient layers must keep reflecting the location the player is
-  // LEAVING, not the one state.crew.location already flipped to -- the
-  // companionway-timed crossfade (transitionBoatAudioThroughCompanionway/
-  // transitionRainAudioThroughCompanionway) is what's responsible for
-  // actually moving them to the new location, at the right moment.
-  // Without this, the ordinary per-render calls below (from the live
-  // loop, visibility restore, or renderOptions itself right after the
-  // GO ABOVE/GO BELOW short action's 2-second dots finish and flip
-  // state.crew.location) would apply the new location's ambience the
-  // instant the location changes, regardless of whether the
-  // companionway sample -- which can easily run longer than those 2
-  // seconds -- has actually finished. null means no transition is
-  // pending; state.crew.location is used normally.
+  // action handler and startCompanionwayForTransition), the
+  // sea/wind/rain ambient layers must keep reflecting the location the
+  // player is LEAVING, not the one state.crew.location already flipped
+  // to -- the companionway-timed crossfade (transitionSeaAudioThroughCompanionway/
+  // transitionWindAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
+  // is what's responsible for actually moving them to the new
+  // location, at the right moment. Without this, the ordinary
+  // per-render calls below (from the live loop, visibility restore, or
+  // renderOptions itself right after the GO ABOVE/GO BELOW short
+  // action's 2-second dots finish and flip state.crew.location) would
+  // apply the new location's ambience the instant the location
+  // changes, regardless of whether the companionway sample -- which
+  // can easily run longer than those 2 seconds -- has actually
+  // finished. null means no transition is pending; state.crew.location
+  // is used normally. One shared variable governs all three layers,
+  // since they transition together.
   var companionwayHoldLocation = null;
 
-  function getBoatAudioState(state) {
+  function getSeaAudioState(state) {
     // See state.departure.ambienceSuppressed's own declaration comment
-    // -- silent on both channels, regardless of location/weather, until
-    // CAST OFF explicitly lifts this.
+    // -- silent on all three environment layers, regardless of
+    // location/weather, until CAST OFF explicitly lifts this.
     if (state.departure.ambienceSuppressed) {
-      return { location: state.crew.location, windSpeed: state.weather.windSpeed || 0, exteriorTrack: null, exteriorGainMultiplier: 1, interiorTrack: null };
+      return { location: state.crew.location, seaState: state.weather.seaState || 0, exteriorTrack: null, exteriorGainMultiplier: 1, interiorTrack: null };
     }
     var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
-    return getBoatAudioStateFor(location, state.weather.windSpeed || 0, state.boat.hatchOpen);
+    return getSeaAudioStateFor(location, state.weather.seaState || 0, state.boat.hatchOpen);
   }
 
-  function makeBoatChannel(name, targetGain) {
+  function makeSeaChannel(name, targetGain) {
     return {
       name: name,
       targetGain: targetGain,
@@ -8050,18 +8127,18 @@
       generation: 0,          // bumped every time a genuinely new attempt begins; closures/slots capture their own generation so a slow or stale async result can recognize it's been superseded and refuse to resurrect old state
     };
   }
-  var boatChannels = {
-    exterior: makeBoatChannel('exterior', 0.6),
-    interior: makeBoatChannel('interior', 0.5),
+  var seaChannels = {
+    exterior: makeSeaChannel('exterior', 0.6),
+    interior: makeSeaChannel('interior', 0.5),
   };
 
-  function ensureBoatChannelSlot(channel, index) {
+  function ensureSeaChannelSlot(channel, index) {
     if (channel.slots[index] || !audioCtx) return;
     try {
       var el = new Audio();
       // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
       // "defensive fallback" true: the custom self-loop system below
-      // (scheduleBoatChannelSelfLoop/performBoatChannelCrossfade) is now
+      // (scheduleSeaChannelSelfLoop/performSeaChannelCrossfade) is now
       // the ONE authoritative source of repetition for this element.
       // Native looping firing independently of that system was never
       // actually harmless -- if a backgrounded tab throttled the self-
@@ -8085,7 +8162,7 @@
         // reading it fresh here -- not capturing a path in a closure --
         // is what makes this correct for whichever load just failed).
         var path = el.currentSrc || el.src;
-        console.error('BOAT AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+        console.error('SEA AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
       });
       el.addEventListener('loadeddata', function () {
         var path = el.currentSrc || el.src;
@@ -8093,10 +8170,10 @@
       });
       el.addEventListener('playing', function () {
         // Confirmation path #2 (alongside the play() Promise below) --
-        // commitBoatChannelPlayback itself re-checks staleness before
+        // commitSeaChannelPlayback itself re-checks staleness before
         // doing anything, so it's safe to call from here even though
         // the Promise path may already have committed (or may yet).
-        commitBoatChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
+        commitSeaChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
       });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
@@ -8105,7 +8182,7 @@
       slot.gain = gain;
       channel.slots[index] = slot;
     } catch (e) {
-      console.warn('Boat ambience unavailable:', describeError(e));
+      console.warn('Sea ambience unavailable:', describeError(e));
     }
   }
 
@@ -8119,13 +8196,13 @@
   // the most recently scheduled destination for this slot's ramp --
   // checking it (rather than the ramp's current, mid-flight, instant
   // value) means an in-progress legitimate fade-in still reads healthy.
-  function boatChannelIsHealthy(channel) {
+  function seaChannelIsHealthy(channel) {
     if (channel.currentPath === null) return channel.activeIndex === -1;
     if (channel.activeIndex === -1) return false;
     var slot = channel.slots[channel.activeIndex];
     if (!slot) return false;
     var el = slot.el;
-    if (el.paused && !el.ended) audioDebugLog('boat ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
+    if (el.paused && !el.ended) audioDebugLog('sea ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
     var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
     return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
   }
@@ -8145,14 +8222,14 @@
   // padding at the seam). selfLoopScheduledForGeneration guards
   // against scheduling it twice if both confirmation paths fire for
   // the same attempt.
-  function commitBoatChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (boat commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
+  function commitSeaChannelPlayback(channel, slot, path, myGeneration) {
+    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (sea commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
     channel.currentPath = path;
     channel.loadingPath = null;
-    audioDebugLog('started: ' + path + ' (boat)');
+    audioDebugLog('started: ' + path + ' (sea)');
     if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
     slot.selfLoopScheduledForGeneration = myGeneration;
-    scheduleBoatChannelSelfLoop(channel, slot, path, myGeneration);
+    scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration);
   }
 
   // Polls briefly for real decoded duration if metadata isn't ready
@@ -8163,52 +8240,52 @@
   // weather/location change, a stop, or a different self-loop attempt
   // entirely) always supersedes this cleanly, so a stale timer can
   // never resurrect audio or restart a track that's no longer wanted.
-  function scheduleBoatChannelSelfLoop(channel, slot, path, myGeneration) {
+  function scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration) {
     if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
     var duration = slot.el.duration;
     if (!isFinite(duration) || duration <= 0) {
       slot.selfLoopTimer = setTimeout(function () {
         if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
-          audioDebugLog('stale generation callback ignored (boat self-loop duration poll, ' + channel.name + ')');
+          audioDebugLog('stale generation callback ignored (sea self-loop duration poll, ' + channel.name + ')');
           return;
         }
-        scheduleBoatChannelSelfLoop(channel, slot, path, myGeneration);
+        scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration);
       }, 100);
       return;
     }
     var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
     slot.selfLoopTimer = setTimeout(function () {
       slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (boat self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
+      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (sea self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
       var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (boat self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
+      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (sea self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
       audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
-      // isSelfLoop=true -- see performBoatChannelCrossfade's own notes
+      // isSelfLoop=true -- see performSeaChannelCrossfade's own notes
       // on why this specific call must always force currentTime=0 in
       // the incoming slot, even when that slot already has this exact
       // path loaded (which, once a track has looped even once before,
       // it very likely does -- the two slots keep trading this same
       // src back and forth).
-      performBoatChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
+      performSeaChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
     }, delayMs);
   }
 
-  // The actual crossfade execution, extracted from setBoatChannelTrack
-  // so it can be invoked two ways: normally, through setBoatChannelTrack's
+  // The actual crossfade execution, extracted from setSeaChannelTrack
+  // so it can be invoked two ways: normally, through setSeaChannelTrack's
   // own "is this genuinely a new ask" guards below, OR directly from a
   // self-loop timer above, which deliberately BYPASSES those guards --
   // a self-loop repeat asks for the exact SAME desiredPath the channel
   // already (correctly, healthily) considers itself playing, which is
-  // precisely the case setBoatChannelTrack's own skip-if-already-there
+  // precisely the case setSeaChannelTrack's own skip-if-already-there
   // check exists to short-circuit. `crossfadeSeconds` is parameterized
-  // (rather than hardcoded to BOAT_AMBIENCE_CROSSFADE_SECONDS) so a
+  // (rather than hardcoded to SEA_AMBIENCE_CROSSFADE_SECONDS) so a
   // self-loop repeat can use the new, shorter LOOP_CROSSFADE_SECONDS
-  // instead -- see the section comment above BOAT_AMBIENCE_CROSSFADE_SECONDS
+  // instead -- see the section comment above SEA_AMBIENCE_CROSSFADE_SECONDS
   // for why these two durations are deliberately different constants.
   //
   // isSelfLoop (AUDIO STABILITY FIX) -- explicit, not inferred from
   // locationForLog or any other heuristic: true only when this call
-  // came from scheduleBoatChannelSelfLoop above, i.e. this is an
+  // came from scheduleSeaChannelSelfLoop above, i.e. this is an
   // intentional repetition of the SAME track, never an ordinary
   // location/weather transition. This is the one thing that must
   // override the "same src already loaded in this slot -> resume in
@@ -8227,7 +8304,7 @@
   // producing a rapid, glitched ~0.5s repeat. A self-loop repetition is
   // always a NEW play-through of the file and must always start at 0,
   // regardless of what this slot was doing before.
-  function performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
+  function performSeaChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
     channel.generation++;
     var myGeneration = channel.generation;
     var now = audioCtx.currentTime;
@@ -8255,11 +8332,11 @@
     }
 
     channel.loadingPath = desiredPath;
-    audioDebugLog('play: ' + desiredPath + ' (boat, ' + locationForLog + ', wind ' + windSpeedForLog + ')');
+    audioDebugLog('play: ' + desiredPath + ' (sea, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
 
     try {
       var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-      ensureBoatChannelSlot(channel, incomingIndex);
+      ensureSeaChannelSlot(channel, incomingIndex);
       var incoming = channel.slots[incomingIndex];
       if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
 
@@ -8289,11 +8366,11 @@
       var playPromise = incoming.el.play();
       if (playPromise && typeof playPromise.then === 'function') {
         playPromise.then(function () {
-          // Confirmation path #1. commitBoatChannelPlayback itself
+          // Confirmation path #1. commitSeaChannelPlayback itself
           // re-checks staleness before committing anything.
-          commitBoatChannelPlayback(channel, incoming, desiredPath, myGeneration);
+          commitSeaChannelPlayback(channel, incoming, desiredPath, myGeneration);
         }, function (error) {
-          console.error('BOAT AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          console.error('SEA AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
           // currentPath was never set for this attempt -- nothing to
           // undo. Only clear loadingPath if this is still the most
           // recent attempt (a newer one may already be in flight).
@@ -8303,7 +8380,7 @@
       // If no Promise is returned at all (very old browsers), the
       // 'playing' listener above is the sole confirmation path.
     } catch (e) {
-      console.error('Boat audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      console.error('Sea audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
       if (channel.loadingPath === desiredPath) channel.loadingPath = null;
     }
   }
@@ -8311,35 +8388,500 @@
   // Crossfades `channel` toward `desiredPath` (or silence if null), at
   // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
   // only the exterior channel below deck with the hatch open ever
-  // passes anything else, see applyBoatAudioDesiredState/
+  // passes anything else, see applySeaAudioDesiredState/
   // HATCH_BLEED_VOLUME_FRACTION). currentPath is ONLY ever committed
-  // once playback is actually confirmed (see commitBoatChannelPlayback)
+  // once playback is actually confirmed (see commitSeaChannelPlayback)
   // -- never merely because play() didn't throw synchronously, since
   // that proves nothing about whether audio is actually coming out. A
   // generation counter, checked at commit time, means a slow or stale
   // async result from an attempt that's since been superseded by a
   // newer request can never resurrect old state. The skip-if-unchanged
   // optimization only fires when the channel is genuinely, verifiably
-  // already there (boatChannelIsHealthy, which now also verifies the
+  // already there (seaChannelIsHealthy, which now also verifies the
   // GAIN matches) -- a bare currentPath string match is never
   // sufficient on its own. This is deliberately the ONLY caller that
   // can skip the crossfade entirely -- the self-loop timer above calls
-  // performBoatChannelCrossfade directly, bypassing these guards on
+  // performSeaChannelCrossfade directly, bypassing these guards on
   // purpose, since a self-loop repeat's whole point is to restart
   // despite the channel already being "healthy" on this exact path.
-  function setBoatChannelTrack(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSecondsOverride) {
+  function setSeaChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSecondsOverride) {
     if (gainMultiplier == null) gainMultiplier = 1;
     // Defaults to the normal weather/location crossfade duration; the
-    // companionway transition (see transitionBoatAudioThroughCompanionway)
+    // companionway transition (see transitionSeaAudioThroughCompanionway)
     // is the one caller that passes its own shorter value here, so it
     // never has to duplicate this function's guards to get a custom
     // crossfade length.
-    var crossfadeSeconds = crossfadeSecondsOverride == null ? BOAT_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
+    var crossfadeSeconds = crossfadeSecondsOverride == null ? SEA_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
     channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
     channel.desiredGainMultiplier = gainMultiplier;
 
     if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
-    if (channel.currentPath === desiredPath && boatChannelIsHealthy(channel)) return; // genuinely already there, at the right gain
+    if (channel.currentPath === desiredPath && seaChannelIsHealthy(channel)) return; // genuinely already there, at the right gain
+
+    // SAME track, only the GAIN target has changed -- e.g. above deck
+    // (full level) -> below deck with the hatch open (bleed level), or
+    // vice versa, while the sea tier itself hasn't moved. Just re-ramp
+    // the currently active slot's gain in place; no new attempt, no
+    // slot switch, no restart -- the track keeps playing exactly where
+    // it was the whole time, including its own already-scheduled
+    // self-loop timer, which is untouched by a bare gain change.
+    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
+      var activeSlot = channel.slots[channel.activeIndex];
+      if (activeSlot && !activeSlot.el.paused) {
+        var nowRegain = audioCtx.currentTime;
+        var effectiveRegain = channel.targetGain * gainMultiplier;
+        activeSlot.gainTarget = effectiveRegain;
+        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
+        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
+        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
+        return;
+      }
+    }
+
+    if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
+
+    performSeaChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
+  }
+
+  // Hands a {location, seaState, exteriorTrack, exteriorGainMultiplier,
+  // interiorTrack} shape to setSeaChannelTrack for both channels, which
+  // alone decides whether anything actually needs to happen. Shared by
+  // both entry points below so GO ABOVE and GO BELOW are never separate
+  // implementations of the same crossfade. interior is always at its
+  // own full normal level (gainMultiplier 1) -- only exterior's ever
+  // reduced, and only below deck with the hatch open.
+  function applySeaAudioDesiredState(desired, crossfadeSecondsOverride) {
+    setSeaChannelTrack(seaChannels.exterior, desired.exteriorTrack, desired.location, desired.seaState, desired.exteriorGainMultiplier, crossfadeSecondsOverride);
+    setSeaChannelTrack(seaChannels.interior, desired.interiorTrack, desired.location, desired.seaState, 1, crossfadeSecondsOverride);
+  }
+
+  // The state-driven entry point, for everything that isn't a location
+  // transition in progress: the live loop, restart, offline catch-up,
+  // sound-on, and weather/hatch changing while the player stays put.
+  // Called from updateAudioForState and directly from renderOptions.
+  function updateSeaAudioForState(state) {
+    applySeaAudioDesiredState(getSeaAudioState(state));
+  }
+
+  // The hatch's own OPEN/CLOSED state is unaffected by a location
+  // transition (it's a persistent physical fact, not location-dependent)
+  // -- reading it straight from state is correct either way. targetLocation
+  // is taken explicitly (rather than reading state.crew.location) because
+  // the caller -- the companionway sample's near-end callback, see
+  // startCompanionwayForTransition -- fires before state.crew.location has
+  // necessarily settled into its final value from the player's
+  // perspective, and because it makes both directions genuinely the
+  // same code path.
+
+  // The companionway-specific variant -- same target-state computation
+  // as updateSeaAudioForState/getSeaAudioState above, but crossfaded
+  // over the short COMPANIONWAY_CROSSFADE_SECONDS window instead of the
+  // normal multi-second weather/location duration. Called once, right
+  // at the end of upstairs.mp3/downstairs.mp3 (see
+  // startCompanionwayForTransition), not at the moment the player clicks
+  // GO ABOVE/GO BELOW -- see the 'go-above-below' action handler for
+  // why the two are deliberately no longer the same moment.
+  function transitionSeaAudioThroughCompanionway(state, targetLocation) {
+    applySeaAudioDesiredState(getSeaAudioStateFor(targetLocation, state.weather.seaState || 0, state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
+  }
+
+  /* --------------------------------------------------------------
+     WIND AMBIENCE (recorded, from audio/environment/) -- a third
+     independent layer, same two-channel (exterior/interior)
+     crossfading architecture as SEA just above, driven by the raw
+     state.weather.windSpeed value rather than the weather EVENT name
+     (section 5/12 of the task this implements): FAIR SAILING at 15kt
+     and MAJOR STORM easing through 19kt both read as MODERATE WIND,
+     because the physical value is what the audio actually tracks, not
+     which event produced it. Genuinely calm air (under
+     WIND_AUDIO_SPEED_THRESHOLDS_KT.noneMax) has NO wind layer at all
+     -- exteriorTrack/interiorTrack simply resolve to null, same as
+     any other "silence" case setWindChannelTrack already handles.
+     -------------------------------------------------------------- */
+  var WIND_AUDIO_FILES = {
+    exteriorLight: 'audio/environment/light_wind_ext.mp3',
+    exteriorModerate: 'audio/environment/moderate_wind_ext.mp3',
+    exteriorHeavy: 'audio/environment/heavy_wind_ext.mp3',
+    interiorLight: 'audio/environment/light_wind_int.mp3',
+    interiorModerate: 'audio/environment/moderate_wind_int.mp3',
+    interiorHeavy: 'audio/environment/heavy_wind_int.mp3',
+  };
+  var WIND_AMBIENCE_CROSSFADE_SECONDS = 2; // matches SEA_AMBIENCE_CROSSFADE_SECONDS -- same smooth, deliberate feel
+
+  // Centralized, tunable thresholds (section 20), in knots, directly
+  // against the EXISTING state.weather.windSpeed -- no second wind
+  // simulation. Section 5's own approximate bands.
+  // The spec states these as integer bands (0-4/5-12/13-22/23+). Against
+  // a continuous windSpeed, each band's own stated top is the LAST
+  // whole knot still in it, so the threshold -- the first value in the
+  // NEXT tier -- is one above that (5/13/23), not the stated top itself
+  // (4/12/22, which would wrongly promote 4.0-4.99kt etc. into the next
+  // tier early).
+  var WIND_AUDIO_SPEED_THRESHOLDS_KT = { noneMax: 5, lightMax: 13, moderateMax: 23 };
+  // Hysteresis margin (section 11) -- same role as SEA_AUDIO_HYSTERESIS_FT,
+  // just in knots: the wind speed must move this far PAST the next
+  // threshold before the tier actually changes.
+  var WIND_AUDIO_HYSTERESIS_KT = 0.75;
+  var windAudioTierState = { current: null }; // 'none' | 'light' | 'moderate' | 'heavy' | null (not yet established)
+
+  function windAudioRawTierForSpeed(kt) {
+    var t = WIND_AUDIO_SPEED_THRESHOLDS_KT;
+    if (kt < t.noneMax) return 'none';
+    if (kt < t.lightMax) return 'light';
+    if (kt < t.moderateMax) return 'moderate';
+    return 'heavy';
+  }
+
+  // Same hysteresis approach as seaAudioTierFor -- see its own notes.
+  function windAudioTierFor(windSpeed) {
+    var t = WIND_AUDIO_SPEED_THRESHOLDS_KT, h = WIND_AUDIO_HYSTERESIS_KT;
+    var current = windAudioTierState.current;
+    if (current == null) { windAudioTierState.current = windAudioRawTierForSpeed(windSpeed); return windAudioTierState.current; }
+    var next = current;
+    if (current === 'none' && windSpeed >= t.noneMax + h) next = windAudioRawTierForSpeed(windSpeed);
+    else if (current === 'light' && (windSpeed < t.noneMax - h || windSpeed >= t.lightMax + h)) next = windAudioRawTierForSpeed(windSpeed);
+    else if (current === 'moderate' && (windSpeed < t.lightMax - h || windSpeed >= t.moderateMax + h)) next = windAudioRawTierForSpeed(windSpeed);
+    else if (current === 'heavy' && windSpeed < t.moderateMax - h) next = windAudioRawTierForSpeed(windSpeed);
+    windAudioTierState.current = next;
+    return next;
+  }
+
+  // location/windSpeed/hatchOpen -> which file (if any) each channel
+  // wants -- same shape and hatch-bleed reasoning as
+  // getSeaAudioStateFor, see its own comment. tier 'none' means both
+  // tracks simply stay null -- no wind layer at all in calm air,
+  // never a silent-but-still-"selected" file.
+  function getWindAudioStateFor(location, windSpeed, hatchOpen) {
+    var tier = windAudioTierFor(windSpeed);
+    var exteriorTrack = null, exteriorGainMultiplier = 1, interiorTrack = null;
+    if (tier !== 'none') {
+      var tierKey = tier.charAt(0).toUpperCase() + tier.slice(1);
+      if (location === 'above') {
+        exteriorTrack = WIND_AUDIO_FILES['exterior' + tierKey];
+      } else {
+        interiorTrack = WIND_AUDIO_FILES['interior' + tierKey];
+        if (hatchOpen) {
+          exteriorTrack = WIND_AUDIO_FILES['exterior' + tierKey];
+          exteriorGainMultiplier = HATCH_BLEED_VOLUME_FRACTION;
+        }
+      }
+    }
+    return { location: location, windSpeed: windSpeed, exteriorTrack: exteriorTrack, exteriorGainMultiplier: exteriorGainMultiplier, interiorTrack: interiorTrack };
+  }
+
+  function getWindAudioState(state) {
+    // See state.departure.ambienceSuppressed's own declaration comment
+    // -- silent on all three environment layers until CAST OFF lifts
+    // this; see getSeaAudioState's identical check.
+    if (state.departure.ambienceSuppressed) {
+      return { location: state.crew.location, windSpeed: state.weather.windSpeed || 0, exteriorTrack: null, exteriorGainMultiplier: 1, interiorTrack: null };
+    }
+    var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
+    return getWindAudioStateFor(location, state.weather.windSpeed || 0, state.boat.hatchOpen);
+  }
+
+  function makeWindChannel(name, targetGain) {
+    return {
+      name: name,
+      targetGain: targetGain,
+      slots: [null, null],
+      activeIndex: -1,
+      desiredPath: null,
+      loadingPath: null,
+      currentPath: null,
+      generation: 0,
+    };
+  }
+  var windChannels = {
+    exterior: makeWindChannel('exterior', 0.6),
+    interior: makeWindChannel('interior', 0.5),
+  };
+
+  function ensureWindChannelSlot(channel, index) {
+    if (channel.slots[index] || !audioCtx) return;
+    try {
+      var el = new Audio();
+      // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
+      // "defensive fallback" true: the custom self-loop system below
+      // (scheduleWindChannelSelfLoop/performWindChannelCrossfade) is now
+      // the ONE authoritative source of repetition for this element.
+      // Native looping firing independently of that system was never
+      // actually harmless -- if a backgrounded tab throttled the self-
+      // loop timer below and the element reached its own natural end
+      // first, native loop would silently restart the SAME element from
+      // 0 with none of this system's own bookkeeping (generation,
+      // selfLoopTimer, the already-scheduled crossfade) aware it had
+      // happened; the self-loop timer, still armed for the ORIGINAL
+      // play-through's own duration, would then fire against audio that
+      // had already re-started and was no longer where it expected --
+      // exactly the kind of desync that produced the reported ~0.5s
+      // glitch loop. One authoritative repetition system, not two
+      // racing each other, is what section 2 of this fix requires.
+      el.loop = false;
+      el.preload = 'auto';
+      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
+      el.addEventListener('error', function () {
+        // el.currentSrc reflects the resolved URL that actually failed
+        // (this element is reused for different paths over time, so
+        // reading it fresh here -- not capturing a path in a closure --
+        // is what makes this correct for whichever load just failed).
+        var path = el.currentSrc || el.src;
+        console.error('WIND AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+      });
+      el.addEventListener('loadeddata', function () {
+        var path = el.currentSrc || el.src;
+        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
+      });
+      el.addEventListener('playing', function () {
+        // Confirmation path #2 (alongside the play() Promise below) --
+        // commitWindChannelPlayback itself re-checks staleness before
+        // doing anything, so it's safe to call from here even though
+        // the Promise path may already have committed (or may yet).
+        commitWindChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
+      });
+      var source = audioCtx.createMediaElementSource(el);
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain).connect(masterGain);
+      slot.gain = gain;
+      channel.slots[index] = slot;
+    } catch (e) {
+      console.warn('Wind ambience unavailable:', describeError(e));
+    }
+  }
+
+  // "Healthy" means currentPath isn't just a remembered string -- the
+  // element it names is actually, verifiably the one loaded, running,
+  // AND audible (or on its way there). A stale currentPath alone must
+  // never suppress a genuine restart attempt -- and neither must a path
+  // match by itself: a slot can be the correct track, unpaused and
+  // unended, yet still be the OUTGOING half of some earlier crossfade,
+  // gain ramping toward (or already sitting at) 0. gainTarget records
+  // the most recently scheduled destination for this slot's ramp --
+  // checking it (rather than the ramp's current, mid-flight, instant
+  // value) means an in-progress legitimate fade-in still reads healthy.
+  function windChannelIsHealthy(channel) {
+    if (channel.currentPath === null) return channel.activeIndex === -1;
+    if (channel.activeIndex === -1) return false;
+    var slot = channel.slots[channel.activeIndex];
+    if (!slot) return false;
+    var el = slot.el;
+    if (el.paused && !el.ended) audioDebugLog('wind ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
+    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
+    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
+  }
+
+  // Called from BOTH confirmation paths (the play() Promise resolving,
+  // and the element's own 'playing' event) the instant a slot's
+  // playback is actually verified -- deliberately idempotent, since
+  // either path can fire first, or both can fire for the same attempt.
+  // Beyond committing currentPath (the pre-existing behavior), this is
+  // now also what schedules the slot's own SEAMLESS SELF-LOOP: once
+  // this file's real decoded duration is known, a timer is set for
+  // LOOP_CROSSFADE_SECONDS before its natural end, which re-crossfades
+  // this SAME path into the other slot -- masking the file's own loop
+  // seam the same way any other connected-sound transition in this
+  // pass does, instead of relying on the element's native loop=true
+  // (which does not crossfade, and does not hide any encoder gap/
+  // padding at the seam). selfLoopScheduledForGeneration guards
+  // against scheduling it twice if both confirmation paths fire for
+  // the same attempt.
+  function commitWindChannelPlayback(channel, slot, path, myGeneration) {
+    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (wind commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
+    channel.currentPath = path;
+    channel.loadingPath = null;
+    audioDebugLog('started: ' + path + ' (wind)');
+    if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
+    slot.selfLoopScheduledForGeneration = myGeneration;
+    scheduleWindChannelSelfLoop(channel, slot, path, myGeneration);
+  }
+
+  // Polls briefly for real decoded duration if metadata isn't ready
+  // yet (rather than never scheduling at all), then sets a timer for
+  // LOOP_CROSSFADE_SECONDS before this slot's own natural end. When it
+  // fires, re-verifies this exact slot is STILL the channel's active
+  // one for this SAME path and generation -- a newer crossfade (a
+  // weather/location change, a stop, or a different self-loop attempt
+  // entirely) always supersedes this cleanly, so a stale timer can
+  // never resurrect audio or restart a track that's no longer wanted.
+  function scheduleWindChannelSelfLoop(channel, slot, path, myGeneration) {
+    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
+    var duration = slot.el.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      slot.selfLoopTimer = setTimeout(function () {
+        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
+          audioDebugLog('stale generation callback ignored (wind self-loop duration poll, ' + channel.name + ')');
+          return;
+        }
+        scheduleWindChannelSelfLoop(channel, slot, path, myGeneration);
+      }, 100);
+      return;
+    }
+    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
+    slot.selfLoopTimer = setTimeout(function () {
+      slot.selfLoopTimer = null;
+      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (wind self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
+      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
+      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (wind self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
+      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
+      // isSelfLoop=true -- see performWindChannelCrossfade's own notes
+      // on why this specific call must always force currentTime=0 in
+      // the incoming slot, even when that slot already has this exact
+      // path loaded (which, once a track has looped even once before,
+      // it very likely does -- the two slots keep trading this same
+      // src back and forth).
+      performWindChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
+    }, delayMs);
+  }
+
+  // The actual crossfade execution, extracted from setWindChannelTrack
+  // so it can be invoked two ways: normally, through setWindChannelTrack's
+  // own "is this genuinely a new ask" guards below, OR directly from a
+  // self-loop timer above, which deliberately BYPASSES those guards --
+  // a self-loop repeat asks for the exact SAME desiredPath the channel
+  // already (correctly, healthily) considers itself playing, which is
+  // precisely the case setWindChannelTrack's own skip-if-already-there
+  // check exists to short-circuit. `crossfadeSeconds` is parameterized
+  // (rather than hardcoded to WIND_AMBIENCE_CROSSFADE_SECONDS) so a
+  // self-loop repeat can use the new, shorter LOOP_CROSSFADE_SECONDS
+  // instead -- see the section comment above WIND_AMBIENCE_CROSSFADE_SECONDS
+  // for why these two durations are deliberately different constants.
+  //
+  // isSelfLoop (AUDIO STABILITY FIX) -- explicit, not inferred from
+  // locationForLog or any other heuristic: true only when this call
+  // came from scheduleWindChannelSelfLoop above, i.e. this is an
+  // intentional repetition of the SAME track, never an ordinary
+  // location/weather transition. This is the one thing that must
+  // override the "same src already loaded in this slot -> resume in
+  // place" optimization just below: for an ordinary transition, the
+  // incoming slot having the same src already loaded means it's being
+  // reused mid-fade-out (e.g. a quick back-and-forth between two
+  // states) and really should resume from wherever it still is. For a
+  // self-loop, the incoming slot having the same src loaded is the
+  // NORMAL case once a track has looped even once before (the two
+  // slots keep trading the same file back and forth), and that
+  // "wherever it still is" position is wherever THIS SAME element was
+  // paused at the end of its own previous play-through -- i.e. right
+  // near the very end of the file. Resuming there instead of
+  // restarting is exactly the reported bug: the self-loop timer (armed
+  // for a fresh full play-through) then fires again almost immediately,
+  // producing a rapid, glitched ~0.5s repeat. A self-loop repetition is
+  // always a NEW play-through of the file and must always start at 0,
+  // regardless of what this slot was doing before.
+  function performWindChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
+    channel.generation++;
+    var myGeneration = channel.generation;
+    var now = audioCtx.currentTime;
+    var outgoingIndex = channel.activeIndex;
+
+    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
+      var outgoing = channel.slots[outgoingIndex];
+      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; } // this slot may already have a pause pending from an EARLIER fade-out -- if so it's stale as of this new fade-out and must not fire mid-way through (or after) this one
+      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; } // this slot's own pending self-loop repeat, if any, is superseded the instant it stops being the channel's active slot
+      outgoing.gainTarget = 0;
+      outgoing.gain.gain.cancelScheduledValues(now);
+      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
+      outgoing.pauseTimer = setTimeout(function () {
+        outgoing.pauseTimer = null;
+        outgoing.el.pause();
+      }, crossfadeSeconds * 1000 + 100);
+    }
+
+    if (desiredPath == null) {
+      channel.activeIndex = -1;
+      channel.currentPath = null;
+      channel.loadingPath = null;
+      return;
+    }
+
+    channel.loadingPath = desiredPath;
+    audioDebugLog('play: ' + desiredPath + ' (wind, ' + locationForLog + ', wind ' + windSpeedForLog + ')');
+
+    try {
+      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+      ensureWindChannelSlot(channel, incomingIndex);
+      var incoming = channel.slots[incomingIndex];
+      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
+
+      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; } // this slot may still be carrying a pause scheduled from when IT was the outgoing track of an earlier crossfade -- now that it's wanted again, that pause must never be allowed to fire
+      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; } // likewise any self-loop repeat left over from whatever this slot was carrying before being reused
+      incoming.selfLoopScheduledForGeneration = -1; // this is a fresh attempt -- needs its own fresh scheduling once (re-)confirmed, even if this slot previously held the same path
+      incoming.pendingPath = desiredPath;
+      incoming.pendingGeneration = myGeneration;
+      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
+      if (!alreadyLoaded) {
+        incoming.el.src = desiredPath;
+        incoming.el.currentTime = 0;
+      } else if (isSelfLoop) {
+        // Explicit self-loop restart -- see this function's own notes
+        // above. Same file already loaded in this slot, but this is a
+        // NEW repetition, not a resume of an interrupted earlier one.
+        incoming.el.currentTime = 0;
+        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
+      } // else: ordinary transition, same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
+      var effectiveGain = channel.targetGain * gainMultiplier;
+      incoming.gainTarget = effectiveGain;
+      incoming.gain.gain.cancelScheduledValues(now);
+      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
+      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
+      channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
+
+      var playPromise = incoming.el.play();
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(function () {
+          // Confirmation path #1. commitWindChannelPlayback itself
+          // re-checks staleness before committing anything.
+          commitWindChannelPlayback(channel, incoming, desiredPath, myGeneration);
+        }, function (error) {
+          console.error('WIND AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          // currentPath was never set for this attempt -- nothing to
+          // undo. Only clear loadingPath if this is still the most
+          // recent attempt (a newer one may already be in flight).
+          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
+        });
+      }
+      // If no Promise is returned at all (very old browsers), the
+      // 'playing' listener above is the sole confirmation path.
+    } catch (e) {
+      console.error('Wind audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
+    }
+  }
+
+  // Crossfades `channel` toward `desiredPath` (or silence if null), at
+  // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
+  // only the exterior channel below deck with the hatch open ever
+  // passes anything else, see applyWindAudioDesiredState/
+  // HATCH_BLEED_VOLUME_FRACTION). currentPath is ONLY ever committed
+  // once playback is actually confirmed (see commitWindChannelPlayback)
+  // -- never merely because play() didn't throw synchronously, since
+  // that proves nothing about whether audio is actually coming out. A
+  // generation counter, checked at commit time, means a slow or stale
+  // async result from an attempt that's since been superseded by a
+  // newer request can never resurrect old state. The skip-if-unchanged
+  // optimization only fires when the channel is genuinely, verifiably
+  // already there (windChannelIsHealthy, which now also verifies the
+  // GAIN matches) -- a bare currentPath string match is never
+  // sufficient on its own. This is deliberately the ONLY caller that
+  // can skip the crossfade entirely -- the self-loop timer above calls
+  // performWindChannelCrossfade directly, bypassing these guards on
+  // purpose, since a self-loop repeat's whole point is to restart
+  // despite the channel already being "healthy" on this exact path.
+  function setWindChannelTrack(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSecondsOverride) {
+    if (gainMultiplier == null) gainMultiplier = 1;
+    // Defaults to the normal weather/location crossfade duration; the
+    // companionway transition (see transitionWindAudioThroughCompanionway)
+    // is the one caller that passes its own shorter value here, so it
+    // never has to duplicate this function's guards to get a custom
+    // crossfade length.
+    var crossfadeSeconds = crossfadeSecondsOverride == null ? WIND_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
+    channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
+    channel.desiredGainMultiplier = gainMultiplier;
+
+    if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
+    if (channel.currentPath === desiredPath && windChannelIsHealthy(channel)) return; // genuinely already there, at the right gain
 
     // SAME track, only the GAIN target has changed -- e.g. above deck
     // (full level) -> below deck with the hatch open (bleed level), or
@@ -8363,27 +8905,27 @@
 
     if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
 
-    performBoatChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds);
+    performWindChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds);
   }
 
   // Hands a {location, windSpeed, exteriorTrack, exteriorGainMultiplier,
-  // interiorTrack} shape to setBoatChannelTrack for both channels, which
+  // interiorTrack} shape to setWindChannelTrack for both channels, which
   // alone decides whether anything actually needs to happen. Shared by
   // both entry points below so GO ABOVE and GO BELOW are never separate
   // implementations of the same crossfade. interior is always at its
   // own full normal level (gainMultiplier 1) -- only exterior's ever
   // reduced, and only below deck with the hatch open.
-  function applyBoatAudioDesiredState(desired, crossfadeSecondsOverride) {
-    setBoatChannelTrack(boatChannels.exterior, desired.exteriorTrack, desired.location, desired.windSpeed, desired.exteriorGainMultiplier, crossfadeSecondsOverride);
-    setBoatChannelTrack(boatChannels.interior, desired.interiorTrack, desired.location, desired.windSpeed, 1, crossfadeSecondsOverride);
+  function applyWindAudioDesiredState(desired, crossfadeSecondsOverride) {
+    setWindChannelTrack(windChannels.exterior, desired.exteriorTrack, desired.location, desired.windSpeed, desired.exteriorGainMultiplier, crossfadeSecondsOverride);
+    setWindChannelTrack(windChannels.interior, desired.interiorTrack, desired.location, desired.windSpeed, 1, crossfadeSecondsOverride);
   }
 
   // The state-driven entry point, for everything that isn't a location
   // transition in progress: the live loop, restart, offline catch-up,
   // sound-on, and weather/hatch changing while the player stays put.
   // Called from updateAudioForState and directly from renderOptions.
-  function updateBoatAudioForState(state) {
-    applyBoatAudioDesiredState(getBoatAudioState(state));
+  function updateWindAudioForState(state) {
+    applyWindAudioDesiredState(getWindAudioState(state));
   }
 
   // The hatch's own OPEN/CLOSED state is unaffected by a location
@@ -8397,45 +8939,49 @@
   // same code path.
 
   // The companionway-specific variant -- same target-state computation
-  // as updateBoatAudioForState/getBoatAudioState above, but crossfaded
+  // as updateWindAudioForState/getWindAudioState above, but crossfaded
   // over the short COMPANIONWAY_CROSSFADE_SECONDS window instead of the
   // normal multi-second weather/location duration. Called once, right
   // at the end of upstairs.mp3/downstairs.mp3 (see
   // startCompanionwayForTransition), not at the moment the player clicks
   // GO ABOVE/GO BELOW -- see the 'go-above-below' action handler for
   // why the two are deliberately no longer the same moment.
-  function transitionBoatAudioThroughCompanionway(state, targetLocation) {
-    applyBoatAudioDesiredState(getBoatAudioStateFor(targetLocation, state.weather.windSpeed || 0, state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
+  function transitionWindAudioThroughCompanionway(state, targetLocation) {
+    applyWindAudioDesiredState(getWindAudioStateFor(targetLocation, state.weather.windSpeed || 0, state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
   }
 
   /* --------------------------------------------------------------
-     RAIN AUDIO (recorded, from audio/weather/) -- a separate
-     environmental layer on top of marine ambience, its own pair of
-     crossfading exterior/interior channels, exactly the same
-     architecture as MARINE AMBIENCE just above (independently
-     duplicated rather than shared, matching how every other audio
-     subsystem in this file -- engine, sails, galley, cabin, fishing --
-     each keeps its own copy of this kind of machinery rather than a
-     single generic version several systems reach into). Driven by
+     RAIN AUDIO (recorded, from audio/environment/) -- the third
+     independent environmental layer alongside SEA and WIND just
+     above, its own pair of crossfading exterior/interior channels,
+     exactly the same architecture (independently duplicated rather
+     than shared, matching how every other audio subsystem in this
+     file -- engine, sails, galley, cabin, fishing -- each keeps its
+     own copy of this kind of machinery rather than a single generic
+     version several systems reach into). Driven by
      state.weather.condition via rainLevelForCondition below -- no
      second weather/rain simulation, no independent rain randomness:
      'rain' reads as LIGHT (drizzle/rain/showers in Landfall's
      four-condition model) and 'squall' reads as HEAVY (thunderstorm,
      or heavy wind plus precipitation); 'clear'/'overcast' are NONE.
-     RAIN_LAYER_VOLUME is the one place this layer's level lives, so
-     it can be rebalanced later without touching any of the logic
-     below. Exterior and interior are mutually exclusive by location,
-     same as marine ambience; the two systems otherwise know nothing
-     about each other and layer purely by both feeding the same
-     masterGain independently.
+     This mapping is already exactly the "semantic rain levels" this
+     pass's own task calls for, so it's unchanged -- only the audio
+     FILES move to the new library. RAIN_LAYER_VOLUME is the one place
+     this layer's level lives, so it can be rebalanced later without
+     touching any of the logic below. Exterior and interior are
+     mutually exclusive by location, same as SEA/WIND; all three
+     systems otherwise know nothing about each other and layer purely
+     by each independently feeding the same masterGain -- see section
+     7's own "layer changes must be independent" requirement, already
+     exactly how this was built.
      -------------------------------------------------------------- */
   var RAIN_AUDIO_FILES = {
-    exteriorLight: 'audio/weather/exterior_light_rain.mp3',
-    exteriorHeavy: 'audio/weather/exterior_heavy_rain.mp3',
-    interiorLight: 'audio/weather/interior_light_rain.mp3',
-    interiorHeavy: 'audio/weather/interior_heavy_rain.mp3',
+    exteriorLight: 'audio/environment/light_rain_ext.mp3',
+    exteriorHeavy: 'audio/environment/heavy_rain_ext.mp3',
+    interiorLight: 'audio/environment/light_rain_int.mp3',
+    interiorHeavy: 'audio/environment/heavy_rain_int.mp3',
   };
-  var RAIN_AMBIENCE_CROSSFADE_SECONDS = 2; // matches BOAT_AMBIENCE_CROSSFADE_SECONDS -- shared by location transitions, rain starting/stopping, and intensity changes alike
+  var RAIN_AMBIENCE_CROSSFADE_SECONDS = 2; // matches SEA_AMBIENCE_CROSSFADE_SECONDS/WIND_AMBIENCE_CROSSFADE_SECONDS -- shared by location transitions, rain starting/stopping, and intensity changes alike
   var RAIN_LAYER_VOLUME = 0.45; // the ONE gain value for this whole layer (both exterior and interior channels) -- see the section comment above
 
   // state.weather.condition -> 'none' | 'light' | 'heavy'. The only
@@ -8450,7 +8996,7 @@
   // location/rainLevel/hatchOpen -> which file (if any) each channel
   // wants, and at what fraction of the exterior channel's own normal
   // level. Pure function of explicit values, exactly like
-  // getBoatAudioStateFor -- including the same below-deck-with-hatch-
+  // getSeaAudioStateFor -- including the same below-deck-with-hatch-
   // open bleed behavior (see HATCH_BLEED_VOLUME_FRACTION, defined
   // alongside the marine-ambience system above and shared by both).
   // Staying at the same rain level naturally keeps returning the SAME
@@ -8458,7 +9004,7 @@
   // means the recording is never restarted for that (see "DO NOT
   // RESTART UNNECESSARILY"). Takes location as a parameter (rather
   // than reading state.crew.location directly) for the same reason
-  // getBoatAudioStateFor does -- a transition in progress can ask
+  // getSeaAudioStateFor does -- a transition in progress can ask
   // "what should play for the location the player is headed TO."
   function getRainAudioStateFor(location, rainLevel, hatchOpen) {
     var exteriorTrack = null, exteriorGainMultiplier = 1, interiorTrack = null;
@@ -8478,7 +9024,7 @@
   }
 
   function getRainAudioState(state) {
-    // Same state.departure.ambienceSuppressed check as getBoatAudioState
+    // Same state.departure.ambienceSuppressed check as getSeaAudioState
     // above -- rain is the same "environmental weather ambience" class
     // of sound sea_state is, so it's held silent for exactly the same
     // window (the marina is the only soundscape until the boat actually
@@ -8486,7 +9032,7 @@
     if (state.departure.ambienceSuppressed) {
       return { location: state.crew.location, rainLevel: 'none', exteriorTrack: null, exteriorGainMultiplier: 1, interiorTrack: null };
     }
-    // Same companionwayHoldLocation override as getBoatAudioState above
+    // Same companionwayHoldLocation override as getSeaAudioState above
     // -- see its comment for the full reasoning; one shared variable
     // governs both layers, since they transition together.
     var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
@@ -8514,7 +9060,7 @@
     if (channel.slots[index] || !audioCtx) return;
     try {
       var el = new Audio();
-      el.loop = false; // AUDIO STABILITY FIX -- see the note above ensureBoatChannelSlot; the custom self-loop below is the one authoritative repetition system for this element too
+      el.loop = false; // AUDIO STABILITY FIX -- see the note above ensureSeaChannelSlot; the custom self-loop below is the one authoritative repetition system for this element too
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
       var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
@@ -8543,7 +9089,7 @@
     }
   }
 
-  // "Healthy" -- same meaning and same reasoning as boatChannelIsHealthy.
+  // "Healthy" -- same meaning and same reasoning as seaChannelIsHealthy.
   function rainChannelIsHealthy(channel) {
     if (channel.currentPath === null) return channel.activeIndex === -1;
     if (channel.activeIndex === -1) return false;
@@ -8555,7 +9101,7 @@
     return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
   }
 
-  // Same shape and reasoning as commitBoatChannelPlayback -- see its
+  // Same shape and reasoning as commitSeaChannelPlayback -- see its
   // own comment for the full explanation of the idempotent double-
   // confirmation-path handling and the seamless self-loop scheduling.
   function commitRainChannelPlayback(channel, slot, path, myGeneration) {
@@ -8568,7 +9114,7 @@
     scheduleRainChannelSelfLoop(channel, slot, path, myGeneration);
   }
 
-  // Same shape and reasoning as scheduleBoatChannelSelfLoop.
+  // Same shape and reasoning as scheduleSeaChannelSelfLoop.
   function scheduleRainChannelSelfLoop(channel, slot, path, myGeneration) {
     if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
     var duration = slot.el.duration;
@@ -8594,8 +9140,8 @@
   }
 
   // The actual crossfade execution, extracted from setRainChannelTrack
-  // exactly as performBoatChannelCrossfade was extracted from
-  // setBoatChannelTrack -- see that function's own comment for the
+  // exactly as performSeaChannelCrossfade was extracted from
+  // setSeaChannelTrack -- see that function's own comment for the
   // full reasoning, including why a self-loop repeat deliberately
   // bypasses setRainChannelTrack's own guards by calling this directly,
   // and why isSelfLoop (AUDIO STABILITY FIX) must be explicit rather
@@ -8646,7 +9192,7 @@
         incoming.el.src = desiredPath;
         incoming.el.currentTime = 0;
       } else if (isSelfLoop) {
-        // Explicit self-loop restart -- see performBoatChannelCrossfade's
+        // Explicit self-loop restart -- see performSeaChannelCrossfade's
         // own notes for the full reasoning; identical fix applied here.
         incoming.el.currentTime = 0;
         audioDebugLog('self-loop incoming slot restart (rain ' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
@@ -8675,7 +9221,7 @@
 
   // Crossfades `channel` toward `desiredPath` (or silence if null), at
   // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
-  // identical shape and reasoning to setBoatChannelTrack, including the
+  // identical shape and reasoning to setSeaChannelTrack, including the
   // hatch-bleed gain handling; see its own comments for the full
   // explanation of the generation/confirmation logic, the same-track-
   // different-gain in-place re-ramp case, and why a self-loop repeat
@@ -8687,7 +9233,7 @@
   // next rain event" -- no separate reset step needed.
   function setRainChannelTrack(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSecondsOverride) {
     if (gainMultiplier == null) gainMultiplier = 1;
-    // Same override reasoning as setBoatChannelTrack -- see its own
+    // Same override reasoning as setSeaChannelTrack -- see its own
     // comment; the companionway transition is the one caller that
     // passes a shorter value here.
     var crossfadeSeconds = crossfadeSecondsOverride == null ? RAIN_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
@@ -8718,7 +9264,7 @@
   // Hands a {location, rainLevel, exteriorTrack, exteriorGainMultiplier,
   // interiorTrack} shape to setRainChannelTrack for both channels --
   // same shared-by-both-entry-points reasoning as
-  // applyBoatAudioDesiredState. interior is always at its own full
+  // applySeaAudioDesiredState. interior is always at its own full
   // normal level (gainMultiplier 1) -- only exterior's ever reduced, and
   // only below deck with the hatch open.
   function applyRainAudioDesiredState(desired, crossfadeSecondsOverride) {
@@ -8730,18 +9276,18 @@
   // catch-up, sound-on, and rain starting/stopping/changing intensity
   // (or the hatch opening/closing) while the player stays put. Called
   // from updateAudioForState and directly from renderOptions, same as
-  // updateBoatAudioForState.
+  // updateSeaAudioForState.
   function updateRainAudioForState(state) {
     applyRainAudioDesiredState(getRainAudioState(state));
   }
 
   // The hatch's own state is unaffected by a location transition --
   // reading it straight from state is correct either way. targetLocation
-  // is taken explicitly for the same reason as transitionBoatAudioThroughCompanionway's
+  // is taken explicitly for the same reason as transitionSeaAudioThroughCompanionway's
   // own comment above.
 
   // The companionway-specific variant -- see
-  // transitionBoatAudioThroughCompanionway's own comment for the full
+  // transitionSeaAudioThroughCompanionway's own comment for the full
   // reasoning; identical shape, just the rain layer.
   function transitionRainAudioThroughCompanionway(state, targetLocation) {
     applyRainAudioDesiredState(getRainAudioStateFor(targetLocation, rainLevelForCondition(state.weather.condition), state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
@@ -8777,8 +9323,8 @@
   // start/cruise/off one-shots any more. Starting, stopping, and
   // relocating all crossfade directly between these two (or to/from
   // silence) using the SAME two-slot mechanism/timing style as the
-  // existing sea_state exterior/interior ambience (see
-  // BOAT_AMBIENCE_CROSSFADE_SECONDS/makeBoatChannel) -- a 2-second fade
+  // existing SEA exterior/interior ambience (see
+  // SEA_AMBIENCE_CROSSFADE_SECONDS/makeSeaChannel) -- a 2-second fade
   // for the initial start, a 2-second crossfade on relocation, and a
   // 2-second fade to silence on stop.
   var ENGINE_AUDIO_FILES = {
@@ -8786,7 +9332,7 @@
     interior: 'audio/engine/interior.mp3',
   };
   var ENGINE_VOLUME = { exterior: 0.55, interior: 0.45 };
-  var ENGINE_FADE_SECONDS = 2; // matches BOAT_AMBIENCE_CROSSFADE_SECONDS -- "the same timing/style as the existing sea_state exterior/interior crossfade" this task asks for
+  var ENGINE_FADE_SECONDS = 2; // matches SEA_AMBIENCE_CROSSFADE_SECONDS -- "the same timing/style as the existing SEA exterior/interior crossfade" this task asks for
 
   var engineAudio = makeCrossfadeLoopController('ENGINE');
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
@@ -8904,7 +9450,7 @@
     board: 'audio/marina/board.mp3',
   };
   var MARINA_AUDIO_VOLUME = { pnwBirds: 0.35, marinaSound: 0.45, board: 0.6 };
-  var MARINA_AMBIENCE_FADE_IN_SECONDS = 2;   // "fade in smoothly" -- matches BOAT_AMBIENCE_CROSSFADE_SECONDS/ENGINE_FADE_SECONDS, the same smooth, deliberate feel this task's other new audio already uses
+  var MARINA_AMBIENCE_FADE_IN_SECONDS = 2;   // "fade in smoothly" -- matches SEA_AMBIENCE_CROSSFADE_SECONDS/ENGINE_FADE_SECONDS, the same smooth, deliberate feel this task's other new audio already uses
   var MARINA_ONE_SHOT_FADE_SECONDS = 0.1;    // board.mp3's own quick fade-in -- click prevention only, same role as SAILS_CROSSFADE_SECONDS for the sail one-shots
 
   var marinaAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as sailsAudioEls/fishingAudioEls
@@ -9377,7 +9923,7 @@
   // below tolerates a channel not existing yet at all (audio never
   // unlocked, or the specific slot never built) by printing 'none'
   // rather than throwing.
-  function boatOrRainChannelSnapshot(channel) {
+  function environmentChannelSnapshot(channel) {
     if (!channel) return null;
     var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
     return {
@@ -9405,10 +9951,12 @@
       duration: tapeAudioEl.duration,
       currentSrc: tapeAudioEl.currentSrc,
     } : { tapePhase: tapePhase, note: 'tapeAudioEl not yet created' });
-    console.log('[AUDIO DEBUG] BOAT EXTERIOR', boatOrRainChannelSnapshot(boatChannels.exterior));
-    console.log('[AUDIO DEBUG] BOAT INTERIOR', boatOrRainChannelSnapshot(boatChannels.interior));
-    console.log('[AUDIO DEBUG] RAIN EXTERIOR', boatOrRainChannelSnapshot(rainChannels.exterior));
-    console.log('[AUDIO DEBUG] RAIN INTERIOR', boatOrRainChannelSnapshot(rainChannels.interior));
+    console.log('[AUDIO DEBUG] SEA EXTERIOR', environmentChannelSnapshot(seaChannels.exterior));
+    console.log('[AUDIO DEBUG] SEA INTERIOR', environmentChannelSnapshot(seaChannels.interior));
+    console.log('[AUDIO DEBUG] WIND EXTERIOR', environmentChannelSnapshot(windChannels.exterior));
+    console.log('[AUDIO DEBUG] WIND INTERIOR', environmentChannelSnapshot(windChannels.interior));
+    console.log('[AUDIO DEBUG] RAIN EXTERIOR', environmentChannelSnapshot(rainChannels.exterior));
+    console.log('[AUDIO DEBUG] RAIN INTERIOR', environmentChannelSnapshot(rainChannels.interior));
     var engineEl = engineAudio.getActiveEl();
     console.log('[AUDIO DEBUG] ENGINE', {
       engineActiveKey: engineActiveKey,
@@ -9459,13 +10007,13 @@
   // that's correctly silent (nothing currently desired, engine off,
   // cassette stopped/between phases). Deliberately independent of mute:
   // muting only ever changes gain/volume in this codebase (masterGain
-  // for boat/rain, .volume for engine/cassette -- see toggleMute/
+  // for sea/wind/rain, .volume for engine/cassette -- see toggleMute/
   // applyMuteToTapeAudio), never pauses anything, so an element SHOULD
   // still be genuinely advancing while muted, and a stall caught then
   // is exactly as real (and exactly as worth fixing before the player
-  // unmutes) as one caught while audible. 'boatOrRain' entries are the
+  // unmutes) as one caught while audible. 'environment' entries are the
   // ones a confirmed stall can escalate to a hard rebuild for (section
-  // 4/5 -- a stalled boat/rain channel is what indicates the
+  // 4/5 -- a stalled sea/wind/rain channel is what indicates the
   // AudioContext graph itself is wedged); 'engine'/'cassette' entries
   // are reported the same way but their own recovery stays the
   // existing, separate soft paths (resumeEngineAudioIfSuspended/
@@ -9474,11 +10022,12 @@
   // rebuilding the Web Audio graph could never be what fixes them.
   function collectExpectedPlayingAudio() {
     var expected = [];
-    [['boat exterior', boatChannels.exterior], ['boat interior', boatChannels.interior],
+    [['sea exterior', seaChannels.exterior], ['sea interior', seaChannels.interior],
+     ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
      ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
       var label = pair[0], channel = pair[1];
       if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex]) {
-        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'boatOrRain' });
+        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'environment' });
       }
     });
     if (tapeAudioEl && tapePhase === 'track') {
@@ -9586,29 +10135,30 @@
   // Order matters: dispose everything tied to the OLD AudioContext
   // first (timers, gain automation, the elements themselves) so no
   // stale callback can act on it once discarded; only THEN close() it
-  // and build a genuinely fresh one. boatChannels/rainChannels are
-  // replaced with entirely NEW channel objects (via makeBoatChannel/
-  // makeRainChannel, reusing each channel's own existing targetGain --
-  // never a new hardcoded value, per this task's own "do not change
-  // volume levels") rather than the old ones mutated in place -- this
-  // is what makes every in-flight callback from the old graph (a
-  // self-loop timer, a play() promise, a 'playing' listener already
-  // queued when the rebuild began) harmless even if one still fires
-  // late: it can only ever touch an object the rest of the system no
-  // longer references at all. audioRuntimeGeneration is bumped before
-  // any of this starts, so a SECOND rebuild firing while this one is
-  // still awaiting close()/construction can supersede it cleanly (the
+  // and build a genuinely fresh one. seaChannels/windChannels/
+  // rainChannels are replaced with entirely NEW channel objects (via
+  // makeSeaChannel/makeWindChannel/makeRainChannel, reusing each
+  // channel's own existing targetGain -- never a new hardcoded value,
+  // per this task's own "do not change volume levels") rather than
+  // the old ones mutated in place -- this is what makes every
+  // in-flight callback from the old graph (a self-loop timer, a
+  // play() promise, a 'playing' listener already queued when the
+  // rebuild began) harmless even if one still fires late: it can only
+  // ever touch an object the rest of the system no longer references
+  // at all. audioRuntimeGeneration is bumped before any of this
+  // starts, so a SECOND rebuild firing while this one is still
+  // awaiting close()/construction can supersede it cleanly (the
   // generation check right before buildAudioGraph below).
   //
   // Reconstruction (section 8) reuses buildAudioGraph exactly as
   // unlockAudio's own first call does: masterGain, then
-  // updateAudioForState(GAME) (boat/rain/luffing/mute, all freshly
-  // derived from current state -- never a one-shot), then -- only if
-  // the engine is actually on -- the same "resumed save" engine-loop
-  // logic that starts straight into the correct cruise/interior loop
-  // with no engine-start.mp3 replay. Cassette recovery is handled
-  // separately afterward (see recoverCassetteHard) since it was never
-  // part of this graph to begin with.
+  // updateAudioForState(GAME) (sea/wind/rain/luffing/mute, all
+  // freshly derived from current state -- never a one-shot), then --
+  // only if the engine is actually on -- the same "resumed save"
+  // engine-loop logic that starts straight into the correct
+  // cruise/interior loop with no engine-start.mp3 replay. Cassette
+  // recovery is handled separately afterward (see recoverCassetteHard)
+  // since it was never part of this graph to begin with.
   async function rebuildLandfallAudio(triggerSource) {
     var now = Date.now();
     if (now - lastHardRebuildAtMs < AUDIO_RECOVERY_COOLDOWN_MS) {
@@ -9621,8 +10171,10 @@
     var newGeneration = audioRuntimeGeneration;
     console.warn('HARD AUDIO REBUILD START (trigger: ' + triggerSource + ', generation ' + oldGeneration + ' -> ' + newGeneration + ')');
 
-    if (boatChannels.exterior) disposeAmbienceChannel(boatChannels.exterior);
-    if (boatChannels.interior) disposeAmbienceChannel(boatChannels.interior);
+    if (seaChannels.exterior) disposeAmbienceChannel(seaChannels.exterior);
+    if (seaChannels.interior) disposeAmbienceChannel(seaChannels.interior);
+    if (windChannels.exterior) disposeAmbienceChannel(windChannels.exterior);
+    if (windChannels.interior) disposeAmbienceChannel(windChannels.interior);
     if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
     if (rainChannels.interior) disposeAmbienceChannel(rainChannels.interior);
     disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
@@ -9630,7 +10182,8 @@
     var oldCtx = audioCtx;
     audioCtx = null;
     masterGain = null;
-    boatChannels = { exterior: makeBoatChannel('exterior', boatChannels.exterior.targetGain), interior: makeBoatChannel('interior', boatChannels.interior.targetGain) };
+    seaChannels = { exterior: makeSeaChannel('exterior', seaChannels.exterior.targetGain), interior: makeSeaChannel('interior', seaChannels.interior.targetGain) };
+    windChannels = { exterior: makeWindChannel('exterior', windChannels.exterior.targetGain), interior: makeWindChannel('interior', windChannels.interior.targetGain) };
     rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
 
     if (oldCtx) {
@@ -9651,7 +10204,7 @@
     if (newGeneration !== audioRuntimeGeneration) return; // superseded while constructing the new context
 
     buildAudioGraph();
-    audioDebugLog('HARD AUDIO REBUILD complete -- restored boat exterior=' + boatChannels.exterior.desiredPath + ' interior=' + boatChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
+    audioDebugLog('HARD AUDIO REBUILD complete -- restored sea exterior=' + seaChannels.exterior.desiredPath + ' interior=' + seaChannels.interior.desiredPath + ', wind exterior=' + windChannels.exterior.desiredPath + ' interior=' + windChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
 
     await recoverCassetteHard();
   }
@@ -9721,16 +10274,16 @@
       var stalled = await findStalledPersistentAudio();
       if (myRuntimeGeneration !== audioRuntimeGeneration) return;
 
-      var stalledBoatOrRain = stalled.filter(function (e) { return e.group === 'boatOrRain'; });
+      var stalledEnvironment = stalled.filter(function (e) { return e.group === 'environment'; });
       audioDebugLog('SOFT RECOVERY RESULT: ' + stalled.length + ' stalled (' + stalled.map(function (e) { return e.label; }).join(', ') + ')');
 
-      if (stalledBoatOrRain.length > 0) {
+      if (stalledEnvironment.length > 0) {
         // The AudioContext graph itself is wedged and resume() alone
         // did not bring it back -- section 4's "do not continue
         // trusting it forever". Escalate.
-        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledBoatOrRain.map(function (e) { return e.label; }).join(','));
+        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledEnvironment.map(function (e) { return e.label; }).join(','));
       } else if (stalled.some(function (e) { return e.group === 'cassette'; })) {
-        // Boat/rain are fine (so the AudioContext itself isn't the
+        // Sea/wind/rain are fine (so the AudioContext itself isn't the
         // problem), but the cassette -- a completely separate plain
         // element -- is still stalled after the soft resume above.
         // Its own hard path doesn't need the Web Audio graph rebuilt
@@ -16351,9 +16904,10 @@
     downstairs: 'audio/companionway/downstairs.mp3',
   };
   // Both WHEN the ambience crossfade begins (duration - this) and HOW
-  // LONG it takes are this same value, since applyBoatAudioDesiredState/
-  // applyRainAudioDesiredState use it as both the near-end offset (via
-  // transitionBoatAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
+  // LONG it takes are this same value, since applySeaAudioDesiredState/
+  // applyWindAudioDesiredState/applyRainAudioDesiredState use it as
+  // both the near-end offset (via transitionSeaAudioThroughCompanionway/
+  // transitionWindAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
   // and the crossfade's own ramp length -- exactly the requested "begin
   // 2 seconds before the end, ramp smoothly across those final 2
   // seconds."
@@ -16392,7 +16946,8 @@
   // resolves and the player's location actually changes.
   //
   // Independently of that, the interior<->exterior crossfade
-  // (transitionBoatAudioThroughCompanionway/transitionRainAudioThroughCompanionway)
+  // (transitionSeaAudioThroughCompanionway/transitionWindAudioThroughCompanionway/
+  // transitionRainAudioThroughCompanionway)
   // is scheduled for COMPANIONWAY_CROSSFADE_SECONDS before the SAME
   // real duration, polled the same "check now, retry in 100ms until
   // known" way. fireCrossfadeOnce is ALSO called, as a guarantee, at
@@ -16412,7 +16967,8 @@
       if (crossfadeFired) return;
       crossfadeFired = true;
       if (GAME) {
-        transitionBoatAudioThroughCompanionway(GAME, targetLocation);
+        transitionSeaAudioThroughCompanionway(GAME, targetLocation);
+        transitionWindAudioThroughCompanionway(GAME, targetLocation);
         transitionRainAudioThroughCompanionway(GAME, targetLocation);
       }
     }
@@ -17486,7 +18042,8 @@
     applyCabinLighting(state);
     applyNaturalLightDimming(state);
     applyTapeLocationAudio(state);
-    updateBoatAudioForState(state);
+    updateSeaAudioForState(state);
+    updateWindAudioForState(state);
     updateRainAudioForState(state);
     syncActivityDots(state);
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
@@ -18253,22 +18810,27 @@
       workingLabel: 'CASTING OFF',
       duration: 8,
       // onStart fires immediately: (A) lifts ambienceSuppressed and
-      // starts the exterior sea_state fade-in, explicitly over 2
+      // starts the exterior SEA and WIND fade-ins, explicitly over 2
       // seconds (the FIRST 2 of this step's own 8-second duration --
-      // applyBoatAudioDesiredState's own crossfadeSecondsOverride is
-      // exactly this mechanism, already used by the companionway
-      // transition for its own shorter override); it then naturally
-      // keeps playing at full volume for the remaining 6 seconds with
-      // no further code needed, same as any other healthy channel. (B)
-      // fades the marina ambience out over the FULL 8 seconds --
-      // fadeMarinaAmbienceOut's own notes cover why an already-ended
-      // layer (e.g. a short marina_sound.mp3 that finished on its own
-      // during BOARDING/START ENGINE) is correctly left alone rather
-      // than restarted. (C) the engine is untouched by any of this --
-      // it keeps running exactly as it already was.
+      // applySeaAudioDesiredState's/applyWindAudioDesiredState's own
+      // crossfadeSecondsOverride is exactly this mechanism, already
+      // used by the companionway transition for its own shorter
+      // override); they then naturally keep playing at full volume for
+      // the remaining 6 seconds with no further code needed, same as
+      // any other healthy channel. (RAIN is untouched here -- it's
+      // already correctly silent in clear departure conditions, and
+      // updateRainAudioForState's own normal per-render sync picks it
+      // up like any other state-driven change if conditions ever
+      // call for it.) (B) fades the marina ambience out over the FULL
+      // 8 seconds -- fadeMarinaAmbienceOut's own notes cover why an
+      // already-ended layer (e.g. a short marina_sound.mp3 that
+      // finished on its own during BOARDING/START ENGINE) is correctly
+      // left alone rather than restarted. (C) the engine is untouched
+      // by any of this -- it keeps running exactly as it already was.
       onStart: function (s) {
         s.departure.ambienceSuppressed = false;
-        applyBoatAudioDesiredState(getBoatAudioState(s), 2);
+        applySeaAudioDesiredState(getSeaAudioState(s), 2);
+        applyWindAudioDesiredState(getWindAudioState(s), 2);
         fadeMarinaAmbienceOut(8);
       },
       // The scripted sequence ends here — sails stay furled, the engine
