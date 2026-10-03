@@ -8253,7 +8253,23 @@
       }, 100);
       return;
     }
-    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
+    // RELIABILITY FIX -- subtract the element's own currentTime, not just
+    // duration. Without this, the delay is computed as if "now" were
+    // always position 0 in the file, which is only true if this function
+    // runs at the EXACT instant playback begins. Any elapsed time before
+    // scheduling actually succeeds -- most commonly however long the
+    // isFinite(duration) poll above had to retry, but even the normal,
+    // small gap between el.play() being called and commitSeaChannelPlayback
+    // actually running -- means currentTime is already > 0 by the time
+    // this runs, so the OLD delay overshot the true remaining time by
+    // exactly that much: the self-loop crossfade fired that much too
+    // late relative to the file's real playback position, late enough on
+    // a slow decode/poll to land at or after the file's own natural end
+    // -- silence until the late callback finally restarts it. This is
+    // exactly the intermittent ("sometimes") dead-gap behavior reported;
+    // anchoring to currentTime makes the schedule correct regardless of
+    // how much time passed before it was actually set.
+    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS - slot.el.currentTime) * 1000);
     slot.selfLoopTimer = setTimeout(function () {
       slot.selfLoopTimer = null;
       if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (sea self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
@@ -8490,8 +8506,8 @@
      independent layer, same two-channel (exterior/interior)
      crossfading architecture as SEA just above, driven by the raw
      state.weather.windSpeed value rather than the weather EVENT name
-     (section 5/12 of the task this implements): FAIR SAILING at 15kt
-     and MAJOR STORM easing through 19kt both read as MODERATE WIND,
+     (section 5/12 of the task this implements): FAIR SAILING at 17kt
+     and MAJOR STORM easing through 24kt both read as MODERATE WIND,
      because the physical value is what the audio actually tracks, not
      which event produced it. Genuinely calm air (under
      WIND_AUDIO_SPEED_THRESHOLDS_KT.noneMax) has NO wind layer at all
@@ -8510,14 +8526,14 @@
 
   // Centralized, tunable thresholds (section 20), in knots, directly
   // against the EXISTING state.weather.windSpeed -- no second wind
-  // simulation. Section 5's own approximate bands.
-  // The spec states these as integer bands (0-4/5-12/13-22/23+). Against
-  // a continuous windSpeed, each band's own stated top is the LAST
-  // whole knot still in it, so the threshold -- the first value in the
-  // NEXT tier -- is one above that (5/13/23), not the stated top itself
-  // (4/12/22, which would wrongly promote 4.0-4.99kt etc. into the next
-  // tier early).
-  var WIND_AUDIO_SPEED_THRESHOLDS_KT = { noneMax: 5, lightMax: 13, moderateMax: 23 };
+  // simulation. Updated bands: 0-4 none, 5-15 light, 16-25 moderate,
+  // 26+ heavy. Stated as integer bands; against a continuous windSpeed,
+  // each band's own stated top is the LAST whole knot still in it, so
+  // the threshold -- the first value in the NEXT tier -- is one above
+  // that (5/16/26), not the stated top itself (4/15/25, which would
+  // wrongly promote e.g. 15.0-15.99kt into MODERATE when the spec's own
+  // examples explicitly put 15kt in LIGHT).
+  var WIND_AUDIO_SPEED_THRESHOLDS_KT = { noneMax: 5, lightMax: 16, moderateMax: 26 };
   // Hysteresis margin (section 11) -- same role as SEA_AUDIO_HYSTERESIS_FT,
   // just in knots: the wind speed must move this far PAST the next
   // threshold before the tier actually changes.
