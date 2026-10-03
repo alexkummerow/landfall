@@ -5461,7 +5461,25 @@
   var CABIN_TEMP_COLD_MAX_F = 65;   // strictly below: COLD
   var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above (base, no fan): HOT — 65-78 inclusive is COMFORTABLE
   var CABIN_TEMP_FAN_RESCUE_MAX_F = 85; // FAN ON can make an otherwise-HOT cabin read COMFORTABLE up to and including this; past it, still HOT even with the fan running — a fan is not air conditioning
-  var CABIN_HEATER_TARGET_F = 68;          // the heater's fixed ceiling — it never pushes the cabin above this, and never adds heat once ambient is already warmer
+  // HEATER TARGET TABLE -- centralized here (not scattered through
+  // syncCabinTemperature or anywhere else) so these seven thresholds
+  // stay easy to retune in one place. A real boat heater reads as a
+  // handful of discrete settings tied to how cold it is outside, not a
+  // smoothly interpolated dial -- these are deliberately hard steps,
+  // not a lerpTable curve: the TARGET can jump when outside crosses a
+  // threshold, but the CABIN itself never jumps (it still only ever
+  // blends gradually toward whatever the current target is -- see
+  // syncCabinTemperature's own unchanged change-rate logic). 55F is
+  // the floor (anything at or below 45F outside), 68F is the ceiling
+  // (anything at or above 61F outside, which folds the 61-65F and
+  // 66F+ bands together since they share the same value).
+  function getHeatedCabinTarget(outsideTemp) {
+    if (outsideTemp < 46) return 55;  // below 40F, and 40-45F
+    if (outsideTemp < 51) return 58;  // 46-50F
+    if (outsideTemp < 56) return 61;  // 51-55F
+    if (outsideTemp < 61) return 65;  // 56-60F
+    return 68;                        // 61-65F, and 66F+
+  }
   // Rate the actual cabin temperature moves toward its current target,
   // warming or cooling alike — see syncCabinTemperature. Now hatch-
   // dependent: a closed hatch insulates the cabin heavily (slow
@@ -7018,7 +7036,23 @@
 
     var outside = state.weather.temperatureF;
     if (b.cabinTemperatureF == null) b.cabinTemperatureF = outside;
-    var cabinTarget = outside > CABIN_HEATER_TARGET_F ? outside : (b.heaterOn ? CABIN_HEATER_TARGET_F : outside);
+    // HEATER -- OFF: unchanged, cabin simply tracks outside, same as
+    // always. ON: the cabin moves toward getHeatedCabinTarget(outside)
+    // instead of a fixed ceiling, so a mild day warms the cabin only as
+    // far as a mild day should (not all the way to the old fixed 68F).
+    // Critically, the heater only ever pulls the cabin UP toward that
+    // target, never down: once the cabin is already at or above it
+    // (outside itself has risen past the heater's own ceiling, say),
+    // the heater contributes nothing further and the target falls back
+    // to outside -- exactly the unheated behavior, never a cooling
+    // device pulling the cabin back down to the heated target.
+    var cabinTarget;
+    if (b.heaterOn) {
+      var heatedTarget = getHeatedCabinTarget(outside);
+      cabinTarget = b.cabinTemperatureF > heatedTarget ? outside : heatedTarget;
+    } else {
+      cabinTarget = outside;
+    }
     var changeRate = b.hatchOpen ? CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_OPEN_F : CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_CLOSED_F;
     var maxCabinChange = changeRate * elapsed;
     if (b.cabinTemperatureF < cabinTarget) {
@@ -11657,6 +11691,19 @@
     }
     if (key === 'accessory' && !turningOn && b.fanOn) {
       b.fanOn = false;
+    }
+    // HEATER HOOK -- immediate player feedback only, OFF -> ON alone
+    // (never ON -> OFF, and never repeated on every subsequent toggle
+    // or temperature tick -- this only runs on the actual edge, right
+    // here in the one place the switch is actually thrown). A plain
+    // printLine, not log(): this is a transient screen confirmation,
+    // not a voyage-log-worthy event, so it deliberately never touches
+    // state.log. It does not itself change cabinTemperatureF in any
+    // way -- the cabin still only ever moves via syncCabinTemperature's
+    // own gradual, periodic blend toward getHeatedCabinTarget's target.
+    if (key === 'heater' && turningOn) {
+      printBlank();
+      printLine('Heater on. Warm air begins moving through the cabin.');
     }
     cmdNavStation(state);
   }
