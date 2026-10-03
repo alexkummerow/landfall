@@ -1061,30 +1061,13 @@
      2. GAME STATE
      ============================================================ */
   function newGameState() {
-    var now = Date.now(); // REAL current time -- lastTick (offline catch-up, see catchUpFromRealTime) MUST stay anchored to this, unchanged; it has nothing to do with the voyage's own internal calendar below
-    var realNow = new Date(now);
-    // PHASE 8 -- the voyage's own internal calendar is fixed to a
-    // November 1 departure, regardless of whatever REAL calendar
-    // month the player happens to launch a fresh voyage in, so the
-    // weather/temperature system has one single, consistent seasonal
-    // context (see the TEMPERATURE ARC section's own notes) rather
-    // than silently varying with Date.now(). Only the MONTH and DAY
-    // are fixed -- time-of-day is taken from the real moment of
-    // launch, preserving the existing night-start/nav-lights variety
-    // (see the naturalLightBrightness check further down) exactly as
-    // before. The year itself is arbitrary and never surfaced
-    // anywhere (see REMOVE CALENDAR DATE FROM LOG TIMESTAMPS below) --
-    // using the real current year is simplest and completely harmless,
-    // since departedAt is purely an internal calendar anchor, never
-    // compared against real time for anything (that's lastTick's own,
-    // separate job).
-    var departed = new Date(realNow.getFullYear(), 10, 1, realNow.getHours(), realNow.getMinutes(), realNow.getSeconds(), realNow.getMilliseconds());
+    var now = Date.now();
     var start = WAYPOINTS[0];
     var startBearing = bearingBetween(start.lat, start.lon, WAYPOINTS[1].lat, WAYPOINTS[1].lon);
     var state = {
       version: 1,
       meta: {
-        departedAt: departed.getTime(),
+        departedAt: now,
         clockAlignedV1: true,   // this voyage's game clock started equal to the real clock -- see alignGameClockIfNeeded, which only ever acts on older saves that lack this
         departureDateAnchor: null, // set only if alignGameClockIfNeeded had to shift departedAt: the ORIGINAL departure instant, so the DAY counter keeps counting from the real calendar date the voyage began on -- see voyageDayNumber
         lastTick: now,
@@ -1128,7 +1111,7 @@
         seaState: 2,
         condition: 'overcast',
         trend: 'steady', // derived each tick from the active phase's own trendHint -- see advanceWeatherEngine/PHASE 2's own notes
-        temperatureF: 46, // PHASE 8 -- a plausible November-1 Shilshole morning; matches TEMPERATURE_PROGRESS_CURVE's own 0%-progress value (44F) plus a touch of day/night texture, rather than the old, warmer latitude-only estimate
+        temperatureF: 56, // a plausible Shilshole-in-fall reading; see estimateTemperatureF for the offline fallback as the boat moves
         // PHASE 2 -- EVENT-DRIVEN WEATHER ENGINE's own state. See the
         // WEATHER ENGINE section (near advanceWeatherEngine) for the
         // full system; this is just the persisted shape. A fresh
@@ -1388,7 +1371,7 @@
       // logVesselLogRepair/logVesselLogEvent for how repairs/events
       // are added to it.
       vesselLog: {
-        currentDay: newVesselLogDay(1, 0),
+        currentDay: newVesselLogDay(1, vesselLogMonthDayLabel(now), 0),
         completedDays: [],
       },
       flags: {
@@ -2539,60 +2522,13 @@
   // existing voyage gets rebased to.
   var FOOD_INVENTORY_VERSION = 5;
 
-  // PHASE 8 -- TEMPERATURE ARC. Baseline is driven by PASSAGE PROGRESS
-  // (passageProgressPercent), not latitude or elapsed voyage days --
-  // the same straight-line percentage the weather engine's own voyage-
-  // arc windows already use (see VOYAGE_WINDOW_EARLY_ROUGH etc.), so
-  // this works identically for an 18-day crossing, a 30-day crossing,
-  // or a boat delayed by repairs: whatever the voyage's actual pace,
-  // the temperature always reflects how FAR ALONG it is, never a fixed
-  // day number (section 6 of the task this implements explicitly
-  // rules out DAY 1 = 47F-style hardcoding).
-  //
-  // Control points below land inside every one of the task's own
-  // stated bands (0-10% 44-50F, 10-30% 46-55F, 30-50% 50-60F, 50-70%
-  // 56-66F, 70-90% 62-72F, 90-100% 68-78F) -- each interior point is
-  // the average of the band ending there and the band beginning there,
-  // smoothing the small overlaps between adjacent bands' own stated
-  // ranges into one continuous curve that still honors every number
-  // given, rather than picking one band arbitrarily at each seam.
-  // lerpTable (shared with SAIL_SPEED_CURVE/POINT_OF_SAIL_CURVE
-  // elsewhere) gives the same smooth piecewise-linear shape those use.
-  var TEMPERATURE_PROGRESS_CURVE = [
-    [0, 44], [10, 48], [30, 52.5], [50, 58], [70, 64], [90, 70], [100, 78],
-  ];
-  function baselineTemperatureForProgress(progress) {
-    return lerpTable(progress, TEMPERATURE_PROGRESS_CURVE);
-  }
-
-  // PHASE 8 -- the condition-based piece of the temperature arc (see
-  // advanceWeatherEngine's own notes on how this combines with the
-  // existing wind-driven stormChill). Maps directly onto the task's
-  // own named categories: clear ("CLEARING/SUNNIER") reads warmer,
-  // overcast ("FAIR SAILING") is the unmodified baseline, rain/squall
-  // ("RAIN/FRONTAL WEATHER", and combined with stormChill, "COLD/ROUGH
-  // SYSTEM") read cooler. Centralized here, in one place, exactly so
-  // these can be retuned later without hunting through
-  // advanceWeatherEngine itself.
-  var WEATHER_TEMPERATURE_CONDITION_OFFSET_F = {
-    clear: 1.5,
-    overcast: 0,
-    rain: -2.5,
-    squall: -3.5,
-  };
-
-  // Modest day/night variation (section 4 of the task this implements)
-  // -- a restrained, marine-appropriate sine wave, never the wide
-  // inland-style swing a land-based day/night model would use. Peaks
-  // in the afternoon (~15:00 local game time) and troughs before dawn
-  // (~03:00), using the SAME state.meta.departedAt + voyageMinutes
-  // game-clock reconstruction naturalLightBrightness already uses
-  // just below -- not a second, independent clock.
-  var DAY_NIGHT_TEMPERATURE_AMPLITUDE_F = 2.5; // +/-2.5F -- a 5F full swing trough-to-peak
-  function dayNightTemperatureOffsetF(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var hourOfDay = d.getHours() + d.getMinutes() / 60;
-    return Math.sin((hourOfDay - 9) / 24 * 2 * Math.PI) * DAY_NIGHT_TEMPERATURE_AMPLITUDE_F;
+  // Fallback temperature from latitude alone, when no real-world reading
+  // is available (or ever arrives) — cool in the mid-40s near Shilshole,
+  // warming to tropical as the boat approaches Kaua'i, so temperature
+  // still tracks the boat's own progress with zero connectivity.
+  function estimateTemperatureF(lat) {
+    var t = clamp((47.7 - lat) / (47.7 - 22.0), 0, 1); // 0 at Shilshole's latitude, 1 at Kaua'i's
+    return 56 + t * 26; // ~56F at the dock, ~82F approaching Kaua'i
   }
 
   /* ================================================================
@@ -3531,24 +3467,14 @@
 
     w.trend = engine.squall ? 'building' : phaseDef.trendHint;
 
-    // PHASE 8 -- TEMPERATURE ARC. baselineTemperatureForProgress (see
-    // its own notes) is the geographic trend; three adjustments move
-    // around it without ever overpowering it (section 3 of the task
-    // this implements): stormChill is the EXISTING wind-driven pull,
-    // unchanged, and already does most of the "COLD/ROUGH SYSTEM"
-    // work on its own, since it naturally scales up through a storm's
-    // own approach->peak phases. conditionOffset adds the piece wind
-    // speed alone can't distinguish -- rain/squall vs clear -- and
-    // stacks with stormChill rather than replacing it, so a squall
-    // inside a major storm's own peak reads as genuinely "several
-    // degrees cooler" (both terms combined) without needing a single
-    // bigger constant tuned just for that one case. dayNightOffset is
-    // independent of weather entirely.
-    var tempBaseline = baselineTemperatureForProgress(passageProgressPercent(state));
-    var stormChill = clamp((targets.windSpeed - 15) / 25, 0, 1) * 4; // up to ~4F cooler at the strongest winds -- unchanged from before this phase
-    var conditionOffset = WEATHER_TEMPERATURE_CONDITION_OFFSET_F[targets.condition] || 0;
-    var dayNightOffset = dayNightTemperatureOffsetF(state);
-    var tempTarget = tempBaseline - stormChill + conditionOffset + dayNightOffset;
+    // Temperature: the existing latitude-based pull (unchanged
+    // mechanism from before this phase), plus a gentle extra pull
+    // toward whatever this phase's own windSpeed target implies (rough
+    // weather reads a little cooler) -- section 4's own "temperature
+    // tendency if currently used."
+    var tempBaseline = estimateTemperatureF(state.nav.lat);
+    var stormChill = clamp((targets.windSpeed - 15) / 25, 0, 1) * 4; // up to ~4F cooler at the strongest winds
+    var tempTarget = tempBaseline - stormChill;
     w.temperatureF = w.temperatureF
       + (tempTarget - w.temperatureF) * (1 - Math.pow(1 - WEATHER_BLEND_TEMP_PER_HOUR, hours))
       + (Math.random() - 0.5) * WEATHER_TEXTURE_TEMP_F_PER_HOUR * hours;
@@ -10720,31 +10646,22 @@
     outputEl.insertBefore(p, tempViewEl);
   }
 
-  // PHASE 8 -- replaces the old calendar-date timestamp (DD MON HH:MM,
-  // e.g. "03 NOV 14:30") with a pure voyage-relative one: DAY X HH:MM,
-  // 24-hour time, no month or date anywhere (section 7 of the task
-  // this implements). dayNumberForTimestamp is the SAME day-rollover
-  // math voyageDayNumber/checkVesselLogDayRollover already use, just
-  // applied to this specific entry's own stored ts rather than the
-  // current moment -- a log entry printed on day 3 must always still
-  // read DAY 3 when scrolled back to later, even once the voyage has
-  // moved on to day 11. This is a display-only change: entry.t itself
-  // is untouched (still the real departedAt+voyageMinutes-based
-  // timestamp the save/log/day-rollover system actually runs on).
-  function formatVoyageLogTimestamp(state, ts) {
-    var day = dayNumberForTimestamp(state, ts);
+  function formatShipTime(ts) {
+    var months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
     var d = new Date(ts);
+    var dd = String(d.getDate()).padStart(2, '0');
+    var mon = months[d.getMonth()];
     var hh = String(d.getHours()).padStart(2, '0');
     var mm = String(d.getMinutes()).padStart(2, '0');
-    return 'DAY ' + day + ' ' + hh + ':' + mm;
+    return dd + ' ' + mon + ' ' + hh + ':' + mm;
   }
 
-  function printLogEntry(state, entry) {
+  function printLogEntry(entry) {
     var wrap = document.createElement('div');
     wrap.className = 'entry';
     var ts = document.createElement('div');
     ts.className = 'entry-ts';
-    ts.textContent = formatVoyageLogTimestamp(state, entry.t);
+    ts.textContent = formatShipTime(entry.t);
     var body = document.createElement('div');
     body.className = 'entry-text';
     body.textContent = entry.text;
@@ -10759,7 +10676,7 @@
 
   function flushNewLogEntries(state) {
     for (; printedCount < state.log.length; printedCount++) {
-      printLogEntry(state, state.log[printedCount]);
+      printLogEntry(state.log[printedCount]);
     }
     scrollToBottom();
   }
@@ -10807,21 +10724,14 @@
   // Day 1 is the calendar date the voyage departed on; Day 2 begins at
   // the following local midnight, not 24 elapsed hours after departure
   // (a 4pm departure should read DAY 2 at midnight that same night, a
-  // few hours in, not at 4pm the next day). Generalized to an arbitrary
-  // ts (PHASE 8) so a PAST log entry's own stored timestamp can get its
-  // correct day number too, not just "the current moment" -- see
-  // formatVoyageLogTimestamp, which is what actually needs this for an
-  // arbitrary entry.t rather than state.meta.voyageMinutes.
-  function dayNumberForTimestamp(state, ts) {
+  // few hours in, not at 4pm the next day).
+  function voyageDayNumber(state) {
     var departure = new Date(state.meta.departureDateAnchor != null ? state.meta.departureDateAnchor : state.meta.departedAt);
-    var current = new Date(ts);
+    var current = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
     var departureMidnight = new Date(departure.getFullYear(), departure.getMonth(), departure.getDate());
     var currentMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate());
     var daysSince = Math.round((currentMidnight - departureMidnight) / 86400000);
     return daysSince + 1;
-  }
-  function voyageDayNumber(state) {
-    return dayNumberForTimestamp(state, state.meta.departedAt + state.meta.voyageMinutes * 60000);
   }
 
   /* ============================================================
@@ -10855,6 +10765,12 @@
      logVesselLogRepair/logVesselLogEvent and their call sites) rather
      than being inferred here. */
 
+  function vesselLogMonthDayLabel(ts) {
+    var months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    var d = new Date(ts);
+    return months[d.getMonth()] + ' ' + d.getDate();
+  }
+
   function vesselLogTimeLabel(ts) {
     var d = new Date(ts);
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -10865,13 +10781,10 @@
   // moment this day began, so "distance traveled today" is always
   // simply the odometer's current value minus this, never a second,
   // separately-accumulated total that could drift out of sync with it.
-  // PHASE 8 -- no longer takes/stores a calendar dateLabel (see
-  // vesselLogMonthDayLabel, removed -- its only reader was
-  // appendVesselLogDay's own heading, which now shows a plain
-  // IN PROGRESS/COMPLETE status instead of a calendar date).
-  function newVesselLogDay(dayNumber, distanceTraveledAtStart) {
+  function newVesselLogDay(dayNumber, dateLabel, distanceTraveledAtStart) {
     return {
       dayNumber: dayNumber,
+      dateLabel: dateLabel,
       distanceTraveledAtStart: distanceTraveledAtStart,
       speedSampleSum: 0, speedSampleCount: 0, maxSpeed: 0,
       windSampleSum: 0, windSampleCount: 0, maxWindSpeed: 0,
@@ -10891,6 +10804,7 @@
   function finalizeVesselLogDay(state, cd) {
     return {
       dayNumber: cd.dayNumber,
+      dateLabel: cd.dateLabel,
       distanceTraveled: +(state.nav.distanceTraveled - cd.distanceTraveledAtStart).toFixed(1),
       totalDistanceAtEnd: +state.nav.distanceTraveled.toFixed(1),
       avgSpeed: cd.speedSampleCount > 0 ? +(cd.speedSampleSum / cd.speedSampleCount).toFixed(1) : 0,
@@ -10922,7 +10836,8 @@
     var nowDay = voyageDayNumber(state);
     while (vl.currentDay.dayNumber < nowDay) {
       vl.completedDays.push(finalizeVesselLogDay(state, vl.currentDay));
-      vl.currentDay = newVesselLogDay(vl.currentDay.dayNumber + 1, state.nav.distanceTraveled);
+      var nowTs = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+      vl.currentDay = newVesselLogDay(vl.currentDay.dayNumber + 1, vesselLogMonthDayLabel(nowTs), state.nav.distanceTraveled);
     }
   }
 
@@ -10976,8 +10891,9 @@
   // other migrateXIfNeeded in this file.
   function migrateVesselLogIfNeeded(state) {
     if (state.vesselLog) return;
+    var nowTs = state.meta.departedAt + state.meta.voyageMinutes * 60000;
     state.vesselLog = {
-      currentDay: newVesselLogDay(voyageDayNumber(state), state.nav.distanceTraveled),
+      currentDay: newVesselLogDay(voyageDayNumber(state), vesselLogMonthDayLabel(nowTs), state.nav.distanceTraveled),
       completedDays: [],
     };
   }
@@ -13344,12 +13260,9 @@
   // EVENTS headings are omitted entirely, not shown empty, when that
   // day has none -- see the task's own explicit requirement for this.
   function appendVesselLogDay(container, day, isCurrent) {
-    // PHASE 8 -- COMPLETE parallels IN PROGRESS; no calendar date here
-    // any more (see newVesselLogDay's own notes) -- the day number
-    // alone already identifies which day this is.
     var heading = document.createElement('p');
     heading.className = 'line heading-label';
-    heading.textContent = 'DAY ' + day.dayNumber + ' \u2014 ' + (isCurrent ? 'IN PROGRESS' : 'COMPLETE');
+    heading.textContent = 'DAY ' + day.dayNumber + ' \u2014 ' + (isCurrent ? 'IN PROGRESS' : day.dateLabel);
     container.appendChild(heading);
 
     var gap = document.createElement('p');
@@ -19447,7 +19360,7 @@
     // to never having connectivity, which the whole system already has
     // to handle gracefully.
     var w = state.weather;
-    if (w.temperatureF === undefined) w.temperatureF = baselineTemperatureForProgress(passageProgressPercent(state));
+    if (w.temperatureF === undefined) w.temperatureF = estimateTemperatureF(state.nav.lat);
     if (!w.realWx) {
       w.realWx = {
         fetchedRealMs: null, lat: null, lon: null,
