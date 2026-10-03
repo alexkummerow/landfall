@@ -828,7 +828,7 @@
       <span id="nav-day"></span>
       <span id="nav-speed"></span>
       <span id="nav-heading"></span>
-      <span id="nav-region"></span>
+      <span id="nav-condition"></span>
     </div>
 
     <main id="output" aria-live="polite"><div id="temp-view"></div></main>
@@ -10797,7 +10797,7 @@
   var navDayEl = document.getElementById('nav-day');
   var navSpeedEl = document.getElementById('nav-speed');
   var navHeadingEl = document.getElementById('nav-heading');
-  var navRegionEl = document.getElementById('nav-region');
+  var navConditionEl = document.getElementById('nav-condition'); // information-architecture pass: used to show the region (see regionName), now shows weatherConditionLabel instead -- the region moved up into the header itself (setVesselLine)
   var soundBtn = document.getElementById('sound-btn');
   var restartBtn = document.getElementById('restart-btn');
   var shipsPlanOverlayEl = document.getElementById('ships-plan-overlay');
@@ -11086,6 +11086,32 @@
     applyNaturalLightDimming(GAME); // NATURAL LIGHT -- keeps the 30-minute dim/brighten ramps moving continuously even while the player isn't actively clicking anything; renderOptions covers the immediate case (an action, a cabin-light toggle) right after this same function definition
   }
 
+  // VOYAGE STATUS BAR's own CONDITION field (information-architecture
+  // pass: the status bar's old region field moved up into the header
+  // itself -- see setVesselLine's own call sites and updateNavStrip
+  // below -- freeing this slot for quick atmospheric awareness
+  // instead). Maps the existing simulated condition/windSpeed (never a
+  // second weather model) to the task's own preferred player-facing
+  // vocabulary. Reuses WIND_AUDIO_SPEED_THRESHOLDS_KT (the audio
+  // system's own existing "how windy is this" tiers) for the rain-
+  // intensity split rather than inventing a second set of numbers. Not
+  // every label in the task's own preferred list is reachable here (no
+  // existing signal for MOSTLY CLEAR/PARTLY CLOUDY/FOG/SHOWERS) --
+  // offered as a preferred vocabulary, not a mandate every entry must
+  // appear.
+  function weatherConditionLabel(state) {
+    var w = state.weather;
+    var t = WIND_AUDIO_SPEED_THRESHOLDS_KT;
+    if (w.condition === 'squall' || w.windSpeed >= 34) return 'STORM'; // 34kt: comfortably past WIND_AUDIO's own "heavy" (26kt) floor, into majorStorm's own peak-phase range
+    if (w.condition === 'rain') {
+      if (w.windSpeed >= t.moderateMax) return 'HEAVY RAIN';
+      if (w.windSpeed >= t.lightMax) return 'RAIN';
+      return 'LIGHT RAIN';
+    }
+    if (w.condition === 'clear') return 'CLEAR';
+    return 'OVERCAST';
+  }
+
   function regionName(state) {
     var phase = voyagePhase(state);
     if (phase === 'inland') {
@@ -11305,7 +11331,14 @@
     navDayEl.textContent = 'DAY ' + day;
     navSpeedEl.textContent = speed.toFixed(1) + ' KT';
     navHeadingEl.textContent = Math.round(state.nav.heading) + '\u00B0';
-    navRegionEl.textContent = regionName(state);
+    // Information-architecture pass: the status bar's final field is now
+    // the current WEATHER CONDITION (quick atmospheric awareness while
+    // moving through the boat), not the region -- the region moved up
+    // into the header itself, kept live here alongside everything else
+    // this function already refreshes on its own existing cadence
+    // (updateClock's periodic tick, plus every render).
+    navConditionEl.textContent = weatherConditionLabel(state);
+    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + regionName(state));
   }
 
   function compassPoint(deg) {
@@ -11526,49 +11559,24 @@
       && state.boat.cabinTemperatureF != null && state.boat.cabinTemperatureF > CABIN_STUFFY_TEMP_F;
   }
 
-  // The NAV STATION "CABIN" status word -- COLD/COMFORTABLE/HOT from the
-  // existing cabinConditionLabel, but STUFFY (isCabinHeatStuffy) takes
-  // precedence over whatever that would otherwise read, matching the
-  // spec's flat four-way enumeration (COLD/COMFORTABLE/STUFFY/HOT) for
-  // this one status word. Temperature itself is shown on its own
-  // separate CABIN TEMP line now (see cmdNavStation) -- this function
-  // returns only the word. A separate function from formatCabinTemp
-  // (used as-is, unmodified, by STATUS) specifically so nothing else
-  // that reads cabinConditionLabel's bare 'HOT'/'COLD'/'COMFORTABLE'
-  // string is ever affected by this addition.
-  function cabinStatusWord(state) {
-    if (isCabinHeatStuffy(state)) return 'STUFFY';
-    return cabinConditionLabel(state.boat.cabinTemperatureF, state.boat.fanOn);
-  }
-
   // STATUS is now purely about Solace herself — HUNGER/THIRST moved to
   // GALLEY, ENERGY to CABIN, MORALE to SALOON (see those rooms), each
   // reusing this exact same label/level logic in its new home rather
   // than a duplicate.
+  // INFORMATION-ARCHITECTURE PASS -- STATUS is no longer a separate
+  // screen; its content (statusDataRows, near cmdNavStation) now
+  // expands in place within NAV STATION itself. This function stays,
+  // unchanged in name and signature, purely so its existing callers
+  // (cmd:status from outside NAV STATION's own render -- see
+  // cmdRepair's own BACK button and darkness-block fallback, plus its
+  // own direct call when a repair list comes up empty) keep working
+  // exactly as before: force STATUS open, then land on NAV STATION
+  // itself, which now shows it expanded -- arguably a small
+  // improvement over the old behavior, since the player sees the
+  // system they just dealt with immediately, with no extra click.
   function cmdStatus(state) {
-    var b = state.boat;
-    printBlank();
-    printDataRow('CABIN TEMP', formatCabinTemp(b.cabinTemperatureF, b.fanOn), 'data-row-md');
-    printDataRow('BATTERY', Math.floor(b.battery) + '%', 'data-row-md');
-    printBlank();
-    printDataRow('SAILS', b.sails, 'data-row-md');
-    printDataRow('RUDDER', b.steering, 'data-row-md');
-    printDataRow('ENGINE', b.engine, 'data-row-md');
-    printDataRow('ELECTRICAL', b.electrical, 'data-row-md');
-    var opts = [];
-    // REPAIR is now reachable only from here, and only while there's
-    // actually something to repair -- hasRepairableDamage covers the
-    // four tracked systems; the aft-locker check alongside it covers
-    // the one-off event cmdRepair also offers (a deferred "SECURE IT
-    // LATER" aft locker isn't a DAMAGED system yet, but the player
-    // still needs a way back to it before it escalates on its own).
-    if (hasRepairableDamage(state) || (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)) {
-      opts.push({ label: 'REPAIR', action: 'cmd:repair' });
-    }
-    var rescueItem = rescueMenuOption(state);
-    if (rescueItem) opts.push(rescueItem);
-    opts.push({ label: 'BACK', action: 'cmd:nav-station' });
-    state.pendingChoice = { id: 'status-view', options: opts };
+    navStationExpanded.status = true;
+    cmdNavStation(state);
   }
 
   var ELECTRICAL_TOGGLE_FIELDS = {
@@ -13049,6 +13057,20 @@
     state.pendingChoice = { id: 'cabin-menu', options: options };
   }
 
+  // NAV STATION COLLAPSIBLE SECTIONS -- INSTRUMENTS and STATUS both
+  // expand/collapse in place within NAV STATION itself (never
+  // navigating to a separate screen the way SOLACE HANDBOOK/SHIP'S
+  // COMPUTER/INVENTORY still do): the toggle button's own label stays
+  // "> INSTRUMENTS"/"> STATUS" in both states, with that section's
+  // rows appearing directly beneath it when expanded, collapsing back
+  // to just the button on a second click. UI-only, like openInfoPanel/
+  // uiBusy elsewhere in this file -- never part of state, never saved
+  // (a collapsed state after reload is harmless, expected, and exactly
+  // how every other UI-only flag in this file already behaves). Both
+  // flags are independent -- either, both, or neither section can be
+  // open at once.
+  var navStationExpanded = { instruments: false, status: false };
+
   // NAV STATION INSTRUMENTS -- live onboard readings (information-
   // architecture pass: separates CURRENT CONDITIONS, measured here,
   // from FUTURE CONDITIONS, which now live only in SHIP'S COMPUTER's
@@ -13061,11 +13083,12 @@
   // BAROMETER is the one genuinely new reading -- see
   // currentBarometricPressureMb's own notes on why it's a pure
   // derivation from windSpeed rather than a second weather model.
-  // Returns one heading row plus six data rows, inserted as their own
-  // group (see cmdNavStation below) between SOLACE HANDBOOK and SHIP'S
-  // COMPUTER -- a plain, non-interactive block sitting among the
-  // screen's buttons, same shape as option.status elsewhere.
+  // Returns the toggle button, plus the six data rows only while
+  // navStationExpanded.instruments is true -- see the toggle-instruments
+  // case in handleAction for what flips that flag.
   function instrumentsStatusRows(state) {
+    var rows = [{ label: 'INSTRUMENTS', action: 'toggle-instruments' }];
+    if (!navStationExpanded.instruments) return rows;
     var w = state.weather;
     var fix = currentLatLon(state);
     var seaRange = seaHeightRangeFt(w.seaState);
@@ -13077,16 +13100,47 @@
       ['BAROMETER', currentBarometricPressureMb(state) + ' MB'],
       ['SEAS', seaRange.low + '\u2013' + seaRange.high + ' FT'],
     ];
-    return [{ heading: true, text: 'INSTRUMENTS' }].concat(readings.map(function (r) {
+    return rows.concat(readings.map(function (r) {
       return { dataRow: true, label: r[0], value: r[1], widthCls: 'data-row-md' };
     }));
+  }
+
+  // NAV STATION STATUS -- vessel systems / repair state, the same
+  // collapsible treatment as INSTRUMENTS just above (see
+  // navStationExpanded's own notes). CABIN TEMP/BATTERY no longer
+  // appear here at all -- information-architecture pass, section 5:
+  // those readings already have a home (the three rows at the top of
+  // this same screen), and duplicating them here served no purpose.
+  // REPAIR/RESCUE stay as real, clickable buttons (never passive data
+  // rows) when relevant, exactly as STATUS always offered them -- the
+  // one place this expanded block still contains an actual action, not
+  // just a reading.
+  function statusDataRows(state) {
+    var rows = [{ label: 'STATUS', action: 'toggle-status' }];
+    if (!navStationExpanded.status) return rows;
+    var b = state.boat;
+    rows = rows.concat([
+      { dataRow: true, label: 'SAILS', value: b.sails, widthCls: 'data-row-md' },
+      { dataRow: true, label: 'RUDDER', value: b.steering, widthCls: 'data-row-md' },
+      { dataRow: true, label: 'ENGINE', value: b.engine, widthCls: 'data-row-md' },
+      { dataRow: true, label: 'ELECTRICAL', value: b.electrical, widthCls: 'data-row-md' },
+    ]);
+    if (hasRepairableDamage(state) || (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)) {
+      rows.push({ label: 'REPAIR', action: 'cmd:repair' });
+    }
+    var rescueItem = rescueMenuOption(state);
+    if (rescueItem) rows.push(rescueItem);
+    return rows;
   }
 
   // NAV STATION -- the boat's operational center: cabin/power status at
   // a glance, the electrical panel embedded directly (no heading of its
   // own -- the controls are self-explanatory), then SOLACE HANDBOOK,
-  // live INSTRUMENTS readings (instrumentsStatusRows above), SHIP'S
-  // COMPUTER, and inventory/status. Groups are separated by blank
+  // INSTRUMENTS, SHIP'S COMPUTER, INVENTORY, and STATUS. INSTRUMENTS
+  // and STATUS are each independent, collapsible sections now
+  // (instrumentsStatusRows/statusDataRows above, each its own group so
+  // a divider separates it from its neighbors) -- INVENTORY stays a
+  // plain navigation button, unchanged. Groups are separated by blank
   // vertical spacing ALONE (groupedOptions' plain invisible spacer) --
   // no horizontal rule of any kind anywhere on this screen.
   function cmdNavStation(state) {
@@ -13096,14 +13150,21 @@
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    printLine('CABIN TEMP: ' + cabinTempDisplay);
-    printLine('CABIN: ' + cabinStatusWord(state));
+    // INFORMATION-ARCHITECTURE PASS -- the old CABIN: COLD/COMFORTABLE/
+    // HOT status word (and its now-dead helper, formerly cabinStatusWord,
+    // removed along with this) is gone entirely: redundant next to the
+    // exact CABIN TEMP reading right above it. The three remaining readings
+    // use the SAME shared label/value grid (.data-row-md, same width
+    // tier NAV STATION/STATUS/REPAIR already use) every other clean
+    // data display in the game uses -- no colons, no manual spacing.
+    printDataRow('CABIN TEMP', cabinTempDisplay, 'data-row-md');
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
-    printLine('BATTERY: ' + batteryLabel);
+    printDataRow('BATTERY', batteryLabel, 'data-row-md');
+    printDataRow('SOLAR CHARGING', solarOutputWatts(state) + ' W', 'data-row-md');
     // BATTERY FAILURE -- one consolidated line for the whole 0%-through-
     // threshold span (0% included): the separate all-caps NO POWER
     // wording this used to show at exactly 0% was redundant next to the
-    // BATTERY line itself, which already reads the exact percentage —
+    // BATTERY row itself, which already reads the exact percentage —
     // SYSTEMS UNAVAILABLE — LOW BATTERY communicates the consequence
     // (systems unavailable) without repeating the battery reading a
     // second way. Gated on batteryRecovering, not the raw value alone:
@@ -13112,11 +13173,12 @@
     // ever having reached 0% (see updateBattery). Never appears once
     // battery reaches the threshold; the mechanical gate itself is
     // unchanged (see every performXToggle's own check) -- this is
-    // purely the status line catching up to what was already true.
+    // purely the status line catching up to what was already true. A
+    // plain printLine, not a data row: this is a full-width warning
+    // message, not a label/value pair.
     if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printLine('SYSTEMS UNAVAILABLE \u2014 LOW BATTERY', 'amber');
     }
-    printLine('SOLAR CHARGING: ' + solarOutputWatts(state) + ' W');
     if (b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
@@ -13159,10 +13221,8 @@
       [{ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
       instrumentsStatusRows(state),
       [{ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }],
-      [
-        { label: 'INVENTORY', action: 'cmd:inventory' },
-        { label: 'STATUS', action: 'cmd:status' },
-      ],
+      [{ label: 'INVENTORY', action: 'cmd:inventory' }],
+      statusDataRows(state),
       extraGroup,
       [{ label: 'BACK', action: 'cancel' }],
     ]);
@@ -14666,9 +14726,9 @@
   // activeTurn/isCurrentlyLuffing elsewhere in this file. null
   // whenever the player isn't inside the CHANGE screen; cmdClothing
   // initializes it fresh from whatever's currently worn the moment
-  // it's null, and both leaving via BACK (performClothingDiscard) and
-  // committing via COMMIT (performClothingCommit) clear it back to
-  // null on their way out, so the next visit always starts fresh.
+  // it's null, and leaving via BACK (performClothingCommit, the single
+  // exit now) clears it back to null on the way out, so the next visit
+  // always starts fresh.
   var pendingClothing = null;
 
   function cloneClothing(clo) {
@@ -14684,12 +14744,18 @@
   // changed in the PENDING outfit, rather than dropping back to the
   // contextual BELOW DECK menu — see performSetPendingClothing/
   // performTogglePendingClothing. Nothing here touches what's actually
-  // worn. The player leaves CHANGE one of two ways: BACK
-  // ('clothing-discard', discarding the pending outfit with no audio/
-  // observation — see performClothingDiscard) or COMMIT
-  // ('commit-clothing', which actually applies it — see
-  // performClothingCommit). Neither is the generic 'cancel' every
-  // other screen uses, since both need their own specific behavior.
+  // worn. INFORMATION-ARCHITECTURE PASS -- the player now leaves CHANGE
+  // only one way, BACK ('commit-clothing' -- see performClothingCommit's
+  // own notes), which applies the pending outfit (with its usual
+  // changing sequence) only if it actually differs from what's worn,
+  // and otherwise returns immediately with no sequence and no message.
+  // There's no longer a separate CONFIRM step, and no longer a second,
+  // unconditional-discard exit path (the old 'clothing-discard' /
+  // performClothingDiscard, removed along with this -- see this
+  // function's own BACK button) -- a single BACK that does the right
+  // thing either way, regardless of how many individual items were
+  // toggled on the way there. Not the generic 'cancel' every other
+  // screen uses, since this needs its own specific behavior.
   function cmdClothing(state) {
     // BATTERY FAILURE -- changing clothes is explicitly allowed even in
     // a nighttime failure (see the task this implements), so the usual
@@ -14714,8 +14780,16 @@
           { label: 'SUNGLASSES', value: clo.sunglasses ? 'ON' : 'OFF', action: 'toggle-pending:sunglasses' },
         ],
         [
-          { label: 'CONFIRM', action: 'commit-clothing' },
-          { label: 'BACK', action: 'clothing-discard' },
+          // INFORMATION-ARCHITECTURE PASS -- CONFIRM removed entirely.
+          // BACK is now the ONLY exit, and reuses commit-clothing's own
+          // existing comparison (see performClothingCommit's own notes:
+          // it already resolves instantly, with no audio/sequence/
+          // observation, whenever the pending outfit matches what's
+          // currently worn -- exactly the "unchanged -> return
+          // immediately" behavior this task asks for) rather than the
+          // old unconditional clothing-discard, which always skipped
+          // applying the outfit regardless of whether it had changed.
+          { label: 'BACK', action: 'commit-clothing' },
         ],
       ]),
     };
@@ -14813,27 +14887,17 @@
     cmdClothing(state);
   }
 
-  // BACK — the player decided not to change clothes. Discards the
-  // pending outfit entirely; nothing worn is touched, no audio, no
-  // busy state, no observation. Same immediate, synchronous style and
-  // generic "Left as it was." text as the plain 'cancel' action every
-  // other screen uses, since that's exactly what this means here too.
-  function performClothingDiscard(state) {
-    pendingClothing = null;
-    printBlank();
-    printLine('Left as it was.', 'dim');
-    cmdCabin(state);
-  }
-
-  // COMMIT — the only command that actually changes what's worn.
-  // Compares the pending outfit against what's currently worn; if
-  // nothing differs, resolves instantly with no audio/busy state/
-  // observation (the player just confirmed what they already have on).
-  // Otherwise runs ONE physical clothing-changing action through the
-  // same audio-synced architecture as galley prep and sail raising/
-  // lowering (see runAudioSyncedAction, playCabinOneShot) — the entire
-  // pending outfit is applied simultaneously only once that audio
-  // actually finishes, never garment-by-garment while it plays.
+  // BACK — the single exit from CHANGE now (see cmdClothing's own
+  // notes), reached regardless of how many individual items were
+  // toggled along the way. Compares the pending outfit against what's
+  // currently worn; if nothing differs, resolves instantly with no
+  // audio/busy state/observation (the player just backed out of CHANGE
+  // without actually changing anything). Otherwise runs ONE physical
+  // clothing-changing action through the same audio-synced architecture
+  // as galley prep and sail raising/lowering (see runAudioSyncedAction,
+  // playCabinOneShot) — the entire pending outfit is applied
+  // simultaneously only once that audio actually finishes, never
+  // garment-by-garment while it plays.
   function performClothingCommit(state) {
     var outfit = pendingClothing || cloneClothing(state.crew.clothing);
     if (clothingOutfitsEqual(outfit, state.crew.clothing)) {
@@ -18503,21 +18567,6 @@
         optionsEl.appendChild(statusDiv);
         return;
       }
-      if (opt.heading) {
-        // NAV STATION INSTRUMENTS' own section title (the one place
-        // #options needs a heading sitting among its rows rather than
-        // up in #output) -- .option-status for this panel's own
-        // padding/font-size rhythm, plus .heading-label (unchanged,
-        // reused verbatim from every other screen's section headings)
-        // for its distinct wider letter-spacing. Same non-interactive
-        // <div>, same cmdNavStation-rebuilds-it-fresh-every-call
-        // pattern as opt.status above.
-        var headingDiv = document.createElement('div');
-        headingDiv.className = 'option-status heading-label';
-        headingDiv.textContent = opt.text;
-        optionsEl.appendChild(headingDiv);
-        return;
-      }
       if (opt.dataRow) {
         // NAV STATION INSTRUMENTS' own live readings (POSITION/WIND
         // FROM/WIND/OUTSIDE TEMP/BAROMETER/SEAS) -- the EXACT same
@@ -18967,11 +19016,26 @@
           printBlank();
           printLine('Left as it was.', 'dim');
           break;
-        case 'clothing-discard':
-          performClothingDiscard(state);
-          break;
         case 'commit-clothing':
           performClothingCommit(state);
+          break;
+        case 'toggle-instruments':
+          // NAV STATION's own in-place expand/collapse (see
+          // navStationExpanded's own notes, near instrumentsStatusRows) --
+          // flips the flag and redraws the same screen in place, exactly
+          // like an electrical toggle does, rather than navigating
+          // anywhere. clearTempView already ran (see this click handler's
+          // own 'else' branch, just above the switch this is inside), so
+          // re-running cmdNavStation's own CABIN TEMP/BATTERY/SOLAR
+          // CHARGING rows here doesn't duplicate anything.
+          navStationExpanded.instruments = !navStationExpanded.instruments;
+          cmdNavStation(state);
+          break;
+        case 'toggle-status':
+          // Same mechanism as toggle-instruments just above, for STATUS'S
+          // own independent flag.
+          navStationExpanded.status = !navStationExpanded.status;
+          cmdNavStation(state);
           break;
         case 'wake-up':
           // The physical act of getting out of the bunk (wake_up.mp3) is
@@ -19395,7 +19459,7 @@
       playMarinaAmbience(nightStart); // idempotent -- marinaAmbienceStarted's own flags mean this only starts whichever layer(s) never actually got going above
       updateSoundLabel();
       restartBtn.hidden = false;
-      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+      setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + regionName(GAME)); // header now shows the current REGION, not a fixed "UNDERWAY" -- see updateNavStrip's own ongoing refresh for how this stays live as the voyage progresses
       startLiveLoop();
       runShortAction(GAME, {
         label: 'CONTINUE',
@@ -20084,7 +20148,7 @@
     migrateStalePendingChoiceIfNeeded(GAME);
     enforceFavorableDepartureIfNeeded(GAME); // PHASE 7 -- after every migration above, before the catch-up tick simulation below ever runs
     restartBtn.hidden = false;
-    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
+    setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + regionName(GAME)); // header now shows the current REGION, not a fixed "UNDERWAY" -- see updateNavStrip's own ongoing refresh for how this stays live as the voyage progresses
     var ticks = catchUpFromRealTime(GAME);
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
