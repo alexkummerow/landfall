@@ -8554,6 +8554,7 @@
     applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
     applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
     applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
+    applyMuteToDoorAudio(); // DOOR HOOK (room-navigation pass: CABIN/HEAD open/close, AFT CABIN rattle) -- same reasoning as engine audio
     applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
     applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
     applyMuteToCompanionwayAudio(); // COMPANIONWAY HOOK (upstairs/downstairs transition SFX) -- same reasoning as engine audio
@@ -13009,6 +13010,105 @@
     state.pendingChoice = { id: 'galley-menu', options: pushBack(options, 'cancel') };
   }
 
+  /* --------------------------------------------------------------
+     ROOM-NAVIGATION PASS -- door-opening/closing wrappers for the
+     CABIN/HEAD transitions reachable from BELOW DECK's own room list,
+     plus AFT CABIN's locked-door interaction. Same runAudioSyncedAction/
+     transientLabel shape as cmdOpenHatch/cmdCloseHatch -- a brief,
+     routine beat that leaves nothing behind in the scrollback once it
+     resolves, with the real room (or "Left as it was."/"The door is
+     locked." note) appearing only once the door sound has actually
+     finished (or the usual audio-unlocked/failure/duration-unknown
+     fallbacks let it resolve immediately instead -- see
+     runAudioSyncedAction's own notes; this never adds a second way for
+     the player to get stuck waiting). Kept here, right before cmdHead/
+     cmdCabin themselves, since these are purely entry/exit wrappers
+     around them -- cmdHead/cmdCabin's own content is completely
+     unchanged by this pass.
+     -------------------------------------------------------------- */
+  function cmdEnterCabin(state) {
+    runAudioSyncedAction(state, {
+      label: 'OPENING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('open', onEnded); },
+      action: function (s) { cmdCabin(s); },
+    });
+  }
+  function cmdEnterHead(state) {
+    runAudioSyncedAction(state, {
+      label: 'OPENING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('open', onEnded); },
+      action: function (s) { cmdHead(s); },
+    });
+  }
+  // LEAVING -- mirrors 'cancel's own exact text ("Left as it was.") so
+  // this reads as the same plain, un-eventful return every other
+  // screen's generic BACK already gives, just with the door sound laid
+  // over it -- see cmdCabin/cmdHead's own notes on why THEIR specific
+  // BACK button needed its own action string instead of 'cancel' at
+  // all. Neither callback touches state.pendingChoice itself -- same
+  // as 'cancel' never did -- so runAudioSyncedAction's own tail (it
+  // was still equal to choiceAtStart) nulls it once this resolves,
+  // which is exactly what lets the very next render fall through to
+  // BELOW DECK's own default room list.
+  function cmdLeaveCabin(state) {
+    runAudioSyncedAction(state, {
+      label: 'CLOSING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('close', onEnded); },
+      action: function (s) {
+        printBlank();
+        printLine('Left as it was.', 'dim');
+      },
+    });
+  }
+  function cmdLeaveHead(state) {
+    runAudioSyncedAction(state, {
+      label: 'CLOSING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('close', onEnded); },
+      action: function (s) {
+        printBlank();
+        printLine('Left as it was.', 'dim');
+      },
+    });
+  }
+
+  // AFT CABIN -- always locked this pass (section 2/10's own "for now,
+  // AFT CABIN is always locked"). Extracted into its own function
+  // rather than inlined into cmdTryAftCabin below specifically so a
+  // future key/unlock pass has one single place to change (a real
+  // found-the-key check) rather than needing to touch the interaction
+  // itself at all.
+  function isAftCabinLocked(state) {
+    return true;
+  }
+  // The door-rattle interaction -- immediate feedback only, never a
+  // room of its own: no temporary AFT CABIN screen, nothing logged
+  // permanently, nothing revealed. Repeatable indefinitely (no state
+  // set on a failed attempt), so the player can try the door again
+  // later and hear the same rattle every time, exactly as the task
+  // asks. A future unlock pass would branch here once
+  // isAftCabinLocked(state) can actually return false -- playing
+  // unlock.mp3 once, THEN (not yet, and not part of this pass) opening
+  // a real room -- but that branch does not exist yet; the only path
+  // this function has today is the locked one.
+  function cmdTryAftCabin(state) {
+    if (isAftCabinLocked(state)) {
+      runAudioSyncedAction(state, {
+        label: 'TRYING THE DOOR',
+        transientLabel: true,
+        playAudio: function (onEnded) { return playDoorOneShot('rattle', onEnded); },
+        action: function (s) {
+          printBlank();
+          printLine('The door is locked.', 'dim');
+        },
+      });
+      return;
+    }
+  }
+
   // HEAD — personal washing. HYGIENE is a pure read of the existing
   // hoursSinceWash (see hygieneLevel) — no second cleanliness number.
   // There's no shower aboard Solace; WASH is the wet head's sink/
@@ -13016,12 +13116,19 @@
   function cmdHead(state) {
     printBlank();
     printLine('HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
+    // ROOM-NAVIGATION PASS -- BACK is 'leave-head', not the plain
+    // 'cancel' every other screen's own BACK still uses: this specific
+    // button is the one actually shutting the door behind you on the
+    // way out to BELOW DECK, so it gets the door-close sound (see the
+    // 'leave-head' case in handleAction) -- WASH's own BACK (reached
+    // one level deeper, if it has one) is untouched by this and still
+    // returns here, not all the way out, exactly as before.
     state.pendingChoice = {
       id: 'head-menu',
       options: [
         { label: 'WASH', action: 'cmd:wash' },
         { divider: true },
-        { label: 'BACK', action: 'cancel' },
+        { label: 'BACK', action: 'leave-head' },
       ],
     };
   }
@@ -13266,7 +13373,14 @@
     if (bunkOpt) options.push(bunkOpt);
     var airOpt = choreOptionIfDue(state, 'air');
     if (airOpt) options.push(airOpt);
-    state.pendingChoice = { id: 'cabin-menu', options: pushBack(options, 'cancel') };
+    // ROOM-NAVIGATION PASS -- BACK is 'leave-cabin', not the plain
+    // 'cancel' every other screen's own BACK still uses: this specific
+    // button is the one actually shutting the door behind you on the
+    // way out to BELOW DECK, so it gets the door-close sound (see the
+    // 'leave-cabin' case in handleAction) -- SLEEP/CHANGE/the chore
+    // options above (reached one level deeper) are untouched by this
+    // and still return here, not all the way out, exactly as before.
+    state.pendingChoice = { id: 'cabin-menu', options: pushBack(options, 'leave-cabin') };
   }
 
   // NAV STATION COLLAPSIBLE SECTIONS -- INSTRUMENTS and STATUS both
@@ -17357,6 +17471,123 @@
   }
 
   /* --------------------------------------------------------------
+     DOOR AUDIO -- ROOM-NAVIGATION PASS. The physical door sounds for
+     entering/leaving CABIN or HEAD from BELOW DECK (open/close; see
+     the 'enter-cabin'/'enter-head'/'leave-cabin'/'leave-head' cases in
+     handleAction), and AFT CABIN's own locked-door attempt (rattle;
+     see 'try-aft-cabin'). Same lazy-element/fade-in/onEnded shape as
+     every other one-shot domain in this file (SALOON AUDIO just above,
+     HEAD/CABIN/GALLEY/SAILS elsewhere) -- a NEW domain of its own
+     rather than folded into CABIN_AUDIO/HEAD_AUDIO, since these sounds
+     belong to the DOORWAY itself (and, for AFT CABIN, a room with no
+     other audio of its own at all), not to anything already happening
+     inside either room. playDoorOneShot still runs its onEnded
+     callback correctly (via the existing audioUnlocked/play-rejection
+     handling) if a file is missing, so the busy action can never get
+     stuck waiting on it -- see runAudioSyncedAction's own duration-
+     derived watchdog for the belt-and-suspenders failure case.
+     unlock is listed here (the file exists -- see this task's own
+     notes) purely as future-proofing data, exactly like every other
+     key; nothing anywhere calls playDoorOneShot('unlock', ...) yet,
+     and this pass does not add that call -- the key/unlock story event
+     itself is explicitly out of scope.
+     -------------------------------------------------------------- */
+  var DOOR_AUDIO_FILES = {
+    open: 'audio/doors/open.mp3',
+    close: 'audio/doors/close.mp3',
+    rattle: 'audio/doors/rattle.mp3',
+    unlock: 'audio/doors/unlock.mp3', // NOT used yet -- see this section's own notes above
+  };
+  var DOOR_AUDIO_VOLUME = {
+    open: 0.5,
+    close: 0.5,
+    rattle: 0.5,
+    unlock: 0.5,
+  };
+  var DOOR_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+
+  var doorAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as saloonAudioEls/headAudioEls/cabinAudioEls
+
+  function getDoorAudioEl(key) {
+    var el = doorAudioEls[key];
+    if (el) return el;
+    el = new Audio(DOOR_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Door audio failed to load (' + key + '): ' + DOOR_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
+    doorAudioEls[key] = el;
+    return el;
+  }
+
+  // Identical in shape to fadeSaloonVolume/fadeHeadVolume/fadeCabinVolume --
+  // see those functions' own comments for why each audio system keeps
+  // its own independent copy rather than sharing one.
+  function fadeDoorVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a door one-shot (open/close/rattle) once from the beginning,
+  // with a quick fade-in, and fires onEnded (once) when it naturally
+  // finishes -- the exact onEnded wiring runAudioSyncedAction expects
+  // from its config.playAudio, and returns the element itself so its
+  // own duration-derived watchdog can size itself off the real file
+  // rather than a fixed number, same as every other domain's one-shot.
+  function playDoorOneShot(key, onEnded) {
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
+    var el = getDoorAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.then) {
+      p.then(function () {}, function (e) {
+        console.warn('Door audio failed to play (' + key + '):', describeError(e));
+        audioDebugError(key, e);
+        if (onEnded) onEnded();
+      });
+    }
+    fadeDoorVolume(el, muted ? 0 : DOOR_AUDIO_VOLUME[key], DOOR_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  function applyMuteToDoorAudio() {
+    Object.keys(doorAudioEls).forEach(function (key) {
+      var el = doorAudioEls[key];
+      if (!el || el.paused) return;
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.volume = muted ? 0 : DOOR_AUDIO_VOLUME[key];
+    });
+  }
+
+  /* --------------------------------------------------------------
      NAV STATION AUDIO -- SHIP'S COMPUTER's three one-shots (boot,
      shutdown, app-select click). Identical shape to SALOON's audio
      just above (lazy-loaded elements, quick fade-in, onEnded wiring
@@ -18570,13 +18801,24 @@
       // GALLEY/CABIN/SALOON respectively) at the task's own request, so
       // this is back to just the room list + GO ABOVE, matching CABIN/
       // HEAD/SALOON/GALLEY/NAV STATION's own existing order exactly.
+      // ROOM-NAVIGATION PASS -- AFT CABIN appended as the final room,
+      // after every existing one and still ahead of the GO ABOVE group:
+      // the list reads spatially bow-to-stern, and AFT CABIN is the
+      // sternmost room on the boat -- see cmdAftCabin's own notes for
+      // why it's always locked this pass. CABIN/HEAD's own actions are
+      // 'enter-cabin'/'enter-head' now, not the plain 'cmd:cabin'/
+      // 'cmd:head' every OTHER caller of those two rooms still uses
+      // (chore returns, a darkness-block retry) -- only THIS specific
+      // button, the one actually opening the door from BELOW DECK, gets
+      // the door-open sound; see those two cases in handleAction.
       return groupedOptions([
         [
-          { label: 'CABIN', action: 'cmd:cabin' },
-          { label: 'HEAD', action: 'cmd:head' },
+          { label: 'CABIN', action: 'enter-cabin' },
+          { label: 'HEAD', action: 'enter-head' },
           { label: 'SALOON', action: 'cmd:saloon' },
           { label: 'GALLEY', action: 'cmd:galley' },
           { label: 'NAV STATION', action: 'cmd:nav-station' },
+          { label: 'AFT CABIN', action: 'try-aft-cabin' },
         ],
         [{ label: goLabel, action: 'go-above-below' }],
       ]);
@@ -19169,6 +19411,16 @@
       cmdOpenHatch(state);
     } else if (action === 'close-hatch') {
       cmdCloseHatch(state);
+    } else if (action === 'enter-cabin') {
+      cmdEnterCabin(state);
+    } else if (action === 'enter-head') {
+      cmdEnterHead(state);
+    } else if (action === 'leave-cabin') {
+      cmdLeaveCabin(state);
+    } else if (action === 'leave-head') {
+      cmdLeaveHead(state);
+    } else if (action === 'try-aft-cabin') {
+      cmdTryAftCabin(state);
     } else if (action === 'toggle-autopilot') {
       performAutopilotToggle(state);
     } else if (action === 'toggle-autopilot-nav') {
