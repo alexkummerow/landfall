@@ -1122,15 +1122,25 @@
         // still has a normal, freshly-sampled remaining duration
         // ahead of it rather than being perpetually "mid-phase."
         engine: {
-          currentEvent: 'fairSailing',
+          // PHASE 7 -- a fresh voyage now opens inside the dedicated,
+          // protected FAVORABLE DEPARTURE event (see WEATHER_EVENTS'
+          // own entry for it) rather than fairSailing directly -- see
+          // that event's own notes for why the 0-10%-ish opening needs
+          // its own genuinely guaranteed event rather than just a
+          // weighting bias. targetWindDirection here is startBearing+90
+          // (a clean beam reach for the very first leg out of
+          // Shilshole) -- a fixed, deterministic scripted value for the
+          // brief moment before the first real tick, same reasoning as
+          // the pre-existing targetWindSpeed: 13 scripted value below.
+          currentEvent: 'favorableDeparture',
           eventStartedAt: 0,
           plannedEventDuration: 0,       // real value assigned by beginEvent the first time advanceWeatherEngine runs (see its own "boot" handling)
-          currentPhase: 'middle',
+          currentPhase: 'sailing',
           phaseStartedAt: 0,
           plannedPhaseDuration: 0,
           intensity: 0.3,
           targetWindSpeed: 13,
-          targetWindDirection: 225,
+          targetWindDirection: normalizeDeg(startBearing + 90),
           targetCondition: 'overcast',
           targetRainProbability: 0,
           previousEvent: null,
@@ -1139,6 +1149,34 @@
           booted: false,                 // true once beginEvent has actually run at least once (see advanceWeatherEngine) -- lets a fresh game's own scripted targets above stand untouched for its first tick rather than being immediately overwritten by a freshly sampled phase duration
           routingAtEventStart: null,     // PHASE 4/5 -- {deviationNm, side, mitigationFraction, strongSide, metStrongSide, metWeakSide, interceptPhase} sampled once when the current event began, or null for any non-mitigable event -- see applyRoutingMitigation
           stormStrongSide: null,         // PHASE 5 -- 'north' or 'south', rolled fresh the instant a majorStorm instance begins; null otherwise -- see beginEvent's own notes
+          // PHASE 7 -- the open-ocean "background regime" direction
+          // (see PREVAILING WIND REGIME's own notes, near
+          // prevailingDirectionBandForLat). null until the engine first
+          // establishes one -- a fresh voyage doesn't need it until well
+          // past FAVORABLE DEPARTURE, so it's left unset rather than
+          // guessed at here.
+          prevailingWindDirectionDeg: null,
+          // PHASE 7 -- majorStorm's own temporary direction (see
+          // computeStormDirectionDeg's own notes), set fresh by
+          // beginEvent the instant a storm begins; meaningless outside
+          // an active majorStorm instance, so null is correct here.
+          stormDirectionDeg: null,
+          // PHASE 7 -- open-ocean no-go sanity backstop (see its own
+          // notes near applyNoGoBackstopIfNeeded): voyageMinutes the
+          // CURRENT continuous ordinary-event no-go streak began, or
+          // null when not currently in one.
+          noGoSinceMinutes: null,
+          // PHASE 7 -- FAVORABLE DEPARTURE's own waypoint-change watch
+          // (see advanceWeatherEngine's own check, just after the boot
+          // handling): the nav.waypointIndex the current 'sailing'
+          // phase's direction was picked for. A 3-6h phase timer alone
+          // is too slow to track the coastal corridor's own bends --
+          // several waypoints there are under an hour apart -- so this
+          // forces an immediate re-pick the moment the boat reaches a
+          // new leg, rather than waiting for the next natural phase
+          // boundary. Harmless once clear of the corridor (waypointIndex
+          // stops changing there, see OPEN_WATER_WAYPOINT_INDEX).
+          favorableDepartureWaypointIndex: 1,
         },
         // PHASE 3 -- voyage-level weather arc state, tracked
         // separately from the engine above (see markArcEventExperienced/
@@ -2614,7 +2652,64 @@
      weighted table of what this event may become once its OWN last
      phase finishes -- see chooseNextEvent).
      ---------------------------------------------------------------- */
+  // PHASE 7 -- FAVORABLE DEPARTURE, a genuinely protected opening
+  // window (0% through roughly 12% passage progress) rather than just
+  // a soft weighting bias on top of the normal event pool. Below
+  // FAVORABLE_DEPARTURE_TAPER_START (8%) its own self-transition is
+  // effectively guaranteed (see computeArcWeightMultiplier's own
+  // favorableDeparture case); between that and
+  // FAVORABLE_DEPARTURE_HARD_END (12%) the self-transition weight
+  // tapers smoothly toward zero, so normal Phase 3 cadence takes over
+  // gradually rather than at one exact percentage; past 12% the event
+  // becomes outright ineligible (its own eligibility function below),
+  // a hard backstop independent of the weighting taper.
+  var FAVORABLE_DEPARTURE_TAPER_START = 8;
+  var FAVORABLE_DEPARTURE_HARD_END = 12;
+
   var WEATHER_EVENTS = {
+
+    // PHASE 7 -- see the section comment above
+    // FAVORABLE_DEPARTURE_TAPER_START for the window mechanics. Wind
+    // speed stays tightly within 8-15kt (windSpeedRange 9-15,
+    // intensityRange 0.1-0.9 keeps it inside that even at the
+    // extremes; the normal per-hour texture wobble can nudge it
+    // slightly further but never close to dead air). Direction uses
+    // the new 'routeRelative' mode (see resolvePhaseTargets/beginPhase
+    // and pickRouteRelativeDirectionDeg) -- computed fresh off
+    // state.nav.intendedCourse each time a 'sailing' phase begins
+    // (every 3-6h, not continuously, so it doesn't read as chasing the
+    // player tick to tick), which is ALREADY the correct reference
+    // whether the boat is still working through the coastal waypoints
+    // or has already cleared Cape Flattery onto the open-ocean direct
+    // bearing (nav.intendedCourse covers both, see its own
+    // declaration). A single repeating 'sailing' phase, not a begin/
+    // middle/end arc -- this event's own lifetime is governed by the
+    // progress-based taper above, not an internal dramatic shape.
+    favorableDeparture: {
+      label: 'FAVORABLE DEPARTURE',
+      intensityRange: [0.1, 0.9],
+      cooldownHours: 0,
+      canRepeatImmediately: true,
+      eligibility: function (state) { return passageProgressPercent(state) < FAVORABLE_DEPARTURE_HARD_END; },
+      // weight 10000: not merely "heavily favored" -- with
+      // fairSailing/freshWinds at their own ordinary weight of 1 each,
+      // this makes the self-transition's failure probability per roll
+      // roughly 1 in 5000, which stays genuinely negligible even
+      // across the many 3-6h phase rollovers a slow boat could see
+      // before reaching FAVORABLE_DEPARTURE_TAPER_START -- a real
+      // guarantee, not just a strong bias, while still going through
+      // chooseNextEvent's own ordinary weighted-random mechanism
+      // rather than a separate special-cased branch there.
+      transitions: [
+        { to: 'favorableDeparture', weight: 10000 },
+        { to: 'fairSailing', weight: 1 },
+        { to: 'freshWinds', weight: 1 },
+      ],
+      phaseOrder: ['sailing'],
+      phases: {
+        sailing: { durationRangeHours: [3, 6], windSpeedRange: [15, 9], directionMode: 'routeRelative', directionMaxDeg: 110, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'steady', allowsSquall: false },
+      },
+    },
 
     fairSailing: {
       label: 'FAIR SAILING',
@@ -2695,8 +2790,16 @@
       ],
       phaseOrder: ['begin', 'middle', 'end'],
       phases: {
-        begin: { durationRangeHours: [2, 4], windSpeedRange: [9, 4], directionMode: 'hold', directionMaxDeg: 0, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'easing', allowsSquall: false },
-        middle: { durationRangeHours: [6, 16], windSpeedRange: [6, 2], directionMode: 'hold', directionMaxDeg: 0, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'steady', allowsSquall: false },
+        // PHASE 7 -- directionMaxDeg raised from its old 0 (meaningless
+        // now anyway -- 'hold' no longer has special-cased behavior,
+        // see beginPhase's own notes) to a genuinely wide spread: real
+        // light/variable air is exactly that, variable, and under the
+        // new prevailing-regime system an offset of 0 would instead
+        // have made calm the single MOST directionally stable event
+        // in the whole engine, backwards from "direction may become
+        // less stable/variable."
+        begin: { durationRangeHours: [2, 4], windSpeedRange: [9, 4], directionMode: 'hold', directionMaxDeg: 70, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'easing', allowsSquall: false },
+        middle: { durationRangeHours: [6, 16], windSpeedRange: [6, 2], directionMode: 'hold', directionMaxDeg: 70, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'steady', allowsSquall: false },
         end: { durationRangeHours: [2, 5], windSpeedRange: [11, 7], directionMode: 'driftSmall', directionMaxDeg: 20, targetCondition: 'overcast', conditionTexture: ['clear'], targetRainProbability: 0, trendHint: 'building', allowsSquall: false },
       },
     },
@@ -2879,6 +2982,181 @@
     }
   }
 
+  /* --------------------------------------------------------------
+     PHASE 7 -- OPEN-OCEAN PREVAILING WIND REGIME
+     ------------------------------------------------------------
+     Replaces the old unconstrained directional random walk (every
+     phase drifting from whatever the live value already happened to
+     be, with no geographic awareness at all -- confirmed directly to
+     leave the wind in the no-go zone 100% of a 24-day simulated
+     open-ocean leg) with a persistent "background flow" direction,
+     engine.prevailingWindDirectionDeg, loosely modeled on this
+     route's own real synoptic pattern: Westerlies/frontal systems in
+     the higher-latitude transition zone the boat crosses first,
+     settling into the steadier NE trades as it nears "the trade wind
+     belt" waypoint (28N) further south and west. Established once
+     (maybeRefreshPrevailingWindDirection, called from beginEvent) and
+     left alone across many subsequent ordinary event transitions --
+     the actual source of the "relatively stable... coherent"
+     character the different event types are meant to share -- only
+     refreshed again when it's genuinely stopped matching the boat's
+     current latitude band, or deliberately after a majorStorm passes
+     (postStormClearing's own beginEvent always rolls fresh, "settles
+     into the next regime"). majorStorm itself never touches this --
+     it has its own separate, temporary engine.stormDirectionDeg (see
+     computeStormDirectionDeg, tied to the existing hidden
+     stormStrongSide asymmetry) and hands back to the unchanged
+     background value as it clears.
+     -------------------------------------------------------------- */
+  var PREVAILING_TRADE_LAT = 30;              // at/below this latitude, fully in the trade-wind-belt band
+  var PREVAILING_TRANSITION_LAT = 46;         // at/above this latitude, fully in the higher-latitude transition band
+  var PREVAILING_TRANSITION_CENTER_DEG = 300; // WNW -- a believable post-frontal Pacific NW pattern; gives a broad reach/run for this route's ~220-230deg course through the transition zone
+  var PREVAILING_TRANSITION_SPREAD_DEG = 45;  // wide -- real variety/challenge belongs here (see WEATHER_EVENTS' own earlyRoughWeather/freshWinds larger directionMaxDeg values layering more on top)
+  var PREVAILING_TRADE_CENTER_DEG = 55;       // ENE -- the classic NE trades; a broad reach/run for this route's ~230-248deg final course
+  var PREVAILING_TRADE_SPREAD_DEG = 25;       // narrower -- real trades are steadier than the systems further north
+
+  function prevailingDirectionBandForLat(lat) {
+    if (lat <= PREVAILING_TRADE_LAT) return { center: PREVAILING_TRADE_CENTER_DEG, spread: PREVAILING_TRADE_SPREAD_DEG };
+    if (lat >= PREVAILING_TRANSITION_LAT) return { center: PREVAILING_TRANSITION_CENTER_DEG, spread: PREVAILING_TRANSITION_SPREAD_DEG };
+    var t = (lat - PREVAILING_TRADE_LAT) / (PREVAILING_TRANSITION_LAT - PREVAILING_TRADE_LAT); // 0 at the trade edge, 1 at the transition edge
+    var centerDelta = signedAngleDiff(PREVAILING_TRADE_CENTER_DEG, PREVAILING_TRANSITION_CENTER_DEG);
+    return {
+      center: normalizeDeg(PREVAILING_TRANSITION_CENTER_DEG + centerDelta * (1 - t)),
+      spread: PREVAILING_TRADE_SPREAD_DEG + (PREVAILING_TRANSITION_SPREAD_DEG - PREVAILING_TRADE_SPREAD_DEG) * t,
+    };
+  }
+
+  function rollPrevailingWindDirection(lat) {
+    var band = prevailingDirectionBandForLat(lat);
+    return normalizeDeg(band.center + (Math.random() - 0.5) * 2 * band.spread);
+  }
+
+  // Called from every ordinary (non-majorStorm, non-favorableDeparture)
+  // beginEvent. Cheap no-op the overwhelming majority of the time --
+  // only actually rerolls when there either isn't one yet, or the
+  // existing value has drifted out of step with the CURRENT latitude's
+  // own band (genuinely crossed into a new zone since it was last
+  // set), never on every ordinary transition within the same zone.
+  function maybeRefreshPrevailingWindDirection(state) {
+    var engine = state.weather.engine;
+    var band = prevailingDirectionBandForLat(state.nav.lat);
+    if (engine.prevailingWindDirectionDeg == null || angleDiff(engine.prevailingWindDirectionDeg, band.center) > band.spread * 1.5) {
+      engine.prevailingWindDirectionDeg = rollPrevailingWindDirection(state.nav.lat);
+    }
+  }
+
+  // A real low-pressure system's own circulation meaningfully rotates
+  // the wind away from the surrounding background pattern -- this is
+  // what majorStorm's approach/building phases shift TOWARD (see
+  // beginPhase's own majorStorm branch) and easing/clearing shift
+  // AWAY from, back toward the unchanged prevailing value. Tied to
+  // the EXISTING hidden stormStrongSide asymmetry (PHASE 5) rather
+  // than a second, independent roll -- the same storm that's
+  // secretly more dangerous to its north or south also secretly has
+  // its wind rotated that way.
+  var MAJOR_STORM_DIRECTION_OFFSET_DEG = 55;
+  function computeStormDirectionDeg(state) {
+    var engine = state.weather.engine;
+    var base = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
+    var sign = engine.stormStrongSide === 'north' ? 1 : -1;
+    return normalizeDeg(base + sign * MAJOR_STORM_DIRECTION_OFFSET_DEG);
+  }
+
+  // PHASE 7 -- NO-GO SANITY BACKSTOP (open ocean only -- the coastal
+  // corridor is already fully handled by FAVORABLE DEPARTURE's own
+  // route-relative picking). A validation check, not a steering
+  // force (section 5 of the task this implements): the
+  // geographically-grounded prevailing-regime bands above already
+  // make an ordinary event landing in the no-go zone uncommon by
+  // construction, and when it does happen that's genuine, intended
+  // texture -- "sometimes an inconvenient angle" -- left completely
+  // alone. This only intervenes once an ordinary event's own
+  // candidate direction has sat inside the no-go zone CONTINUOUSLY
+  // for NOGO_BACKSTOP_MAX_MINUTES (~20h, "never...for days"), nudging
+  // just that one candidate out to the nearer edge rather than
+  // picking a fresh direction outright -- a believable shift, not an
+  // escape to one fixed bearing every time. Never applied to
+  // majorStorm or earlyRoughWeather, which are explicitly allowed to
+  // create a difficult angle on their own -- see beginEvent's own
+  // reset of noGoSinceMinutes when either of those begins, so a
+  // streak never awkwardly carries across one of them.
+  var NOGO_BACKSTOP_MAX_MINUTES = 20 * 60;
+  var NOGO_BACKSTOP_CLEARANCE_DEG = NOGO_ZONE_DEG + 10;
+  function applyNoGoBackstopIfNeeded(state, candidateDeg) {
+    var engine = state.weather.engine;
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { engine.noGoSinceMinutes = null; return candidateDeg; }
+    var course = state.nav.intendedCourse;
+    // Defensive: a backstop's whole job is reliability, so it must
+    // never itself be the thing that turns one rare bad/stale
+    // nav.intendedCourse read (from some OTHER system entirely, e.g.
+    // a course-turn animation in progress) into a PERSISTED corrupt
+    // engine.phaseDirectionAnchorDeg -- confirmed directly as the
+    // actual mechanism behind an intermittent NaN wind direction on
+    // long test crossings before this guard existed. Skip cleanly
+    // rather than act on a non-finite reference.
+    if (!isFinite(course)) return candidateDeg;
+    var offset = angleDiff(candidateDeg, course);
+    if (offset >= NOGO_ZONE_DEG) { engine.noGoSinceMinutes = null; return candidateDeg; }
+    if (engine.noGoSinceMinutes == null) engine.noGoSinceMinutes = state.meta.voyageMinutes;
+    if (state.meta.voyageMinutes - engine.noGoSinceMinutes < NOGO_BACKSTOP_MAX_MINUTES) return candidateDeg;
+    var side = signedAngleDiff(candidateDeg, course) >= 0 ? 1 : -1;
+    engine.noGoSinceMinutes = null;
+    return normalizeDeg(course + side * NOGO_BACKSTOP_CLEARANCE_DEG);
+  }
+
+  // PHASE 7 -- the backstop's own per-TICK counterpart, run every
+  // tick against the LIVE blended wind (see advanceWeatherEngine,
+  // right after the direction blend) rather than only at a phase's
+  // own start. The phase-start check above avoids ever CHOOSING an
+  // obviously bad target in the first place; this is what actually
+  // guarantees the "never for days" bound regardless of how a no-go
+  // stretch arose -- including the case the phase-start check alone
+  // cannot catch: a single long-running phase (fairSailing's own
+  // middle phase can run up to 28h) whose candidate was genuinely
+  // fine when picked, but the boat's own slowly-changing
+  // nav.intendedCourse drifts enough, over that same phase's real
+  // duration, to put the live value back in the no-go zone well
+  // before the phase naturally ends and gets a fresh check -- 
+  // confirmed directly (multi-day no-go streaks on long test
+  // crossings) before this per-tick counterpart existed. Adjusts the
+  // phase's own TARGET (phaseDirectionAnchorDeg), which the existing
+  // blend step then pulls the live value toward smoothly over
+  // subsequent ticks, rather than snapping anything instantly.
+  function applyNoGoBackstopTick(state) {
+    var engine = state.weather.engine;
+    var eventKey = engine.currentEvent;
+    if (eventKey === 'majorStorm' || eventKey === 'earlyRoughWeather' || eventKey === 'favorableDeparture') { engine.noGoSinceMinutes = null; return; }
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { engine.noGoSinceMinutes = null; return; }
+    var course = state.nav.intendedCourse;
+    if (!isFinite(course)) return; // see applyNoGoBackstopIfNeeded's own identical guard and notes
+    var offset = angleDiff(state.weather.windDirection, course);
+    if (offset >= NOGO_ZONE_DEG) { engine.noGoSinceMinutes = null; return; }
+    if (engine.noGoSinceMinutes == null) engine.noGoSinceMinutes = state.meta.voyageMinutes;
+    if (state.meta.voyageMinutes - engine.noGoSinceMinutes < NOGO_BACKSTOP_MAX_MINUTES) return;
+    var side = signedAngleDiff(state.weather.windDirection, course) >= 0 ? 1 : -1;
+    engine.phaseDirectionAnchorDeg = normalizeDeg(course + side * NOGO_BACKSTOP_CLEARANCE_DEG);
+    engine.noGoSinceMinutes = null;
+  }
+
+  // PHASE 7 -- route-relative direction picker, used by FAVORABLE
+  // DEPARTURE's own 'routeRelative' directionMode. Picks a genuinely
+  // SAILABLE angle off courseDeg -- a reach, never dead upwind (the
+  // whole point of this event) and never dead downwind either (a
+  // real but needlessly slow choice when the goal is "steady,
+  // believable progress," not just "technically not in irons").
+  // minOffset/maxOffset (60/maxOffsetDeg) together land squarely in
+  // POINT_OF_SAIL_CURVE's own close-reach-through-broad-reach band
+  // (0.93-1.0 factor) for every value the random pick can produce,
+  // picked with an equal chance of favoring either side of the
+  // course so it isn't visibly biased port or starboard over many
+  // calls.
+  function pickRouteRelativeDirectionDeg(courseDeg, maxOffsetDeg) {
+    var minOffset = 60;
+    var mag = minOffset + Math.random() * (maxOffsetDeg - minOffset);
+    var sign = Math.random() < 0.5 ? 1 : -1;
+    return normalizeDeg(courseDeg + sign * mag);
+  }
+
   // ---- Phase/event boundary bookkeeping ----
   function beginPhase(state, eventKey, phaseKey, now) {
     var engine = state.weather.engine;
@@ -2903,12 +3181,82 @@
     // section 17's own "major changes should come from phase/event
     // transitions" -- the live value still only ever approaches it
     // gradually via the normal blend step, never snaps to it.
-    if (phaseDef.directionMode === 'shift') {
-      engine.phaseDirectionAnchorDeg = normalizeDeg(state.weather.windDirection + (Math.random() - 0.5) * 2 * phaseDef.directionMaxDeg);
-    } else if (phaseDef.directionMode === 'hold') {
-      engine.phaseDirectionAnchorDeg = state.weather.windDirection;
-    } else { // driftSmall -- the anchor itself wanders a little over the phase's own life, see advanceWeatherEngine's own small per-tick nudge to it
-      engine.phaseDirectionAnchorDeg = state.weather.windDirection;
+    if (eventKey === 'majorStorm') {
+      // PHASE 7 -- the storm's own directional arc (see
+      // computeStormDirectionDeg's own notes): approach/building
+      // shift TOWARD engine.stormDirectionDeg (computed once, at
+      // beginEvent, before any of this event's phases begin) and hold
+      // near it through peak; easing/clearing gradually hand back
+      // toward the UNCHANGED background prevailing value, so the
+      // live wind is most of the way back to it by the time
+      // postStormClearing (which rolls the NEXT regime fresh) takes
+      // over. "Gradually" here means the TARGET itself moves partway
+      // back at each of these two phase boundaries -- the normal
+      // blend step then still closes the gap to THAT target smoothly
+      // over the phase's own real duration, exactly as any other
+      // phase transition does; this is not a second, separate blend.
+      if (phaseKey === 'approach' || phaseKey === 'building') {
+        engine.phaseDirectionAnchorDeg = engine.stormDirectionDeg;
+      } else if (phaseKey === 'peak') {
+        engine.phaseDirectionAnchorDeg = normalizeDeg(engine.stormDirectionDeg + (Math.random() - 0.5) * 2 * phaseDef.directionMaxDeg);
+      } else { // easing, clearing
+        var stormBase = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : engine.stormDirectionDeg;
+        var returnFraction = phaseKey === 'easing' ? 0.5 : 1.0;
+        var stormDelta = signedAngleDiff(stormBase, engine.stormDirectionDeg);
+        engine.phaseDirectionAnchorDeg = normalizeDeg(engine.stormDirectionDeg + stormDelta * returnFraction);
+      }
+    } else if (phaseDef.directionMode === 'routeRelative') {
+      // PHASE 7 -- FAVORABLE DEPARTURE only. This runs on every
+      // natural 3-6h phase rollover AND whenever the waypoint-change
+      // watch (see advanceWeatherEngine) calls beginPhase directly --
+      // either way, re-picking UNCONDITIONALLY would jump the TARGET
+      // to a fresh random side/magnitude even when the existing one
+      // was already perfectly good, and the LIVE wind then has to
+      // blend across that gap over real time, which can itself sweep
+      // through the no-go zone even though neither endpoint was ever
+      // actually bad -- confirmed directly (repeated multi-hour
+      // auto-tack stretches with no waypoint change in sight) before
+      // this check existed. So: keep the existing anchor untouched
+      // whenever it's still within the sailable band for the CURRENT
+      // nav.intendedCourse (always live and correct here, coastal or
+      // open-ocean alike -- see its own declaration), and only pick a
+      // genuinely fresh one when it isn't (or there isn't one yet).
+      // Defensive: see applyNoGoBackstopIfNeeded's own identical guard
+      // and notes -- nav.intendedCourse read here must never be
+      // trusted blindly either. A non-finite read falls back to
+      // keeping whatever anchor already exists (if any), never to
+      // computing a fresh one from a bad reference.
+      if (isFinite(state.nav.intendedCourse)) {
+        var fdExistingOffset = engine.phaseDirectionAnchorDeg == null ? null : angleDiff(engine.phaseDirectionAnchorDeg, state.nav.intendedCourse);
+        if (fdExistingOffset == null || fdExistingOffset < 55 || fdExistingOffset > 115) {
+          engine.phaseDirectionAnchorDeg = pickRouteRelativeDirectionDeg(state.nav.intendedCourse, phaseDef.directionMaxDeg);
+        }
+      } else if (engine.phaseDirectionAnchorDeg == null) {
+        engine.phaseDirectionAnchorDeg = state.weather.windDirection;
+      }
+    } else {
+      // PHASE 7 -- every ordinary open-ocean event (fairSailing,
+      // freshWinds, calm, rain, postStormClearing -- 'shift'/'hold'/
+      // 'driftSmall' alike, the distinction between them no longer
+      // matters for picking the anchor itself now that ALL of them
+      // draw from the SAME persistent background regime rather than
+      // "wherever the live value already happens to be"). Offset
+      // magnitude is still each phase's own existing directionMaxDeg
+      // -- small for fairSailing ("relatively stable... modest
+      // drift"), larger for earlyRoughWeather ("stronger directional
+      // shift") -- same per-event character the data already encoded,
+      // just measured from a stable reference point instead of an
+      // unanchored one. 'driftSmall' phases still get their own
+      // small per-tick wander on TOP of this (see advanceWeatherEngine,
+      // just below) -- unchanged.
+      var ordinaryBase = engine.prevailingWindDirectionDeg != null ? engine.prevailingWindDirectionDeg : rollPrevailingWindDirection(state.nav.lat);
+      var ordinaryCandidate = normalizeDeg(ordinaryBase + (Math.random() - 0.5) * 2 * phaseDef.directionMaxDeg);
+      // PHASE 7 -- the no-go backstop applies to every ordinary event
+      // EXCEPT earlyRoughWeather, which (like majorStorm, handled in
+      // its own branch above) is explicitly allowed to create a
+      // difficult angle on its own -- see applyNoGoBackstopIfNeeded's
+      // own notes.
+      engine.phaseDirectionAnchorDeg = eventKey === 'earlyRoughWeather' ? ordinaryCandidate : applyNoGoBackstopIfNeeded(state, ordinaryCandidate);
     }
   }
   function beginEvent(state, eventKey, now) {
@@ -2931,7 +3279,35 @@
     // set exactly once per storm instance even though
     // applyRoutingMitigation's own 'on track' branch returns without
     // otherwise touching engine.stormStrongSide at all.
-    if (eventKey === 'majorStorm') engine.stormStrongSide = Math.random() < 0.5 ? 'north' : 'south';
+    if (eventKey === 'majorStorm') {
+      engine.stormStrongSide = Math.random() < 0.5 ? 'north' : 'south';
+      // PHASE 7 -- the storm's own temporary direction, computed now
+      // (stormStrongSide just above, and prevailingWindDirectionDeg
+      // if already established, are both ready) so beginPhase's own
+      // majorStorm branch has it available the instant 'approach'
+      // begins, just below. The BACKGROUND prevailing value itself is
+      // deliberately left untouched here -- see this section's own
+      // notes above computeStormDirectionDeg.
+      engine.stormDirectionDeg = computeStormDirectionDeg(state);
+      engine.noGoSinceMinutes = null; // PHASE 7 -- see applyNoGoBackstopIfNeeded's own notes on why this resets here
+    } else if (eventKey === 'earlyRoughWeather') {
+      engine.noGoSinceMinutes = null; // PHASE 7 -- same reasoning as majorStorm just above
+    } else if (eventKey === 'postStormClearing') {
+      // PHASE 7 -- "settles into the next regime": always a fresh
+      // roll, never the maybeRefresh "only if stale" check every
+      // other ordinary event uses -- the storm having just passed
+      // IS the regime-change event.
+      engine.prevailingWindDirectionDeg = rollPrevailingWindDirection(state.nav.lat);
+    } else if (eventKey !== 'favorableDeparture') {
+      maybeRefreshPrevailingWindDirection(state);
+    }
+    // PHASE 7 -- see favorableDepartureWaypointIndex's own declaration
+    // comment. Reset here (not just at newGameState) so a genuine
+    // self-transition -- a brand new event instance via beginEvent,
+    // same as any other -- also starts its own waypoint watch fresh
+    // rather than comparing against a stale value from the PREVIOUS
+    // instance.
+    if (eventKey === 'favorableDeparture') engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
     markArcEventExperienced(state, eventKey); // PHASE 3 -- see its own notes
     beginPhase(state, eventKey, eventDef.phaseOrder[0], now);
     applyRoutingMitigation(state, eventKey); // PHASE 4/5 -- see its own notes; runs after beginPhase so it can adjust what that just set
@@ -3007,6 +3383,20 @@
       engine.booted = true;
     }
 
+    // PHASE 7 -- FAVORABLE DEPARTURE's own waypoint-change watch (see
+    // favorableDepartureWaypointIndex's own declaration comment): a
+    // 3-6h phase timer alone is too slow to track the coastal
+    // corridor's own bends (several legs there are under an hour),
+    // so this calls beginPhase the moment a new leg begins rather
+    // than waiting for the next natural rollover. Always safe to call
+    // unconditionally -- beginPhase's own 'routeRelative' branch keeps
+    // the existing direction untouched if it's still sailable for the
+    // new course, and only actually re-picks when it genuinely isn't.
+    if (engine.currentEvent === 'favorableDeparture' && state.nav.waypointIndex !== engine.favorableDepartureWaypointIndex) {
+      engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
+      beginPhase(state, 'favorableDeparture', 'sailing', now);
+    }
+
     updateSquallAndMaybeEnd(state, now);
 
     if (now - engine.phaseStartedAt >= engine.plannedPhaseDuration) {
@@ -3058,6 +3448,7 @@
       w.windDirection + dirDiff * (1 - Math.pow(1 - dirBlendRate, hours))
         + (Math.random() - 0.5) * WEATHER_TEXTURE_DIRECTION_DEG_PER_HOUR * hours
     );
+    applyNoGoBackstopTick(state); // PHASE 7 -- see its own notes
 
     // seaState: unchanged derivation from wind speed -- still the
     // same field sea-state audio already reads.
@@ -3087,6 +3478,51 @@
     w.temperatureF = w.temperatureF
       + (tempTarget - w.temperatureF) * (1 - Math.pow(1 - WEATHER_BLEND_TEMP_PER_HOUR, hours))
       + (Math.random() - 0.5) * WEATHER_TEXTURE_TEMP_F_PER_HOUR * hours;
+  }
+
+  // PHASE 7 -- called once from boot(), after every other migration
+  // has already run, so it sees the fully-settled state rather than a
+  // partially-migrated one. Fixes the actual reported bug directly:
+  // migrateProvisionsIfNeeded's own long-standing !w.engine inference
+  // (for a save old enough to predate the event-driven engine
+  // entirely) hands back whatever windSpeed that save's LAST real
+  // observation happened to be, verbatim -- including a genuinely low
+  // one from back when fetchRealWeather was still live. Rather than
+  // teaching that inference about the new protected window too, this
+  // runs AFTER it (and after every other migration) and simply
+  // overrides the result outright for a boat still this early in the
+  // passage, the same way a fresh voyage already starts -- one
+  // authoritative rule, regardless of whether the stale value came
+  // from that old inference, a genuinely pre-Phase-7 save that rolled
+  // an ordinary low-wind fairSailing/freshWinds phase before this
+  // window was actually protected, or any other source. Does nothing
+  // once progress has cleared the window -- normal engine state from
+  // the save carries forward exactly as it already did.
+  function enforceFavorableDepartureIfNeeded(state) {
+    if (passageProgressPercent(state) >= FAVORABLE_DEPARTURE_HARD_END) return;
+    var w = state.weather;
+    w.windSpeed = 13;
+    w.windDirection = normalizeDeg(state.nav.intendedCourse + (Math.random() < 0.5 ? 90 : -90));
+    w.engine.currentEvent = 'favorableDeparture';
+    w.engine.eventStartedAt = state.meta.voyageMinutes;
+    w.engine.plannedEventDuration = 0;
+    w.engine.currentPhase = 'sailing';
+    w.engine.phaseStartedAt = state.meta.voyageMinutes;
+    w.engine.plannedPhaseDuration = 0;
+    w.engine.intensity = 0.5;
+    w.engine.targetWindSpeed = w.windSpeed;
+    w.engine.targetWindDirection = w.windDirection;
+    w.engine.targetCondition = 'overcast';
+    w.engine.targetRainProbability = 0;
+    w.engine.squall = null;
+    w.engine.phaseDirectionAnchorDeg = null; // force a genuinely fresh pickRouteRelativeDirectionDeg on the next tick, never keep a stale pre-reset value even if it happens to still fall in-band by coincidence
+    // booted: false reuses advanceWeatherEngine's own normal boot
+    // path (see beginPhase's own notes) to properly sample a real
+    // phase duration and a genuine routeRelative direction on the
+    // very next tick, rather than duplicating that logic here.
+    w.engine.booted = false;
+    w.engine.routingAtEventStart = null;
+    w.engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
   }
 
   /* ================================================================
@@ -3191,6 +3627,19 @@
     if (arc.voyageArcComplete) return 1;
     var progress = passageProgressPercent(state);
 
+    // PHASE 7 -- FAVORABLE DEPARTURE's own soft taper (see its
+    // WEATHER_EVENTS entry's own notes). Checked before
+    // voyageArcComplete would ever matter here in practice (the
+    // window closes at 12% progress, voyageArcComplete can't be true
+    // that early), but kept independent of it regardless -- this
+    // event's own eligibility function is the true hard backstop.
+    if (eventKey === 'favorableDeparture') {
+      if (progress <= FAVORABLE_DEPARTURE_TAPER_START) return 1;
+      if (progress >= FAVORABLE_DEPARTURE_HARD_END) return 0;
+      var fdFraction = (progress - FAVORABLE_DEPARTURE_TAPER_START) / (FAVORABLE_DEPARTURE_HARD_END - FAVORABLE_DEPARTURE_TAPER_START);
+      return clamp(1 - fdFraction, 0.02, 1);
+    }
+
     // The three guarantees -- each gets a strong, rising boost on its
     // OWN event key specifically while not yet experienced, and nudges
     // a few competing event types down a little within its own window
@@ -3230,11 +3679,13 @@
       if (finalApproachWeights[eventKey] != null) return finalApproachWeights[eventKey];
       return 1;
     }
-    if (progress < 10) { // FAVORABLE DEPARTURE
-      var departureWeights = { fairSailing: 1.5, freshWinds: 1.3, rain: 0.6, calm: 0.25 };
-      if (departureWeights[eventKey] != null) return departureWeights[eventKey];
-      return 1;
-    }
+    // PHASE 7 -- the old soft "FAVORABLE DEPARTURE" weighting bias
+    // that used to live here (progress < 10: nudge fairSailing/
+    // freshWinds up, rain/calm down) is superseded by the dedicated
+    // favorableDeparture EVENT above -- a real protected window now,
+    // not a bias on the ordinary pool. Leaving the old bias in place
+    // alongside the new event would just fight it: confirmed directly
+    // (a too-early handoff at ~3% progress) before this was removed.
     if (progress < VOYAGE_WINDOW_EARLY_ROUGH[1]) { // 10-25%, EARLY ROUGH-WEATHER WINDOW (urgency already handled above for earlyRoughWeather itself)
       var earlyWindowWeights = { freshWinds: 1.2, rain: 1.1, calm: 0.5 };
       if (earlyWindowWeights[eventKey] != null) return earlyWindowWeights[eventKey];
@@ -18401,6 +18852,24 @@
     // applied to whichever storm it's already experiencing, same as
     // if Phase 5 hadn't shipped yet for that one storm.
     if (w.engine.stormStrongSide === undefined) w.engine.stormStrongSide = null;
+    // PHASE 7 -- a save from before the open-ocean prevailing-regime
+    // system existed has w.engine but not these fields yet. null is
+    // the correct "not yet established" value for both -- see their
+    // own declaration comments in newGameState -- the engine
+    // establishes a real prevailingWindDirectionDeg itself the next
+    // time it needs one (see beginEvent's own notes), and an absent
+    // noGoSinceMinutes streak is exactly equivalent to "not currently
+    // in one," the same steady-state value applyNoGoBackstopIfNeeded
+    // would reset it to anyway once the save's current event isn't
+    // itself in the no-go zone. favorableDepartureWaypointIndex only
+    // matters while currentEvent is actually 'favorableDeparture' --
+    // the current waypointIndex is always a safe value for it, since
+    // enforceFavorableDepartureIfNeeded (see boot()) is what actually
+    // owns getting a save back into that event correctly if needed.
+    if (w.engine.prevailingWindDirectionDeg === undefined) w.engine.prevailingWindDirectionDeg = null;
+    if (w.engine.stormDirectionDeg === undefined) w.engine.stormDirectionDeg = null;
+    if (w.engine.noGoSinceMinutes === undefined) w.engine.noGoSinceMinutes = null;
+    if (w.engine.favorableDepartureWaypointIndex === undefined) w.engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
     // PHASE 6 -- a save from before the forecast-snapshot cache
     // existed has no w.forecastSnapshot at all. null is exactly the
     // "no report issued yet" state a fresh voyage also starts in --
@@ -18496,6 +18965,7 @@
     migrateVesselLogIfNeeded(GAME);
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
+    enforceFavorableDepartureIfNeeded(GAME); // PHASE 7 -- after every migration above, before the catch-up tick simulation below ever runs
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 UNDERWAY');
     var ticks = catchUpFromRealTime(GAME);
