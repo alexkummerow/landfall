@@ -1085,7 +1085,7 @@
         courseDraft: null,         // in-progress heading value while the CHANGE COURSE picker is open; null when not in use
         landWarningLevel: 'none',  // 'none' | 'ahead' | 'close' | 'danger' — escalating land-proximity state, so each level only logs once on the way up (and clears silently once the danger passes)
         groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
-        tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveCoastalAutoTack(). Never set in open ocean.
+        tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveAutoTack(). AUTOPILOT no longer auto-tacks in open ocean (see autopilotSteeringSolution), so this is genuinely never set out there now.
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
         autopilotWobble: 0,        // open ocean, whenever something is ACTIVELY holding course — AUTOPILOT ON or AT THE HELM — small bounded correction oscillation around the steering solution; see computeHeading
@@ -1098,16 +1098,16 @@
         trackLastSampleDistanceTraveled: 0, // nav.distanceTraveled's value the last time a track point was recorded -- see recordChartTrackPointIfNeeded's own comment for why distanceTraveled (already tracked) doubles as the sampling clock rather than a separate distance/haversine check
       },
       weather: {
-        // SW — real wind, not routing logic, so it can still drift into a
-        // headwind over time. But the old 340 (NNW) was picked back when
-        // heading was a fake constant unconnected to geography; now that
-        // the first leg genuinely points north out of Shilshole, a due-
-        // north headwind there would leave the boat nearly unsailable
-        // before it even clears the marina. A SW wind gives it a fair
-        // reach instead, which also happens to be a common real Puget
-        // Sound pattern in unsettled weather like this game opens with.
-        windDirection: 225,
-        windSpeed: 13,
+        // SAILING-BEHAVIOR TASK -- matches the engine's own scripted
+        // targetWindDirection (168.75, the midpoint of the protected
+        // S-SSE departure band -- see WEATHER_EVENTS.favorableDeparture's
+        // own notes) exactly, so there's no gap for the first few hours
+        // to blend across before the live wind actually settles into
+        // the protected band. A following-to-broad-reach angle off the
+        // first leg north out of Shilshole, same as every other leg in
+        // the corridor.
+        windDirection: 168.75,
+        windSpeed: 12,
         seaState: 2,
         condition: 'overcast',
         trend: 'steady', // derived each tick from the active phase's own trendHint -- see advanceWeatherEngine/PHASE 2's own notes
@@ -1126,13 +1126,16 @@
           // PHASE 7 -- a fresh voyage now opens inside the dedicated,
           // protected FAVORABLE DEPARTURE event (see WEATHER_EVENTS'
           // own entry for it) rather than fairSailing directly -- see
-          // that event's own notes for why the 0-10%-ish opening needs
-          // its own genuinely guaranteed event rather than just a
-          // weighting bias. targetWindDirection here is startBearing+90
-          // (a clean beam reach for the very first leg out of
-          // Shilshole) -- a fixed, deterministic scripted value for the
-          // brief moment before the first real tick, same reasoning as
-          // the pre-existing targetWindSpeed: 13 scripted value below.
+          // that event's own notes for why the departure corridor
+          // needs its own genuinely guaranteed event rather than just
+          // a weighting bias. SAILING-BEHAVIOR TASK -- targetWindDirection
+          // here is a fixed point in the protected S-SSE band (168.75,
+          // its midpoint) and targetWindSpeed is 12kt, this event's own
+          // suggested center point -- both fixed, deterministic
+          // scripted values for the brief moment before the first real
+          // tick (beginPhase picks a genuine, safety-checked value the
+          // very next tick regardless, same as always -- see its own
+          // "boot" handling).
           currentEvent: 'favorableDeparture',
           eventStartedAt: 0,
           plannedEventDuration: 0,       // real value assigned by beginEvent the first time advanceWeatherEngine runs (see its own "boot" handling)
@@ -1140,8 +1143,8 @@
           phaseStartedAt: 0,
           plannedPhaseDuration: 0,
           intensity: 0.3,
-          targetWindSpeed: 13,
-          targetWindDirection: normalizeDeg(startBearing + 90),
+          targetWindSpeed: 12,
+          targetWindDirection: 168.75,
           targetCondition: 'overcast',
           targetRainProbability: 0,
           previousEvent: null,
@@ -1253,7 +1256,7 @@
         repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
         batteryRecovering: false,  // true ONLY from the moment battery actually reaches 0% until it climbs back to BATTERY_RESTART_THRESHOLD_PCT -- see updateBattery. Makes that threshold a true dead-battery RECOVERY gate rather than a general minimum: every performXToggle/cmdEngine/etc. check requires this flag too, not just battery<BATTERY_RESTART_THRESHOLD_PCT, so ordinary depletion through 3%/2%/1% never locks anything out on its own.
-        autopilotOn: true,          // holds SET COURSE and auto-tacks; OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
+        autopilotOn: true,          // holds SET COURSE exactly, current-corrected, and nothing more -- no auto-tack (see autopilotSteeringSolution); OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
         fanOn: false,
         heaterOn: false,
         cabinLightsOn: false,
@@ -2813,54 +2816,58 @@
      weighted table of what this event may become once its OWN last
      phase finishes -- see chooseNextEvent).
      ---------------------------------------------------------------- */
-  // PHASE 7 -- FAVORABLE DEPARTURE, a genuinely protected opening
-  // window (0% through roughly 12% passage progress) rather than just
-  // a soft weighting bias on top of the normal event pool. Below
-  // FAVORABLE_DEPARTURE_TAPER_START (8%) its own self-transition is
-  // effectively guaranteed (see computeArcWeightMultiplier's own
-  // favorableDeparture case); between that and
-  // FAVORABLE_DEPARTURE_HARD_END (12%) the self-transition weight
-  // tapers smoothly toward zero, so normal Phase 3 cadence takes over
-  // gradually rather than at one exact percentage; past 12% the event
-  // becomes outright ineligible (its own eligibility function below),
-  // a hard backstop independent of the weighting taper.
-  var FAVORABLE_DEPARTURE_TAPER_START = 8;
-  var FAVORABLE_DEPARTURE_HARD_END = 12;
-
+  // PHASE 7 -- FAVORABLE DEPARTURE, a genuinely protected window
+  // rather than just a soft weighting bias on top of the normal event
+  // pool. SAILING-BEHAVIOR TASK -- this window used to be gated on
+  // passage-progress percentage (0% through roughly 12%), which runs
+  // far beyond the Strait of Juan de Fuca on this voyage's real
+  // distance -- it now ends exactly when the boat clears the authored
+  // departure corridor (nav.waypointIndex reaching
+  // OPEN_WATER_WAYPOINT_INDEX, the same signal computeHeading's own
+  // coastal/open-ocean split already uses), a hard, discrete boundary
+  // with no soft taper needed -- see this event's own eligibility
+  // function below, and advanceWeatherEngine's own waypoint-change
+  // watch for the immediate hand-off the instant that boundary is
+  // crossed, rather than waiting for this phase's own 3-6h timer.
   var WEATHER_EVENTS = {
 
-    // PHASE 7 -- see the section comment above
-    // FAVORABLE_DEPARTURE_TAPER_START for the window mechanics. Wind
-    // speed stays tightly within 8-15kt (windSpeedRange 9-15,
-    // intensityRange 0.1-0.9 keeps it inside that even at the
-    // extremes; the normal per-hour texture wobble can nudge it
-    // slightly further but never close to dead air). Direction uses
-    // the new 'routeRelative' mode (see resolvePhaseTargets/beginPhase
-    // and pickRouteRelativeDirectionDeg) -- computed fresh off
-    // state.nav.intendedCourse each time a 'sailing' phase begins
-    // (every 3-6h, not continuously, so it doesn't read as chasing the
-    // player tick to tick), which is ALREADY the correct reference
-    // whether the boat is still working through the coastal waypoints
-    // or has already cleared Cape Flattery onto the open-ocean direct
-    // bearing (nav.intendedCourse covers both, see its own
-    // declaration). A single repeating 'sailing' phase, not a begin/
-    // middle/end arc -- this event's own lifetime is governed by the
-    // progress-based taper above, not an internal dramatic shape.
+    // SAILING-BEHAVIOR TASK -- wind speed narrowed to 10-15kt
+    // (windSpeedRange 15-10; intensityRange 0.1-0.9 keeps it inside
+    // that even at the extremes; the normal per-hour texture wobble
+    // can nudge it slightly further but never close to dead air).
+    // Direction uses the new 'departureSoutherly' mode (see
+    // resolvePhaseTargets/beginPhase and
+    // pickDepartureCorridorDirectionDeg) -- a generally southerly S
+    // through SSE wind, not a reach relative to course, so the whole
+    // corridor (NORTH, out of Shilshole, through NORTHWEST/WEST-
+    // NORTHWEST in the Strait, to WEST clearing Cape Flattery) is sailed
+    // on a following-to-broad-reach angle the entire way, exactly the
+    // "clean, believable sail out of Seattle without needing to tack"
+    // this task asks for -- verified directly against every actual
+    // corridor leg bearing (minimum margin ~77\u00b0 from dead-south wind,
+    // far outside the 35\u00b0 no-go zone). Picked once per phase (every
+    // 3-6h, or immediately on a waypoint change -- see
+    // advanceWeatherEngine), with its own defensive route-aware no-go
+    // check in pickDepartureCorridorDirectionDeg in case route geometry
+    // or the no-go angle itself ever changes. A single repeating
+    // 'sailing' phase, not a begin/middle/end arc -- this event's own
+    // lifetime is governed by the corridor boundary above, not an
+    // internal dramatic shape.
     favorableDeparture: {
       label: 'FAVORABLE DEPARTURE',
       intensityRange: [0.1, 0.9],
       cooldownHours: 0,
       canRepeatImmediately: true,
-      eligibility: function (state) { return passageProgressPercent(state) < FAVORABLE_DEPARTURE_HARD_END; },
+      eligibility: function (state) { return state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX; },
       // weight 10000: not merely "heavily favored" -- with
       // fairSailing/freshWinds at their own ordinary weight of 1 each,
       // this makes the self-transition's failure probability per roll
       // roughly 1 in 5000, which stays genuinely negligible even
-      // across the many 3-6h phase rollovers a slow boat could see
-      // before reaching FAVORABLE_DEPARTURE_TAPER_START -- a real
-      // guarantee, not just a strong bias, while still going through
-      // chooseNextEvent's own ordinary weighted-random mechanism
-      // rather than a separate special-cased branch there.
+      // across the several 3-6h phase rollovers a slow boat could see
+      // before clearing the corridor -- a real guarantee, not just a
+      // strong bias, while still going through chooseNextEvent's own
+      // ordinary weighted-random mechanism rather than a separate
+      // special-cased branch there.
       transitions: [
         { to: 'favorableDeparture', weight: 10000 },
         { to: 'fairSailing', weight: 1 },
@@ -2868,7 +2875,7 @@
       ],
       phaseOrder: ['sailing'],
       phases: {
-        sailing: { durationRangeHours: [3, 6], windSpeedRange: [15, 9], directionMode: 'routeRelative', directionMaxDeg: 110, targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'steady', allowsSquall: false },
+        sailing: { durationRangeHours: [3, 6], windSpeedRange: [15, 10], directionMode: 'departureSoutherly', targetCondition: 'clear', conditionTexture: ['overcast'], targetRainProbability: 0, trendHint: 'steady', allowsSquall: false },
       },
     },
 
@@ -3372,23 +3379,47 @@
     engine.noGoSinceMinutes = null;
   }
 
-  // PHASE 7 -- route-relative direction picker, used by FAVORABLE
-  // DEPARTURE's own 'routeRelative' directionMode. Picks a genuinely
-  // SAILABLE angle off courseDeg -- a reach, never dead upwind (the
-  // whole point of this event) and never dead downwind either (a
-  // real but needlessly slow choice when the goal is "steady,
-  // believable progress," not just "technically not in irons").
-  // minOffset/maxOffset (60/maxOffsetDeg) together land squarely in
-  // POINT_OF_SAIL_CURVE's own close-reach-through-broad-reach band
-  // (0.93-1.0 factor) for every value the random pick can produce,
-  // picked with an equal chance of favoring either side of the
-  // course so it isn't visibly biased port or starboard over many
-  // calls.
-  function pickRouteRelativeDirectionDeg(courseDeg, maxOffsetDeg) {
-    var minOffset = 60;
-    var mag = minOffset + Math.random() * (maxOffsetDeg - minOffset);
-    var sign = Math.random() < 0.5 ? 1 : -1;
-    return normalizeDeg(courseDeg + sign * mag);
+  // SAILING-BEHAVIOR TASK -- the departure corridor's protected wind
+  // band: generally southerly, S (180\u00b0) through SSE (157.5\u00b0), per
+  // the task's own target. A fixed compass band rather than a reach
+  // relative to course -- the corridor's three broad legs (NORTH out
+  // of Shilshole, NORTHWEST/WEST-NORTHWEST through the Strait, WEST
+  // clearing Cape Flattery) all sit on a following-to-broad-reach angle
+  // off this band the entire way, verified directly against every
+  // actual corridor leg bearing.
+  var DEPARTURE_WIND_MIN_DEG = 157.5; // SSE
+  var DEPARTURE_WIND_MAX_DEG = 180;   // S
+
+  // Defensive route-aware safety check (see this task's own "do not
+  // merely hard-code one compass direction and assume it works"):
+  // confirms directionDeg is genuinely outside the no-go zone for
+  // courseDeg -- the CURRENT route heading, coastal or open-ocean
+  // alike (nav.intendedCourse covers both, see its own declaration) --
+  // and if some future change to the departure band or the route
+  // geometry ever put it too close, nudges to whichever edge of the
+  // SAME S-SSE band sits furthest from the no-go zone for that course,
+  // rather than abandoning the southerly character of the departure
+  // wind entirely. In the route geometry as authored today this never
+  // actually fires (every corridor leg's margin from this band is
+  // ~77\u00b0 or more, far outside the +5\u00b0-padded threshold below) --
+  // it exists purely as a safety net, not as the mechanism actually
+  // keeping the corridor sailable.
+  function departureWindSafeForCourse(directionDeg, courseDeg) {
+    if (!Number.isFinite(courseDeg) || !Number.isFinite(directionDeg)) return directionDeg;
+    if (angleDiff(directionDeg, courseDeg) >= NOGO_ZONE_DEG + 5) return directionDeg;
+    var sOffset = angleDiff(DEPARTURE_WIND_MAX_DEG, courseDeg);
+    var sseOffset = angleDiff(DEPARTURE_WIND_MIN_DEG, courseDeg);
+    return sOffset >= sseOffset ? DEPARTURE_WIND_MAX_DEG : DEPARTURE_WIND_MIN_DEG;
+  }
+
+  // PHASE 7 -- departure-corridor direction picker, used by FAVORABLE
+  // DEPARTURE's own 'departureSoutherly' directionMode (see
+  // WEATHER_EVENTS' own entry and beginPhase below). A fresh pick
+  // within the protected S-SSE band, safety-checked against the
+  // current route heading every time.
+  function pickDepartureCorridorDirectionDeg(courseDeg) {
+    var candidate = rand(DEPARTURE_WIND_MIN_DEG, DEPARTURE_WIND_MAX_DEG);
+    return departureWindSafeForCourse(candidate, courseDeg);
   }
 
   // ---- Phase/event boundary bookkeeping ----
@@ -3449,41 +3480,24 @@
         var stormDelta = signedAngleDiff(stormBase, engine.stormDirectionDeg);
         engine.phaseDirectionAnchorDeg = normalizeDeg(engine.stormDirectionDeg + stormDelta * returnFraction);
       }
-    } else if (phaseDef.directionMode === 'routeRelative') {
-      // PHASE 7 -- FAVORABLE DEPARTURE only. This runs on every
-      // natural 3-6h phase rollover AND whenever the waypoint-change
-      // watch (see advanceWeatherEngine) calls beginPhase directly --
-      // either way, re-picking UNCONDITIONALLY would jump the TARGET
-      // to a fresh random side/magnitude even when the existing one
-      // was already perfectly good, and the LIVE wind then has to
-      // blend across that gap over real time, which can itself sweep
-      // through the no-go zone even though neither endpoint was ever
-      // actually bad -- confirmed directly (repeated multi-hour
-      // auto-tack stretches with no waypoint change in sight) before
-      // this check existed. So: keep the existing anchor untouched
-      // whenever it's still within the sailable band for the CURRENT
-      // nav.intendedCourse (always live and correct here, coastal or
-      // open-ocean alike -- see its own declaration), and only pick a
-      // genuinely fresh one when it isn't (or there isn't one yet).
-      // Defensive: see applyNoGoBackstopIfNeeded's own identical guard
-      // and notes -- nav.intendedCourse read here must never be
-      // trusted blindly either. A non-finite read falls back to
-      // keeping whatever anchor already exists (if any), never to
-      // computing a fresh one from a bad reference.
-      if (Number.isFinite(state.nav.intendedCourse)) {
-        var fdExistingOffset = isValidDirectionDeg(engine.phaseDirectionAnchorDeg) ? angleDiff(engine.phaseDirectionAnchorDeg, state.nav.intendedCourse) : null;
-        if (fdExistingOffset == null || fdExistingOffset < 55 || fdExistingOffset > 115) {
-          engine.phaseDirectionAnchorDeg = pickRouteRelativeDirectionDeg(state.nav.intendedCourse, phaseDef.directionMaxDeg);
-        }
-      } else if (!isValidDirectionDeg(engine.phaseDirectionAnchorDeg)) {
-        // RELIABILITY PASS -- the live windDirection this used to fall
-        // back to unconditionally is itself not guaranteed valid at
-        // this exact moment (e.g. mid-recovery elsewhere); only use it
-        // if it actually is, and fall through the normal recovery
-        // chain otherwise, rather than ever assigning a second
-        // possibly-invalid value here.
-        engine.phaseDirectionAnchorDeg = Number.isFinite(state.weather.windDirection) ? state.weather.windDirection : recoverWindDirection(state);
-      }
+    } else if (phaseDef.directionMode === 'departureSoutherly') {
+      // SAILING-BEHAVIOR TASK -- FAVORABLE DEPARTURE only. This runs
+      // on every natural 3-6h phase rollover AND whenever the
+      // waypoint-change watch (see advanceWeatherEngine) calls
+      // beginPhase directly. A fresh pick within the protected S-SSE
+      // band every time is safe here in a way the old routeRelative
+      // mode's reach-off-course angle wasn't: the S-SSE band itself
+      // never produces a no-go angle for any actual corridor leg
+      // (verified directly, ~77\u00b0+ margin on every one -- see
+      // DEPARTURE_WIND_MIN_DEG/MAX_DEG's own declaration), so there's
+      // no "sweep through no-go on a fresh pick" risk to guard against
+      // the way the old mode's much wider possible swings had, and a
+      // little directional jitter within the narrow band reads as the
+      // natural variation this task asks for rather than a problem.
+      // pickDepartureCorridorDirectionDeg's own defensive route-aware
+      // check (see its own notes) still runs every time regardless, in
+      // case route geometry or the no-go angle itself ever changes.
+      engine.phaseDirectionAnchorDeg = pickDepartureCorridorDirectionDeg(state.nav.intendedCourse);
     } else {
       // PHASE 7 -- every ordinary open-ocean event (fairSailing,
       // freshWinds, calm, rain, postStormClearing -- 'shift'/'hold'/
@@ -3592,6 +3606,23 @@
     }
     return candidates[candidates.length - 1].to;
   }
+  // Ends endedKey outright and picks/begins whatever comes next --
+  // the shared tail both advanceToNextPhaseOrEvent (a phase-timer
+  // exhaustion, the ordinary case) and the departure-corridor-cleared
+  // handoff below (a FORCED early end, independent of the phase timer)
+  // need: cooldown bookkeeping for the event that just ended, Phase 3
+  // arc tracking, then the normal chooseNextEvent/beginEvent pair --
+  // never a special-cased shortcut around either.
+  function endEventAndPickNext(state, endedKey, now) {
+    var engine = state.weather.engine;
+    var endedDef = WEATHER_EVENTS[endedKey];
+    if (endedDef.cooldownHours > 0) {
+      engine.cooldownUntil[endedKey] = now + endedDef.cooldownHours * 60;
+    }
+    markArcEventCompleted(state, endedKey); // PHASE 3 -- see its own notes
+    var nextKey = chooseNextEvent(state, endedKey, now);
+    beginEvent(state, nextKey, now);
+  }
   function advanceToNextPhaseOrEvent(state, now) {
     var engine = state.weather.engine;
     var eventDef = WEATHER_EVENTS[engine.currentEvent];
@@ -3604,14 +3635,7 @@
     // This event's own phases are exhausted -- record cooldown
     // bookkeeping for IT (not the one about to begin), then pick and
     // begin whatever comes next.
-    var endedKey = engine.currentEvent;
-    var endedDef = WEATHER_EVENTS[endedKey];
-    if (endedDef.cooldownHours > 0) {
-      engine.cooldownUntil[endedKey] = now + endedDef.cooldownHours * 60;
-    }
-    markArcEventCompleted(state, endedKey); // PHASE 3 -- see its own notes
-    var nextKey = chooseNextEvent(state, endedKey, now);
-    beginEvent(state, nextKey, now);
+    endEventAndPickNext(state, engine.currentEvent, now);
   }
 
   // ---- The main per-tick entry point -- called from simTick exactly
@@ -3638,13 +3662,28 @@
     // 3-6h phase timer alone is too slow to track the coastal
     // corridor's own bends (several legs there are under an hour),
     // so this calls beginPhase the moment a new leg begins rather
-    // than waiting for the next natural rollover. Always safe to call
-    // unconditionally -- beginPhase's own 'routeRelative' branch keeps
-    // the existing direction untouched if it's still sailable for the
-    // new course, and only actually re-picks when it genuinely isn't.
+    // than waiting for the next natural rollover.
+    //
+    // SAILING-BEHAVIOR TASK -- the SAME waypoint change that clears
+    // OPEN_WATER_WAYPOINT_INDEX (section 8's own "immediately stop
+    // applying the departure wind protection") is handled differently
+    // from every earlier one: rather than re-anchoring within the
+    // still-active event (which would leave the protected wind running
+    // for up to this phase's own remaining 3-6h), this ends
+    // favorableDeparture outright, right now, via the same
+    // endEventAndPickNext every ordinary phase-timer exhaustion uses --
+    // its own eligibility function (see WEATHER_EVENTS' own entry)
+    // already makes it ineligible to be picked again the moment
+    // waypointIndex reaches OPEN_WATER_WAYPOINT_INDEX, so
+    // chooseNextEvent hands off to fairSailing/freshWinds, normal
+    // Phase 2/3 cadence, immediately -- not gradually.
     if (engine.currentEvent === 'favorableDeparture' && state.nav.waypointIndex !== engine.favorableDepartureWaypointIndex) {
       engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
-      beginPhase(state, 'favorableDeparture', 'sailing', now);
+      if (state.nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX) {
+        endEventAndPickNext(state, 'favorableDeparture', now);
+      } else {
+        beginPhase(state, 'favorableDeparture', 'sailing', now);
+      }
     }
 
     updateSquallAndMaybeEnd(state, now);
@@ -3763,21 +3802,29 @@
   // entirely) hands back whatever windSpeed that save's LAST real
   // observation happened to be, verbatim -- including a genuinely low
   // one from back when fetchRealWeather was still live. Rather than
-  // teaching that inference about the new protected window too, this
+  // teaching that inference about the protected corridor too, this
   // runs AFTER it (and after every other migration) and simply
-  // overrides the result outright for a boat still this early in the
-  // passage, the same way a fresh voyage already starts -- one
-  // authoritative rule, regardless of whether the stale value came
-  // from that old inference, a genuinely pre-Phase-7 save that rolled
-  // an ordinary low-wind fairSailing/freshWinds phase before this
-  // window was actually protected, or any other source. Does nothing
-  // once progress has cleared the window -- normal engine state from
-  // the save carries forward exactly as it already did.
+  // overrides the result outright for a boat still inside the
+  // authored departure corridor, the same way a fresh voyage already
+  // starts -- one authoritative rule, regardless of whether the stale
+  // value came from that old inference, a genuinely pre-Phase-7 save
+  // that rolled an ordinary low-wind fairSailing/freshWinds phase
+  // before this corridor was actually protected, or any other source.
+  // SAILING-BEHAVIOR TASK -- section 10's own "on reload, restore the
+  // protected departure wind behavior if still inside the corridor;
+  // do not re-enable it if already clear" is exactly this function's
+  // existing gate, just moved from a passage-progress percentage to
+  // the same waypoint-based boundary the rest of this task uses. Does
+  // nothing once the corridor is cleared -- normal engine state from
+  // the save carries forward exactly as it already did, and boat
+  // position/route progress/weather event/log/clock/sails/autopilot/
+  // course are never touched here, only the weather engine fields
+  // below.
   function enforceFavorableDepartureIfNeeded(state) {
-    if (passageProgressPercent(state) >= FAVORABLE_DEPARTURE_HARD_END) return;
+    if (state.nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX) return;
     var w = state.weather;
-    w.windSpeed = 13;
-    w.windDirection = normalizeDeg(state.nav.intendedCourse + (Math.random() < 0.5 ? 90 : -90));
+    w.windSpeed = 12;
+    w.windDirection = pickDepartureCorridorDirectionDeg(state.nav.intendedCourse);
     w.engine.currentEvent = 'favorableDeparture';
     w.engine.eventStartedAt = state.meta.voyageMinutes;
     w.engine.plannedEventDuration = 0;
@@ -3790,10 +3837,10 @@
     w.engine.targetCondition = 'overcast';
     w.engine.targetRainProbability = 0;
     w.engine.squall = null;
-    w.engine.phaseDirectionAnchorDeg = null; // force a genuinely fresh pickRouteRelativeDirectionDeg on the next tick, never keep a stale pre-reset value even if it happens to still fall in-band by coincidence
+    w.engine.phaseDirectionAnchorDeg = null; // force a genuinely fresh pickDepartureCorridorDirectionDeg on the next tick, never keep a stale pre-reset value even if it happens to still fall in-band by coincidence
     // booted: false reuses advanceWeatherEngine's own normal boot
     // path (see beginPhase's own notes) to properly sample a real
-    // phase duration and a genuine routeRelative direction on the
+    // phase duration and a genuine departureSoutherly direction on the
     // very next tick, rather than duplicating that logic here.
     w.engine.booted = false;
     w.engine.routingAtEventStart = null;
@@ -3902,18 +3949,16 @@
     if (arc.voyageArcComplete) return 1;
     var progress = passageProgressPercent(state);
 
-    // PHASE 7 -- FAVORABLE DEPARTURE's own soft taper (see its
-    // WEATHER_EVENTS entry's own notes). Checked before
-    // voyageArcComplete would ever matter here in practice (the
-    // window closes at 12% progress, voyageArcComplete can't be true
-    // that early), but kept independent of it regardless -- this
-    // event's own eligibility function is the true hard backstop.
-    if (eventKey === 'favorableDeparture') {
-      if (progress <= FAVORABLE_DEPARTURE_TAPER_START) return 1;
-      if (progress >= FAVORABLE_DEPARTURE_HARD_END) return 0;
-      var fdFraction = (progress - FAVORABLE_DEPARTURE_TAPER_START) / (FAVORABLE_DEPARTURE_HARD_END - FAVORABLE_DEPARTURE_TAPER_START);
-      return clamp(1 - fdFraction, 0.02, 1);
-    }
+    // SAILING-BEHAVIOR TASK -- FAVORABLE DEPARTURE no longer has a
+    // soft taper here: its own eligibility function (see WEATHER_EVENTS'
+    // own entry) is now a hard, discrete waypoint-based boundary with
+    // nothing to smooth over (unlike the old percentage-based window,
+    // there's no continuous value approaching a threshold -- the boat
+    // either is or isn't still inside the corridor), and
+    // chooseNextEvent's own eligibility filter already excludes it the
+    // instant that boundary is crossed, before this function is ever
+    // consulted for it. Falls through to the plain `return 1` below
+    // like any other event type this section has no opinion about.
 
     // The three guarantees -- each gets a strong, rising boost on its
     // OWN event key specifically while not yet experienced, and nudges
@@ -4984,18 +5029,22 @@
     return d > 180 ? d - 360 : d;
   }
 
-  // AUTO-TACK — active throughout the whole voyage; see computeHeading.
-  // The player controls SET COURSE (the intended track: the current
-  // waypoint's bearing while coastal, or the player's own chosen
-  // heading once in open ocean); this decides what the boat actually
-  // steers tick to tick (ACTUAL HEADING) to make that course good. If
-  // SET COURSE is too close to the wind to sail directly, the boat
-  // beats to windward instead of luffing indefinitely — short legs
-  // through the coastal corridor (tight enough to stay inside the
-  // verified-safe route), longer legs once in open water, both shrinking
-  // further as the boat nears whatever it's currently aiming for. The
-  // player never manually tacks; changing SET COURSE (via CHANGE COURSE
-  // or SET FOR NĀWILIWILI) is the only navigation input there is.
+  // AUTO-TACK — coastal corridor ONLY now (nav.waypointIndex <
+  // OPEN_WATER_WAYPOINT_INDEX; see computeHeading's own coastal
+  // branch). The player is never asked to navigate confined water, so
+  // this unconditional safe-routing stays exactly as it always has:
+  // when the current waypoint's bearing is too close to the wind to
+  // sail directly, the boat beats to windward instead of luffing
+  // indefinitely, in short legs tight enough to stay inside the
+  // verified-safe route. Past OPEN_WATER_WAYPOINT_INDEX this no longer
+  // applies — AUTOPILOT holds SET COURSE exactly (see
+  // autopilotSteeringSolution below) and never tacks on its own; a
+  // human AT THE HELM never has either. If the wind moves onto the
+  // bow out there, the boat luffs and loses speed under the normal
+  // point-of-sail physics (pointOfSailFactor/computeBoatSpeed) exactly
+  // like any other unsailable heading, and the player has to notice
+  // and manually pick a new course (CHANGE COURSE) — there is no
+  // automatic escape from open-ocean no-go once clear of the corridor.
   var NOGO_ZONE_DEG = 35;          // matches pointOfSailFactor's own no-go threshold
   var CLOSE_HAULED_ANGLE_DEG = 42; // realistic close-hauled angle — lands in pointOfSailFactor's 35-50deg tier, a real reduced-but-genuine speed, not a crawl
   var COASTAL_MAX_TACK_LEG_NM = 0.6; // short legs — the corridor can run within under a mile of real charted shoreline
@@ -5057,14 +5106,15 @@
     return closeHauledHeading(w.windDirection, nav.tack);
   }
 
-  // NAVIGATION — two phases, split at OPEN_WATER_WAYPOINT_INDEX, but
-  // auto-tacking applies throughout both; the only thing that changes
-  // is where SET COURSE (desired) comes from:
+  // NAVIGATION — two phases, split at OPEN_WATER_WAYPOINT_INDEX, and
+  // (as of this task) genuinely different steering behavior in each,
+  // not just a different source for SET COURSE:
   //
   // Coastal corridor (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): SET
   // COURSE is the bearing to WAYPOINTS[waypointIndex], recalculated
   // every tick; simTick() advances waypointIndex on arrival — the
-  // player is never asked to navigate confined water.
+  // player is never asked to navigate confined water, so resolveAutoTack
+  // (above) still silently beats to windward here if it ever needs to.
   //
   // Open ocean (waypointIndex >= OPEN_WATER_WAYPOINT_INDEX): SET COURSE
   // is whatever compass heading is in nav.setCourse — set by the player
@@ -5073,16 +5123,17 @@
   // bearing toward Nāwiliwili so the voyage keeps moving. nav.intendedCourse
   // is repurposed here to the LIVE direct bearing to Nāwiliwili (BEARING
   // TO NĀWILIWILI) — informational only, never what's actually steered.
+  // AUTOPILOT here no longer auto-tacks (see this task): it holds SET
+  // COURSE exactly, current-corrected, and nothing more. If that course
+  // is unsailable, the boat luffs and slows under the ordinary
+  // point-of-sail physics, same as a human AT THE HELM already does —
+  // the player must notice and manually choose a new course.
   //
-  // Either way, resolveAutoTack() decides what the boat actually steers
-  // (ACTUAL HEADING) tick to tick to make SET COURSE good.
-  //
-  // AUTOPILOT ON, open water: desired course is current-corrected, then
-  // run through resolveAutoTack exactly as below — factored out as
-  // autopilotSteeringSolution() so beginCourseTurn() (the "boat actually
-  // has to come around" turn animation — see its own section) can ask
-  // for the same answer up front, as the turn's target, without
-  // duplicating the current-correction/auto-tack logic.
+  // autopilotSteeringSolution() is factored out (rather than inlined in
+  // computeHeading below) so beginCourseTurn() (the "boat actually has
+  // to come around" turn animation — see its own section) can ask for
+  // the same answer up front, as the turn's target, without duplicating
+  // the current-correction logic.
   function autopilotSteeringSolution(state, targetPoint) {
     var desired = state.nav.setCourse;
     var currentAnchor = state.weather.oceanCurrent;
@@ -5090,7 +5141,20 @@
       var estSpeed = computeBoatSpeed(state, desired);
       desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
     }
-    return resolveAutoTack(state, desired, targetPoint);
+    // AUTOPILOT NO LONGER AUTO-TACKS (this task) -- previously this
+    // returned resolveAutoTack(state, desired, targetPoint), which
+    // could silently beat to windward and even change which side of
+    // the wind the boat sailed on. Now it simply holds the
+    // current-corrected course, whatever it is; targetPoint is kept as
+    // a parameter (both call sites still pass one) purely so neither
+    // call site needs touching, though it's unused here now. Any stale
+    // nav.tack left over from a save made before this change, or from
+    // the coastal corridor's own still-auto-tacking resolveAutoTack
+    // switching off as the boat clears OPEN_WATER_WAYPOINT_INDEX, is
+    // cleared here so cmdPosition's own "BEATING TO WINDWARD" readout
+    // never shows while AUTOPILOT is genuinely just holding course.
+    if (state.nav.tack) { state.nav.tack = null; state.nav.tackDistanceNm = 0; }
+    return desired;
   }
 
   // AUTOPILOT OFF drift — how strongly wind-push direction pulls at
@@ -5176,11 +5240,14 @@
         steered = normalizeDeg(steered + nav.autopilotWobble);
       } else if (state.crew.atHelm && state.boat.steering !== 'DAMAGED') {
         // AT THE HELM: the player is actively holding SET COURSE by
-        // hand — a direct compass heading, not the current-corrected,
-        // auto-tack-aware solution the autopilot computes (a human
-        // helmsman steers by compass, doesn't auto-tack, and doesn't
-        // silently correct for current the way electronic course-
-        // keeping would). Same bounded correction oscillation as
+        // hand — a direct compass heading, not the current-corrected
+        // solution the autopilot computes (a human helmsman steers by
+        // compass and doesn't silently correct for current the way
+        // electronic course-keeping would). Neither one auto-tacks any
+        // more, but this distinction is still real and worth keeping:
+        // current correction alone can nudge the autopilot's own
+        // steered heading a degree or two off the player's literal
+        // compass number. Same bounded correction oscillation as
         // autopilot, above, standing in for imperfect human steering.
         steered = nav.setCourse;
         updateSailTrimForHeading(state, steered); // against the CLEAN set course, before the oscillation below
@@ -6349,12 +6416,12 @@
 
   // The heading the boat should physically turn toward whenever
   // nav.setCourse changes, AUTOPILOT re-engages, or the player TAKEs THE
-  // HELM. AUTOPILOT ON: the same current-corrected, auto-tack-aware
-  // solution computeHeading() would steer toward on its own (see
-  // autopilotSteeringSolution). Otherwise (autopilot off, whether or not
-  // the player is at the helm): the player's raw chosen heading,
-  // unadjusted — a deliberate manual turn, no auto-tack, since that's an
-  // AUTOPILOT-ON feature only.
+  // HELM. AUTOPILOT ON: the same current-corrected solution
+  // computeHeading() would steer toward on its own (see
+  // autopilotSteeringSolution — no auto-tack either way now). Otherwise
+  // (autopilot off, whether or not the player is at the helm): the
+  // player's raw chosen heading, unadjusted — current correction is an
+  // AUTOPILOT-ON feature only, same as it always was.
   function courseSteeringTarget(state) {
     if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
       return state.nav.setCourse;
@@ -6701,13 +6768,15 @@
     }
 
     if (nmRemaining > 0) {
-      // OPEN OCEAN: free-heading movement (possibly tacking — heading
-      // here is whatever resolveAutoTack chose, not necessarily
-      // setCourse directly, and the actual track (cog.courseOverGround)
-      // can differ further still once current is added). distanceTraveled
-      // still tracks actual nm sailed even though nothing is being
-      // "arrived at" along the way — only Nāwiliwili itself, and land,
-      // matter now.
+      // OPEN OCEAN: free-heading movement -- heading here is whatever
+      // computeHeading settled on (AUTOPILOT holding setCourse exactly,
+      // current-corrected; a human AT THE HELM; or drift -- never a
+      // tack-chosen heading out here any more, see
+      // autopilotSteeringSolution), and the actual track
+      // (cog.courseOverGround) can differ further still once current is
+      // added. distanceTraveled still tracks actual nm sailed even
+      // though nothing is being "arrived at" along the way — only
+      // Nāwiliwili itself, and land, matter now.
       var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
       if (distToFinal <= nmRemaining) {
         state.nav.lat = FINAL_DEST.lat;
