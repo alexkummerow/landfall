@@ -1082,6 +1082,7 @@
         distanceTraveled: 0,       // odometer — actual nm sailed, not progress toward the goal
         intendedCourse: startBearing, // coastal phase: bearing to the current waypoint. Open-ocean phase: live direct bearing to Nāwiliwili (for the BEARING TO NĀWILIWILI display) — NOT necessarily what the boat is actually steering; see setCourse for that. Refreshed every tick either way.
         setCourse: null,           // the player's manually chosen open-ocean compass heading (0-359), via CHANGE COURSE or SET FOR NĀWILIWILI — null until the coastal corridor is cleared, at which point computeHeading() initializes it toward Nāwiliwili if still unset
+        autopilotHeading: null,    // the compass heading AUTOPILOT is holding while it is ON in open water -- captured from the boat's ACTUAL current heading the moment the player engages it (or set to the new heading when the player explicitly changes course), never computed from navigation/wind/current; null whenever there's nothing to hold (coastal corridor, or not yet captured -- see autopilotSteeringSolution)
         courseDraft: null,         // in-progress heading value while the CHANGE COURSE picker is open; null when not in use
         landWarningLevel: 'none',  // 'none' | 'ahead' | 'close' | 'danger' — escalating land-proximity state, so each level only logs once on the way up (and clears silently once the danger passes)
         groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
@@ -5295,15 +5296,14 @@
      cached and refreshed the same way real weather is: a background
      fetch on its own cadence, never blocking simTick, silently
      unavailable rather than invented when the provider has nothing
-     for a given point. Feeds two things: a small heading correction so
-     automatic steering still makes good the player's chosen course
-     through a cross-current (see computeHeading/currentCorrectionDeg),
-     and the true vector sum of boat-through-water + current that
-     actually moves the boat and sets the displayed speed (see
-     combineWithCurrent, used in simTick). Never used to choose a
-     course on its own — only to keep what the player already chose
-     honest against real current, and to inform the player's own
-     decision via WEATHER and FORECAST.
+     for a given point. Feeds the true vector sum of boat-through-water
+     + current that actually moves the boat, sets the displayed speed,
+     and gives the course over ground (see combineWithCurrent, used in
+     simTick and the HELM figures). The boat's HEADING is never adjusted
+     for it: AUTOPILOT holds a heading, so a cross-current pushes the
+     track (COURSE) off the heading, exactly as it would for a real boat
+     that isn't crabbing. It also informs the player's own decision via
+     WEATHER and FORECAST.
      -------------------------------------------------------------- */
   function normalizeOceanCurrent(raw) {
     if (!raw || !raw.current) return null;
@@ -5429,22 +5429,6 @@
     }).catch(function () {
       currentFetchInFlight = false;
     });
-  }
-
-  // Standard current-triangle correction: given a desired course and a
-  // known current, how many degrees to turn the heading (through water)
-  // toward the side the current is coming from, so the two vectors sum
-  // back to roughly the desired course over ground. Returns 0 with no
-  // current data, or if the cross-component would exceed what the boat
-  // can counter at its own speed (an unresolvable set — direct sailing
-  // is left to just be pushed off, same as it would be for a real boat
-  // in a current stronger than it can make way across).
-  function currentCorrectionDeg(desiredDeg, boatSpeedKt, current) {
-    if (!current || current.speedKt == null || boatSpeedKt <= 0) return 0;
-    var relBearingRad = signedAngleDiff(current.directionDeg, desiredDeg) * Math.PI / 180;
-    var crossComponent = current.speedKt * Math.sin(relBearingRad);
-    var ratio = clamp(crossComponent / boatSpeedKt, -1, 1);
-    return -(Math.asin(ratio) * 180 / Math.PI);
   }
 
   // The actual vector sum of the boat's motion through the water and
@@ -5658,55 +5642,63 @@
     return closeHauledHeading(w.windDirection, nav.tack);
   }
 
-  // NAVIGATION — two phases, split at OPEN_WATER_WAYPOINT_INDEX, and
-  // (as of this task) genuinely different steering behavior in each,
-  // not just a different source for SET COURSE:
+  // NAVIGATION — two phases, split at OPEN_WATER_WAYPOINT_INDEX:
   //
-  // Coastal corridor (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): SET
-  // COURSE is the bearing to WAYPOINTS[waypointIndex], recalculated
+  // Coastal corridor (waypointIndex < OPEN_WATER_WAYPOINT_INDEX): the
+  // heading is the bearing to WAYPOINTS[waypointIndex], recalculated
   // every tick; simTick() advances waypointIndex on arrival — the
   // player is never asked to navigate confined water, so resolveAutoTack
   // (above) still silently beats to windward here if it ever needs to.
+  // That is the corridor's own safe routing, independent of AUTOPILOT.
   //
-  // Open ocean (waypointIndex >= OPEN_WATER_WAYPOINT_INDEX): SET COURSE
-  // is whatever compass heading is in nav.setCourse — set by the player
-  // via CHANGE COURSE or SET FOR NĀWILIWILI, or, if the player was away
-  // when the corridor cleared, initialized automatically to the direct
-  // bearing toward Nāwiliwili so the voyage keeps moving. nav.intendedCourse
-  // is repurposed here to the LIVE direct bearing to Nāwiliwili (BEARING
-  // TO NĀWILIWILI) — informational only, never what's actually steered.
-  // AUTOPILOT here no longer auto-tacks (see this task): it holds SET
-  // COURSE exactly, current-corrected, and nothing more. If that course
-  // is unsailable, the boat luffs and slows under the ordinary
-  // point-of-sail physics, same as a human AT THE HELM already does —
-  // the player must notice and manually choose a new course.
+  // Open ocean (waypointIndex >= OPEN_WATER_WAYPOINT_INDEX): the player
+  // steers. nav.setCourse is the player's chosen compass heading (via
+  // CHANGE COURSE or SET COURSE FOR NĀWILIWILI, or, if the player was
+  // away when the corridor cleared, initialized once to the direct
+  // bearing toward Nāwiliwili so the voyage keeps moving).
+  // nav.intendedCourse is repurposed here to the LIVE direct bearing to
+  // Nāwiliwili (BEARING TO NĀWILIWILI) — informational only, never
+  // what's actually steered.
   //
-  // autopilotSteeringSolution() is factored out (rather than inlined in
-  // computeHeading below) so beginCourseTurn() (the "boat actually has
-  // to come around" turn animation — see its own section) can ask for
-  // the same answer up front, as the turn's target, without duplicating
-  // the current-correction logic.
+  // AUTOPILOT IS A HEADING-HOLD AND NOTHING ELSE. It has no navigation
+  // intelligence at all: it does not know where Nāwiliwili is, where
+  // the wind is, what the no-go zone is, what the current is doing, or
+  // whether the boat is fast or slow. Engaging it captures the heading
+  // the boat is ALREADY ON (nav.autopilotHeading -- see
+  // performAutopilotToggle) and it holds exactly that, until the player
+  // deliberately picks a new heading (CHANGE COURSE / SET COURSE FOR
+  // NĀWILIWILI both update it) or turns it off. If that heading is
+  // unsailable the boat luffs and slows under the ordinary point-of-sail
+  // physics, same as a human AT THE HELM already does — the player must
+  // notice and manually choose a new heading. No auto-tack, no current
+  // correction (an earlier version crabbed into the current: when the
+  // boat's estimated speed was small beside the cross-current the
+  // correction saturated at a full 90 degrees, which is how a 238-degree
+  // heading became ~149 the moment it was engaged).
+  //
+  // autopilotSteeringSolution() is kept as the single place computeHeading
+  // and courseSteeringTarget both ask "what heading is the autopilot
+  // holding?" so they can never disagree about it.
   function autopilotSteeringSolution(state, targetPoint) {
-    var desired = state.nav.setCourse;
-    var currentAnchor = state.weather.oceanCurrent;
-    if (currentAnchor.fetchedRealMs != null) {
-      var estSpeed = computeBoatSpeed(state, desired);
-      desired = normalizeDeg(desired + currentCorrectionDeg(desired, estSpeed, currentAnchor));
+    var nav = state.nav;
+    if (!Number.isFinite(nav.autopilotHeading)) {
+      // Nothing was ever captured: a save from before this existed, or
+      // the first open-water tick after the coastal corridor (where the
+      // autopilot has been riding along, unused). Seed it from the
+      // player's own chosen heading -- nav.setCourse, which is what the
+      // autopilot has always been holding in that situation -- and only
+      // fall back to wherever the bow is actually pointed.
+      nav.autopilotHeading = Number.isFinite(nav.setCourse) ? nav.setCourse : (Number.isFinite(nav.heading) ? nav.heading : 0);
     }
-    // AUTOPILOT NO LONGER AUTO-TACKS (this task) -- previously this
-    // returned resolveAutoTack(state, desired, targetPoint), which
-    // could silently beat to windward and even change which side of
-    // the wind the boat sailed on. Now it simply holds the
-    // current-corrected course, whatever it is; targetPoint is kept as
-    // a parameter (both call sites still pass one) purely so neither
-    // call site needs touching, though it's unused here now. Any stale
-    // nav.tack left over from a save made before this change, or from
-    // the coastal corridor's own still-auto-tacking resolveAutoTack
-    // switching off as the boat clears OPEN_WATER_WAYPOINT_INDEX, is
-    // cleared here so cmdPosition's own "BEATING TO WINDWARD" readout
-    // never shows while AUTOPILOT is genuinely just holding course.
-    if (state.nav.tack) { state.nav.tack = null; state.nav.tackDistanceNm = 0; }
-    return desired;
+    // Any stale nav.tack left over from a save made before auto-tack was
+    // removed, or from the coastal corridor's own still-auto-tacking
+    // resolveAutoTack switching off as the boat clears
+    // OPEN_WATER_WAYPOINT_INDEX, is cleared here so cmdPosition's own
+    // "BEATING TO WINDWARD" readout never shows while AUTOPILOT is
+    // genuinely just holding a heading. (targetPoint is kept as a
+    // parameter purely so no call site needs touching; it is unused.)
+    if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
+    return nav.autopilotHeading;
   }
 
   // AUTOPILOT OFF drift — how strongly wind-push direction pulls at
@@ -5764,6 +5756,7 @@
       nav.intendedCourse = bearingBetween(nav.lat, nav.lon, targetPoint.lat, targetPoint.lon);
       desired = nav.intendedCourse;
       steered = resolveAutoTack(state, desired, targetPoint);
+      nav.autopilotHeading = null; // the corridor steers itself -- no autopilot heading exists here, so a stale one can never carry into open water
     } else {
       nav.intendedCourse = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
       if (nav.setCourse == null) {
@@ -5951,6 +5944,14 @@
     return {
       stw: stw,
       sog: cog.speedOverGround,
+      // COURSE: the direction the boat is actually MOVING over the
+      // ground (heading + current, the same vector simTick moves the
+      // boat by) -- never nav.setCourse or the bearing to a destination.
+      // With no current it is exactly the heading; with one it can
+      // legitimately differ. A boat that isn't moving has no direction of
+      // travel, so it falls back to the bow rather than reading the
+      // meaningless atan2(0,0) = 000.
+      courseOverGround: cog.speedOverGround > 0.05 ? cog.courseOverGround : normalizeDeg(heading),
       bearingToDest: bearingToDest,
       vmg: vmg,
       pointOfSail: pointOfSailLabel(heading, state.weather.windDirection),
@@ -6965,13 +6966,10 @@
   }
 
   // The heading the boat should physically turn toward whenever
-  // nav.setCourse changes, AUTOPILOT re-engages, or the player TAKEs THE
-  // HELM. AUTOPILOT ON: the same current-corrected solution
-  // computeHeading() would steer toward on its own (see
-  // autopilotSteeringSolution — no auto-tack either way now). Otherwise
-  // (autopilot off, whether or not the player is at the helm): the
-  // player's raw chosen heading, unadjusted — current correction is an
-  // AUTOPILOT-ON feature only, same as it always was.
+  // nav.setCourse changes or the player TAKEs THE HELM. AUTOPILOT ON: the
+  // heading it is holding (see autopilotSteeringSolution -- a pure
+  // hold, no navigation of any kind). Otherwise (autopilot off, whether
+  // or not the player is at the helm): the player's chosen heading.
   function courseSteeringTarget(state) {
     if (!state.boat.autopilotOn || state.boat.steering === 'DAMAGED') {
       return state.nav.setCourse;
@@ -7047,6 +7045,7 @@
       if (activeTurn.headerRefs) {
         var liveFigures = computeHelmLiveFigures(state, nav.heading);
         activeTurn.headerRefs.headingEl.textContent = Math.round(nav.heading) + '\u00B0';
+        if (activeTurn.headerRefs.courseEl) activeTurn.headerRefs.courseEl.textContent = Math.round(liveFigures.courseOverGround) + '\u00B0'; // COURSE follows the heading through a turn (it is course over ground now, not a stored number)
         activeTurn.headerRefs.stwEl.textContent = liveFigures.stw.toFixed(1) + ' KT';
         activeTurn.headerRefs.sogEl.textContent = liveFigures.sog.toFixed(1) + ' KT';
         activeTurn.headerRefs.pointOfSailEl.textContent = liveFigures.pointOfSail;
@@ -12815,22 +12814,6 @@
     return { lat: lat, lon: lon };
   }
 
-  // GPS's own "COURSE" figure -- the player's actual intended
-  // direction, matching HELM's own use of the word "COURSE" exactly
-  // (nav.setCourse) rather than introducing a second meaning for it.
-  // nav.setCourse is only ever initialized once open water unlocks
-  // manual steering (see cmdHelm) -- before that, during the coastal
-  // corridor, GPS falls back to the exact same live bearing-to-current-
-  // waypoint cmdHelm's own coastal branch already computes and shows,
-  // so this never reads null/blank during that phase. A read-only
-  // convenience function; never writes nav.setCourse itself.
-  function currentCourseDeg(state) {
-    var nav = state.nav;
-    if (nav.setCourse != null) return nav.setCourse;
-    var wp = WAYPOINTS[nav.waypointIndex] || FINAL_DEST;
-    return bearingBetween(nav.lat, nav.lon, wp.lat, wp.lon);
-  }
-
   function describeGap(minutes) {
     if (minutes < 90) return Math.round(minutes) + ' minutes';
     var hours = minutes / 60;
@@ -13109,12 +13092,11 @@
   // visible on the other the next time it's opened. Same damaged/
   // battery gating and switch-click sound as every other electrical
   // toggle, and the exact same side effects regardless of which screen
-  // it was toggled from: engaging it clears any stale drift heading
-  // before starting the turn toward the current steering target;
-  // disengaging it is announced the same way. Nothing about autopilot
-  // battery draw, course holding, or steering behavior changes here —
-  // this is the same state flip and the same beginCourseTurn call
-  // every time.
+  // it was toggled from: engaging it clears any stale drift heading and
+  // captures the heading the boat is on (see below — no turn, no
+  // calculation); disengaging it is announced and changes nothing about
+  // the heading: the boat just carries on from where it is under the
+  // ordinary manual-control behavior.
   function performAutopilotToggle(state, returnTo) {
     var render = returnTo || cmdHelm;
     var b = state.boat;
@@ -13171,8 +13153,30 @@
       // nav state block.
       state.nav.driftHeading = null;
       printBlank();
-      printLine('Autopilot engaged.', 'dim');
-      beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
+      if (state.nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX) {
+        // HEADING HOLD: lock the heading the boat is ON right now and
+        // hold exactly that. Nothing is calculated — not the bearing to
+        // Nāwiliwili, not the wind, not the current, not the old
+        // nav.setCourse (which can be stale, or can disagree with where
+        // the bow is actually pointed after unattended drift). The one
+        // exception is a turn the player already started that hasn't
+        // finished (CHANGE COURSE / SET COURSE FOR NĀWILIWILI / TAKE THE
+        // HELM): their last explicit choice is that turn's destination,
+        // nav.setCourse, not wherever the bow happens to be mid-swing.
+        var held = headingTurnActive && Number.isFinite(state.nav.setCourse) ? state.nav.setCourse : normalizeDeg(state.nav.heading);
+        state.nav.autopilotHeading = held;
+        // The heading being held IS now the player's chosen course:
+        // keeping nav.setCourse equal to it means CHANGE COURSE shows the
+        // truth, and disengaging while at the helm (manual steering holds
+        // nav.setCourse) carries on from the same heading instead of
+        // swinging toward some older number.
+        state.nav.setCourse = Math.round(held);
+        printLine('Autopilot engaged. Holding ' + Math.round(held) + '\u00B0.', 'dim');
+        // No beginCourseTurn: there is nothing to turn through — the
+        // boat is already on the heading it will hold.
+      } else {
+        printLine('Autopilot engaged.', 'dim');
+      }
     } else {
       printBlank();
       printLine('Autopilot disengaged.', 'dim');
@@ -13910,15 +13914,13 @@
   // display the same word, so the override itself is harmless, kept
   // only because removing it would be more than this wording-only pass
   // calls for.
-  // COURSE uses currentCourseDeg (nav.setCourse once open water has set
-  // it, otherwise the live bearing to the current coastal waypoint) so
-  // this same, single HELM renderer is safe to call during the coastal
-  // passage too -- nav.setCourse itself stays exactly as it always has
-  // (null until open water unlocks it; see currentCourseDeg's own
-  // notes), never written here. Every other figure below already comes
-  // from computeHelmLiveFigures/state.weather directly, independent of
-  // setCourse, so this is the one adjustment needed to make the full
-  // instrumentation coastal-safe.
+  // HEADING is where the bow points (nav.heading); COURSE is where the
+  // boat is actually MOVING over the ground (computeHelmLiveFigures'
+  // courseOverGround) -- they differ only by current. Neither is
+  // nav.setCourse or a destination bearing (BEARING TO N\u0100WILIWILI has
+  // its own row), so both are correct in the coastal passage too and
+  // this same, single HELM renderer is safe to call there; nothing here
+  // reads or writes nav.setCourse.
   function printHelmAtHelmHeader(state, headingLabel) {
     var nav = state.nav;
     var figures = computeHelmLiveFigures(state, nav.heading);
@@ -13926,7 +13928,7 @@
     printLine(headingLabel || 'HELM', 'heading-label');
     printBlank();
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
-    printDataRow('COURSE', Math.round(currentCourseDeg(state)) + '\u00B0', 'data-row-lg');
+    var courseEl = printDataRow('COURSE', Math.round(figures.courseOverGround) + '\u00B0', 'data-row-lg');
     printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
     var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
     printBlank();
@@ -13940,7 +13942,7 @@
     printDataRow('SAIL TRIM', sailTrimLabel(state), 'data-row-lg');
     printDataRow('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF', 'data-row-lg');
 
-    var refs = { headingEl: headingEl, stwEl: stwEl, sogEl: sogEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
+    var refs = { headingEl: headingEl, courseEl: courseEl, stwEl: stwEl, sogEl: sogEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
     if (activeTurn) activeTurn.headerRefs = refs;
     return refs;
   }
@@ -13962,7 +13964,7 @@
   // COASTAL vs OPEN WATER: this is now ONE renderer for both, per the
   // coastal-tutorial task this implements -- the player sees the exact
   // same full instrumentation (printHelmAtHelmHeader, already coastal-
-  // safe: see that function's own notes on currentCourseDeg) and the
+  // safe: see that function's own notes on HEADING vs COURSE) and the
   // exact same three navigation buttons (CHANGE COURSE/SET COURSE FOR
   // NĀWILIWILI/TURN AUTOPILOT OFF) in both phases. What differs is only
   // what clicking those buttons actually DOES: during coastal, each one
@@ -14821,7 +14823,7 @@
         { term: 'WIND SPEED', body: 'Current wind strength.' },
         { term: 'POINT OF SAIL', body: 'SOLACE\u2019s angle to the wind.' },
         { term: 'SAIL TRIM', body: 'Whether the sails are properly adjusted.' },
-        { term: 'AUTOPILOT', body: 'Whether SOLACE is holding the selected course automatically.' },
+        { term: 'AUTOPILOT', body: 'Whether SOLACE is holding a fixed compass heading automatically. It does not steer for the destination, the wind, or the current.' },
         { h3: 'CHANGING COURSE' },
         { p: 'Use CHANGE COURSE to choose a new course.' },
         { p: 'Use SET COURSE FOR N\u0100WILIWILI to set the direct bearing toward the destination.' },
@@ -16036,14 +16038,14 @@
     // path. Every figure is read from the SAME existing calculations
     // HELM/POSITION already use -- currentLatLon/formatLatLon (POSITION,
     // including its own uncertain-fix jitter when electrical is
-    // damaged), currentCourseDeg (COURSE, open-ocean setCourse or the
-    // coastal waypoint bearing), computeHelmLiveFigures (SPEED, i.e.
-    // SOG), and bearingBetween/distanceBetween (BEARING/DISTANCE to
+    // damaged), computeHelmLiveFigures (COURSE, i.e. course over ground,
+    // and SPEED, i.e. SOG), and bearingBetween/distanceBetween (BEARING/DISTANCE to
     // Nāwiliwili) -- never a duplicate calculation of any of them.
     var fix = currentLatLon(state);
     chartNavPositionEl.textContent = formatLatLon(fix.lat, fix.lon);
-    chartNavCourseEl.textContent = Math.round(currentCourseDeg(state)) + '\u00B0';
-    chartNavSpeedEl.textContent = computeHelmLiveFigures(state, nav.heading).sog.toFixed(1) + ' KT';
+    var chartFigures = computeHelmLiveFigures(state, nav.heading);
+    chartNavCourseEl.textContent = Math.round(chartFigures.courseOverGround) + '\u00B0';
+    chartNavSpeedEl.textContent = chartFigures.sog.toFixed(1) + ' KT';
     chartNavBearingEl.textContent = Math.round(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)) + '\u00B0';
     chartNavDistanceEl.textContent = Math.round(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)).toLocaleString() + ' NM';
   }
@@ -20853,6 +20855,7 @@
           break;
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
+        state.nav.autopilotHeading = state.nav.setCourse; // the player's newest explicit heading — what AUTOPILOT (if on) now holds
         state.nav.courseDraft = null;
         printBlank();
         printLine('Course set to ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
@@ -20869,7 +20872,8 @@
       case 'set-for-nawiliwili':
         if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { blockedByCoastalLock(state); break; }
         if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
-        state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon));
+        state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)); // a deliberate PLAYER command — the only place a destination bearing becomes a heading
+        state.nav.autopilotHeading = state.nav.setCourse; // ...and, like CHANGE COURSE, what AUTOPILOT (if on) then holds — it just holds it, it never chooses it
         printBlank();
         printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
         beginCourseTurn(state, {
@@ -21170,6 +21174,7 @@
     if (nav.tack === undefined) nav.tack = null;
     if (nav.tackDistanceNm === undefined) nav.tackDistanceNm = 0;
     if (nav.setCourse === undefined) nav.setCourse = null; // computeHeading() lazily sets this toward Nāwiliwili on first open-ocean use if still null
+    if (nav.autopilotHeading === undefined) nav.autopilotHeading = null; // a save from before the heading-hold autopilot: seeded lazily from the player's own setCourse the first tick it's needed (see autopilotSteeringSolution)
     if (nav.courseDraft === undefined) nav.courseDraft = null;
     if (nav.landWarningLevel === undefined) nav.landWarningLevel = 'none';
     if (nav.groundedOn === undefined) nav.groundedOn = null;
