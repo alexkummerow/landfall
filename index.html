@@ -8531,6 +8531,7 @@
   // render state.
   function updateAudioForState(state) {
     updateSeaAudioForState(state);
+    updateCreakAudioForState(state); // AMBIENT-AUDIO ENHANCEMENT PASS -- layered on top of interior sea, see its own section notes
     updateWindAudioForState(state);
     updateRainAudioForState(state);
     // Defensive re-sync only (idempotent — see updateNoGoZoneAudio's own
@@ -9102,6 +9103,300 @@
   // why the two are deliberately no longer the same moment.
   function transitionSeaAudioThroughCompanionway(state, targetLocation) {
     applySeaAudioDesiredState(getSeaAudioStateFor(targetLocation, state.weather.seaState || 0, state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
+  }
+
+  /* --------------------------------------------------------------
+     CREAK AMBIENCE (recorded, from audio/environment/) -- AMBIENT-AUDIO
+     ENHANCEMENT PASS. An ADDITIVE layer, interior-only, that sits ON
+     TOP of the existing interior sea ambience above: hull/wood/joinery
+     movement, strongest the more the sea is actually moving the boat
+     around below. Same two-slot-per-channel, generation-counter,
+     self-loop-crossfade architecture as SEA just above -- this is a
+     deliberate, independent COPY of that machinery (not a shared/
+     generic version of it), matching how WIND and RAIN below each keep
+     their own copy too rather than parameterizing one shared
+     implementation; see fadeCabinVolume's own notes elsewhere in this
+     file for why that's this codebase's consistent choice throughout.
+     The ONE piece that is NOT copied, and must not be: seaAudioTierFor
+     itself, just above -- this reads the SAME already-committed tier
+     (calm/moderate/rough/heavy) SEA's own channel just derived from
+     state.weather.seaState, via the SAME hysteresis state machine, so
+     creak and sea can never disagree about which tier is current and
+     this never becomes a second, independent severity calculation.
+     Only one channel exists at all (interior) -- there is no exterior
+     creak file, and none should ever be invented; CALM has no file
+     either (the task's own "CALM SEAS -> no creak loop"), so
+     getCreakAudioStateFor's own interiorTrack is simply null for that
+     tier, the same shape setSeaChannelTrack/performSeaChannelCrossfade
+     already use everywhere else in this file to mean "fade to
+     silence", not a special case.
+
+     Muting: this channel connects straight to masterGain (built in
+     ensureCreakChannelSlot below), exactly like every sea/wind/rain
+     slot already does -- no separate applyMuteToCreakAudio is needed
+     or added, the same reasoning toggleMute's own engine/fishing/
+     cabin/etc. hooks already document ("bypasses masterGain entirely,
+     so it needs its own mute application" -- this does NOT bypass it).
+     -------------------------------------------------------------- */
+  var CREAK_AUDIO_FILES = {
+    interiorModerate: 'audio/environment/creaks_moderate_int.mp3',
+    interiorRough: 'audio/environment/creaks_rough_int.mp3',
+    interiorHeavy: 'audio/environment/creaks_heavy_int.mp3',
+    // interiorCalm deliberately does not exist -- CALM means no creak
+    // loop at all (interiorTrack: null below), not a quiet file.
+  };
+  var CREAK_AMBIENCE_CROSSFADE_SECONDS = 2; // same value as SEA_AMBIENCE_CROSSFADE_SECONDS -- shared general transition feel (section 1/5 of this task), kept as this layer's own named constant rather than a direct reference, matching how every other layer here owns its own timing constant
+
+  // Secondary to the main sea ambience (section 7 of this task): clearly
+  // audible, but well under sea/wind's own 0.5-0.6 and rain's 0.45 --
+  // the one new, modest, centralized gain value this task allows for.
+  // Tune this one constant if the mix ever needs adjusting; nothing
+  // else in this section hardcodes a volume.
+  var CREAK_CHANNEL_GAIN = 0.3;
+
+  function makeCreakChannel(name, targetGain) {
+    return {
+      name: name,
+      targetGain: targetGain,
+      slots: [null, null],
+      activeIndex: -1,
+      desiredPath: null,
+      loadingPath: null,
+      currentPath: null,
+      generation: 0,
+    };
+  }
+  var creakChannels = {
+    interior: makeCreakChannel('interior', CREAK_CHANNEL_GAIN),
+  };
+
+  function ensureCreakChannelSlot(channel, index) {
+    if (channel.slots[index] || !audioCtx) return;
+    try {
+      var el = new Audio();
+      el.loop = false; // see SEA's own identical line above for why -- one authoritative repetition system (the self-loop scheduler below), never native loop=true racing it
+      el.preload = 'auto';
+      el.volume = 1;
+      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
+      el.addEventListener('error', function () {
+        var path = el.currentSrc || el.src;
+        console.error('CREAK AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
+      });
+      el.addEventListener('loadeddata', function () {
+        var path = el.currentSrc || el.src;
+        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
+      });
+      el.addEventListener('playing', function () {
+        commitCreakChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
+      });
+      var source = audioCtx.createMediaElementSource(el);
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      source.connect(gain).connect(masterGain);
+      slot.gain = gain;
+      channel.slots[index] = slot;
+    } catch (e) {
+      console.warn('Creak ambience unavailable:', describeError(e));
+    }
+  }
+
+  function creakChannelIsHealthy(channel) {
+    if (channel.currentPath === null) return channel.activeIndex === -1;
+    if (channel.activeIndex === -1) return false;
+    var slot = channel.slots[channel.activeIndex];
+    if (!slot) return false;
+    var el = slot.el;
+    if (el.paused && !el.ended) audioDebugLog('creak ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
+    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
+    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
+  }
+
+  function commitCreakChannelPlayback(channel, slot, path, myGeneration) {
+    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (creak commit, ' + channel.name + '): ' + path); return; }
+    channel.currentPath = path;
+    channel.loadingPath = null;
+    audioDebugLog('started: ' + path + ' (creak)');
+    if (slot.selfLoopScheduledForGeneration === myGeneration) return;
+    slot.selfLoopScheduledForGeneration = myGeneration;
+    scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration);
+  }
+
+  function scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration) {
+    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
+    var duration = slot.el.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      slot.selfLoopTimer = setTimeout(function () {
+        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
+          audioDebugLog('stale generation callback ignored (creak self-loop duration poll, ' + channel.name + ')');
+          return;
+        }
+        scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration);
+      }, 100);
+      return;
+    }
+    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS - slot.el.currentTime) * 1000);
+    slot.selfLoopTimer = setTimeout(function () {
+      slot.selfLoopTimer = null;
+      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (creak self-loop fire, ' + channel.name + ')'); return; }
+      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
+      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (creak self-loop, slot no longer active, ' + channel.name + ')'); return; }
+      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
+      performCreakChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
+    }, delayMs);
+  }
+
+  function performCreakChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
+    channel.generation++;
+    var myGeneration = channel.generation;
+    var now = audioCtx.currentTime;
+    var outgoingIndex = channel.activeIndex;
+
+    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
+      var outgoing = channel.slots[outgoingIndex];
+      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; }
+      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; }
+      outgoing.gainTarget = 0;
+      outgoing.gain.gain.cancelScheduledValues(now);
+      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
+      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
+      outgoing.pauseTimer = setTimeout(function () {
+        outgoing.pauseTimer = null;
+        outgoing.el.pause();
+      }, crossfadeSeconds * 1000 + 100);
+    }
+
+    if (desiredPath == null) {
+      channel.activeIndex = -1;
+      channel.currentPath = null;
+      channel.loadingPath = null;
+      return;
+    }
+
+    channel.loadingPath = desiredPath;
+    audioDebugLog('play: ' + desiredPath + ' (creak, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
+
+    try {
+      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
+      ensureCreakChannelSlot(channel, incomingIndex);
+      var incoming = channel.slots[incomingIndex];
+      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; }
+
+      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; }
+      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; }
+      incoming.selfLoopScheduledForGeneration = -1;
+      incoming.pendingPath = desiredPath;
+      incoming.pendingGeneration = myGeneration;
+      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
+      if (!alreadyLoaded) {
+        incoming.el.src = desiredPath;
+        incoming.el.currentTime = 0;
+      } else if (isSelfLoop) {
+        incoming.el.currentTime = 0;
+        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
+      }
+      var effectiveGain = channel.targetGain * gainMultiplier;
+      incoming.gainTarget = effectiveGain;
+      incoming.gain.gain.cancelScheduledValues(now);
+      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
+      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
+      channel.activeIndex = incomingIndex;
+
+      var playPromise = incoming.el.play();
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise.then(function () {
+          commitCreakChannelPlayback(channel, incoming, desiredPath, myGeneration);
+        }, function (error) {
+          console.error('CREAK AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
+        });
+      }
+    } catch (e) {
+      console.error('Creak audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
+      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
+    }
+  }
+
+  function setCreakChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSecondsOverride) {
+    if (gainMultiplier == null) gainMultiplier = 1;
+    var crossfadeSeconds = crossfadeSecondsOverride == null ? CREAK_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
+    channel.desiredPath = desiredPath;
+    channel.desiredGainMultiplier = gainMultiplier;
+
+    if (!audioCtx) return;
+    if (channel.currentPath === desiredPath && creakChannelIsHealthy(channel)) return; // DO NOT RESTART HEALTHY LOOPS (section 8 of this task) -- already there, at the right gain
+
+    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
+      var activeSlot = channel.slots[channel.activeIndex];
+      if (activeSlot && !activeSlot.el.paused) {
+        var nowRegain = audioCtx.currentTime;
+        var effectiveRegain = channel.targetGain * gainMultiplier;
+        activeSlot.gainTarget = effectiveRegain;
+        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
+        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
+        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
+        return;
+      }
+    }
+
+    if (desiredPath != null && channel.loadingPath === desiredPath) return;
+
+    performCreakChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
+  }
+
+  // location/seaState -> which file (if any) the one creak channel
+  // wants. Reuses seaAudioTierFor directly -- see this section's own
+  // header notes on why that must never be a second calculation.
+  // Interior-only (section 3 of this task): above deck this always
+  // returns interiorTrack: null, fading any active creak layer out via
+  // the same setCreakChannelTrack(..., null, ...) path CALM already
+  // uses, never a separate "above deck" special case.
+  function getCreakAudioStateFor(location, seaState) {
+    var tier = seaAudioTierFor(seaState);
+    var interiorTrack = (location === 'below' && tier !== 'calm')
+      ? CREAK_AUDIO_FILES['interior' + tier.charAt(0).toUpperCase() + tier.slice(1)]
+      : null;
+    return { location: location, seaState: seaState, interiorTrack: interiorTrack };
+  }
+
+  // Same ambienceSuppressed/companionwayHoldLocation handling as
+  // getSeaAudioState just above -- companionwayHoldLocation is the ONE
+  // shared variable already governing sea/wind/rain's own in-progress
+  // companionway transitions (see its own declaration comment: "One
+  // shared variable governs all three layers, since they transition
+  // together"); creak reads that exact same variable, not a new one of
+  // its own, so all four layers are always in agreement about which
+  // location's ambience is currently correct mid-transition.
+  function getCreakAudioState(state) {
+    if (state.departure.ambienceSuppressed) {
+      return { location: state.crew.location, seaState: state.weather.seaState || 0, interiorTrack: null };
+    }
+    var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
+    return getCreakAudioStateFor(location, state.weather.seaState || 0);
+  }
+
+  function applyCreakAudioDesiredState(desired, crossfadeSecondsOverride) {
+    setCreakChannelTrack(creakChannels.interior, desired.interiorTrack, desired.location, desired.seaState, 1, crossfadeSecondsOverride);
+  }
+
+  // The state-driven entry point -- same role as updateSeaAudioForState,
+  // called from the exact same places (updateAudioForState and
+  // renderOptions) so every trigger that already keeps sea/wind/rain in
+  // sync (the live loop, restart, offline catch-up, sound-on, a weather/
+  // location change while the player stays put) keeps creak in sync too,
+  // automatically, with no separate wiring of its own anywhere else.
+  function updateCreakAudioForState(state) {
+    applyCreakAudioDesiredState(getCreakAudioState(state));
+  }
+
+  // The companionway-specific variant -- same role as
+  // transitionSeaAudioThroughCompanionway, called from the exact same
+  // place (fireCrossfadeOnce, inside startCompanionwayForTransition) so
+  // BELOW DECK -> ABOVE DECK fades the creak layer out, and ABOVE DECK
+  // -> BELOW DECK fades the correct tier's creak layer in, in exact sync
+  // with sea/wind/rain's own location crossfade -- never a separate,
+  // later, or out-of-step transition.
+  function transitionCreakAudioThroughCompanionway(state, targetLocation) {
+    applyCreakAudioDesiredState(getCreakAudioStateFor(targetLocation, state.weather.seaState || 0), COMPANIONWAY_CROSSFADE_SECONDS);
   }
 
   /* --------------------------------------------------------------
@@ -10572,6 +10867,7 @@
     } : { tapePhase: tapePhase, note: 'tapeAudioEl not yet created' });
     console.log('[AUDIO DEBUG] SEA EXTERIOR', environmentChannelSnapshot(seaChannels.exterior));
     console.log('[AUDIO DEBUG] SEA INTERIOR', environmentChannelSnapshot(seaChannels.interior));
+    console.log('[AUDIO DEBUG] CREAK INTERIOR', environmentChannelSnapshot(creakChannels.interior)); // AMBIENT-AUDIO ENHANCEMENT PASS -- no exterior counterpart, see this layer's own section notes
     console.log('[AUDIO DEBUG] WIND EXTERIOR', environmentChannelSnapshot(windChannels.exterior));
     console.log('[AUDIO DEBUG] WIND INTERIOR', environmentChannelSnapshot(windChannels.interior));
     console.log('[AUDIO DEBUG] RAIN EXTERIOR', environmentChannelSnapshot(rainChannels.exterior));
@@ -10642,6 +10938,7 @@
   function collectExpectedPlayingAudio() {
     var expected = [];
     [['sea exterior', seaChannels.exterior], ['sea interior', seaChannels.interior],
+     ['creak interior', creakChannels.interior], // AMBIENT-AUDIO ENHANCEMENT PASS -- no exterior counterpart, see this layer's own section notes
      ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
      ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
       var label = pair[0], channel = pair[1];
@@ -10792,6 +11089,7 @@
 
     if (seaChannels.exterior) disposeAmbienceChannel(seaChannels.exterior);
     if (seaChannels.interior) disposeAmbienceChannel(seaChannels.interior);
+    if (creakChannels.interior) disposeAmbienceChannel(creakChannels.interior); // AMBIENT-AUDIO ENHANCEMENT PASS -- no exterior counterpart, see this layer's own section notes
     if (windChannels.exterior) disposeAmbienceChannel(windChannels.exterior);
     if (windChannels.interior) disposeAmbienceChannel(windChannels.interior);
     if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
@@ -10802,6 +11100,7 @@
     audioCtx = null;
     masterGain = null;
     seaChannels = { exterior: makeSeaChannel('exterior', seaChannels.exterior.targetGain), interior: makeSeaChannel('interior', seaChannels.interior.targetGain) };
+    creakChannels = { interior: makeCreakChannel('interior', creakChannels.interior.targetGain) }; // AMBIENT-AUDIO ENHANCEMENT PASS -- reuses its own existing targetGain, never a new hardcoded value, same as every other layer here
     windChannels = { exterior: makeWindChannel('exterior', windChannels.exterior.targetGain), interior: makeWindChannel('interior', windChannels.interior.targetGain) };
     rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
 
@@ -10823,7 +11122,7 @@
     if (newGeneration !== audioRuntimeGeneration) return; // superseded while constructing the new context
 
     buildAudioGraph();
-    audioDebugLog('HARD AUDIO REBUILD complete -- restored sea exterior=' + seaChannels.exterior.desiredPath + ' interior=' + seaChannels.interior.desiredPath + ', wind exterior=' + windChannels.exterior.desiredPath + ' interior=' + windChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
+    audioDebugLog('HARD AUDIO REBUILD complete -- restored sea exterior=' + seaChannels.exterior.desiredPath + ' interior=' + seaChannels.interior.desiredPath + ', creak interior=' + creakChannels.interior.desiredPath + ', wind exterior=' + windChannels.exterior.desiredPath + ' interior=' + windChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
 
     await recoverCassetteHard();
   }
@@ -17922,6 +18221,7 @@
       crossfadeFired = true;
       if (GAME) {
         transitionSeaAudioThroughCompanionway(GAME, targetLocation);
+        transitionCreakAudioThroughCompanionway(GAME, targetLocation); // AMBIENT-AUDIO ENHANCEMENT PASS -- same moment as sea's own location crossfade, see its own section notes
         transitionWindAudioThroughCompanionway(GAME, targetLocation);
         transitionRainAudioThroughCompanionway(GAME, targetLocation);
       }
@@ -19008,6 +19308,7 @@
     applyNaturalLightDimming(state);
     applyTapeLocationAudio(state);
     updateSeaAudioForState(state);
+    updateCreakAudioForState(state); // AMBIENT-AUDIO ENHANCEMENT PASS -- same reasoning as updateAudioForState's own call
     updateWindAudioForState(state);
     updateRainAudioForState(state);
     syncActivityDots(state);
