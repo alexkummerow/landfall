@@ -8292,12 +8292,19 @@
       }, stepMs);
     }
 
-    function safePlay(el) {
+    // `onFail` (optional) is called if play() is rejected or throws -- the
+    // file is missing/undecodable, or autoplay was refused. Every
+    // pre-existing caller omits it and keeps the exact silent-failure
+    // behavior it always had; a caller whose UI is WAITING on this sound
+    // (ENGINE's start/stop actions) passes one so it can finish instead
+    // of waiting on an 'ended' event that will never come.
+    function safePlay(el, onFail) {
       try {
         var p = el.play();
-        if (p && typeof p.catch === 'function') p.catch(function () {});
+        if (p && typeof p.catch === 'function') p.catch(function (e) { if (onFail) onFail(e); });
       } catch (e) {
         // fail gracefully -- file genuinely missing, autoplay blocked without a promise, or play() itself throwing
+        if (onFail) onFail(e);
       }
     }
 
@@ -8347,7 +8354,13 @@
     // loop's first seam must land LOOP_CROSSFADE_SECONDS before the
     // file's end no matter how slowly it first faded in (see
     // crossfadeToLoop below).
-    function crossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSecondsOverride, nearEndLeadSecondsOverride) {
+    //
+    // onPlayFailed: optional -- called (once, and only if this instance
+    // is still the current one) if play() is rejected or throws, so a
+    // caller whose UI is waiting on this sound can finish rather than
+    // wait on an 'ended' that will never come. Omitted by every pre-
+    // existing caller, which keeps its silent-failure behavior.
+    function crossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSecondsOverride, nearEndLeadSecondsOverride, onPlayFailed) {
       if (!audioUnlocked) return; // matches every other domain's own play function -- silently no-op rather than attempt playback that autoplay policy would reject anyway; whatever called this (engineActiveKey, etc.) may still record its own intent, but nothing here starts until unlocked. buildAudioGraph's own resume-mid-run catchup (and the equivalent for any other domain) is what correctly picks this back up once audio actually becomes available.
       var fadeSeconds = fadeSecondsOverride == null ? LOOP_CROSSFADE_SECONDS : fadeSecondsOverride;
       var nearEndLead = nearEndLeadSecondsOverride == null ? fadeSeconds : nearEndLeadSecondsOverride;
@@ -8386,6 +8399,7 @@
       // addEventListener calls, so nothing accumulates across reuse.
       incoming.el.loop = !!isSelfLoop;
       incoming.el.onended = null;
+      incoming.el.ontimeupdate = null; // a previous use of this slot's own timer re-derivation (see below) must never carry over
       if (onNearEnd && !isSelfLoop) {
         incoming.el.onended = function () {
           incoming.el.onended = null;
@@ -8394,12 +8408,16 @@
           onNearEnd();
         };
       }
-      safePlay(incoming.el);
+      safePlay(incoming.el, onPlayFailed ? function () {
+        if (incoming.myGeneration !== myGeneration || activeIndex !== incomingIndex) return; // superseded since -- nobody is waiting on this one any more
+        onPlayFailed();
+      } : null);
       activeIndex = incomingIndex;
 
       if (outgoingIndex !== -1 && slots[outgoingIndex]) {
         var outgoing = slots[outgoingIndex];
         outgoing.el.onended = null; // a superseded slot's own 'ended' fallback must never fire afterward
+        outgoing.el.ontimeupdate = null; // ...and neither may its timer re-derivation
         // A superseded loop must not native-loop itself around during a
         // SHORT (seam-length) fade-out -- that fade ends right about
         // where the file does anyway. But a LONG fade-out (a 2-3 second
@@ -8425,6 +8443,7 @@
       if (onNearEnd) {
         var schedule = function () {
           if (incoming.myGeneration !== myGeneration || activeIndex !== incomingIndex) return; // superseded before this could even be scheduled
+          clearNearEndTimer(incoming); // (re-)deriving: any earlier estimate for this same instance is replaced, never stacked
           var duration = incoming.el.duration;
           if (!isFinite(duration) || duration <= 0) {
             incoming.nearEndTimer = setTimeout(schedule, 100); // metadata not loaded yet -- try again shortly rather than never scheduling at all
@@ -8438,6 +8457,21 @@
           }, delayMs);
         };
         schedule();
+        // The estimate above is only as good as the moment it was made --
+        // and that is BEFORE the audio has necessarily started (a first,
+        // uncached load, or any start-up latency, leaves currentTime
+        // sitting at 0 while the wall clock keeps running). Left alone, a
+        // late-starting file would get its near-end moment (e.g. ENGINE's
+        // 3-seconds-before-the-end handoff) fired that much too EARLY,
+        // fading and cutting it off before its real end. So every time
+        // the element reports real playback progress, the timer is
+        // re-derived from where it ACTUALLY is -- self-correcting for
+        // load latency and clock drift alike, costing nothing but a
+        // clearTimeout/setTimeout a few times a second.
+        incoming.el.ontimeupdate = function () {
+          if (incoming.myGeneration !== myGeneration || activeIndex !== incomingIndex) { incoming.el.ontimeupdate = null; return; }
+          if (incoming.el.currentTime > 0 && !incoming.el.paused) schedule();
+        };
       }
     }
 
@@ -8475,21 +8509,39 @@
     // got cut short can never report itself finished late. Used for
     // ENGINE's off.mp3, whose shutdown recording must overlap the
     // running loop for 2 seconds and then finish by itself.
-    function crossfadeToOneShot(path, targetVolume, fadeSecondsOverride, onFinished) {
+    //
+    // `onFailed`, if given, is called once instead if play() is rejected
+    // (the file is missing/undecodable, autoplay refused): the dead slot
+    // is cleared out of "active" first -- so recovery can never keep
+    // retrying a sound that cannot play -- while the outgoing sound the
+    // crossfade was already fading out simply carries on fading out on
+    // its own. Returns true if the one-shot actually started, false if
+    // the controller declined (audio not unlocked yet).
+    function crossfadeToOneShot(path, targetVolume, fadeSecondsOverride, onFinished, onFailed) {
       var generationBefore = generation;
-      crossfadeTo(path, targetVolume, null, false, fadeSecondsOverride);
-      if (generation === generationBefore) return; // crossfadeTo declined to run at all (audio not unlocked yet) -- nothing new is playing to attach an end-handler to
-      if (!onFinished) return;
-      var index = activeIndex;
+      var index = -1;
+      var myGeneration = -1;
+      crossfadeTo(path, targetVolume, null, false, fadeSecondsOverride, null, onFailed ? function () {
+        if (generation === myGeneration && activeIndex === index) activeIndex = -1;
+        // The dead element is left silent and paused rather than parked
+        // mid-"play" at a rising volume with nothing loaded behind it.
+        var dead = slots[index];
+        if (dead) { clearFadeTimer(dead); dead.el.volume = 0; if (!dead.el.paused) dead.el.pause(); }
+        onFailed();
+      } : null);
+      if (generation === generationBefore) return false; // crossfadeTo declined to run at all (audio not unlocked yet) -- nothing new is playing to attach an end-handler to
+      index = activeIndex;
+      myGeneration = generation;
       var slot = slots[index];
-      if (!slot) return;
-      var myGeneration = generation;
-      slot.el.onended = function () {
-        slot.el.onended = null;
-        if (generation !== myGeneration || activeIndex !== index) return; // superseded -- stale, do nothing
-        activeIndex = -1;
-        onFinished();
-      };
+      if (slot && onFinished) {
+        slot.el.onended = function () {
+          slot.el.onended = null;
+          if (generation !== myGeneration || activeIndex !== index) return; // superseded -- stale, do nothing
+          activeIndex = -1;
+          onFinished();
+        };
+      }
+      return true;
     }
 
     // Instantly silences and pauses every slot that is NOT the current
@@ -8521,6 +8573,7 @@
         if (!slot) continue;
         clearNearEndTimer(slot);
         slot.el.onended = null;
+        slot.el.ontimeupdate = null;
         slot.el.loop = false; // a fading-out/stopped slot must never native-loop itself back to life
         if (i === activeIndex && fadeSeconds > 0) {
           fadeSlotVolume(slot, 0, fadeSeconds, function (s) { return function () { if (!s.el.paused) s.el.pause(); }; }(slot));
@@ -10316,14 +10369,17 @@
      stale timer from an abandoned transition can never touch the
      current sound:
 
-       START (above deck)   start.mp3 plays at full level; exactly
+       START (above deck)   start.mp3 begins the instant START ENGINE
+                            is chosen and plays at full level; exactly
                             ENGINE_START_HANDOFF_SECONDS (3s) before its
                             own natural end it hands off -- start.mp3
                             fades 100% -> 0% while cruise.mp3 fades
                             0% -> running level over those same 3
                             seconds -- then cruise.mp3 loops forever
                             (pre-scheduled self-loop seam, never an
-                            `ended` event).
+                            `ended` event). The STARTING ENGINE action
+                            stays on screen until start.mp3 reaches its
+                            end.
        RUNNING              cruise.mp3 (above) or interior.mp3 (below),
                             looping. Moving between decks never
                             restarts the engine or replays start.mp3 --
@@ -10334,23 +10390,37 @@
                             from the exact same moment they are (see
                             fireCrossfadeOnce in
                             startCompanionwayForTransition).
-       STOP                 off.mp3 fades in over
+       STOP                 off.mp3 begins the instant STOP ENGINE
+                            is chosen, fading in over
                             ENGINE_STOP_CROSSFADE_SECONDS (2s) while
                             whichever sound is currently audible fades
                             out over the same 2s, then off.mp3 plays on
                             by itself until it finishes -- then silence.
+                            The STOPPING ENGINE action stays on screen
+                            until off.mp3 itself finishes (the 2s is
+                            only the transition into it).
 
      There is no "sync engine audio to current state" function that runs
-     on every render: the actual engine-start/engine-stop action
-     handlers below call these functions directly, at the moment the
-     player's choice actually takes effect (see the engine-start/
-     engine-stop cases and the departure-sequence START ENGINE step),
-     and the above<->below crossfade is fired by the companionway
-     transition. This means engine audio is authored to react to real
-     events, not inferred after the fact from state.boat.engineOn --
-     though that flag remains the sole source of truth for whether the
-     engine itself is running; nothing here tracks a second,
-     independent notion of "is engine audio on."
+     on every render: the engine-start/engine-stop action handlers (and
+     the departure-sequence START ENGINE step) call these functions the
+     moment the player makes the choice, as AUDIO-SYNCED actions -- the
+     on-screen action lasts exactly as long as start.mp3/off.mp3 really
+     play (see runAudioSyncedAction), and each function takes the
+     action's onEnded as `onComplete`. The above<->below crossfade is
+     fired by the companionway transition. This means engine audio is
+     authored to react to real events, not inferred after the fact from
+     state.boat.engineOn.
+
+     That gameplay flag stays exactly where it was: it flips inside each
+     action's own completion callback, i.e. when the action finishes --
+     so it is still false during a start's startup recording and still
+     true during a stop's shutdown recording, and NOTHING in this layer
+     uses it to decide whether those recordings may play (see
+     catchUpEngineAudioIfRunning/transitionEngineLocationAudio for the
+     places that must tell "engine on" apart from "engine audio mid-
+     transition"). The audio/UI transition therefore finishes on its
+     own clock, independent of the boolean diesel/propulsion/charging
+     read.
      -------------------------------------------------------------- */
   var ENGINE_AUDIO_FILES = {
     start: 'audio/engine/start.mp3',
@@ -10364,6 +10434,25 @@
   var ENGINE_VOLUME = { start: 0.55, cruise: 0.55, interior: 0.45, off: 0.55 };
   var ENGINE_START_HANDOFF_SECONDS = 3; // start.mp3 -> cruise.mp3 overlap: the LAST 3 seconds of start.mp3
   var ENGINE_STOP_CROSSFADE_SECONDS = 2; // running sound -> off.mp3 overlap
+  // start.mp3's own fade-in is click-prevention only -- the starter must
+  // be audible essentially the instant START ENGINE is pressed, not
+  // swelling in over a quarter of a second.
+  var ENGINE_START_FADE_IN_SECONDS = 0.1;
+  // The STARTING ENGINE / STOPPING ENGINE actions last exactly as long as
+  // start.mp3 / off.mp3 actually play (see runAudioSyncedAction). These
+  // are the beats they take when there is NO audio to time them -- audio
+  // never unlocked, or a below-deck start that has no startup recording
+  // -- and are simply the fixed durations those two actions had before
+  // they became audio-synced, so a player without sound sees exactly the
+  // pacing they always did.
+  var ENGINE_START_FALLBACK_SECONDS = 3;
+  var ENGINE_STOP_FALLBACK_SECONDS = 2;
+  // A start is "over" when start.mp3 reaches its end. Its 'ended' event
+  // is the real signal; this is how long past the handoff's own fade the
+  // backup timer waits, for the case where the controller already paused
+  // the (by then fully faded) start.mp3 a hair before its true end, so
+  // 'ended' never comes.
+  var ENGINE_STARTUP_COMPLETE_MARGIN_SECONDS = 0.15;
 
   var engineAudio = makeCrossfadeLoopController('ENGINE', 3);
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
@@ -10389,6 +10478,14 @@
   // below deck during startup gets interior.mp3 handed off to, not
   // cruise.mp3). null whenever the engine isn't running.
   var engineAudioPerspective = null;
+  // Bumped by every start, stop, and abrupt stop. Everything this layer
+  // schedules for itself (the start->cruise handoff, a below-deck
+  // fallback beat) remembers the value it was created under and does
+  // nothing if it no longer matches -- on top of the controller's own
+  // generation guards -- so the NEWEST engine event always wins and a
+  // stale callback from a superseded start or stop can never push a
+  // sound (or a phase) back into a world that has moved on.
+  var engineAudioEpoch = 0;
 
   // The ONLY place a location becomes a running-engine sound.
   function engineRunningKeyForLocation(location) {
@@ -10405,20 +10502,31 @@
   }
 
   // The start.mp3 -> running-loop handoff, fired by the controller
-  // ENGINE_START_HANDOFF_SECONDS before start.mp3's own natural end
-  // (see beginEngineStartAudio). Its generation guards guarantee it
-  // only ever runs while start.mp3 is still the live, current sound --
-  // a STOP, a restart, or a perspective change that already took over
+  // ENGINE_START_HANDOFF_SECONDS before start.mp3's own natural end --
+  // measured from where the audio ACTUALLY is, not from a wall-clock
+  // guess made before it began (see crossfadeTo's timeupdate notes), so
+  // a slow first load can never pull it early and cut start.mp3 short.
+  // Its generation + epoch guards guarantee it only ever runs while
+  // THIS start's start.mp3 is still the live, current sound -- a STOP,
+  // a restart, or a perspective change that already took over
   // supersedes it permanently. start.mp3 fades 100% -> 0% over the
   // same span cruise.mp3 (or interior.mp3, if the player has gone
   // below deck since startup began) fades 0% -> its running level, so
-  // there is no silence and no abrupt cut at the seam. If this is ever
+  // there is no silence and no abrupt cut at the seam, and start.mp3
+  // is left to play out to its own end underneath that fade rather
+  // than being stopped the moment the new loop is up. If this is ever
   // genuinely LATE (a backgrounded tab throttling its timer, so only
   // the 'ended' fallback caught it), the overlap shrinks to whatever
   // is actually left of start.mp3 rather than slowly swelling the loop
   // in after the startup sound is already gone.
-  function handoffEngineStartToRunning() {
-    if (engineAudioPhase !== 'starting') return;
+  //
+  // `complete` (the STARTING ENGINE action's own onEnded) is what ends
+  // the on-screen startup: it fires when start.mp3 reaches its end --
+  // the 'ended' event, or, if the controller already paused the fully
+  // faded start.mp3 a hair short of it, a backup timer just past the
+  // end of the fade -- never merely because cruise.mp3 became audible.
+  function handoffEngineStartToRunning(epoch, complete) {
+    if (epoch !== engineAudioEpoch || engineAudioPhase !== 'starting') return;
     var key = engineAudioPerspective || 'cruise';
     var fade = ENGINE_START_HANDOFF_SECONDS;
     var startEl = engineAudio.getActiveEl();
@@ -10429,55 +10537,145 @@
     engineAudioPhase = 'running';
     engineActiveKey = key;
     engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[key], engineTargetVolume(key), fade);
+
+    var timer = null;
+    function finish() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (startEl) startEl.removeEventListener('ended', finish);
+      complete();
+    }
+    timer = setTimeout(finish, (fade + ENGINE_STARTUP_COMPLETE_MARGIN_SECONDS) * 1000);
+    if (startEl) startEl.addEventListener('ended', finish);
   }
 
-  // Called directly from the engine-start action (both the ENGINE menu
-  // toggle and the departure-sequence START ENGINE step) at the moment
-  // state.boat.engineOn actually becomes true -- never inferred later
-  // from render state. Above deck (the only place the ENGINE menu
-  // exists): start.mp3 at its normal level, handing off to the looping
-  // cruise.mp3 over its own last ENGINE_START_HANDOFF_SECONDS (see
-  // handoffEngineStartToRunning). Below deck (not reachable from the
-  // ENGINE menu today -- preserved exactly as before the rebuild): no
-  // start recording, straight into interior.mp3 fading in over the
-  // above<->below crossfade duration. Always supersedes whatever this
-  // controller was doing (a Start right after Stop cuts off the
-  // finishing off.mp3 with a short fade, never stacks a second sound).
-  // Never called for perspective changes or SOUND ON/recovery -- those
-  // only ever crossfade/restore the running loop, so start.mp3 is never
-  // replayed by them.
-  function beginEngineStartAudio(location) {
+  // Called directly from the START ENGINE action (both the ENGINE menu
+  // toggle and the departure-sequence START ENGINE step) THE INSTANT
+  // the player chooses it -- not after a text animation, not from a
+  // completion callback: those actions are audio-synced (see
+  // runAudioSyncedAction), so this runs synchronously inside the click
+  // and start.mp3 is audible straight away. Above deck (the only place
+  // the ENGINE menu exists): start.mp3 at its normal level, handing off
+  // to the looping cruise.mp3 over its own last
+  // ENGINE_START_HANDOFF_SECONDS (see handoffEngineStartToRunning).
+  // Below deck (not reachable from the ENGINE menu today -- preserved
+  // exactly as before): no start recording, straight into interior.mp3
+  // fading in over the above<->below crossfade duration.
+  //
+  // `onComplete` is the action's onEnded: called exactly once when the
+  // startup is over -- start.mp3 reaching its end -- or, whenever there
+  // is no audio to wait on (audio never unlocked, a below-deck start,
+  // start.mp3 unable to play), after the old fixed beat or at once, so
+  // the action can never be left waiting on an event that will never
+  // fire. Returns start.mp3's element (for runAudioSyncedAction's own
+  // duration watchdog) or null when there isn't one.
+  //
+  // This is where any stale shutdown state dies: the epoch bump orphans
+  // every earlier start/stop callback, and the crossfade supersedes
+  // whatever the controller was last doing -- including a finishing
+  // off.mp3, which is faded out and paused, never carried into the
+  // startup. Nothing on this path ever plays off.mp3.
+  function beginEngineStartAudio(location, onComplete) {
+    engineAudioEpoch++;
+    var epoch = engineAudioEpoch;
+    var completed = false;
+    function complete() {
+      if (completed) return;
+      completed = true;
+      if (onComplete) onComplete();
+    }
     var key = engineRunningKeyForLocation(location);
     engineAudioPerspective = key;
-    if (key === 'cruise') {
-      engineAudioPhase = 'starting';
-      engineActiveKey = 'start';
-      engineAudio.crossfadeTo(ENGINE_AUDIO_FILES.start, engineTargetVolume('start'), handoffEngineStartToRunning, false, null, ENGINE_START_HANDOFF_SECONDS);
-    } else {
+
+    // No audio to wait on: record the intent (so a later unlock's
+    // catch-up starts the right loop) and take the old fixed beat. If
+    // audio gets unlocked DURING that beat, start the loop when the beat
+    // ends rather than leaving a running engine silent.
+    if (!audioUnlocked || key === 'interior') {
       engineAudioPhase = 'running';
       engineActiveKey = key;
-      engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[key], engineTargetVolume(key), COMPANIONWAY_CROSSFADE_SECONDS);
+      if (audioUnlocked) {
+        engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[key], engineTargetVolume(key), COMPANIONWAY_CROSSFADE_SECONDS);
+      }
+      setTimeout(function () {
+        if (epoch === engineAudioEpoch && audioUnlocked && !engineAudio.isActive()) {
+          engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[key], engineTargetVolume(key));
+        }
+        complete();
+      }, ENGINE_START_FALLBACK_SECONDS * 1000);
+      return null;
     }
+
+    engineAudioPhase = 'starting';
+    engineActiveKey = 'start';
+    engineAudio.crossfadeTo(
+      ENGINE_AUDIO_FILES.start,
+      engineTargetVolume('start'),
+      function () { handoffEngineStartToRunning(epoch, complete); },
+      false,
+      ENGINE_START_FADE_IN_SECONDS,
+      ENGINE_START_HANDOFF_SECONDS,
+      function () {
+        // start.mp3 itself cannot play (missing/undecodable file, autoplay
+        // refused): skip the startup recording, go straight into the
+        // running loop for the current deck, and let the action finish.
+        if (epoch !== engineAudioEpoch || engineAudioPhase !== 'starting') return;
+        var fallbackKey = engineAudioPerspective || 'cruise';
+        engineAudioPhase = 'running';
+        engineActiveKey = fallbackKey;
+        engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[fallbackKey], engineTargetVolume(fallbackKey), COMPANIONWAY_CROSSFADE_SECONDS);
+        complete();
+      }
+    );
+    return engineAudio.getActiveEl();
   }
 
-  // Called directly from the engine-stop action at the moment
-  // state.boat.engineOn actually becomes false. Crossfades off.mp3 in
+  // Called directly from the STOP ENGINE action THE INSTANT the player
+  // chooses it (same reasoning as beginEngineStartAudio: the action is
+  // audio-synced, so this runs inside the click). Crossfades off.mp3 in
   // against whichever sound is CURRENTLY audible -- cruise.mp3 above
   // deck, interior.mp3 below, or start.mp3/the start->cruise overlap if
-  // the player stops mid-startup -- over ENGINE_STOP_CROSSFADE_SECONDS,
-  // after which off.mp3 plays on by itself until it finishes and the
-  // engine goes silent. `location` is accepted for call-site symmetry
-  // with beginEngineStartAudio but isn't needed: the crossfade is
-  // against the controller's own current sound, whatever it is.
-  function beginEngineStopAudio(location) {
-    engineAudioPhase = 'stopping';
-    engineActiveKey = 'off';
+  // it is ever reached mid-startup -- over ENGINE_STOP_CROSSFADE_SECONDS,
+  // starting from zero gain and rising while the running sound falls.
+  // That 2 seconds is only the TRANSITION: off.mp3 then plays on by
+  // itself, and the action stays open until it actually finishes.
+  //
+  // `onComplete` is called exactly once when off.mp3 reaches its natural
+  // end -- or if it cannot play, or there is no audio at all (after the
+  // old fixed beat), so the action is never left waiting. Returns
+  // off.mp3's element for runAudioSyncedAction's duration watchdog, or
+  // null. `location` is accepted for call-site symmetry with
+  // beginEngineStartAudio but isn't needed: the crossfade is against
+  // the controller's own current sound, whatever it is.
+  function beginEngineStopAudio(location, onComplete) {
+    engineAudioEpoch++;
+    var epoch = engineAudioEpoch;
+    var completed = false;
+    function complete() {
+      if (completed) return;
+      completed = true;
+      if (onComplete) onComplete();
+    }
     engineAudioPerspective = null;
-    engineAudio.crossfadeToOneShot(ENGINE_AUDIO_FILES.off, engineTargetVolume('off'), ENGINE_STOP_CROSSFADE_SECONDS, function () {
-      if (engineAudioPhase !== 'stopping') return;
+
+    if (!audioUnlocked) {
       engineAudioPhase = 'idle';
       engineActiveKey = null;
-    });
+      setTimeout(complete, ENGINE_STOP_FALLBACK_SECONDS * 1000);
+      return null;
+    }
+
+    function settle() {
+      if (epoch === engineAudioEpoch) {
+        engineAudioPhase = 'idle';
+        engineActiveKey = null;
+      }
+      complete();
+    }
+    engineAudioPhase = 'stopping';
+    engineActiveKey = 'off';
+    var started = engineAudio.crossfadeToOneShot(ENGINE_AUDIO_FILES.off, engineTargetVolume('off'), ENGINE_STOP_CROSSFADE_SECONDS, settle, settle);
+    if (!started) { settle(); return null; }
+    return engineAudio.getActiveEl();
   }
 
   // The one small helper for automatic, abrupt shutdowns (fuel out,
@@ -10485,8 +10683,10 @@
   // one: silences engine audio immediately, with no fade and no
   // off.mp3 -- this is a safety net for a genuine mechanical/electrical
   // failure or a state reset, not the player-facing shutdown
-  // presentation (see beginEngineStopAudio above for that).
+  // presentation (see beginEngineStopAudio above for that). Orphans
+  // every pending start/stop callback (the epoch bump).
   function stopAllEngineLoops() {
+    engineAudioEpoch++;
     engineAudioPhase = 'idle';
     engineActiveKey = null;
     engineAudioPerspective = null;
@@ -10514,7 +10714,7 @@
   //   - 'idle'/'stopping': just records the perspective; there is no
   //     running loop to move.
   function transitionEngineLocationAudio(state, targetLocation) {
-    if (!state.boat.engineOn) return;
+    if (!state.boat.engineOn || engineAudioPhase === 'stopping') return; // (the gameplay flag stays true until a STOP ENGINE action completes -- but a shutdown in progress has no perspective left to move)
     var key = engineRunningKeyForLocation(targetLocation);
     engineAudioPerspective = key;
     if (engineAudioPhase === 'running') {
@@ -10538,6 +10738,14 @@
   // buildAudioGraph.
   function catchUpEngineAudioIfRunning(state) {
     if (!state || !state.boat.engineOn) return;
+    // state.boat.engineOn stays true for the whole of a STOP ENGINE
+    // action (it flips when off.mp3 finishes), and a start's
+    // start.mp3 is just as real while engineOn is still false: a hard
+    // audio rebuild that lands in either window must NOT resurrect or
+    // skip ahead to a running loop -- the engine's own elements are
+    // plain <audio> elements the rebuild never touched, still playing
+    // exactly what the action is waiting on.
+    if ((engineAudioPhase === 'starting' || engineAudioPhase === 'stopping') && engineAudio.isActive()) return;
     var key = engineAudioPerspective || engineRunningKeyForLocation(state.crew.location);
     engineAudioPerspective = key;
     engineAudioPhase = 'running';
@@ -11180,7 +11388,7 @@
     if (tapeAudioEl && tapePhase === 'track') {
       expected.push({ label: 'cassette', el: tapeAudioEl, group: 'cassette' });
     }
-    if (GAME && GAME.boat.engineOn) {
+    if (GAME && (GAME.boat.engineOn || engineAudioPhase !== 'idle')) {
       var engineEl = engineAudio.getActiveEl();
       if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'engine' });
     }
@@ -11416,7 +11624,7 @@
       // already healthy; see each function's own guards.
       if (GAME) {
         updateAudioForState(GAME);
-        if (GAME.boat.engineOn) resumeEngineAudioIfSuspended();
+        if (GAME.boat.engineOn || engineAudioPhase !== 'idle') resumeEngineAudioIfSuspended(); // (also mid-start/mid-stop, when the gameplay flag is on the "wrong" side of the transition -- see the ENGINE AUDIO section notes)
       }
       resumeTapeAudioIfSuspended();
 
@@ -13162,6 +13370,21 @@
       }
     }
     showNext();
+  }
+
+  // The three conditions cmdEngine itself refuses START ENGINE on --
+  // engine DAMAGED, no diesel, a dead-battery recovery still under the
+  // restart threshold -- evaluated a second time at the moment a START
+  // ENGINE action COMPLETES. The action now lasts as long as start.mp3
+  // actually plays rather than a fixed 3 seconds, so there is a longer
+  // window in which one of them can newly become true (a random engine
+  // failure, the last of the diesel); without this the action's
+  // completion would switch the engine on regardless. Never consulted
+  // for the click itself -- cmdEngine's own checks still decide whether
+  // START ENGINE is offered at all.
+  function engineStartBlockedNow(state) {
+    var b = state.boat;
+    return b.engine === 'DAMAGED' || b.fuelGallons <= 0 || (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT);
   }
 
   function cmdEngine(state) {
@@ -20082,12 +20305,31 @@
           break;
         case 'engine-start':
           if (state.boat.engine === 'DAMAGED') break; // shouldn't be reachable — button isn't shown otherwise
-          runShortAction(state, {
+          // AUDIO-SYNCED (see runAudioSyncedAction and the ENGINE AUDIO
+          // section): beginEngineStartAudio runs RIGHT HERE, inside the
+          // click, so start.mp3 is audible and "STARTING ENGINE. .. …"
+          // is on screen at the same instant; the action then lasts
+          // exactly as long as start.mp3 really plays (its own
+          // onComplete is this action's onEnded). Everything in `action`
+          // below is the unchanged gameplay body -- it just runs when
+          // the startup is over instead of after a fixed 3 seconds, and
+          // state.boat.engineOn still flips there, not before.
+          // watchdogMarginSeconds is only the failsafe past the file's
+          // own duration if neither the real end nor the engine layer's
+          // own completion ever arrives.
+          runAudioSyncedAction(state, {
             label: 'STARTING ENGINE',
-            duration: 3,
+            watchdogMarginSeconds: 2,
+            playAudio: function (onEnded) { return beginEngineStartAudio(state.crew.location, onEnded); },
             action: function (s) {
+              if (engineStartBlockedNow(s)) {
+                // Something that blocks starting became true DURING the
+                // startup recording -- it never gets to run.
+                stopAllEngineLoops();
+                cmdEngine(s);
+                return;
+              }
               s.boat.engineOn = true;
-              beginEngineStartAudio(s.crew.location);
               // Recalculate immediately, using the heading as of the last
               // real tick — never invent a fresh heading here, since
               // computeHeading() also rolls a per-tick drift wobble that
@@ -20103,12 +20345,20 @@
           });
           break;
         case 'engine-stop':
-          runShortAction(state, {
+          // AUDIO-SYNCED, same shape as engine-start just above:
+          // beginEngineStopAudio runs inside the click, so off.mp3 is
+          // already fading in (and the running sound fading out, over
+          // the 2-second crossfade) while "STOPPING ENGINE. .. …" first
+          // appears, and the action stays open until off.mp3 itself
+          // finishes -- the crossfade ending is not the end of the
+          // action. state.boat.engineOn flips in `action`, when that
+          // happens, exactly as it always did relative to the action.
+          runAudioSyncedAction(state, {
             label: 'STOPPING ENGINE',
-            duration: 2,
+            watchdogMarginSeconds: 2,
+            playAudio: function (onEnded) { return beginEngineStopAudio(state.crew.location, onEnded); },
             action: function (s) {
               s.boat.engineOn = false;
-              beginEngineStopAudio(s.crew.location);
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
               log(s, 'Engine stopped.');
               flushNewLogEntries(s);
@@ -20240,6 +20490,7 @@
               label: step.workingLabel || step.label,
               playAudio: step.playAudio,
               action: stepAction,
+              watchdogMarginSeconds: step.watchdogMarginSeconds, // undefined (the default) for every step but START ENGINE
             });
           } else {
             runShortAction(state, {
@@ -20283,14 +20534,18 @@
     {
       label: 'START ENGINE',
       workingLabel: 'START ENGINE',
-      duration: 3,
       text: 'BATTERY CHARGING',
-      // onStart (fires immediately, before the dots even begin -- see
-      // the 'departure-step' case's own notes) is what makes the 2-
-      // second fade-in actually happen WHILE "START ENGINE. .. …" is on
-      // screen, audible to the player, rather than silently after the
-      // 3-second beat has already resolved.
-      onStart: function (s) { beginEngineStartAudio(s.crew.location); },
+      // Audio-synced, exactly like the ENGINE menu's own STARTING
+      // ENGINE action (see the 'engine-start' case): start.mp3 begins
+      // the instant this step is chosen, and "START ENGINE. .. …" stays
+      // up until start.mp3 reaches its end -- no longer a fixed 3
+      // seconds that let the next step (CAST OFF) appear while the
+      // startup recording was still playing. (With no audio to time it
+      // the step takes that old 3-second beat -- see
+      // ENGINE_START_FALLBACK_SECONDS.) onEnter/text/afterLog fire once
+      // the startup is over, as before.
+      playAudio: function (onEnded) { return beginEngineStartAudio(GAME ? GAME.crew.location : 'above', onEnded); },
+      watchdogMarginSeconds: 2, // same failsafe margin as the ENGINE menu's own engine-start/engine-stop actions
       onEnter: function (s) { s.boat.engineOn = true; },
     },
     {
