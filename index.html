@@ -1181,6 +1181,13 @@
           // boundary. Harmless once clear of the corridor (waypointIndex
           // stops changing there, see OPEN_WATER_WAYPOINT_INDEX).
           favorableDepartureWaypointIndex: 1,
+          // EARLY OFFSHORE LEARNING PHASE -- see that section's own notes
+          // (near earlyOffshoreWeight). Persisted so a reload never
+          // restarts the ~72-hour window: status 'pending' (still
+          // in the coastal corridor) -> 'active' (stamped with the
+          // voyage minute the boat started targeting open water) ->
+          // 'complete' (protection fully released, nothing left of it).
+          earlyOffshore: { status: 'pending', startedAt: null, entryWindDeg: null, driftPhase: 0 },
         },
         // PHASE 3 -- voyage-level weather arc state, tracked
         // separately from the engine above (see markArcEventExperienced/
@@ -3128,6 +3135,7 @@
     var engine = state.weather.engine;
     if (engine.squall || !phaseDef.allowsSquall) return;
     if (engine.cooldownUntil.squall != null && now < engine.cooldownUntil.squall) return;
+    if (earlyOffshoreSquallsSuppressed(state, now)) return; // EARLY OFFSHORE LEARNING PHASE -- no squalls anywhere in the learning window
     if (Math.random() >= tickProbability(SQUALL_TRIGGER_CHANCE_PER_HOUR / 6)) return; // tickProbability expects a FIXED "per real 10-minute window" figure, independent of the current TICK_MINUTES (it does that conversion internally) -- 6 such windows per hour
     var plannedDuration = rand(SQUALL_DURATION_HOURS[0], SQUALL_DURATION_HOURS[1]) * 60;
     engine.squall = {
@@ -3375,6 +3383,288 @@
     engine.noGoSinceMinutes = null;
   }
 
+  /* ================================================================
+     EARLY OFFSHORE LEARNING PHASE
+     ----------------------------------------------------------------
+     For roughly the first 72 game hours after Cape Flattery the
+     wind/weather is shaped into a gentle open-ocean ROUTING LESSON:
+     every reasonable heading stays sail-able, and a modest move north
+     or south of the direct line to Kauai (the Cape -> Kauai great
+     circle -- NOT the older Shilshole -> Kauai line the storm routing
+     uses, which already puts the Cape itself ~85nm "north" of track)
+     genuinely changes the weather: NORTH = fresher wind and
+     rougher seas (and more cloud/showers), SOUTH = lighter and
+     calmer (and clearer), ON TRACK in between.
+
+     It is deliberately NOT a second weather simulator. It is a thin
+     overlay on the TARGETS the existing engine already blends the
+     live wind toward (see applyEarlyOffshoreToTargets, called right
+     after resolvePhaseTargets in advanceWeatherEngine), so the live
+     interpolation, per-tick texture noise, squalls, phase/event
+     cadence and everything downstream (sea state still derived from
+     wind speed, boat speed, audio, instruments) are completely
+     unchanged -- and the FORECAST reads the SAME functions the
+     simulation does (see buildEarlyOffshoreRouting), so it can never
+     describe weather the simulation doesn't produce.
+
+     WIND DIRECTION. Learning-phase wind stays on the PORT side of the
+     Kauai bearing, backing gently from the S-SSE corridor wind toward
+     roughly SE-S (EARLY_REL_*): 70-112 degrees off the bow of the
+     direct course. This is not an arbitrary choice -- the usual
+     open-ocean band at this latitude (WNW) can only be reached from
+     the corridor wind by rotating THROUGH the Kauai bearing, which is
+     exactly the hostile configuration this phase exists to avoid;
+     staying on the near side means the handoff is a few degrees of
+     backing, not a 130-degree sweep, and it also puts a heading
+     SOUTH of track closer to the wind (slower) and a heading NORTH
+     broader (faster), so "north = faster" falls out of the
+     geometry as well as the stronger wind. The event system's own
+     per-phase wobble (prevailing +/- directionMaxDeg) still
+     contributes, scaled, so direction keeps its natural phase-to-phase
+     variation; the whole thing is clamped so the closest the wind can
+     get to the bow of a heading 30 degrees SOUTH of the direct course
+     is still outside the real, unchanged NOGO_ZONE_DEG.
+
+     TIMELINE (hours since the boat first targets open water):
+       0 - ENTRY_BLEND   the target moves from the corridor wind the
+                         boat actually had to the learning direction
+                         (no waypoint-crossing snap)
+       0 - 24            gentlest: narrow wind window, small sector
+                         differences
+       24 - 72           more variation: wider window, bigger sector
+                         differences, more cloud/showers on the north
+                         side (no squalls anywhere in the window --
+                         they return with normal weather)
+       72 - 72+RELEASE   protection fades out linearly (smoothstep),
+                         the raw event targets take over again --
+                         normal weather, including true headwinds,
+                         returns without a hard switch
+       after            status 'complete': every function below
+                         returns its input unchanged
+
+     During the window calm, earlyRoughWeather and majorStorm (and
+     postStormClearing, which only follows a storm) are ineligible --
+     they keep their authored progress-window cadence and simply
+     become eligible again afterward; nothing is skipped or moved
+     earlier.
+     ================================================================ */
+  var EARLY_OFFSHORE_FULL_HOURS = 72;          // full protection for this long after the open-water handoff...
+  var EARLY_OFFSHORE_RELEASE_HOURS = 12;       // ...then fades out linearly over this many more
+  var EARLY_OFFSHORE_ENTRY_BLEND_HOURS = 10;   // corridor wind -> learning direction (the live wind's own 0.3/hr blend adds a few hours of lag on top)
+  var EARLY_OFFSHORE_MIGRATION_ASSUMED_KT = 5; // old saves: estimate hours-since-the-Cape from distance covered at this speed
+  var EARLY_OFFSHORE_EXCLUDED_EVENTS = { calm: true, earlyRoughWeather: true, majorStorm: true, postStormClearing: true };
+  var EARLY_DAY1_HOURS = 24;                   // "first offshore day" -- gentlest
+  var EARLY_VARIATION_RAMP_HOURS = 24;         // variation ramps from day-1 to full over hours 24-48
+
+  // Track line / sectors (nm, signed: positive = north of the Cape->Kauai line)
+  var EARLY_TRACK_DEADBAND_NM = 10;            // inside this the sector effect is zero ("on track")
+  var EARLY_TRACK_FULL_NM = 90;                // full sector effect at/beyond this -- a modest, readable detour, not a long one; same hard cap idea as TRACK_DEVIATION_FULL_EFFECT_NM
+  var EARLY_SECTOR_FORECAST_NM = 80;           // how far off the line the forecast's NORTH/SOUTH rows describe
+
+  // Direction: degrees RELATIVE to the Cape->Kauai bearing (negative = wind from the port side)
+  var EARLY_REL_CENTER_DEG = -92;
+  var EARLY_REL_MIN_DEG = -112;                // broadest the wind may get (still a broad reach for the direct course)
+  var EARLY_REL_MAX_DEG = -72;                 // closest to the bow it may get: a heading 30 deg south of the direct course still sits 42 deg off the wind, outside NOGO_ZONE_DEG (35)
+  var EARLY_REL_DRIFT_DAY1_DEG = 7;            // slow, deterministic wander amplitude around the center...
+  var EARLY_REL_DRIFT_LATER_DEG = 14;          // ...growing on days 2-3 so it is never a permanent perfect beam reach
+  var EARLY_REL_DRIFT_PERIOD_HOURS = 36;
+  var EARLY_WOBBLE_SCALE = 0.6;                // how much of each event phase's own direction offset (prevailing +/- directionMaxDeg) is kept
+
+  // Speed (kt): the ON-TRACK window the event's own target is clamped into, then the sector offset on top
+  var EARLY_SPEED_ON_TRACK_DAY1 = [11, 16];
+  var EARLY_SPEED_ON_TRACK_LATER = [10, 21];
+  var EARLY_SPEED_CAP_DAY1 = 20;
+  var EARLY_SPEED_CAP_LATER = 24;              // < the 25kt small-craft threshold the forecast warns at
+  var EARLY_SPEED_FLOOR_KT = 7.5;              // no dead calm on the light side
+  var EARLY_SECTOR_AMP_DAY1_KT = 3;
+  var EARLY_SECTOR_AMP_LATER_KT = 6;
+  var EARLY_SECTOR_SOUTH_SCALE = 0.9;
+  var EARLY_SHOWER_CHANCE_PER_HOUR = 0.12;     // north-side showers (overcast -> rain for a spell), scaled by how far north
+  var EARLY_SHOWER_MIN_STRENGTH = 0.4;
+
+  function smoothstep01(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+  function earlyLerp(a, b, t) { return a + (b - a) * t; }
+  // Shortest-arc interpolation between two compass bearings.
+  function interpAngleDeg(from, to, t) { return normalizeDeg(from + signedAngleDiff(to, from) * t); }
+
+  // Hours since the open-water handoff at `atMinutes`, or null when the
+  // phase isn't active (still pending in the corridor, or complete).
+  function earlyOffshoreElapsedHours(state, atMinutes) {
+    var eo = state.weather.engine.earlyOffshore;
+    if (!eo || eo.status !== 'active' || !Number.isFinite(eo.startedAt)) return null;
+    return Math.max(0, (atMinutes - eo.startedAt) / 60);
+  }
+  // 1 through the full window, fading smoothly to 0 over the release.
+  // Pure function of (state, time) so the FORECAST can ask about the
+  // future with the exact same answer the simulation will give then.
+  function earlyOffshoreWeight(state, atMinutes) {
+    var h = earlyOffshoreElapsedHours(state, atMinutes);
+    if (h == null) return 0;
+    if (h <= EARLY_OFFSHORE_FULL_HOURS) return 1;
+    if (h >= EARLY_OFFSHORE_FULL_HOURS + EARLY_OFFSHORE_RELEASE_HOURS) return 0;
+    return 1 - smoothstep01((h - EARLY_OFFSHORE_FULL_HOURS) / EARLY_OFFSHORE_RELEASE_HOURS);
+  }
+  // 0 on day 1 -> 1 from hour 48: how much of the "more variation" of
+  // days 2-3 is in effect.
+  function earlyOffshoreVariation(h) {
+    return smoothstep01((h - EARLY_DAY1_HOURS) / EARLY_VARIATION_RAMP_HOURS);
+  }
+
+  function earlyOffshoreCape() { return WAYPOINTS[OPEN_WATER_WAYPOINT_INDEX - 1]; } // Cape Flattery
+  function earlyOffshoreTrackBearingDeg() {
+    var c = earlyOffshoreCape();
+    return bearingBetween(c.lat, c.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+  }
+  // Signed nm off the Cape->Kauai line: + north, - south.
+  function earlyOffshoreTrackDeviationNm(state) {
+    var c = earlyOffshoreCape();
+    var d = signedCrossTrackNm(state.nav.lat, state.nav.lon, c.lat, c.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    return Number.isFinite(d) ? d : 0;
+  }
+  // -1 (deep south) .. 0 (on track) .. +1 (deep north); smooth, so the
+  // weather changes steadily as the boat moves rather than at a border.
+  function earlyOffshoreSectorFactor(devNm) {
+    var f = smoothstep01((Math.abs(devNm) - EARLY_TRACK_DEADBAND_NM) / (EARLY_TRACK_FULL_NM - EARLY_TRACK_DEADBAND_NM));
+    return devNm >= 0 ? f : -f;
+  }
+
+  function earlyOffshoreLearningDirectionDeg(state, rawDeg, h) {
+    var engine = state.weather.engine;
+    var eo = engine.earlyOffshore;
+    var v = earlyOffshoreVariation(h);
+    var drift = earlyLerp(EARLY_REL_DRIFT_DAY1_DEG, EARLY_REL_DRIFT_LATER_DEG, v);
+    var rel = EARLY_REL_CENTER_DEG + drift * Math.sin(2 * Math.PI * h / EARLY_REL_DRIFT_PERIOD_HOURS + (Number.isFinite(eo.driftPhase) ? eo.driftPhase : 0));
+    if (isValidDirectionDeg(engine.prevailingWindDirectionDeg) && isValidDirectionDeg(rawDeg)) {
+      rel += signedAngleDiff(rawDeg, engine.prevailingWindDirectionDeg) * EARLY_WOBBLE_SCALE;
+    }
+    rel = clamp(rel, EARLY_REL_MIN_DEG, EARLY_REL_MAX_DEG);
+    return normalizeDeg(earlyOffshoreTrackBearingDeg() + rel);
+  }
+  // rawDeg is the direction the NORMAL engine would target; returns what
+  // it should target instead, at `atMinutes`.
+  function earlyOffshoreShapeDirectionDeg(state, rawDeg, atMinutes) {
+    var w = earlyOffshoreWeight(state, atMinutes);
+    if (w <= 0 || !isValidDirectionDeg(rawDeg)) return rawDeg;
+    var eo = state.weather.engine.earlyOffshore;
+    var h = earlyOffshoreElapsedHours(state, atMinutes);
+    var learning = earlyOffshoreLearningDirectionDeg(state, rawDeg, h);
+    var entryT = smoothstep01(h / EARLY_OFFSHORE_ENTRY_BLEND_HOURS);
+    var target = (isValidDirectionDeg(eo.entryWindDeg) && entryT < 1) ? interpAngleDeg(eo.entryWindDeg, learning, entryT) : learning;
+    return w >= 1 ? target : interpAngleDeg(rawDeg, target, w);
+  }
+
+  // The direction the FORECAST should report for a segment at
+  // `atMinutes`: the same shaping the simulation applies, fed the same
+  // raw input -- the current phase's own real anchor, or, for a later
+  // phase that hasn't rolled one yet, the stable prevailing direction
+  // (so no event wobble, exactly like projectWindDirectionForSegment).
+  function earlyOffshoreForecastDirectionDeg(state, segment, atMinutes) {
+    var engine = state.weather.engine;
+    var isCurrent = segment && segment.eventKey === engine.currentEvent && segment.phaseKey === engine.currentPhase;
+    var raw = isCurrent ? engine.phaseDirectionAnchorDeg : (isValidDirectionDeg(engine.prevailingWindDirectionDeg) ? engine.prevailingWindDirectionDeg : engine.phaseDirectionAnchorDeg);
+    return earlyOffshoreShapeDirectionDeg(state, raw, atMinutes);
+  }
+
+  // The speed the learning phase wants for `baseKt` (the event's own
+  // target) at a given cross-track position: first clamp the event's
+  // value into the gentle ON-TRACK window, then add the sector offset
+  // (fresher north, lighter south), then keep it inside a floor/cap.
+  function earlyOffshoreSpeedKt(state, baseKt, devNm, atMinutes) {
+    var w = earlyOffshoreWeight(state, atMinutes);
+    if (w <= 0) return baseKt;
+    var h = earlyOffshoreElapsedHours(state, atMinutes);
+    var v = earlyOffshoreVariation(h);
+    var onTrack = clamp(baseKt, earlyLerp(EARLY_SPEED_ON_TRACK_DAY1[0], EARLY_SPEED_ON_TRACK_LATER[0], v), earlyLerp(EARLY_SPEED_ON_TRACK_DAY1[1], EARLY_SPEED_ON_TRACK_LATER[1], v));
+    var s = earlyOffshoreSectorFactor(devNm);
+    var amp = earlyLerp(EARLY_SECTOR_AMP_DAY1_KT, EARLY_SECTOR_AMP_LATER_KT, v);
+    var offset = s >= 0 ? s * amp : s * amp * EARLY_SECTOR_SOUTH_SCALE;
+    var shaped = clamp(onTrack + offset, EARLY_SPEED_FLOOR_KT, earlyLerp(EARLY_SPEED_CAP_DAY1, EARLY_SPEED_CAP_LATER, v));
+    return baseKt + w * (shaped - baseKt);
+  }
+  // Sky: the south side clears (overcast target -> clear), the north
+  // side stays overcast and gets showers (see earlyOffshoreShowers).
+  function earlyOffshoreCondition(state, baseCondition, devNm, atMinutes) {
+    var w = earlyOffshoreWeight(state, atMinutes);
+    var s = earlyOffshoreSectorFactor(devNm);
+    if (w * Math.abs(s) >= 0.45 && s < 0 && baseCondition === 'overcast') return 'clear';
+    return baseCondition;
+  }
+
+  // Applied to the per-tick targets, right after resolvePhaseTargets.
+  function applyEarlyOffshoreToTargets(state, targets, now) {
+    if (earlyOffshoreWeight(state, now) <= 0) return;
+    var dev = earlyOffshoreTrackDeviationNm(state);
+    targets.windDirection = earlyOffshoreShapeDirectionDeg(state, targets.windDirection, now);
+    targets.windSpeed = earlyOffshoreSpeedKt(state, targets.windSpeed, dev, now);
+    targets.condition = earlyOffshoreCondition(state, targets.condition, dev, now);
+  }
+  // North side only: brief showers on top of the overcast target
+  // (WEATHER_CONDITION_SHIFT_CHANCE_PER_HOUR pulls it back to overcast).
+  function earlyOffshoreShowers(state, now, hours) {
+    var w = earlyOffshoreWeight(state, now);
+    if (w <= 0) return;
+    var strength = w * earlyOffshoreSectorFactor(earlyOffshoreTrackDeviationNm(state));
+    if (strength < EARLY_SHOWER_MIN_STRENGTH || state.weather.engine.squall || state.weather.condition !== 'overcast') return;
+    if (Math.random() < EARLY_SHOWER_CHANCE_PER_HOUR * strength * hours) state.weather.condition = 'rain';
+  }
+
+  // No squalls for the whole window: a squall adds 8-18kt and a 10-30
+  // degree direction kick (SQUALL_*) on top of the target, which would
+  // turn a 24kt north-side day into a 40kt one -- not a gentle lesson.
+  // Showers still come from the rain event and the north-side shower
+  // texture above; squalls return with the rest of normal weather.
+  function earlyOffshoreSquallsSuppressed(state, now) {
+    var h = earlyOffshoreElapsedHours(state, now);
+    return h != null && h < EARLY_OFFSHORE_FULL_HOURS;
+  }
+  // Events held back until the window closes (see the section notes).
+  function earlyOffshoreBlocksEvent(state, eventKey, now) {
+    var h = earlyOffshoreElapsedHours(state, now);
+    return h != null && h < EARLY_OFFSHORE_FULL_HOURS && EARLY_OFFSHORE_EXCLUDED_EVENTS[eventKey] === true;
+  }
+
+  // Called once per tick: starts the window the first tick the boat is
+  // targeting open water (independent of which event happens to be
+  // active), and completes it when the release has fully faded.
+  function earlyOffshoreAdvance(state, now) {
+    var engine = state.weather.engine;
+    var eo = engine.earlyOffshore;
+    if (!eo || typeof eo !== 'object') eo = engine.earlyOffshore = { status: 'pending', startedAt: null, entryWindDeg: null, driftPhase: 0 };
+    if (eo.status === 'pending') {
+      if (state.nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX) {
+        eo.status = 'active';
+        eo.startedAt = now;
+        eo.entryWindDeg = isValidDirectionDeg(state.weather.windDirection) ? normalizeDeg(state.weather.windDirection) : null; // the corridor wind the boat actually has right now
+        eo.driftPhase = rand(0, 2 * Math.PI);
+      }
+    } else if (eo.status === 'active') {
+      var h = earlyOffshoreElapsedHours(state, now);
+      if (h != null && h >= EARLY_OFFSHORE_FULL_HOURS + EARLY_OFFSHORE_RELEASE_HOURS) {
+        eo.status = 'complete';
+        eo.entryWindDeg = null;
+      }
+    }
+  }
+
+  // Save migration: a save with no earlyOffshore field. Before the Cape
+  // it is simply pending. Already past it, the hours since the handoff
+  // are estimated from the distance covered since Cape Flattery, so a
+  // voyage just out of the strait picks the lesson up for what is left
+  // of it, and one well past it is left completely alone.
+  function migrateEarlyOffshoreState(state) {
+    var now = state.meta.voyageMinutes;
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
+      return { status: 'pending', startedAt: null, entryWindDeg: null, driftPhase: 0 };
+    }
+    var c = earlyOffshoreCape();
+    var dist = distanceBetween(c.lat, c.lon, state.nav.lat, state.nav.lon);
+    var hours = Number.isFinite(dist) ? dist / EARLY_OFFSHORE_MIGRATION_ASSUMED_KT : Infinity;
+    if (hours >= EARLY_OFFSHORE_FULL_HOURS + EARLY_OFFSHORE_RELEASE_HOURS) {
+      return { status: 'complete', startedAt: null, entryWindDeg: null, driftPhase: 0 };
+    }
+    return { status: 'active', startedAt: now - hours * 60, entryWindDeg: isValidDirectionDeg(state.weather.windDirection) ? normalizeDeg(state.weather.windDirection) : null, driftPhase: rand(0, 2 * Math.PI) };
+  }
+
   // SAILING-BEHAVIOR TASK -- the departure corridor's protected wind
   // band: generally southerly, S (180\u00b0) through SSE (157.5\u00b0), per
   // the task's own target. A fixed compass band rather than a reach
@@ -3575,6 +3865,7 @@
   function isEventEligible(state, eventKey, now) {
     var engine = state.weather.engine;
     var def = WEATHER_EVENTS[eventKey];
+    if (earlyOffshoreBlocksEvent(state, eventKey, now)) return false; // EARLY OFFSHORE LEARNING PHASE -- calm/earlyRough/majorStorm wait out the window (they keep their own progress-window cadence and simply become eligible again after it)
     if (def.cooldownHours > 0 && engine.cooldownUntil[eventKey] != null && now < engine.cooldownUntil[eventKey]) return false;
     if (def.eligibility && !def.eligibility(state, now)) return false;
     return true;
@@ -3653,6 +3944,13 @@
       engine.booted = true;
     }
 
+    // EARLY OFFSHORE LEARNING PHASE -- starts the window the first tick
+    // the boat targets open water, BEFORE the departure watch just below
+    // may hand off to the next event (its eligibility check needs to
+    // already see the window as active), and closes it when the release
+    // has fully faded. A cheap no-op on every other tick.
+    earlyOffshoreAdvance(state, now);
+
     // PHASE 7 -- FAVORABLE DEPARTURE's own waypoint-change watch (see
     // favorableDepartureWaypointIndex's own declaration comment): a
     // 3-6h phase timer alone is too slow to track the coastal
@@ -3699,6 +3997,10 @@
     }
 
     var targets = resolvePhaseTargets(engine, eventDef, phaseDef);
+    // EARLY OFFSHORE LEARNING PHASE -- shapes the TARGETS (direction,
+    // speed, sky) the live values then blend toward exactly as before;
+    // a no-op once the window is over. See that section's own notes.
+    applyEarlyOffshoreToTargets(state, targets, now);
 
     // A squall temporarily overrides wind/condition targets -- the
     // parent event's own phase/targets underneath are untouched and
@@ -3775,6 +4077,7 @@
     }
 
     w.trend = engine.squall ? 'building' : phaseDef.trendHint;
+    earlyOffshoreShowers(state, now, hours); // EARLY OFFSHORE LEARNING PHASE -- north-side showers; a no-op outside the window
 
     // TEMPERATURE ARC -- target is the shared currentOutsideTemperatureF
     // formula (passage-progress baseline + this phase's own windSpeed
@@ -4399,10 +4702,17 @@
   // genuinely lower precision the further out a projection reaches,
   // same spirit as buildForecastPeriods' own "don't expose
   // unrealistic precision" rule above.
-  function forecastBandFor(segment, engineIntensity) {
+  // adjustKt/fineBand are only ever supplied during the EARLY OFFSHORE
+  // LEARNING PHASE: adjustKt runs the phase's own target through the
+  // SAME earlyOffshoreSpeedKt the simulation uses, and fineBand swaps
+  // the usual coarse 5kt-aligned band for a ~4kt one centered on that
+  // value -- the lesson's few-knot differences between sectors would
+  // otherwise disappear into the 5kt rounding.
+  function forecastBandFor(segment, engineIntensity, adjustKt, fineBand) {
     var windTarget = lerpRange(segment.phaseDef.windSpeedRange, engineIntensity);
-    var bandWidth = segment.confidence === 'high' ? 5 : 10;
-    var windLow = Math.max(0, Math.floor(windTarget / 5) * 5);
+    if (adjustKt) windTarget = adjustKt(windTarget);
+    var bandWidth = fineBand ? (segment.confidence === 'high' ? 4 : 6) : (segment.confidence === 'high' ? 5 : 10);
+    var windLow = fineBand ? Math.max(0, Math.round(windTarget - bandWidth / 2)) : Math.max(0, Math.floor(windTarget / 5) * 5);
     var windHigh = windLow + bandWidth;
     var seaTier = clamp(Math.round(windTarget / 7), 0, 6);
     return {
@@ -4483,6 +4793,9 @@
   function buildSynopsis(state) {
     var engine = state.weather.engine;
     var lines = [synopsisTextFor(engine.currentEvent, engine.currentPhase)];
+    if (earlyOffshoreWeight(state, state.meta.voyageMinutes) > 0.5) {
+      lines.push('A steady offshore flow holds for now -- fresher to the north of the direct line to Kauaʻi, lighter to the south.'); // EARLY OFFSHORE LEARNING PHASE
+    }
     var precursor = arcPrecursorLine(state);
     if (precursor) lines.push(precursor);
     return lines.join(' ');
@@ -4515,11 +4828,18 @@
       lines.note = precursor || 'Confidence beyond this range is limited. Expect conditions broadly consistent with the present pattern unless otherwise noted.';
       return lines;
     }
-    var band = forecastBandFor(segment, engine.intensity);
+    // EARLY OFFSHORE LEARNING PHASE -- while it is (still) in effect at
+    // this period's own midpoint, the period reports the lesson's
+    // weather for the DIRECT LINE (the ON TRACK row of the OFFSHORE
+    // ROUTING block below is this same number), built from the same
+    // functions the simulation uses.
+    var periodMinutes = state.meta.voyageMinutes + ((startHour + endHour) / 2) * 60;
+    var learning = earlyOffshoreWeight(state, periodMinutes) > 0;
+    var band = forecastBandFor(segment, engine.intensity, learning ? function (kt) { return earlyOffshoreSpeedKt(state, kt, 0, periodMinutes); } : null, learning);
     var errorKt = windErrorKt || 0;
     var windLow = Math.max(0, band.windLow + errorKt);
-    var windHigh = Math.max(windLow + 5, band.windHigh + errorKt); // keep at least the original band width even after the shift
-    var windDirText = compassPoint(projectWindDirectionForSegment(state, segment));
+    var windHigh = Math.max(windLow + (learning ? 4 : 5), band.windHigh + errorKt); // keep at least the original band width even after the shift
+    var windDirText = compassPoint(learning ? earlyOffshoreForecastDirectionDeg(state, segment, periodMinutes) : projectWindDirectionForSegment(state, segment));
     lines.windLine = windDirText + ' ' + Math.round(windLow) + ' TO ' + Math.round(windHigh) + ' KT';
     lines.seasLine = band.seaLow + ' TO ' + band.seaHigh + ' FT';
     lines.weatherLine = FORECAST_CONDITION_WORDS[band.condition] || FORECAST_CONDITION_WORDS.overcast;
@@ -4583,6 +4903,58 @@
     return { onTrackLine: onTrackLine, offTrackLine: offTrackLine };
   }
 
+  // EARLY OFFSHORE LEARNING PHASE -- the OFFSHORE ROUTING block: the
+  // same near-term forecast evaluated at three places, NORTH OF TRACK /
+  // ON TRACK / SOUTH OF TRACK (EARLY_SECTOR_FORECAST_NM either side of
+  // the Cape->Kauai line). Nothing in here is its own invention: wind
+  // comes from earlyOffshoreSpeedKt at that cross-track distance, seas
+  // from the same round(wind/7) tier the simulation derives sea state
+  // with, the sky from earlyOffshoreCondition, the direction from
+  // earlyOffshoreForecastDirectionDeg -- the functions the live weather
+  // tick applies to the boat at those positions -- so the player can
+  // read it, go there, and find it. The same shared per-issuance wind
+  // error as every other number in the report is applied, so the
+  // between-sector DIFFERENCE (the actual lesson) survives the blur.
+  // Only issued while the lesson is clearly still in effect; null
+  // otherwise, which is also what every old snapshot reads as.
+  function buildEarlyOffshoreRouting(state, nowOverrideMinutes, windErrorKt) {
+    var engine = state.weather.engine;
+    var atMin = state.meta.voyageMinutes + 6 * 60; // midpoint of NEXT 12 HOURS -- the same instant buildOutlookPeriod evaluates that period at
+    if (earlyOffshoreWeight(state, atMin) < 0.5) return null;
+    var segment = projectForecastWindow(state, 0, 12, nowOverrideMinutes);
+    if (!segment || !segment.phaseDef) {
+      segment = { confidence: 'high', eventKey: engine.currentEvent, phaseKey: engine.currentPhase, phaseDef: WEATHER_EVENTS[engine.currentEvent].phases[engine.currentPhase] };
+    }
+    var windTarget = lerpRange(segment.phaseDef.windSpeedRange, engine.intensity);
+    var width = segment.confidence === 'high' ? 4 : 6;
+    var errorKt = windErrorKt || 0;
+    var dirText = compassPoint(earlyOffshoreForecastDirectionDeg(state, segment, atMin));
+    var rows = [
+      { label: 'NORTH OF TRACK', dev: EARLY_SECTOR_FORECAST_NM },
+      { label: 'ON TRACK', dev: 0 },
+      { label: 'SOUTH OF TRACK', dev: -EARLY_SECTOR_FORECAST_NM },
+    ].map(function (r) {
+      var kt = earlyOffshoreSpeedKt(state, windTarget, r.dev, atMin);
+      var low = Math.max(0, Math.round(kt - width / 2) + errorKt);
+      var high = Math.max(low + 4, Math.round(kt - width / 2) + width + errorKt);
+      var tier = clamp(Math.round(kt / 7), 0, 6);
+      var cond = earlyOffshoreCondition(state, segment.phaseDef.targetCondition, r.dev, atMin);
+      var sky = FORECAST_CONDITION_WORDS[cond] || FORECAST_CONDITION_WORDS.overcast;
+      if (cond === 'overcast' && earlyOffshoreWeight(state, atMin) * earlyOffshoreSectorFactor(r.dev) >= EARLY_SHOWER_MIN_STRENGTH) sky += ', SHOWERS AT TIMES';
+      return {
+        label: r.label,
+        windLine: dirText + ' ' + Math.round(low) + ' TO ' + Math.round(high) + ' KT',
+        seasLine: seaStateWaveHeightFt(tier) + ' TO ' + (seaStateWaveHeightFt(clamp(tier + 1, 0, 6)) + 1) + ' FT',
+        weatherLine: sky,
+      };
+    });
+    return {
+      intro: 'The WIND, SEAS and WEATHER above are for the direct line to Kauaʻi. Conditions change somewhat to either side of it -- about ' + EARLY_SECTOR_FORECAST_NM + ' NM off the line, for the next 12 hours:',
+      rows: rows,
+      note: 'Use SET COURSE at the HELM to angle somewhat north or south of the direct line -- a modest heading change, not a turn to due north or south. Staying on track remains a sound choice.',
+    };
+  }
+
   /* ================================================================
      PHASE 6 -- FORECAST REALISM, UNCERTAINTY, AND UPDATE CADENCE
      ----------------------------------------------------------------
@@ -4633,6 +5005,7 @@
         buildOutlookPeriod(state, '24 TO 48 HOURS', 24, 48, nowOverride, windErrorKt),
       ],
       routeComparison: buildRouteComparison(state), // never numeric -- see this section's own header note on why noise has nothing to invert here
+      offshoreRouting: buildEarlyOffshoreRouting(state, nowOverride, windErrorKt), // EARLY OFFSHORE LEARNING PHASE -- null outside it
     };
   }
 
@@ -4654,6 +5027,11 @@
     if (!Array.isArray(snapshot.periods) || snapshot.periods.length !== 3) return false;
     if (!snapshot.periods.every(function (p) { return p && typeof p.label === 'string'; })) return false;
     if (snapshot.routeComparison != null && (typeof snapshot.routeComparison.onTrackLine !== 'string' || typeof snapshot.routeComparison.offTrackLine !== 'string')) return false;
+    var o = snapshot.offshoreRouting; // absent (every pre-existing snapshot) or null is fine; present must be well-shaped
+    if (o != null) {
+      if (typeof o.intro !== 'string' || typeof o.note !== 'string' || !Array.isArray(o.rows) || o.rows.length !== 3) return false;
+      if (!o.rows.every(function (r) { return r && typeof r.label === 'string' && typeof r.windLine === 'string' && typeof r.seasLine === 'string' && typeof r.weatherLine === 'string'; })) return false;
+    }
     return true;
   }
 
@@ -4677,6 +5055,7 @@
         { label: '24 TO 48 HOURS', warning: null, windLine: null, seasLine: null, weatherLine: null, note: 'Forecast data is temporarily unavailable.' },
       ],
       routeComparison: null,
+      offshoreRouting: null,
     };
   }
 
@@ -13154,6 +13533,41 @@
       if (period.note) appendPlainLine(body, period.note);
     });
 
+    // OFFSHORE ROUTING -- the early-offshore lesson's NORTH/ON TRACK/
+    // SOUTH comparison; see buildEarlyOffshoreRouting's own notes.
+    if (snapshot.offshoreRouting) {
+      var offGap = document.createElement('p');
+      offGap.className = 'gap';
+      body.appendChild(offGap);
+      var offHeading = document.createElement('p');
+      offHeading.className = 'line heading-label';
+      offHeading.textContent = 'OFFSHORE ROUTING';
+      body.appendChild(offHeading);
+      var offHeadingGap = document.createElement('p');
+      offHeadingGap.className = 'gap';
+      body.appendChild(offHeadingGap);
+      appendPlainLine(body, snapshot.offshoreRouting.intro);
+      snapshot.offshoreRouting.rows.forEach(function (row) {
+        var rowGap = document.createElement('p');
+        rowGap.className = 'gap';
+        body.appendChild(rowGap);
+        var rowHeading = document.createElement('p');
+        rowHeading.className = 'line heading-label';
+        rowHeading.textContent = row.label;
+        body.appendChild(rowHeading);
+        var rowHeadingGap = document.createElement('p');
+        rowHeadingGap.className = 'gap';
+        body.appendChild(rowHeadingGap);
+        appendMarineWeatherStat(body, 'WIND', row.windLine);
+        appendMarineWeatherStat(body, 'SEAS', row.seasLine);
+        appendMarineWeatherStat(body, 'WEATHER', row.weatherLine);
+      });
+      var offNoteGap = document.createElement('p');
+      offNoteGap.className = 'gap';
+      body.appendChild(offNoteGap);
+      appendPlainLine(body, snapshot.offshoreRouting.note);
+    }
+
     // ROUTE COMPARISON -- only when there was genuinely something
     // route-dependent to compare AT ISSUANCE; see buildRouteComparison's
     // own notes on why NORTH and SOUTH never reveal which is actually
@@ -21185,6 +21599,8 @@
     if (w.engine.stormDirectionDeg === undefined) w.engine.stormDirectionDeg = null;
     if (w.engine.noGoSinceMinutes === undefined) w.engine.noGoSinceMinutes = null;
     if (w.engine.favorableDepartureWaypointIndex === undefined) w.engine.favorableDepartureWaypointIndex = state.nav.waypointIndex;
+    // EARLY OFFSHORE LEARNING PHASE -- see migrateEarlyOffshoreState's own notes.
+    if (w.engine.earlyOffshore === undefined) w.engine.earlyOffshore = migrateEarlyOffshoreState(state);
     // PHASE 6 -- a save from before the forecast-snapshot cache
     // existed has no w.forecastSnapshot at all. null is exactly the
     // "no report issued yet" state a fresh voyage also starts in --
