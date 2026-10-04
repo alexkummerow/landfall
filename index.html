@@ -3452,6 +3452,16 @@
   var EARLY_OFFSHORE_RELEASE_HOURS = 12;       // ...then fades out linearly over this many more
   var EARLY_OFFSHORE_ENTRY_BLEND_HOURS = 10;   // corridor wind -> learning direction (the live wind's own 0.3/hr blend adds a few hours of lag on top)
   var EARLY_OFFSHORE_MIGRATION_ASSUMED_KT = 5; // old saves: estimate hours-since-the-Cape from distance covered at this speed
+  // Old saves whose wind is ALREADY hostile when the lesson is picked up
+  // (the very situation this phase exists to fix): the slow corridor ->
+  // offshore entry blend is meant for a natural handoff from the benign
+  // corridor wind, and would instead hold the target near the hostile
+  // wind for hours -- so it is skipped, and for a short while the live
+  // wind eases toward the learning direction faster than usual (still the
+  // same smooth interpolation, just a higher rate -- never a snap).
+  var EARLY_MIGRATION_HOSTILE_MARGIN_DEG = 20;      // within NOGO_ZONE_DEG + this of the track bearing counts as hostile
+  var EARLY_MIGRATION_RESCUE_MINUTES = 120;
+  var EARLY_MIGRATION_RESCUE_BLEND_PER_HOUR = 0.6;  // vs WEATHER_BLEND_DIRECTION_PER_HOUR (0.3)
   var EARLY_OFFSHORE_EXCLUDED_EVENTS = { calm: true, earlyRoughWeather: true, majorStorm: true, postStormClearing: true };
   var EARLY_DAY1_HOURS = 24;                   // "first offshore day" -- gentlest
   var EARLY_VARIATION_RAMP_HOURS = 24;         // variation ramps from day-1 to full over hours 24-48
@@ -3662,7 +3672,23 @@
     if (hours >= EARLY_OFFSHORE_FULL_HOURS + EARLY_OFFSHORE_RELEASE_HOURS) {
       return { status: 'complete', startedAt: null, entryWindDeg: null, driftPhase: 0 };
     }
-    return { status: 'active', startedAt: now - hours * 60, entryWindDeg: isValidDirectionDeg(state.weather.windDirection) ? normalizeDeg(state.weather.windDirection) : null, driftPhase: rand(0, 2 * Math.PI) };
+    var wind = state.weather.windDirection;
+    var hostile = isValidDirectionDeg(wind) && angleDiff(wind, earlyOffshoreTrackBearingDeg()) < NOGO_ZONE_DEG + EARLY_MIGRATION_HOSTILE_MARGIN_DEG;
+    return {
+      status: 'active',
+      startedAt: now - hours * 60,
+      entryWindDeg: (!hostile && isValidDirectionDeg(wind)) ? normalizeDeg(wind) : null, // hostile -> no entry blend: head straight for the learning direction
+      driftPhase: rand(0, 2 * Math.PI),
+      rescueUntil: hostile ? now + EARLY_MIGRATION_RESCUE_MINUTES : null,
+    };
+  }
+  // A faster (but still interpolated) direction blend, only during a
+  // hostile old save's short rescue window; everything else uses the
+  // rate it was given.
+  function earlyOffshoreRescueBlendRate(state, now, rate) {
+    var eo = state.weather.engine.earlyOffshore;
+    if (eo && eo.status === 'active' && Number.isFinite(eo.rescueUntil) && now < eo.rescueUntil) return Math.max(rate, EARLY_MIGRATION_RESCUE_BLEND_PER_HOUR);
+    return rate;
   }
 
   // SAILING-BEHAVIOR TASK -- the departure corridor's protected wind
@@ -4049,6 +4075,7 @@
     // ineffectually the whole time it's active.
     var windBlendRate = engine.squall ? WEATHER_BLEND_WIND_PER_HOUR_SQUALL : WEATHER_BLEND_WIND_PER_HOUR;
     var dirBlendRate = engine.squall ? WEATHER_BLEND_DIRECTION_PER_HOUR_SQUALL : WEATHER_BLEND_DIRECTION_PER_HOUR;
+    dirBlendRate = earlyOffshoreRescueBlendRate(state, now, dirBlendRate); // EARLY OFFSHORE LEARNING PHASE -- only ever raises it, and only for a hostile old save's first couple of hours
     w.windSpeed = clamp(
       w.windSpeed + (targets.windSpeed - w.windSpeed) * (1 - Math.pow(1 - windBlendRate, hours))
         + (Math.random() - 0.5) * WEATHER_TEXTURE_WIND_KT_PER_HOUR * hours,
