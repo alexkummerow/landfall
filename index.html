@@ -12092,6 +12092,20 @@
     tempViewEl.appendChild(p);
   }
 
+  // Room header ("> CABIN", "> HEAD", "> HELM") -- the very same line as
+  // GALLEY's, because that one IS printEcho: the game echoes the option
+  // you clicked to enter. CABIN/HEAD are entered through door actions
+  // (no echo), and HELM can be re-rendered without one, so those rooms
+  // print the identical line themselves -- unless the click that brought
+  // you here already echoed this exact name (a plain cmd: entry), in
+  // which case it is already on screen and is not repeated.
+  function printRoomHeader(name) {
+    var last = tempViewEl.lastElementChild;
+    if (last && last.classList.contains('echo') && last.textContent === '> ' + name) return;
+    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "Autopilot engaged."): keep the gap that always sat there
+    printEcho(name.toLowerCase());
+  }
+
   function clearTempView() {
     tempViewEl.innerHTML = '';
     // SHIP'S PLAN's full-viewport overlay (see its CSS notes and
@@ -13651,13 +13665,17 @@
     return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
   }
 
-  // headingLabel overrides the printed title ('HELM' by default).
-  function printHelmAtHelmHeader(state, headingLabel) {
+  // omitTitle: the HELM screen prints its own "> HELM" room header (see
+  // printRoomHeader), so it asks for the readouts without this block's
+  // own "HELM" title; CHANGE COURSE still gets the title.
+  function printHelmAtHelmHeader(state, omitTitle) {
     var nav = state.nav;
     var figures = computeHelmLiveFigures(state, nav.heading);
 
-    printLine(headingLabel || 'HELM', 'heading-label');
-    printBlank();
+    if (!omitTitle) {
+      printLine('HELM', 'heading-label');
+      printBlank();
+    }
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
     printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
     var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
@@ -13713,6 +13731,7 @@
   function cmdHelm(state) {
     var nav = state.nav;
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
+    printRoomHeader('HELM');
     printBlank();
 
     var isCoastal = nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX;
@@ -13733,7 +13752,7 @@
       // steering-damage hook, which forces atHelm false) -- so no CHANGE
       // COURSE, but AUTOPILOT (gated only on electrical damage,
       // unchanged) and TRIM SAILS (an unrelated physical action) remain.
-      printHelmAtHelmHeader(state, 'HELM');
+      printHelmAtHelmHeader(state, true);
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -13752,14 +13771,14 @@
       // time, never an instant snap.
       state.crew.atHelm = true;
       nav.driftHeading = null;
-      printLine('You take the helm.', 'dim');
+      printLine('At the helm. Heading held steady.', 'dim');
       printBlank();
       if (!isCoastal) {
         beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
       }
     }
 
-    printHelmAtHelmHeader(state);
+    printHelmAtHelmHeader(state, true);
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -13976,6 +13995,7 @@
   // There's no shower aboard Solace; WASH is the wet head's sink/
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
+    printRoomHeader('HEAD');
     printBlank();
     printLine('HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
     // ROOM-NAVIGATION PASS -- BACK is 'leave-head', not the plain
@@ -14221,6 +14241,7 @@
   // defined near HUNGER/THIRST/ENERGY above) — never a second
   // temperature calculation.
   function cmdCabin(state) {
+    printRoomHeader('CABIN');
     printBlank();
     var c = state.crew;
     printLine('ENERGY: ' + ENERGY_LABELS[energyLevel(c.fatigue)]);
