@@ -1257,7 +1257,6 @@
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
         batteryRecovering: false,  // true ONLY from the moment battery actually reaches 0% until it climbs back to BATTERY_RESTART_THRESHOLD_PCT -- see updateBattery. Makes that threshold a true dead-battery RECOVERY gate rather than a general minimum: every performXToggle/cmdEngine/etc. check requires this flag too, not just battery<BATTERY_RESTART_THRESHOLD_PCT, so ordinary depletion through 3%/2%/1% never locks anything out on its own.
         autopilotOn: true,          // holds SET COURSE exactly, current-corrected, and nothing more -- no auto-tack (see autopilotSteeringSolution); OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
-        fanOn: false,
         heaterOn: false,
         cabinLightsOn: false,
         navLightsOn: false,         // NAV STATION / ELECTRICAL PANEL — the boat's running lights, one single state (never a separate "exterior lights" duplicate) driving the indicator, the battery draw, and the nighttime Above Deck restriction alike; same BATTERY_DRAIN_LIGHTS_PER_HOUR drain as cabinLightsOn; required after dark (19:00-05:59) for Above Deck activities (HELM/SAILS/ENGINE/FISH) — see needsNavLights/blockedByNavLights and isNavLightsNight's own notes
@@ -2475,18 +2474,15 @@
     // Cabin comfort: same gentle, capped shape as the drags above, and
     // naturally self-correcting — there's no separate bonus for
     // bringing the cabin back to COMFORTABLE, the penalty below just
-    // stops applying once it's not COLD or HOT anymore. HOT specifically
-    // uses the same fan-rescue logic as the displayed condition
-    // (cabinConditionLabel) — a running fan that's successfully keeping
-    // things COMFORTABLE (up to CABIN_TEMP_FAN_RESCUE_MAX_F) means no
-    // HOT penalty either, even though the raw temperature is still
-    // above the base HOT threshold. COLD gets no equivalent rescue from
-    // the heater — only the actual temperature rising resolves it.
+    // stops applying once it's not COLD or HOT anymore. COLD gets no
+    // rescue from the heater beyond its own effect on the real
+    // temperature — only the actual temperature rising resolves it; HOT
+    // is symmetric, with no equivalent rescue of its own either.
     var cabinTempF = state.boat.cabinTemperatureF;
     if (cabinTempF != null) {
       if (cabinTempF < CABIN_TEMP_COLD_MAX_F) {
         target -= clamp((CABIN_TEMP_COLD_MAX_F - cabinTempF) * 0.4, 0, 6);
-      } else if (cabinTempF > CABIN_TEMP_HOT_MIN_F && cabinConditionLabel(cabinTempF, state.boat.fanOn) === 'HOT') {
+      } else if (cabinTempF > CABIN_TEMP_HOT_MIN_F) {
         target -= clamp((cabinTempF - CABIN_TEMP_HOT_MIN_F) * 0.4, 0, 6);
       }
     }
@@ -5649,7 +5645,6 @@
   // for how these are applied per tick.
   var BATTERY_DRAIN_AUTOPILOT_PER_HOUR = 2;
   var BATTERY_DRAIN_HEATER_PER_HOUR = 2;
-  var BATTERY_DRAIN_FAN_PER_HOUR = 0.5;
   var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
   var BATTERY_DRAIN_CASSETTE_PER_HOUR = 0.05; // a cassette actually playing -- almost negligible next to the majors above; the ACCESSORY circuit itself draws nothing just being switched on, see updateBattery
   var BATTERY_CHARGE_PER_HOUR = 100; // engine running: 0% -> 100% in 60 minutes = 100%/hour
@@ -5700,8 +5695,7 @@
   // COMFORTABLE" and "78°F = COMFORTABLE" being the inclusive edges of
   // the comfortable range.
   var CABIN_TEMP_COLD_MAX_F = 65;   // strictly below: COLD
-  var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above (base, no fan): HOT — 65-78 inclusive is COMFORTABLE
-  var CABIN_TEMP_FAN_RESCUE_MAX_F = 85; // FAN ON can make an otherwise-HOT cabin read COMFORTABLE up to and including this; past it, still HOT even with the fan running — a fan is not air conditioning
+  var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above: HOT — 65-78 inclusive is COMFORTABLE
   // HEATER TARGET TABLE -- centralized here (not scattered through
   // syncCabinTemperature or anywhere else) so these seven thresholds
   // stay easy to retune in one place. A real boat heater reads as a
@@ -7146,7 +7140,6 @@
       var drain = 0;
       if (b.autopilotOn) drain += BATTERY_DRAIN_AUTOPILOT_PER_HOUR;
       if (b.heaterOn) drain += BATTERY_DRAIN_HEATER_PER_HOUR;
-      if (b.fanOn) drain += BATTERY_DRAIN_FAN_PER_HOUR;
       if (b.cabinLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR;
       if (b.navLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR; // same rate as cabin lights -- see its own state-field comment
       // ACCESSORY HOOK -- the circuit itself draws nothing just being
@@ -7199,10 +7192,9 @@
     // alone -- so ordinary depletion down through 3%, 2%, 1% never
     // triggers any lockout; only a genuine 0% event does.
     if (b.battery <= 0) {
-      var hadSomethingOn = b.autopilotOn || b.fanOn || b.heaterOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
+      var hadSomethingOn = b.autopilotOn || b.heaterOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
       b.batteryRecovering = true;
       b.autopilotOn = false;
-      b.fanOn = false;
       b.heaterOn = false;
       b.cabinLightsOn = false;
       b.accessoryOn = false;
@@ -7255,7 +7247,7 @@
   // already resolution-independent, and it still earns its keep for
   // sub-minute precision (a value read mid-minute, before that minute's
   // tick has run, is still exactly correct) and for never needing a
-  // full tick before reacting to a heater/fan toggle.
+  // full tick before reacting to a heater toggle.
   // Follows a simple target-and-catch-up model. The TARGET is the
   // warmer of outside ambient or (only if the heater is on and colder
   // than that) the heater's fixed 68°F ceiling — the heater never
@@ -7266,9 +7258,7 @@
   // ventilates much faster (0.5°F/min) — warming or cooling alike,
   // never overshooting past the target either way, so a sudden swing in
   // outside temperature or a heater/hatch toggle is still felt
-  // gradually, not snapped instantly. The fan has NO effect on this
-  // physical number at all; it only affects the player-facing
-  // HOT/COMFORTABLE read — see cabinConditionLabel.
+  // gradually, not snapped instantly.
   function syncCabinTemperature(state) {
     var b = state.boat;
     var now = currentGameMinutes(state);
@@ -7427,7 +7417,7 @@
     BOAT_FAIL_SYSTEMS.forEach(function (k) { weights[k] = BASE_FAILURE_WEIGHT[k]; });
     if (b.engineOn) weights.engine += 1.5;
     weights.engine += engineRuntimeWeightBonus(b.engineRunningMinutes);
-    var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.fanOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
+    var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
     if (loadCount >= 2) weights.electrical += 1;
     if (loadCount >= 3) weights.electrical += 0.5;
     // Rough OR wet weather, not just heavy seas — a damp panel is its
@@ -7489,7 +7479,6 @@
       // manually switches it back on (see performElectricalToggle) —
       // repair only restores ACCESS, never flips anything back on itself.
       b.autopilotOn = false;
-      b.fanOn = false;
       b.heaterOn = false;
       b.cabinLightsOn = false;
     }
@@ -12037,25 +12026,21 @@
      ============================================================ */
   // The DISPLAYED/perceived condition — COLD/COMFORTABLE/HOT. Distinct
   // from the raw cabinTemperatureF number, which always stays visible
-  // and accurate (see formatCabinTemp): a running fan can make an
-  // otherwise-HOT cabin (up to CABIN_TEMP_FAN_RESCUE_MAX_F) read as
-  // COMFORTABLE without the actual temperature having caught up yet —
-  // see syncCabinTemperature for that gradual physical effect. The
-  // heater has no equivalent trick: it only ever works by actually
-  // raising the real temperature, so COLD never gets a similar rescue.
-  function cabinConditionLabel(tempF, fanOn) {
+  // and accurate (see formatCabinTemp) — a pure read of the real
+  // temperature against CABIN_TEMP_COLD_MAX_F/CABIN_TEMP_HOT_MIN_F,
+  // nothing else. Neither COLD nor HOT has any rescue of its own: only
+  // the actual temperature (heater, outside ambient, the hatch) ever
+  // moves it — see syncCabinTemperature.
+  function cabinConditionLabel(tempF) {
     if (tempF == null) return 'COMFORTABLE';
     if (tempF < CABIN_TEMP_COLD_MAX_F) return 'COLD';
-    if (tempF > CABIN_TEMP_HOT_MIN_F) {
-      if (fanOn && tempF <= CABIN_TEMP_FAN_RESCUE_MAX_F) return 'COMFORTABLE';
-      return 'HOT';
-    }
+    if (tempF > CABIN_TEMP_HOT_MIN_F) return 'HOT';
     return 'COMFORTABLE';
   }
 
-  function formatCabinTemp(tempF, fanOn) {
+  function formatCabinTemp(tempF) {
     if (tempF == null) return 'COMFORTABLE';
-    return Math.round(tempF) + '\u00B0F ' + cabinConditionLabel(tempF, fanOn);
+    return Math.round(tempF) + '\u00B0F ' + cabinConditionLabel(tempF);
   }
 
   // STUFFY — a simple, binary condition, deliberately independent of
@@ -12171,8 +12156,8 @@
   // lever still physically moves and clicks with each attempt, so
   // repeated clicks keep alternating switch_on.mp3/switch_off.mp3 even
   // though the real circuit flag never changes. Keyed by the same
-  // strings as ELECTRICAL_TOGGLE_FIELDS, plus 'autopilot' and 'fan' for
-  // their own separate toggle functions. Cleared the moment a REAL
+  // strings as ELECTRICAL_TOGGLE_FIELDS, plus 'autopilot' for its own
+  // separate toggle function. Cleared the moment a REAL
   // toggle for that key goes through, so the next dead-panel spell (if
   // the battery ever fails again) starts its alternation fresh from
   // wherever the switch actually now sits, never from a stale
@@ -12186,11 +12171,10 @@
   // new on, though it can still be switched off. Covers four of the
   // five NAV STATION electrical panel rows -- CABIN LIGHTS, EXTERIOR
   // LIGHTS, HEATER, ACCESSORY. AUTOPILOT (also on this panel, but
-  // reachable from the HELM too) and FAN (reachable from the SALOON)
-  // have their own dedicated toggle functions instead (see
-  // performAutopilotToggle, performFanToggle) since each can return to
-  // more than one screen and (for autopilot) has its own extra side
-  // effects -- this function only ever redraws NAV STATION.
+  // reachable from the HELM too) has its own dedicated toggle function
+  // instead (see performAutopilotToggle), since it can return to more
+  // than one screen and has its own extra side effects -- this
+  // function only ever redraws NAV STATION.
   function performElectricalToggle(state, key) {
     var field = ELECTRICAL_TOGGLE_FIELDS[key];
     if (!field) return;
@@ -12240,16 +12224,9 @@
     // updateBattery for when the battery itself dies. tapePhase (not
     // activeTapeTitle) is the right condition: it also correctly catches
     // an in-progress 'starting'/'stopping' phase, which activeTapeTitle
-    // alone would miss. Same for the fan: it runs off this exact circuit
-    // too (see performFanToggle), so losing ACCESSORY POWER kills it
-    // immediately, just like a fan whose circuit breaker has tripped --
-    // it does NOT come back on its own once ACCESSORY is restored; the
-    // player has to return to the SALOON and switch it on again themselves.
+    // alone would miss.
     if (key === 'accessory' && !turningOn && tapePhase != null) {
       resetTapePlaybackImmediately();
-    }
-    if (key === 'accessory' && !turningOn && b.fanOn) {
-      b.fanOn = false;
     }
     // HEATER HOOK -- immediate player feedback only, OFF -> ON alone
     // (never ON -> OFF, and never repeated on every subsequent toggle
@@ -12347,48 +12324,6 @@
     render(state);
   }
 
-
-  // FAN — moved here from the old combined toggle above so it can
-  // return to the SALOON (where it's now controlled). Same damaged/
-  // battery gating and switch-click sound as every other electrical
-  // toggle; no other side effects before or after the move -- the fan
-  // never did anything but flip its own flag (comfort perception reads
-  // it live via cabinConditionLabel, and it was never part of the
-  // physical temperature calculation). ACCESSORY HOOK -- the fan now
-  // runs off the same ACCESSORY circuit as the cassette player (see
-  // performStartTape's own identical check); turning the fan on is
-  // gated on it exactly the same way, and the matching hook in
-  // performElectricalToggle cuts the fan the moment ACCESSORY itself
-  // is switched off, the same way it already cuts a playing tape.
-  function performFanToggle(state) {
-    var b = state.boat;
-    if (!b.fanOn && !b.accessoryOn) {
-      printBlank();
-      printLine('Accessory power is off.', 'amber');
-      cmdSaloon(state);
-      return;
-    }
-    if (!b.fanOn && b.electrical === 'DAMAGED') {
-      printBlank();
-      printLine('Electrical system damaged.', 'amber');
-      cmdSaloon(state);
-      return;
-    }
-    if (!b.fanOn && b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
-      // DEAD PANEL -- see the module notes on deadSwitchLastSimulatedOn
-      // and performElectricalToggle's identical treatment.
-      var simulatedFanOn = !deadSwitchLastSimulatedOn.fan;
-      deadSwitchLastSimulatedOn.fan = simulatedFanOn;
-      playElectricalSwitchSound(simulatedFanOn);
-      cmdSaloon(state);
-      return;
-    }
-    delete deadSwitchLastSimulatedOn.fan; // a real toggle from here on
-    var turningOn = !b.fanOn;
-    b.fanOn = turningOn;
-    playElectricalSwitchSound(turningOn);
-    cmdSaloon(state);
-  }
 
   function cmdPosition(state) {
     var ll = currentLatLon(state);
@@ -13610,7 +13545,6 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
-      { label: state.boat.fanOn ? 'TURN OFF FAN' : 'TURN ON FAN', action: 'toggle-fan' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
         : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -19726,8 +19660,6 @@
       performAutopilotToggle(state);
     } else if (action === 'toggle-autopilot-nav') {
       performAutopilotToggle(state, cmdNavStation);
-    } else if (action === 'toggle-fan') {
-      performFanToggle(state);
     } else if (action === 'shut-down-computer') {
       performShutDownComputer(state);
     } else if (action === 'trim-sails') {
@@ -20563,7 +20495,6 @@
     // recovery under the current logic (see updateBattery).
     if (b.batteryRecovering === undefined) b.batteryRecovering = b.battery <= 0;
     if (b.autopilotOn === undefined) b.autopilotOn = true;
-    if (b.fanOn === undefined) b.fanOn = false;
     if (b.heaterOn === undefined) b.heaterOn = false;
     if (b.cabinLightsOn === undefined) b.cabinLightsOn = false;
     // NAV LIGHTS -- one single state, never two. A save from before this
