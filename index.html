@@ -5700,13 +5700,32 @@
   // zero = sailing square across it, negative = opening the distance.
   // It needs nothing but the three numbers it names -- boat speed,
   // heading, bearing -- because the boat moves exactly where it is
-  // pointed. (No screen shows it at the moment; it is the one
-  // calculation anything that wants VMG should use.)
-  function computeVmgKt(state, heading) {
+  // pointed. Shown on the HELM screen as VELOCITY MADE GOOD.
+  // boatSpeedKt is optional: a caller that already has the speed for
+  // this heading passes it rather than recomputing it.
+  function computeVmgKt(state, heading, boatSpeedKt) {
     var nav = state.nav;
     var h = heading == null ? nav.heading : heading;
+    var spd = boatSpeedKt == null ? computeBoatSpeed(state, h) : boatSpeedKt;
     var bearingToDest = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-    return computeBoatSpeed(state, h) * Math.cos(signedAngleDiff(h, bearingToDest) * Math.PI / 180);
+    return spd * Math.cos(signedAngleDiff(h, bearingToDest) * Math.PI / 180);
+  }
+
+  // Every HELM-display figure that depends on the boat's heading,
+  // computed fresh each time from the existing simulation functions --
+  // never a stored/cached value, so it's always correct whether called
+  // for the initial render or, mid-turn, every rotation-timer tick.
+  // BOAT SPEED is computeBoatSpeed (the one speed there is); VMG and
+  // POINT OF SAIL follow from it and the heading.
+  function computeHelmLiveFigures(state, heading) {
+    var nav = state.nav;
+    var boatSpeed = computeBoatSpeed(state, heading);
+    return {
+      boatSpeed: boatSpeed,
+      bearingToDest: bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon),
+      vmg: computeVmgKt(state, heading, boatSpeed),
+      pointOfSail: pointOfSailLabel(heading, state.weather.windDirection),
+    };
   }
 
   // Piecewise-linear interpolation through a sorted [x, y] control-point
@@ -6636,8 +6655,9 @@
      background process, not a blocking action: it never touches
      uiBusy, never clears the options panel, and never shows the
      ". .. ..." activity indicator — the player stays fully at the helm
-     (or wherever else they navigate) the entire time, watching HEADING
-     and SPEED update live in the persistent navigation strip, and
+     (or wherever else they navigate) the entire time, watching ACTUAL
+     HEADING and SPEED update live if they're looking at the AT THE
+     HELM screen (see printHelmAtHelmHeader's auto-attach below) and
      free to pick a new heading at any point, which simply retargets
      this same running turn rather than queuing or blocking (see
      activeTurn.retarget). Shared by CHANGE COURSE, SET FOR NĀWILIWILI
@@ -6773,6 +6793,23 @@
       // simulation waits for a final value.
       state.boat.speed = computeBoatSpeed(state, nav.heading);
 
+      // If the player is currently looking at the HELM screen, this
+      // updates its live HEADING/BOAT SPEED/POINT OF SAIL/VELOCITY MADE
+      // GOOD rows in place (see printHelmAtHelmHeader's auto-attach) --
+      // a harmless no-op otherwise (headerRefs is only ever set while that
+      // screen is actually the one on display). All four are heading-
+      // dependent, recomputed together via computeHelmLiveFigures, the
+      // same function the initial render uses, so a mid-turn view is
+      // never stale or inconsistent with what's shown once the turn
+      // settles. Each ref is the row's VALUE span specifically, so this
+      // only ever touches the value half of each row.
+      if (activeTurn.headerRefs) {
+        var liveFigures = computeHelmLiveFigures(state, nav.heading);
+        activeTurn.headerRefs.headingEl.textContent = Math.round(nav.heading) + '\u00B0';
+        activeTurn.headerRefs.speedEl.textContent = liveFigures.boatSpeed.toFixed(1) + ' KT';
+        activeTurn.headerRefs.pointOfSailEl.textContent = liveFigures.pointOfSail;
+        activeTurn.headerRefs.vmgEl.textContent = liveFigures.vmg.toFixed(1) + ' KT';
+      }
       updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
 
       // Luffing/sail_fill driven purely off the actual heading this
@@ -6796,6 +6833,7 @@
     }, HEADING_TURN_TICK_MS);
 
     activeTurn = {
+      headerRefs: null, // set/refreshed by printHelmAtHelmHeader whenever the AT THE HELM screen is actually the one being rendered
       retarget: function (newOpts) {
         currentOpts = newOpts;
       },
@@ -13589,6 +13627,54 @@
     state.pendingChoice = { id: 'engine-choice', options: [toggleOption, { divider: true }, { label: 'BACK', action: 'cancel' }] };
   }
 
+  // The persistent "HELM" instrumentation block, shown above the HELM
+  // controls and above the CHANGE COURSE dial:
+  //
+  //   HEADING / BEARING TO N\u0100WILIWILI / VELOCITY MADE GOOD / BOAT SPEED
+  //   WIND FROM / WIND SPEED / POINT OF SAIL
+  //   SAIL TRIM / AUTOPILOT
+  //
+  // There is ONE speed (BOAT SPEED), and HEADING is both the direction the
+  // bow points and the direction the boat travels. Shared by cmdHelm and cmdChangeCourse -- both
+  // reach this with state.crew.atHelm true. Only the heading-dependent
+  // figures (HEADING, BOAT SPEED, POINT OF SAIL, VELOCITY MADE GOOD --
+  // all recomputed live via computeHelmLiveFigures) get their own DOM
+  // refs for beginCourseTurn's rotation timer to update in place each
+  // tick; BEARING, WIND, SAIL TRIM and AUTOPILOT don't change mid-turn.
+  // Whenever a real-time turn is currently running (activeTurn), this
+  // ALSO (re-)attaches that turn's live updates to whichever lines were
+  // just rendered here, so the block is "live" however the player got
+  // back to it. Returns the refs.
+  // 'GOOD' | 'NEEDS TRIM' -- the one place this string is derived, so
+  // every display and cmdTrimSails' own gating read the exact same word.
+  function sailTrimLabel(state) {
+    return state.nav.sailTrimState === 'needsTrim' ? 'NEEDS TRIM' : 'GOOD';
+  }
+
+  // headingLabel overrides the printed title ('HELM' by default).
+  function printHelmAtHelmHeader(state, headingLabel) {
+    var nav = state.nav;
+    var figures = computeHelmLiveFigures(state, nav.heading);
+
+    printLine(headingLabel || 'HELM', 'heading-label');
+    printBlank();
+    var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
+    printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
+    var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
+    var speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg');
+    printBlank();
+    printDataRow('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0', 'data-row-lg');
+    printDataRow('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT', 'data-row-lg');
+    var pointOfSailEl = printDataRow('POINT OF SAIL', figures.pointOfSail, 'data-row-lg');
+    printBlank();
+    printDataRow('SAIL TRIM', sailTrimLabel(state), 'data-row-lg');
+    printDataRow('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF', 'data-row-lg');
+
+    var refs = { headingEl: headingEl, speedEl: speedEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
+    if (activeTurn) activeTurn.headerRefs = refs;
+    return refs;
+  }
+
   // HELM = AT THE HELM. There is no separate "view the Helm" state
   // leading to a TAKE THE HELM button: reaching this command at all
   // (steering permitting) means the player is now physically steering.
@@ -13602,11 +13688,8 @@
   // actually ends manual steering and lets unattended wander resume if
   // autopilot is off.
   //
-  // THE SCREEN IS THE THREE CONTROLS AND NOTHING ELSE -- no instrument
-  // readouts (the navigation strip, NAV STATION's INSTRUMENTS and the
-  // chart carry those):
-  //
-  //   HELM
+  // THE SCREEN: the instrument block (printHelmAtHelmHeader) above
+  // exactly three controls:
   //
   //   TRIM SAILS
   //   CHANGE COURSE
@@ -13650,7 +13733,7 @@
       // steering-damage hook, which forces atHelm false) -- so no CHANGE
       // COURSE, but AUTOPILOT (gated only on electrical damage,
       // unchanged) and TRIM SAILS (an unrelated physical action) remain.
-      printLine('HELM', 'heading-label');
+      printHelmAtHelmHeader(state, 'HELM');
       if (nav.landWarningLevel !== 'none') {
         printBlank();
         printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -13676,7 +13759,7 @@
       }
     }
 
-    printLine('HELM', 'heading-label');
+    printHelmAtHelmHeader(state);
     if (nav.landWarningLevel !== 'none') {
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
@@ -13723,7 +13806,8 @@
   // then confirm -- or take SET COURSE FOR N\u0100WILIWILI, the separate,
   // explicit command that picks the direct bearing to the destination
   // (never something AUTOPILOT does for you). Reachable from the HELM
-  // screen in EITHER phase (see cmdHelm's own notes). The coastal lock
+  // screen in EITHER phase (see cmdHelm's own notes); the instrument block
+  // stays visible above the dial controls. The coastal lock
   // is checked first, before nav.setCourse is ever read (which stays
   // null throughout coastal; see courseSteeringTarget's own notes) --
   // this never falls through to the real dial logic below during the
@@ -13733,6 +13817,8 @@
     if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { blockedByCoastalLock(state); return; }
     if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
+    printBlank();
+    printHelmAtHelmHeader(state);
     printBlank();
     printLine('CHANGE COURSE', 'heading-label');
     printLine('NEW COURSE ' + nav.courseDraft + '\u00B0');
@@ -14444,14 +14530,25 @@
     {
       id: 'handbook-helm', toc: 'HELM', heading: 'HELM',
       blocks: [
-        { term: 'TRIM SAILS', body: 'Adjust the sails after a larger change of heading.' },
-        { term: 'CHANGE COURSE', body: 'Choose a new heading. SOLACE turns gradually, then moves exactly where she is pointed.' },
-        { term: 'AUTOPILOT', body: 'Holds the heading SOLACE is on when it is switched on. It does not steer for the destination, the wind, or the sails.' },
+        { term: 'HEADING', body: 'Where the bow is pointing now, and the way SOLACE is moving.' },
+        { term: 'BEARING TO N\u0100WILIWILI', body: 'The direct compass direction to N\u0101wiliwili.' },
+        { term: 'VELOCITY MADE GOOD', body: 'How quickly SOLACE is making progress toward N\u0101wiliwili.' },
+        { term: 'BOAT SPEED', body: 'How fast SOLACE is moving.' },
+        { term: 'WIND FROM', body: 'Direction the wind is coming from.' },
+        { term: 'WIND SPEED', body: 'Current wind strength.' },
+        { term: 'POINT OF SAIL', body: 'SOLACE\u2019s angle to the wind.' },
+        { term: 'SAIL TRIM', body: 'Whether the sails are properly adjusted.' },
+        { term: 'AUTOPILOT', body: 'Whether SOLACE is holding a fixed compass heading automatically. It does not steer for the destination, the wind, or the sails.' },
         { h3: 'CHANGING COURSE' },
         { p: 'Use CHANGE COURSE to choose a new heading.' },
         { p: 'Use SET COURSE FOR N\u0100WILIWILI, inside CHANGE COURSE, to point SOLACE along the direct bearing toward the destination.' },
         { p: 'SOLACE turns gradually.' },
-        { p: 'After a larger change of heading, use TRIM SAILS.' },
+        { p: 'After a larger change of heading, check:' },
+        { lines: ['POINT OF SAIL', 'SAIL TRIM'] },
+        { p: 'If:' },
+        { lines: ['SAIL TRIM: NEEDS TRIM'] },
+        { p: 'use:' },
+        { lines: ['TRIM SAILS'] },
       ],
     },
     {
@@ -14603,7 +14700,7 @@
       id: 'handbook-if-unsure', toc: null, heading: 'IF YOU\u2019RE NOT SURE',
       blocks: [
         { p: 'Check:' },
-        { lines: ['WIND', 'HEADING'] },
+        { lines: ['WIND', 'HEADING', 'POINT OF SAIL', 'SAIL TRIM'] },
         { p: 'Then:' },
         { lines: ['SET SAIL FOR CONDITIONS', 'SET COURSE', 'TRIM SAILS', 'CONFIRM AUTOPILOT'] },
         { p: 'Take care of yourself before taking on a repair.' },
