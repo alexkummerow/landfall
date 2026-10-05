@@ -833,7 +833,7 @@
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
-        <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
+        <button id="sound-btn" class="hdr-btn" type="button">SOUND ON</button>
         <span id="clock">—</span>
       </div>
     </header>
@@ -2242,8 +2242,8 @@
   function finaleStartCoda(state, offsetSec) {
     if (finaleCodaEl || !audioUnlocked || finaleCodaTries >= 4) return; // (a missing / refused file is retried a few times, never in a loop)
     finaleCodaTries++;
-    try { finaleCodaEl = new Audio(FINALE_CODA_PATH); } catch (e) { finaleCodaEl = null; return; }
-    finaleCodaEl.volume = muted ? 0 : TAPE_VOLUME_BELOW; // the file's own normal level; the narrator is below, the same as the cassette player
+    try { finaleCodaEl = createGameAudio(FINALE_CODA_PATH); } catch (e) { finaleCodaEl = null; return; }
+    finaleCodaEl.volume = TAPE_VOLUME_BELOW; // the file's own normal level; the narrator is below, the same as the cassette player
     if (offsetSec > 1) finaleCodaEl.addEventListener('loadedmetadata', function () { if (offsetSec < finaleCodaEl.duration) finaleCodaEl.currentTime = offsetSec; else finaleCodaEl.pause(); });
     var p = finaleCodaEl.play();
     if (p && p.catch) p.catch(function (e) { finaleCodaEl = null; }); // not allowed to start yet: tried again on the next gesture
@@ -2262,7 +2262,6 @@
     if (el) el.loop = true; // the voyage is over: it simply stays
     marinaAmbienceStarted.marinaSound = true;
   }
-  function applyMuteToFinaleAudio() { if (finaleCodaEl) finaleCodaEl.volume = muted ? 0 : TAPE_VOLUME_BELOW; }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
     if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
     finaleRendering = null; finaleMarinaOn = false; finaleCodaTries = 0;
@@ -6899,7 +6898,51 @@
   var audioCtx = null;
   var audioUnlocked = false;
   var masterGain = null;
+  var MASTER_GAIN_LEVEL = 0.5; // masterGain's level when sound is ON (0 when muted)
   var muted = false;
+
+  // MASTER MUTE -- the one global SOUND ON / SOUND OFF.
+  // `muted` is the master state and nothing else reads it. It starts false on every page load (sound ON -- never restored
+  // from a save or from storage) and only changes through setMasterMuted. It is applied in exactly two places, which
+  // together cover every sound in the game:
+  //   * masterGain -- the Web Audio bus the sea / wind / rain / creak channels run through. Muting sets it to 0; the
+  //     channels keep playing underneath.
+  //   * the `muted` property of every <audio> element. Unlike `volume` it works on iOS, and it only silences output: the
+  //     element keeps playing, its position keeps advancing, loops keep looping and `ended` still fires -- so fades,
+  //     crossfades, action timing and relative levels all carry on underneath, and un-muting just makes it audible
+  //     again mid-stream. (HTML audio is deliberately NOT routed into the AudioContext: the hard audio rebuild closes
+  //     that context, which would permanently silence every element already tied to it.)
+  // Every <audio> element in the game is created through createGameAudio, which applies the master state as it is made.
+  // The play() guard below catches anything that ever skips it, so no sound can be audible outside the master.
+  var gameAudioKnown = new WeakSet();
+  var gameAudioRefs = []; // weak, so one-shot elements the game has dropped can still be garbage collected
+  function registerGameAudio(el) {
+    if (gameAudioKnown.has(el)) return el;
+    gameAudioKnown.add(el);
+    gameAudioRefs.push(typeof WeakRef === 'function' ? new WeakRef(el) : { deref: function () { return el; } });
+    el.muted = muted;
+    return el;
+  }
+  function createGameAudio(src) {
+    return registerGameAudio(src === undefined ? new Audio() : new Audio(src));
+  }
+  (function () {
+    var nativePlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      registerGameAudio(this); // a no-op for everything created by createGameAudio
+      return nativePlay.apply(this, arguments);
+    };
+  })();
+  function setMasterMuted(isMuted) {
+    muted = isMuted;
+    if (masterGain) masterGain.gain.value = muted ? 0 : MASTER_GAIN_LEVEL;
+    gameAudioRefs = gameAudioRefs.filter(function (ref) {
+      var el = ref.deref();
+      if (el) el.muted = muted;
+      return !!el;
+    });
+    updateSoundLabel();
+  }
 
   /* --------------------------------------------------------------
      AUDIO RECOVERY LAYER -- module-level state for recoverLandfallAudio/
@@ -7039,7 +7082,7 @@
     var generation = 0;
 
     function ensureSlot(i) {
-      var wantGain = gainFallbackForIgnoredVolume && audioCtx && (elementVolumeIsIgnored() || isAppleTouchDevice());
+      var wantGain = gainFallbackForIgnoredVolume && audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice());
       var existing = slots[i];
       // A slot built before the current AudioContext existed, or for one a
       // hard audio rebuild has since closed, would be silent -- replace it.
@@ -7053,7 +7096,7 @@
         slots[i] = null;
       }
       if (slots[i]) return slots[i];
-      var el = new Audio();
+      var el = createGameAudio();
       el.preload = 'auto';
       var routedCtx = null;
       var routedParam = null;
@@ -7061,7 +7104,11 @@
         try {
           var gainNode = audioCtx.createGain();
           gainNode.gain.value = 0;
-          audioCtx.createMediaElementSource(el).connect(gainNode).connect(audioCtx.destination);
+          // Into the master bus like every other Web Audio sound (so SOUND OFF silences it there too); the trim undoes
+          // masterGain's own level so the engine stays exactly as loud as its ENGINE_VOLUME values say.
+          var masterTrim = audioCtx.createGain();
+          masterTrim.gain.value = 1 / MASTER_GAIN_LEVEL;
+          audioCtx.createMediaElementSource(el).connect(gainNode).connect(masterTrim).connect(masterGain);
           var slotCtx = audioCtx;
           var param = gainNode.gain;
           // Reads report the gain's CURRENT value; an instant set cancels any
@@ -7500,7 +7547,7 @@
 
   function buildAudioGraph() {
     masterGain = audioCtx.createGain();
-    masterGain.gain.value = muted ? 0 : 0.5;
+    masterGain.gain.value = muted ? 0 : MASTER_GAIN_LEVEL;
     masterGain.connect(audioCtx.destination);
 
     if (GAME) updateAudioForState(GAME);
@@ -7537,31 +7584,15 @@
     // whatever's already playing, covering GO ABOVE/GO BELOW (this runs
     // after every action's own tail).
     updateNoGoZoneAudio(state);
-    applyMuteToSailsAudio(state);
+    syncSailsAudioVolumes(state);
   }
 
   function toggleMute() {
-    muted = !muted;
-    if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
-    applyMuteToEngineAudio(); // engine audio bypasses masterGain entirely, so it needs its own mute application
-    applyMuteToFishingAudio(); // FISHING HOOK -- same reasoning as engine audio
-    applyMuteToCabinSwitchAudio(); // ELECTRICAL HOOK -- same reasoning as engine audio
-    applyMuteToSailsAudio(); // SAILS HOOK -- same reasoning as engine audio
-    applyMuteToGalleyAudio(); // GALLEY HOOK -- same reasoning as engine audio
-    applyMuteToCabinAudio(); // CABIN HOOK (clothing-change audio) -- same reasoning as engine audio
-    applyMuteToHeadAudio(); // HEAD HOOK (wash audio) -- same reasoning as engine audio
-    applyMuteToSaloonAudio(); // SALOON HOOK (hatch audio) -- same reasoning as engine audio
-    applyMuteToDoorAudio(); // DOOR HOOK (room-navigation pass: CABIN/HEAD open/close, AFT CABIN rattle) -- same reasoning as engine audio
-    applyMuteToNavStationAudio(); // NAV STATION HOOK (ship's computer audio) -- same reasoning as engine audio
-    applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
-    applyMuteToCompanionwayAudio(); // COMPANIONWAY HOOK (upstairs/downstairs transition SFX) -- same reasoning as engine audio
-    applyMuteToMarinaAudio(); // MARINA HOOK (opening/departure ambience + board.mp3) -- same reasoning as engine audio
-    applyMuteToFinaleAudio(); // THE FINAL ARRIVAL -- CODA
-    updateSoundLabel();
+    setMasterMuted(!muted); // the master only -- nothing else in the game reads or applies the mute state
   }
 
   function updateSoundLabel() {
-    soundBtn.textContent = audioUnlocked ? (muted ? 'SOUND OFF' : 'SOUND ON') : 'SOUND OFF';
+    soundBtn.textContent = muted ? 'SOUND OFF' : 'SOUND ON';
   }
 
   /* --------------------------------------------------------------
@@ -7736,7 +7767,7 @@
   function ensureSeaChannelSlot(channel, index) {
     if (channel.slots[index] || !audioCtx) return;
     try {
-      var el = new Audio();
+      var el = createGameAudio();
       // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
       // "defensive fallback" true: the custom self-loop system below
       // (scheduleSeaChannelSelfLoop/performSeaChannelCrossfade) is now
@@ -8130,10 +8161,8 @@
 
      Muting: this channel connects straight to masterGain (built in
      ensureCreakChannelSlot below), exactly like every sea/wind/rain
-     slot already does -- no separate applyMuteToCreakAudio is needed
-     or added, the same reasoning toggleMute's own engine/fishing/
-     cabin/etc. hooks already document ("bypasses masterGain entirely,
-     so it needs its own mute application" -- this does NOT bypass it).
+     slot already does, so the master mute (see MASTER MUTE next to
+     masterGain's declaration) covers it with nothing to add here.
      -------------------------------------------------------------- */
   var CREAK_AUDIO_FILES = {
     interiorModerate: 'audio/environment/creaks_moderate_int.mp3',
@@ -8170,7 +8199,7 @@
   function ensureCreakChannelSlot(channel, index) {
     if (channel.slots[index] || !audioCtx) return;
     try {
-      var el = new Audio();
+      var el = createGameAudio();
       el.loop = false; // see SEA's own identical line above for why -- one authoritative repetition system (the self-loop scheduler below), never native loop=true racing it
       el.preload = 'auto';
       el.volume = 1;
@@ -8511,7 +8540,7 @@
   function ensureWindChannelSlot(channel, index) {
     if (channel.slots[index] || !audioCtx) return;
     try {
-      var el = new Audio();
+      var el = createGameAudio();
       // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
       // "defensive fallback" true: the custom self-loop system below
       // (scheduleWindChannelSelfLoop/performWindChannelCrossfade) is now
@@ -8976,7 +9005,7 @@
   function ensureRainChannelSlot(channel, index) {
     if (channel.slots[index] || !audioCtx) return;
     try {
-      var el = new Audio();
+      var el = createGameAudio();
       el.loop = false; // AUDIO STABILITY FIX -- see the note above ensureSeaChannelSlot; the custom self-loop below is the one authoritative repetition system for this element too
       el.preload = 'auto';
       el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
@@ -9323,9 +9352,8 @@
   var engineAudio = makeCrossfadeLoopController('ENGINE', 3, true); // true: fade through a GainNode where the browser ignores element volume (iOS)
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
   // null) -- the controller itself only knows raw paths/volumes, not
-  // domain keys, so this is purely for applyMuteToEngineAudio's
-  // ENGINE_VOLUME lookup on mute toggle (and the 'running' already-
-  // there check below); it is not consulted for any gameplay decision.
+  // domain keys, so this is purely for the 'running' already-there
+  // check below; it is not consulted for any gameplay decision.
   var engineActiveKey = null;
   // Where engine audio is in its own life cycle -- audio-only, never
   // saved, never read by gameplay:
@@ -9364,7 +9392,7 @@
   // what makes starting the engine while muted silent, and what stops
   // a self-loop seam from restoring a level the player has since muted.
   function engineTargetVolume(key) {
-    return function () { return muted ? 0 : ENGINE_VOLUME[key]; };
+    return function () { return ENGINE_VOLUME[key]; };
   }
 
   // The start.mp3 -> running-loop handoff, fired by the controller
@@ -9619,20 +9647,6 @@
     engineAudio.crossfadeToLoop(ENGINE_AUDIO_FILES[key], engineTargetVolume(key));
   }
 
-  // Applies the current mute state to whichever engine sound is
-  // actually active right now, instantly (matching masterGain's own
-  // instant, non-ramped mute toggle) -- called from toggleMute. Muting
-  // also silences any outgoing sound still mid-fade-out, so SOUND OFF
-  // never leaves half of a crossfade audible. Nothing is ever paused
-  // or restarted by this: the loops keep running at volume 0, so SOUND
-  // ON simply restores the current sound's level -- start.mp3 is never
-  // replayed and no recovery is needed.
-  function applyMuteToEngineAudio() {
-    if (muted) engineAudio.silenceInactive();
-    if (!engineActiveKey) return;
-    engineAudio.applyVolumeInstantly(muted ? 0 : ENGINE_VOLUME[engineActiveKey]);
-  }
-
   // Called on the page becoming visible again (see the
   // visibilitychange handler far below): if the browser silently
   // paused the engine's currently active element while backgrounded,
@@ -9675,7 +9689,7 @@
   function getMarinaAudioEl(key) {
     var el = marinaAudioEls[key];
     if (el) return el;
-    el = new Audio(MARINA_AUDIO_FILES[key]);
+    el = createGameAudio(MARINA_AUDIO_FILES[key]);
     el.preload = 'auto';
     el.volume = 0;
     el.addEventListener('error', function () {
@@ -9686,7 +9700,7 @@
   }
 
   function marinaAudibleVolume(key) {
-    return muted ? 0 : MARINA_AUDIO_VOLUME[key];
+    return MARINA_AUDIO_VOLUME[key];
   }
 
   // Identical in shape to fadeSailsVolume -- see that function's own
@@ -9772,39 +9786,17 @@
   // ended naturally, or was already faded out, is left completely
   // alone -- never restarted just to fade it out, per this feature's
   // own "if either one-shot has already ended naturally, leave it
-  // ended" requirement. Marks each element it actually fades with
-  // _fadingOutForCastOff so applyMuteToMarinaAudio (below) knows to
-  // leave it alone too -- this fade-out's target is always silence
-  // regardless of mute state, so a mute toggle mid-CASTING-OFF (the
-  // SOUND button isn't gated by uiBusy) must never interrupt or
-  // override it.
+  // ended" requirement. The fade-out's target is always silence;
+  // the master mute only silences final output, so a mute toggle
+  // mid-CASTING-OFF cannot interrupt or override it.
   function fadeMarinaAmbienceOut(seconds) {
     ['pnwBirds', 'marinaSound'].forEach(function (key) {
       if (!marinaAmbienceStarted[key]) return;
       var el = marinaAudioEls[key];
       if (!el || el.paused || el.ended) return;
-      el._fadingOutForCastOff = true;
       fadeMarinaVolume(el, 0, seconds, function () {
-        el._fadingOutForCastOff = false;
         if (!el.paused) el.pause();
       });
-    });
-  }
-
-  // Applies the current mute state to whichever marina element(s) are
-  // actually playing right now, instantly -- called from toggleMute,
-  // same shape as applyMuteToEngineAudio. Skips anything mid-CASTING-OFF
-  // fade-out (see fadeMarinaAmbienceOut's own notes just above) --
-  // every other case (the ambience's own initial fade-in, board.mp3's
-  // own brief fade-in) safely jumps straight to the now-correct level,
-  // since marinaAudibleVolume IS that fade's own eventual target either
-  // way.
-  function applyMuteToMarinaAudio() {
-    Object.keys(marinaAudioEls).forEach(function (key) {
-      var el = marinaAudioEls[key];
-      if (!el || el.paused || el._fadingOutForCastOff) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = marinaAudibleVolume(key);
     });
   }
 
@@ -9863,7 +9855,7 @@
   function ensureTapeAudioReady() {
     if (tapeAudioEl) return true;
     try {
-      tapeAudioEl = new Audio();
+      tapeAudioEl = createGameAudio();
       tapeAudioEl.preload = 'auto';
       tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
       tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
@@ -9886,20 +9878,7 @@
   function applyTapeLocationAudio(state) {
     if (!tapeAudioEl) return;
     var above = !!(state && state.crew.location === 'above');
-    tapeAudioEl.volume = muted ? 0 : (above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
-  }
-
-  // SOUND OFF/SOUND ON hook -- the cassette system (tape_start.mp3, the
-  // selected track, tape_stop.mp3, all one shared element) has no
-  // separate mute path of its own; it's a thin wrapper reusing the
-  // exact same volume computation applyTapeLocationAudio already does
-  // on every render, called here too so SOUND OFF/SOUND ON take effect
-  // on the cassette the instant they're pressed, not just on the next
-  // natural render. Never plays or pauses anything -- purely a volume
-  // sync -- so it can never replay a one-shot (tape_start.mp3/
-  // tape_stop.mp3) that already finished while muted.
-  function applyMuteToTapeAudio() {
-    applyTapeLocationAudio(GAME);
+    tapeAudioEl.volume = (above ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
   }
 
   // Same shape as fadeSailsVolume/fadeFishingVolume/etc. elsewhere in
@@ -9940,7 +9919,7 @@
   // ends up.
   function transitionTapeLocationAudio(state, targetLocation) {
     if (!tapeAudioEl || tapePhase !== 'track') return;
-    var target = muted ? 0 : (targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
+    var target = (targetLocation === 'above' ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW);
     fadeTapeVolume(tapeAudioEl, target, TAPE_LOCATION_FADE_SECONDS);
   }
 
@@ -10226,9 +10205,9 @@
   // state says should actually be playing right now -- never a channel
   // that's correctly silent (nothing currently desired, engine off,
   // cassette stopped/between phases). Deliberately independent of mute:
-  // muting only ever changes gain/volume in this codebase (masterGain
-  // for sea/wind/rain, .volume for engine/cassette -- see toggleMute/
-  // applyMuteToTapeAudio), never pauses anything, so an element SHOULD
+  // muting only ever silences final output in this codebase (masterGain
+  // for sea/wind/rain/creak, the element's own muted property for
+  // everything else -- see MASTER MUTE), never pauses anything, so an element SHOULD
   // still be genuinely advancing while muted, and a stall caught then
   // is exactly as real (and exactly as worth fixing before the player
   // unmutes) as one caught while audible. 'environment' entries are the
@@ -10318,7 +10297,7 @@
     var preservedSrc = tapeAudioEl.src;
     try { tapeAudioEl.pause(); } catch (e) {}
 
-    var freshEl = new Audio();
+    var freshEl = createGameAudio();
     freshEl.preload = 'auto';
     freshEl.addEventListener('ended', onTapeAudioEnded);
     freshEl.addEventListener('timeupdate', onTapeTimeUpdate);
@@ -11425,7 +11404,7 @@
   function getCabinSwitchAudioEl(key) {
     var el = cabinSwitchAudioEls[key];
     if (el) return el;
-    el = new Audio(CABIN_SWITCH_AUDIO_FILES[key]);
+    el = createGameAudio(CABIN_SWITCH_AUDIO_FILES[key]);
     el.preload = 'auto';
     el.volume = 0;
     cabinSwitchAudioEls[key] = el;
@@ -11446,21 +11425,9 @@
     if (!el.paused) el.pause();
     el.currentTime = 0;
     el._baseVolume = CABIN_SWITCH_VOLUME;
-    el.volume = muted ? 0 : CABIN_SWITCH_VOLUME;
+    el.volume = CABIN_SWITCH_VOLUME;
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Cabin switch audio failed to play (' + key + '):', describeError(e)); });
-  }
-
-  // Called from toggleMute, same pattern as applyMuteToEngineAudio/
-  // applyMuteToFishingAudio -- only matters for the rare case where a
-  // switch click is still audible at the exact moment mute is toggled,
-  // given how short these sounds are.
-  function applyMuteToCabinSwitchAudio() {
-    Object.keys(cabinSwitchAudioEls).forEach(function (key) {
-      var el = cabinSwitchAudioEls[key];
-      if (!el || el.paused) return;
-      el.volume = muted ? 0 : (el._baseVolume || 0);
-    });
   }
 
   // DEAD-PANEL SWITCH AUDIO -- purely cosmetic and never persisted
@@ -16168,7 +16135,7 @@
   function getFishingAudioEl(key) {
     var el = fishingAudioEls[key];
     if (el) return el;
-    el = new Audio(FISHING_AUDIO_FILES[key]);
+    el = createGameAudio(FISHING_AUDIO_FILES[key]);
     el.loop = (key === 'reel');
     el.preload = 'auto';
     el.volume = 0;
@@ -16223,7 +16190,7 @@
     el._baseVolume = FISHING_AUDIO_VOLUME[key];
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); });
-    fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
+    fadeFishingVolume(el, FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16245,7 +16212,7 @@
     el._baseVolume = FISHING_AUDIO_VOLUME.reel;
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (reel):', describeError(e)); });
-    fadeFishingVolume(el, muted ? 0 : FISHING_AUDIO_VOLUME.reel, FISHING_CROSSFADE_SECONDS);
+    fadeFishingVolume(el, FISHING_AUDIO_VOLUME.reel, FISHING_CROSSFADE_SECONDS);
   }
 
   // ONLY touches the reel element -- never catchSmall/catchMedium/
@@ -16298,7 +16265,7 @@
      (see primeFishingLandingAudio), then reused for every catch by
      reassigning .src, sidesteps that entirely.
      -------------------------------------------------------------- */
-  var fishingLandingAudio = new Audio();
+  var fishingLandingAudio = createGameAudio();
   fishingLandingAudio.preload = 'auto'; // AUDIT FIX -- this was the one Audio element in the whole file missing this; without it, the browser's default preload behavior doesn't necessarily start buffering a size-specific catch sound the moment .src is reassigned, right before an immediate play() call below, which is exactly the kind of narrow timing gap that can make a single .play() intermittently fail to actually start
   var fishingLandingAudioPrimed = false;
 
@@ -16336,7 +16303,7 @@
     fishingLandingAudio.pause();
     fishingLandingAudio.src = landingSrc;
     fishingLandingAudio.currentTime = 0;
-    fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
+    fishingLandingAudio.volume = FISHING_AUDIO_VOLUME.catchLanding;
     audioDebugLog('play: ' + catchSoundKey + ' (' + landingSrc + ')');
     var p = fishingLandingAudio.play();
     if (p && p.catch) {
@@ -16386,25 +16353,6 @@
       if (!el) return;
       if (!el.paused) el.pause();
     });
-  }
-
-  // Applies the current mute state to whichever fishing element(s) are
-  // actually audible right now, instantly -- called from toggleMute,
-  // same pattern as applyMuteToEngineAudio.
-  function applyMuteToFishingAudio() {
-    Object.keys(fishingAudioEls).forEach(function (key) {
-      var el = fishingAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : (el._baseVolume || 0);
-    });
-    // fishingLandingAudio is a standalone element, not part of
-    // fishingAudioEls -- see its own section comment for why -- so it
-    // needs this one extra line rather than being covered by the loop
-    // above.
-    if (!fishingLandingAudio.paused) {
-      fishingLandingAudio.volume = muted ? 0 : FISHING_AUDIO_VOLUME.catchLanding;
-    }
   }
 
   /* --------------------------------------------------------------
@@ -16457,7 +16405,7 @@
   function getGalleyAudioEl(key) {
     var el = galleyAudioEls[key];
     if (el) return el;
-    el = new Audio(GALLEY_AUDIO_FILES[key]);
+    el = createGameAudio(GALLEY_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -16512,7 +16460,7 @@
     el.volume = 0;
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Galley audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
-    fadeGalleyVolume(el, muted ? 0 : GALLEY_AUDIO_VOLUME[key], GALLEY_CROSSFADE_SECONDS);
+    fadeGalleyVolume(el, GALLEY_AUDIO_VOLUME[key], GALLEY_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16520,15 +16468,6 @@
       };
     }
     return el;
-  }
-
-  function applyMuteToGalleyAudio() {
-    Object.keys(galleyAudioEls).forEach(function (key) {
-      var el = galleyAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : GALLEY_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -16569,7 +16508,7 @@
   function getCabinAudioEl(key) {
     var el = cabinAudioEls[key];
     if (el) return el;
-    el = new Audio(CABIN_AUDIO_FILES[key]);
+    el = createGameAudio(CABIN_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -16620,7 +16559,7 @@
     el.volume = 0;
     var p = el.play();
     if (p && p.catch) p.catch(function (e) { console.warn('Cabin audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); });
-    fadeCabinVolume(el, muted ? 0 : CABIN_AUDIO_VOLUME[key], CABIN_CROSSFADE_SECONDS);
+    fadeCabinVolume(el, CABIN_AUDIO_VOLUME[key], CABIN_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16628,15 +16567,6 @@
       };
     }
     return el;
-  }
-
-  function applyMuteToCabinAudio() {
-    Object.keys(cabinAudioEls).forEach(function (key) {
-      var el = cabinAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : CABIN_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -16671,7 +16601,7 @@
   function getHeadAudioEl(key) {
     var el = headAudioEls[key];
     if (el) return el;
-    el = new Audio(HEAD_AUDIO_FILES[key]);
+    el = createGameAudio(HEAD_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -16750,7 +16680,7 @@
         if (onEnded) onEnded();
       });
     }
-    fadeHeadVolume(el, muted ? 0 : HEAD_AUDIO_VOLUME[key], HEAD_CROSSFADE_SECONDS);
+    fadeHeadVolume(el, HEAD_AUDIO_VOLUME[key], HEAD_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16758,15 +16688,6 @@
       };
     }
     return el;
-  }
-
-  function applyMuteToHeadAudio() {
-    Object.keys(headAudioEls).forEach(function (key) {
-      var el = headAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : HEAD_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -16801,7 +16722,7 @@
   function getSaloonAudioEl(key) {
     var el = saloonAudioEls[key];
     if (el) return el;
-    el = new Audio(SALOON_AUDIO_FILES[key]);
+    el = createGameAudio(SALOON_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -16858,7 +16779,7 @@
         if (onEnded) onEnded();
       });
     }
-    fadeSaloonVolume(el, muted ? 0 : SALOON_AUDIO_VOLUME[key], SALOON_CROSSFADE_SECONDS);
+    fadeSaloonVolume(el, SALOON_AUDIO_VOLUME[key], SALOON_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16866,15 +16787,6 @@
       };
     }
     return el;
-  }
-
-  function applyMuteToSaloonAudio() {
-    Object.keys(saloonAudioEls).forEach(function (key) {
-      var el = saloonAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : SALOON_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -16918,7 +16830,7 @@
   function getDoorAudioEl(key) {
     var el = doorAudioEls[key];
     if (el) return el;
-    el = new Audio(DOOR_AUDIO_FILES[key]);
+    el = createGameAudio(DOOR_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -16975,7 +16887,7 @@
         if (onEnded) onEnded();
       });
     }
-    fadeDoorVolume(el, muted ? 0 : DOOR_AUDIO_VOLUME[key], DOOR_CROSSFADE_SECONDS);
+    fadeDoorVolume(el, DOOR_AUDIO_VOLUME[key], DOOR_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -16983,15 +16895,6 @@
       };
     }
     return el;
-  }
-
-  function applyMuteToDoorAudio() {
-    Object.keys(doorAudioEls).forEach(function (key) {
-      var el = doorAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : DOOR_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -17047,7 +16950,7 @@
   function getNavStationAudioEl(key) {
     var el = navStationAudioEls[key];
     if (el) return el;
-    el = new Audio(NAV_STATION_AUDIO_FILES[key]);
+    el = createGameAudio(NAV_STATION_AUDIO_FILES[key]);
     el.loop = false;
     el.preload = 'auto';
     el.volume = 0;
@@ -17132,7 +17035,7 @@
         if (onEnded) onEnded();
       });
     }
-    fadeNavStationVolume(el, muted ? 0 : NAV_STATION_AUDIO_VOLUME[key], NAV_STATION_CROSSFADE_SECONDS);
+    fadeNavStationVolume(el, NAV_STATION_AUDIO_VOLUME[key], NAV_STATION_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
         el.onended = null;
@@ -17218,20 +17121,11 @@
           recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
         });
       }
-      fadeNavStationVolume(el, muted ? 0 : NAV_STATION_AUDIO_VOLUME[audioKey], NAV_STATION_CROSSFADE_SECONDS);
+      fadeNavStationVolume(el, NAV_STATION_AUDIO_VOLUME[audioKey], NAV_STATION_CROSSFADE_SECONDS);
     }
 
     attempt(false);
     return el; // same contract as playNavStationOneShot -- the element itself, for armDurationWatchdog to size its own fallback against
-  }
-
-  function applyMuteToNavStationAudio() {
-    Object.keys(navStationAudioEls).forEach(function (key) {
-      var el = navStationAudioEls[key];
-      if (!el || el.paused) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = muted ? 0 : NAV_STATION_AUDIO_VOLUME[key];
-    });
   }
 
   /* --------------------------------------------------------------
@@ -17290,7 +17184,7 @@
 
   function getCompanionwayAudioEl() {
     if (companionwayAudioEl) return companionwayAudioEl;
-    var el = new Audio();
+    var el = createGameAudio();
     el.preload = 'auto';
     el.addEventListener('error', function () {
       var path = el.currentSrc || el.src;
@@ -17357,7 +17251,7 @@
     el.currentTime = 0;
     el.playbackRate = 1.0;
     el.defaultPlaybackRate = 1.0;
-    el.volume = muted ? 0 : 1;
+    el.volume = 1;
 
     try {
       var p = el.play();
@@ -17391,16 +17285,6 @@
     };
 
     return el;
-  }
-
-  // SOUND OFF/SOUND ON hook -- a plain volume sync, never touches
-  // play/pause state, so it can never replay a companionway one-shot
-  // that already finished while muted (same reasoning as every other
-  // applyMuteToXAudio in this file).
-  function applyMuteToCompanionwayAudio() {
-    var el = companionwayAudioEl;
-    if (!el || el.paused) return;
-    el.volume = muted ? 0 : 1;
   }
 
   /* --------------------------------------------------------------
@@ -17444,7 +17328,7 @@
   function getSailsAudioEl(key) {
     var el = sailsAudioEls[key];
     if (el) return el;
-    el = new Audio(SAILS_AUDIO_FILES[key]);
+    el = createGameAudio(SAILS_AUDIO_FILES[key]);
     el.preload = 'auto';
     el.volume = 0;
     el.addEventListener('error', function () {
@@ -17455,13 +17339,12 @@
   }
 
   // The volume a given sails sound SHOULD actually be heard at right
-  // now -- muted always wins, and the above-deck-only sounds (see
+  // now -- the above-deck-only sounds (see
   // SAILS_LOCATION_GATED_KEYS) go silent below deck specifically
   // because the player isn't the one hearing the sails work, even
   // though the underlying sail physics keep running identically either
   // way (see isInNoGoZone/computeBoatSpeed, untouched by location).
   function sailsAudibleVolume(state, key) {
-    if (muted) return 0;
     if (SAILS_LOCATION_GATED_KEYS[key] && state.crew.location !== 'above') return 0;
     return SAILS_AUDIO_VOLUME[key];
   }
@@ -17552,25 +17435,23 @@
     luffingAudio.stop(LOOP_CROSSFADE_SECONDS);
   }
 
-  // Applies the current mute state AND the current above/below-deck
-  // audibility to whichever sails element(s) are actually playing right
-  // now, instantly -- called from toggleMute (mute changing, no state
-  // in scope there, falls back to GAME) and from updateAudioForState
-  // (location possibly changing, e.g. GO ABOVE/GO BELOW -- passes its
-  // own state explicitly), same pattern as applyMuteToFishingAudio
-  // otherwise. Never starts, stops, or restarts anything -- purely a
-  // volume sync for whatever's already playing. Covers the luffing
+  // Applies the current above/below-deck audibility to whichever sails
+  // element(s) are actually playing right now, instantly -- called from
+  // updateAudioForState (location possibly changing, e.g. GO ABOVE/GO
+  // BELOW). Mute is not its business: the master handles that. Never
+  // starts, stops, or restarts anything -- purely a volume sync for
+  // whatever's already playing. Covers the luffing
   // loop separately since it no longer lives in sailsAudioEls.
-  function applyMuteToSailsAudio(state) {
+  function syncSailsAudioVolumes(state) {
     var s = state || GAME;
     Object.keys(sailsAudioEls).forEach(function (key) {
       var el = sailsAudioEls[key];
       if (!el || el.paused) return;
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.volume = s ? sailsAudibleVolume(s, key) : (muted ? 0 : (el._baseVolume || 0));
+      el.volume = s ? sailsAudibleVolume(s, key) : ((el._baseVolume || 0));
     });
     if (luffingAudio.isActive()) {
-      luffingAudio.applyVolumeInstantly(s ? sailsAudibleVolume(s, 'luffing') : (muted ? 0 : SAILS_AUDIO_VOLUME.luffing));
+      luffingAudio.applyVolumeInstantly(s ? sailsAudibleVolume(s, 'luffing') : (SAILS_AUDIO_VOLUME.luffing));
     }
   }
 
@@ -20097,13 +19978,8 @@
   });
 
   soundBtn.addEventListener('click', function () {
-    if (!audioUnlocked) {
-      unlockAudio();
-      if (GAME) updateAudioForState(GAME);
-    } else {
-      toggleMute();
-    }
-    updateSoundLabel();
+    unlockAudio(); // the tap is a real gesture, so it also does the browser-required unlock (a no-op once unlocked)
+    toggleMute();
   });
 
   document.addEventListener('visibilitychange', function () {
