@@ -811,6 +811,19 @@
     .line, .entry-text, .option { font-size: 0.98rem; }
     #output, #controls { padding-left: 0.9rem; padding-right: 0.9rem; }
   }
+  /* THE ENDING (see FINALE_STEPS): a full-screen black layer that fades in over everything, then the title, then the summary.
+     The *_SECS constants in the script mirror these transition times. */
+  .ending-overlay { position: fixed; inset: 0; z-index: 99999; background: #000; opacity: 0; transition: opacity 4s linear; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
+  .ending-overlay[hidden] { display: none; }
+  .ending-overlay.show { opacity: 1; }
+  .ending-inner { display: flex; flex-direction: column; align-items: center; width: min(94vw, 34rem); margin: auto; padding: 2rem 0; }
+  .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.4em; padding-left: 0.4em; font-size: clamp(1.5rem, 6vw, 2.3rem); text-shadow: var(--output-glow); opacity: 0; transition: opacity 3s ease-in; }
+  .ending-title.show { opacity: 1; }
+  .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
+  .ending-summary.show { max-height: 44rem; opacity: 1; margin-top: 2rem; }
+  .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
+  .ending-newvoyage { margin-top: 2rem; opacity: 0; transition: opacity 1.5s ease; }
+  .ending-newvoyage.show { opacity: 1; }
 </style>
 </head>
 <body>
@@ -990,6 +1003,13 @@
     </div>
   </div>
 
+<div id="ending-overlay" class="ending-overlay" hidden>
+  <div class="ending-inner">
+    <div id="ending-title" class="ending-title">LANDFALL</div>
+    <div id="ending-summary" class="ending-summary"></div>
+    <button id="ending-newvoyage" class="option ending-newvoyage" type="button" hidden>NEW VOYAGE</button>
+  </div>
+</div>
 <script>
 (function () {
   'use strict';
@@ -1065,7 +1085,12 @@
         autopilotHeading: null,    // the compass heading AUTOPILOT is holding while it is ON in open water -- captured from the boat's ACTUAL current heading the moment the player engages it (or set to the new heading when the player explicitly changes course), never computed from navigation/wind/current; null whenever there's nothing to hold (coastal corridor, or not yet captured -- see autopilotSteeringSolution)
         courseDraft: null,         // in-progress heading value while the CHANGE COURSE picker is open; null when not in use
         landWarningLevel: 'none',  // 'none' | 'ahead' | 'close' | 'danger' — escalating land-proximity state, so each level only logs once on the way up (and clears silently once the danger passes)
-        groundedOn: null,          // name of the landmass currently blocking movement, or null — see applyGroundingIfNeeded()
+        grounded: false,           // run aground on real land (see navOnGround): she cannot move until FREE SOLACE
+        groundedShown: true,       // false from the moment she grounds until RUN AGROUND has been shown
+        groundBearing: null,       // the bearing AWAY from the land she struck -- where FREE SOLACE turns her
+        timesAground: 0,           // for the end-of-voyage summary
+        landWarn: 0,               // 0 none | 1 "Land ahead." | 2 "too close" -- escalating, re-armed once nothing is projected nearby
+        boundaryWarn: 0,           // 0 | 1 "too far off course" -- the same idea for the ocean / route boundaries
         tack: null,                // null | 'port' | 'starboard' — set only while auto-tacking through the COASTAL corridor; see resolveAutoTack(). AUTOPILOT no longer auto-tacks in open ocean (see autopilotSteeringSolution), so this is genuinely never set out there now.
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
@@ -1262,8 +1287,10 @@
         weatherSoftwareUpdateAvailable: false, // ...so the Ship's Computer now offers SYSTEM UPDATE AVAILABLE (waits for the next visit)
         weatherSoftwareUpdated: false,     // ...and once the player has run it, WINDY exists on the computer (permanent)
         pacificObservationShown: false,    // guards the coastal-tutorial "course is mine now" observation (Cape Flattery arrival, open-water threshold) so it fires exactly once per voyage
+        landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL FOR RESCUE is all that is offered) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -1753,97 +1780,497 @@
      rough circles approximating each island's real footprint — this is
      a terminal-simple simulation, not a chart.
      -------------------------------------------------------------- */
-  var LAND_MASSES = [
-    { name: 'Ni\u02BBihau',    lat: 21.90, lon: -160.17, radiusNm: 8 },
-    { name: 'O\u02BBahu',      lat: 21.47, lon: -157.98, radiusNm: 20 },
-    { name: 'Moloka\u02BBi',   lat: 21.13, lon: -157.02, radiusNm: 13 },
-    { name: 'L\u0101na\u02BBi', lat: 20.83, lon: -156.92, radiusNm: 9 },
-    { name: 'Maui',            lat: 20.80, lon: -156.33, radiusNm: 20 },
-    { name: 'Kaho\u02BBolawe', lat: 20.55, lon: -156.60, radiusNm: 6 },
-    { name: 'Hawai\u02BBi',    lat: 19.60, lon: -155.50, radiusNm: 45 },
-  ];
+  /* ======================================================================
+     NAVIGATION GEOMETRY -- the supplied GeoJSON, embedded verbatim (this single-file game cannot fetch files when opened locally).
+     Nothing here is redrawn, simplified or "improved"; every coordinate is exactly as supplied, [longitude, latitude]. These shapes are
+     INVISIBLE gameplay geometry: nothing here is ever drawn on the GPS / chart. They are LineStrings in the files; each is read as a
+     closed ring (the last vertex joins the first). Two rings overshoot their own start by a few metres (Pacific, at Cape Flattery; the
+     capture triangle, at its tip) which makes the closed ring cross itself, so those two (dropLast) drop their final near-duplicate vertex;
+     every other ring is simply closed. Kaua\u02bbi's ring keeps the harbour opening exactly as drawn (~306 m between its two breakwater
+     tips) -- it is never closed, repaired or reinterpreted.
+     PACIFIC: the coastal edges are LAND (hitting them is a grounding). artificialEdges are the edges that are NOT land -- ocean / route
+     boundaries (never a grounding): the four long straight lines (east/south-east off Mexico, south, west, north: all >= 800 nm; the
+     longest genuine coastal edge is 112 nm) and the 11.5 nm straight line across the mouth of the Strait of Juan de Fuca, which no length
+     rule could tell apart from coast. Indices refer to the ring after dropLast: edge i runs from vertex i to vertex i+1.
+     ====================================================================== */
+  var NAV_GEO = {
+    pacific: { dropLast: true, artificialEdges: [80, 81, 82, 83, 88], ring: [
+      [-124.750727, 48.394524], [-124.72283, 48.354814], [-124.687957, 48.331636], [-124.676997, 48.324349], [-124.679987, 48.307784],
+      [-124.698917, 48.293865], [-124.692939, 48.268006], [-124.723826, 48.244789], [-124.714832, 48.220824], [-124.717831, 48.197848],
+      [-124.776293, 48.172861], [-124.758819, 48.147311], [-124.728578, 48.116084], [-124.700182, 48.10312], [-124.704065, 48.077182],
+      [-124.722267, 48.038088], [-124.733579, 47.986285], [-124.687247, 47.927717], [-124.646232, 47.876302], [-124.586042, 47.861523],
+      [-124.553741, 47.82469], [-124.50482, 47.769021], [-124.450942, 47.728061], [-124.404101, 47.613508], [-124.36568, 47.475573],
+      [-124.337867, 47.344441], [-124.271571, 47.266352], [-124.231442, 47.134569], [-124.184624, 46.75788], [-124.138475, 46.628053],
+      [-124.143157, 46.223377], [-124.054203, 46.152071], [-124.213383, 44.559931], [-124.292777, 43.745887], [-124.494092, 43.222768],
+      [-124.653272, 42.853204], [-124.64859, 42.791394], [-124.522183, 42.626264], [-124.536228, 42.495225], [-124.456412, 42.032569],
+      [-124.339368, 41.931644], [-124.344049, 41.830558], [-124.311277, 41.70485], [-124.203597, 41.589401], [-124.156779, 41.417595],
+      [-124.241051, 41.114957], [-124.203597, 40.991389], [-124.479822, 40.473434], [-124.418959, 40.195067], [-124.0021, 39.850605],
+      [-123.862245, 39.554629], [-123.909063, 39.355811], [-123.787337, 39.04743], [-123.792019, 38.861753], [-123.047621, 38.20254],
+      [-123.089757, 37.9667], [-122.96335, 37.915008], [-122.860351, 37.915008], [-122.640308, 37.804118], [-122.593491, 37.700471],
+      [-122.574764, 37.470449], [-122.478225, 37.175762], [-122.234774, 36.959092], [-122.089639, 36.835538], [-121.981959, 36.222329],
+      [-120.775106, 35.042616], [-120.709561, 34.508086], [-120.484409, 33.95795], [-119.579671, 33.208289], [-118.271205, 32.706277],
+      [-117.079479, 32.094347], [-116.462605, 30.896543], [-115.985914, 29.91489], [-115.338978, 29.322892], [-115.703791, 28.13715],
+      [-114.250181, 26.776209], [-112.825635, 25.921518], [-112.386579, 24.575769], [-111.151076, 23.874913], [-110.51387, 23.393644],
+      [-110.129599, 22.740257], [-110.658612, 8.890144], [-174.296825, 5.711056], [-181.136123, 50.315312], [-128.321656, 50.315312],
+      [-128.007024, 50.060745], [-126.907316, 49.48971], [-125.477405, 48.827586], [-124.758292, 48.585849], [-124.751321, 48.394118],
+      [-124.751581, 48.394131],
+    ] },
+    islands: [
+      { name: 'Hawai\u02bbi', ring: [
+        [-155.678543, 18.89637], [-155.597816, 18.950916], [-155.547074, 19.03161], [-155.533235, 19.077392], [-155.265684, 19.253861],
+        [-155.180345, 19.240795], [-154.958924, 19.325701], [-154.788245, 19.484509], [-154.788245, 19.532338], [-154.871278, 19.584499],
+        [-154.954311, 19.654022], [-154.972763, 19.721342], [-155.002747, 19.758248], [-155.060409, 19.753907], [-155.060409, 19.866745],
+        [-155.214942, 20.005513], [-155.424831, 20.100845], [-155.555034, 20.153236], [-155.587325, 20.144575], [-155.755697, 20.25497],
+        [-155.850262, 20.287424], [-155.903311, 20.276607], [-155.924069, 20.235494], [-155.921763, 20.144575], [-155.889472, 20.055769],
+        [-155.859488, 20.0211], [-155.884859, 19.969081], [-155.947134, 19.884514], [-155.98865, 19.873669], [-156.092441, 19.760836],
+        [-156.092441, 19.693531], [-156.023247, 19.591436], [-155.921763, 19.332649], [-155.949441, 19.098831], [-155.894085, 19.013809],
+        [-155.792601, 18.963647], [-155.67876, 18.896255],
+      ] },
+      { name: 'Kaho\u02bbolawe', ring: [
+        [-156.651644, 20.566334], [-156.680208, 20.55767], [-156.706358, 20.527532], [-156.686242, 20.49965], [-156.658081, 20.494374],
+        [-156.596528, 20.509447], [-156.578424, 20.501911], [-156.53578, 20.50794], [-156.526124, 20.528286], [-156.531354, 20.57575],
+        [-156.554688, 20.602866], [-156.575206, 20.609644], [-156.608597, 20.5991], [-156.652046, 20.566334],
+      ] },
+      { name: 'Kaua\u02bbi', ring: [
+        [-159.360865, 21.950318], [-159.36099, 21.947714], [-159.359711, 21.94783], [-159.359274, 21.947714], [-159.35812, 21.947512],
+        [-159.357371, 21.947599], [-159.351445, 21.948438], [-159.3487, 21.953852], [-159.347997, 21.953504], [-159.344919, 21.936236],
+        [-159.386451, 21.909932], [-159.384741, 21.901857], [-159.397485, 21.895224], [-159.417533, 21.879938], [-159.444575, 21.865804],
+        [-159.480645, 21.878493], [-159.509265, 21.883317], [-159.527343, 21.881252], [-159.559744, 21.886156], [-159.591664, 21.89334],
+        [-159.602675, 21.887737], [-159.612266, 21.892516], [-159.645832, 21.916903], [-159.672632, 21.949831], [-159.727692, 21.96202],
+        [-159.770316, 21.976843], [-159.79154, 22.016329], [-159.789961, 22.043829], [-159.78654, 22.067696], [-159.743427, 22.112441],
+        [-159.734659, 22.141344], [-159.722636, 22.156048], [-159.690289, 22.168112], [-159.661661, 22.175904], [-159.628863, 22.197876],
+        [-159.581752, 22.226032], [-159.557539, 22.228181], [-159.544492, 22.225344], [-159.523566, 22.217562], [-159.51551, 22.216427],
+        [-159.513934, 22.213428], [-159.513058, 22.207429], [-159.507542, 22.205727], [-159.5015, 22.207915], [-159.500011, 22.211645],
+        [-159.502025, 22.221291], [-159.488209, 22.231994], [-159.472439, 22.231826], [-159.434682, 22.22599], [-159.411208, 22.22871],
+        [-159.405254, 22.237221], [-159.399912, 22.237383], [-159.349114, 22.217382], [-159.328096, 22.200283], [-159.310012, 22.184262],
+        [-159.303121, 22.159], [-159.292526, 22.147322], [-159.289194, 22.135397], [-159.293848, 22.107627], [-159.304268, 22.085072],
+        [-159.317841, 22.057912], [-159.329972, 22.045589], [-159.335192, 22.023338], [-159.330376, 22.001906], [-159.328523, 21.990843],
+        [-159.330975, 21.98083], [-159.327648, 21.967919], [-159.328397, 21.959592], [-159.332337, 21.956587], [-159.335402, 21.953988],
+        [-159.337153, 21.954557], [-159.338817, 21.956993], [-159.341444, 21.957643], [-159.34337, 21.956424], [-159.345647, 21.956018],
+        [-159.348011, 21.956262], [-159.352302, 21.956506], [-159.352477, 21.953013], [-159.357687, 21.950157], [-159.360864, 21.950306],
+      ] },
+      { name: 'L\u0101na\u02bbi', ring: [
+        [-156.937087, 20.933798], [-157.023277, 20.938533], [-157.079047, 20.907751], [-157.066372, 20.867488], [-157.019474, 20.842614],
+        [-157.001729, 20.811813], [-156.994124, 20.756117], [-156.963704, 20.718184], [-156.873711, 20.730039], [-156.823011, 20.762043],
+        [-156.784986, 20.820106], [-156.836954, 20.876963], [-156.888922, 20.925511], [-156.938354, 20.933798],
+      ] },
+      { name: 'Maui', ring: [
+        [-156.474484, 20.904572], [-156.51306, 20.964506], [-156.522334, 20.988632], [-156.557569, 21.019771], [-156.595622, 21.03775],
+        [-156.64636, 21.030734], [-156.683944, 20.99872], [-156.705085, 20.910975], [-156.689581, 20.863572], [-156.628038, 20.800344],
+        [-156.531371, 20.763268], [-156.495667, 20.78567], [-156.468888, 20.77425], [-156.463721, 20.618675], [-156.421909, 20.574698],
+        [-156.346158, 20.566728], [-156.252668, 20.580362], [-156.192535, 20.610267], [-156.116898, 20.60587], [-155.995491, 20.664281],
+        [-155.967773, 20.735914], [-155.972002, 20.786872], [-156.098707, 20.845315], [-156.227635, 20.938376], [-156.289786, 20.954258],
+        [-156.334169, 20.953635], [-156.407585, 20.925585], [-156.47466, 20.904388],
+      ] },
+      { name: 'Moloka\u02bbi', ring: [
+        [-156.998647, 21.188628], [-157.171648, 21.211193], [-157.19585, 21.227069], [-157.265767, 21.229576], [-157.260389, 21.192807],
+        [-157.312379, 21.12844], [-157.320446, 21.079101], [-157.211088, 21.074082], [-157.080217, 21.087465], [-157.004921, 21.067391],
+        [-156.867776, 21.030582], [-156.790687, 21.054843], [-156.70822, 21.126768], [-156.695671, 21.163553], [-156.719873, 21.171076],
+        [-156.738697, 21.185285], [-156.839092, 21.179434], [-156.934108, 21.183614], [-156.961895, 21.22874], [-156.993269, 21.220385],
+        [-156.998647, 21.188628],
+      ] },
+      { name: 'Ni\u02bbihau', ring: [
+        [-160.044064, 21.981167], [-160.056897, 21.967867], [-160.077278, 21.934261], [-160.069729, 21.909752], [-160.068974, 21.88734],
+        [-160.146723, 21.86002], [-160.201827, 21.769619], [-160.243343, 21.788545], [-160.260704, 21.8376], [-160.230511, 21.903449],
+        [-160.159555, 21.952465], [-160.133891, 21.965767], [-160.104452, 22.037853], [-160.080297, 22.032955], [-160.074258, 22.010562],
+        [-160.050858, 21.997965], [-160.04331, 21.980467],
+      ] },
+      { name: 'O\u02bbahu', ring: [
+        [-158.129834, 21.594337], [-158.211357, 21.588616], [-158.288266, 21.581464], [-158.246735, 21.534256], [-158.248273, 21.481306],
+        [-158.208281, 21.428338], [-158.169827, 21.36389], [-158.120605, 21.282217], [-157.977555, 21.296549], [-157.923719, 21.28795],
+        [-157.842196, 21.26645], [-157.819124, 21.236345], [-157.76375, 21.249248], [-157.685303, 21.247814], [-157.633005, 21.302281],
+        [-157.648387, 21.339536], [-157.717605, 21.468424], [-157.78067, 21.475581], [-157.8222, 21.488463], [-157.816048, 21.521378],
+        [-157.842196, 21.575743], [-157.87296, 21.595767], [-157.917567, 21.681553], [-157.959097, 21.720141], [-158.006781, 21.717283],
+        [-158.066769, 21.672977], [-158.09138, 21.632947], [-158.129834, 21.594337],
+      ] },
+    ],
+    approach: { ring: [
+      [-159.347993, 21.94505], [-159.338381, 21.957122], [-159.336431, 21.954259], [-159.334809, 21.954259], [-159.32882, 21.959235],
+      [-159.327697, 21.971385], [-159.327697, 21.994757], [-159.334688, 22.016332], [-159.334485, 22.028734], [-159.33043, 22.043016],
+      [-159.223231, 22.043016], [-159.223231, 21.861192], [-159.443568, 21.861192], [-159.436928, 21.869036], [-159.415196, 21.88192],
+      [-159.384409, 21.902645], [-159.381391, 21.911606], [-159.359055, 21.927287], [-159.349397, 21.933447], [-159.345137, 21.937234],
+      [-159.346202, 21.939915], [-159.349853, 21.941327], [-159.348027, 21.944995],
+    ] },
+    capture: { dropLast: true, ring: [
+      [-159.346025, 21.937877], [-159.348179, 21.955167], [-159.335935, 21.954579], [-159.346027, 21.937884],
+    ] },
+    funnel: [-159.348345, 21.955244],   // the funnel's point (harbor_capture_triangle.geojson, feature 1)
+    dock: [-159.359816, 21.950133],     // SOLACE's final docked position (nawilili_at_dock.geojson)
+  };
+  var LAND_WARNING_TEXT = { ahead: 'LAND AHEAD', close: 'CLOSE TO SHORE', danger: 'DANGER OF GROUNDING' }; // legacy: HELM's old readout, which can no longer show (see navCheckWarnings)
 
-  var LAND_AHEAD_NM = 25;      // edge-distance (to a landmass's coastline, not its center) that first triggers a warning
-  var CLOSE_TO_SHORE_NM = 8;
-  var DANGER_GROUNDING_NM = 2;
-  var LAND_LOOKAHEAD_NM = 60;  // how far along the current heading to look for trouble
-  var LAND_SAMPLE_STEP_NM = 4; // sampling the projected path rather than exact line-to-circle geometry — reuses the same destinationPoint/distanceBetween math as everything else, and a few-mile step is plenty precise at these distances
+  /* ======================================================================
+     NAVIGATION: land, ocean boundaries, the Nawiliwili approach, the capture funnel
+     ----------------------------------------------------------------------
+     Everything is straight segments in the lon/lat plane, exactly as the GeoJSON defines them. A tick's movement is a short straight
+     segment tested against EVERY edge (never just the end point), so no feature, however thin, can be tunnelled through.
+       REAL LAND (the eight islands + the Pacific ring's coastal edges) .. she stops at the last valid water position and runs aground
+       OCEAN / ROUTE boundaries (Pacific's artificial edges) ............... never a grounding: she is turned back toward Nawiliwili
+       THE APPROACH ZONE ................................................... only relaxes the warnings; land stays solid
+       THE CAPTURE FUNNEL .................................................. entering it begins the final arrival, exactly once
+     Only active in open water (waypointIndex >= OPEN_WATER_WAYPOINT_INDEX): the coastal corridor is the waypoint chain.
+     ====================================================================== */
+  var NAV = null;
+  var NAV_GROUND_MARGIN_M = 15;     // she stops this far short of land: "the last valid navigable-water position"
+  var NAV_BOUNDARY_MARGIN_M = 100;  // ...and this far short of an ocean/route boundary
+  var NAV_SIGHT_NM = 20;            // first within this of a Hawaiian island: "Land on the horizon."
+  var NAV_PREDICT_NM = 30;          // how far along her heading a collision is looked for
+  var NAV_LAND_AHEAD_NM = 15;       // a projected land collision this near: "Land ahead."
+  var NAV_LAND_CLOSE_NM = 3;        // ...this near: "I'm getting too close. I should change course."
+  var NAV_BOUNDARY_WARN_NM = 30;    // heading for an ocean/route boundary this near: "I'm getting too far off course."
+  var NAV_REARM_NM = 40;            // a warning re-arms only once nothing is projected inside this
 
-  // Closest approach of the boat's PROJECTED path (straight out along
-  // its current heading) to any landmass's coastline, out to the
-  // lookahead distance. Returns null if nothing is within warning range
-  // anywhere along that stretch.
-  function nearestLandAhead(lat, lon, heading) {
-    var best = null;
-    for (var d = 0; d <= LAND_LOOKAHEAD_NM; d += LAND_SAMPLE_STEP_NM) {
-      var pt = d === 0 ? { lat: lat, lon: lon } : destinationPoint(lat, lon, heading, d);
-      for (var i = 0; i < LAND_MASSES.length; i++) {
-        var lm = LAND_MASSES[i];
-        var edgeDist = distanceBetween(pt.lat, pt.lon, lm.lat, lm.lon) - lm.radiusNm;
-        if (best === null || edgeDist < best.edgeDist) best = { landmass: lm, edgeDist: edgeDist };
-      }
+  function navGeoLon(lon) { return lon > 0 ? lon - 360 : lon; } // the Pacific ring runs past the antimeridian (to -181.1): one continuous longitude
+  function navRingVerts(def) { var r = def.ring.slice(); if (def.dropLast) r.pop(); return r; }
+  function navInit() {
+    if (NAV) return NAV;
+    var g = NAV_GEO, art = {};
+    g.pacific.artificialEdges.forEach(function (k) { art[k] = true; });
+    NAV = { pacific: navRingVerts(g.pacific), approach: navRingVerts(g.approach), capture: navRingVerts(g.capture), islands: [], landEdges: [], artEdges: [], islandEdges: [], capEdges: [] };
+    NAV.pacific.forEach(function (a, k) { var b = NAV.pacific[(k + 1) % NAV.pacific.length]; (art[k] ? NAV.artEdges : NAV.landEdges).push([a[0], a[1], b[0], b[1], 'pacific']); });
+    g.islands.forEach(function (isl) {
+      var v = navRingVerts(isl); NAV.islands.push({ name: isl.name, ring: v });
+      v.forEach(function (a, k) { var b = v[(k + 1) % v.length], e = [a[0], a[1], b[0], b[1], isl.name]; NAV.landEdges.push(e); NAV.islandEdges.push(e); });
+    });
+    NAV.capture.forEach(function (a, k) { var b = NAV.capture[(k + 1) % NAV.capture.length]; NAV.capEdges.push([a[0], a[1], b[0], b[1], 'capture']); });
+    return NAV;
+  }
+  function navPointInRing(x, y, ring) {
+    var inside = false;
+    for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      var xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function navInWater(x, y) {
+    navInit();
+    if (!navPointInRing(x, y, NAV.pacific)) return false;
+    for (var i = 0; i < NAV.islands.length; i++) if (navPointInRing(x, y, NAV.islands[i].ring)) return false;
+    return true;
+  }
+  // Where (0..1) the straight movement (x1,y1)->(x2,y2) first meets edge e, or -1.
+  function navSegT(x1, y1, x2, y2, e) {
+    var rx = x2 - x1, ry = y2 - y1, sx = e[2] - e[0], sy = e[3] - e[1], den = rx * sy - ry * sx;
+    if (Math.abs(den) < 1e-18) return -1;
+    var qx = e[0] - x1, qy = e[1] - y1, t = (qx * sy - qy * sx) / den, u = (qx * ry - qy * rx) / den;
+    return (t >= 0 && t <= 1 && u >= 0 && u <= 1) ? t : -1;
+  }
+  function navFirstHit(x1, y1, x2, y2, edges) {
+    var best = -1, be = null;
+    for (var i = 0; i < edges.length; i++) { var t = navSegT(x1, y1, x2, y2, edges[i]); if (t >= 0 && (best < 0 || t < best)) { best = t; be = edges[i]; } }
+    return best < 0 ? null : { t: best, edge: be };
+  }
+  // The nearest point on a set of edges (nm, and the point as lon/lat), measured in a local flat plane.
+  function navNearestOnEdges(x, y, edges) {
+    var c = Math.cos(y * Math.PI / 180), best = null, px = x * c;
+    for (var i = 0; i < edges.length; i++) {
+      var e = edges[i], ax = e[0] * c, ay = e[1], dx = e[2] * c - ax, dy = e[3] - ay, L2 = dx * dx + dy * dy;
+      var t = L2 > 0 ? clamp(((px - ax) * dx + (y - ay) * dy) / L2, 0, 1) : 0, qx = ax + dx * t, qy = ay + dy * t, d = Math.sqrt((px - qx) * (px - qx) + (y - qy) * (y - qy)) * 60;
+      if (!best || d < best.nm) best = { nm: d, x: qx / c, y: qy };
     }
     return best;
   }
 
-  function landWarningLevelFor(edgeDist) {
-    if (edgeDist <= DANGER_GROUNDING_NM) return 'danger';
-    if (edgeDist <= CLOSE_TO_SHORE_NM) return 'close';
-    if (edgeDist <= LAND_AHEAD_NM) return 'ahead';
-    return 'none';
+  // One tick's open-water movement. Returns what happened; position and odometer are updated here.
+  function navMove(state, heading, nm, opts) {
+    navInit();
+    var nav = state.nav, to = destinationPoint(nav.lat, nav.lon, heading, nm);
+    var x1 = navGeoLon(nav.lon), y1 = nav.lat, x2 = navGeoLon(to.lon), y2 = to.lat, tC = 2;
+    if (!(opts && opts.noCapture)) {
+      if (navPointInRing(x1, y1, NAV.capture)) tC = 0;
+      else { var hc = navFirstHit(x1, y1, x2, y2, NAV.capEdges); if (hc) tC = hc.t; }
+    }
+    var hl = navFirstHit(x1, y1, x2, y2, NAV.landEdges), ha = navFirstHit(x1, y1, x2, y2, NAV.artEdges);
+    var tL = hl ? hl.t : 2, tA = ha ? ha.t : 2, segM = Math.max(nm * 1852, 1), kind = 'free', t = 1;
+    if (tC < 2 && tC <= tL && tC <= tA) { kind = 'capture'; t = tC > 0 ? Math.min(1, tC + 10 / segM) : 0; } // captured 10 m inside the edge she crossed: unambiguously within the funnel
+    else if (tL < 2 && tL <= tA) { kind = 'ground'; t = Math.max(0, tL - NAV_GROUND_MARGIN_M / segM); }
+    else if (tA < 2) { kind = 'boundary'; t = Math.max(0, tA - NAV_BOUNDARY_MARGIN_M / segM); }
+    nav.lat = y1 + (y2 - y1) * t;
+    nav.lon = nav.lon + (to.lon - nav.lon) * t;
+    nav.distanceTraveled += nm * t;
+    if (kind === 'ground') navOnGround(state);
+    else if (kind === 'boundary') navOnBoundary(state);
+    else if (kind === 'capture') navBeginFinale(state);
+    return { kind: kind, t: t };
+  }
+  function navOnGround(state) {
+    var nav = state.nav, near = navNearestOnEdges(navGeoLon(nav.lon), nav.lat, NAV.landEdges), brg = normalizeDeg((nav.heading || 0) + 180);
+    if (near && near.nm > 1e-6) brg = bearingBetween(near.y, near.x, nav.lat, nav.lon); // from the boundary she struck toward her: away from the land
+    nav.grounded = true; nav.groundedShown = false; nav.groundBearing = brg; nav.timesAground = (nav.timesAground || 0) + 1;
+  }
+  // Not a wall and not land: she has simply wandered too far from the route, so she is turned back to the LIVE bearing to Nawiliwili.
+  function navPointAtNawiliwili(state) {
+    var nav = state.nav, b = bearingBetween(nav.lat, nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    nav.setCourse = Math.round(b); nav.autopilotHeading = nav.setCourse; nav.driftHeading = b; nav.heading = b; nav.courseDraft = null; nav.tack = null;
+  }
+  function navOnBoundary(state) {
+    log(state, "I'm too far off course. I should correct my heading.");
+    state.nav.boundaryWarn = 1;
+    navPointAtNawiliwili(state);
   }
 
-  var LAND_WARNING_RANK = { none: 0, ahead: 1, close: 2, danger: 3 };
-  var LAND_WARNING_TEXT = { ahead: 'LAND AHEAD', close: 'CLOSE TO SHORE', danger: 'DANGER OF GROUNDING' };
-
-  // Escalating only — logs when the level goes UP, stays quiet on the
-  // way back down (HELM reflects the current level continuously; see
-  // cmdHelm), and never runs at all inside the coastal corridor.
-  function checkLandProximity(state) {
-    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
-      state.nav.landWarningLevel = 'none';
-      return;
+  // What lies ahead along a heading: distance (nm) to the first land edge / ocean-boundary edge, or null.
+  function navPredict(lat, lon, heading, maxNm) {
+    navInit();
+    var to = destinationPoint(lat, lon, heading, maxNm), x1 = navGeoLon(lon), x2 = navGeoLon(to.lon);
+    var hl = navFirstHit(x1, lat, x2, to.lat, NAV.landEdges), ha = navFirstHit(x1, lat, x2, to.lat, NAV.artEdges);
+    return { landNm: hl ? hl.t * maxNm : null, artNm: ha ? ha.t * maxNm : null };
+  }
+  // Warnings come from an actual projected collision, never from mere closeness; the approach zone relaxes them (land stays solid).
+  function navCheckWarnings(state) {
+    var nav = state.nav;
+    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX || nav.grounded || (state.finale && state.finale.phase !== 'none')) return;
+    navInit();
+    var x = navGeoLon(nav.lon), y = nav.lat;
+    if (!state.flags.landOnHorizonShown) {
+      var near = navNearestOnEdges(x, y, NAV.islandEdges);
+      if (near && near.nm <= NAV_SIGHT_NM) { state.flags.landOnHorizonShown = true; log(state, 'Land on the horizon.'); }
     }
-    // Projects along setCourse (the player's steady intent), not the
-    // wobbled actual heading — using the noisy value here would make
-    // the warning level flicker tick to tick as wobble nudges which
-    // landmass is nearest, spamming the log with re-escalations for
-    // what's really the same ongoing situation.
-    var nearest = nearestLandAhead(state.nav.lat, state.nav.lon, state.nav.setCourse);
-    var level = nearest ? landWarningLevelFor(nearest.edgeDist) : 'none';
-    if (LAND_WARNING_RANK[level] > LAND_WARNING_RANK[state.nav.landWarningLevel]) {
-      var line = LAND_WARNING_TEXT[level];
-      if (nearest) {
-        line += ' \u2014 ' + nearest.landmass.name.toUpperCase() + ', ' + Math.max(0, Math.round(nearest.edgeDist)) + ' NM';
-      }
-      log(state, line);
-    }
-    state.nav.landWarningLevel = level;
+    var pr = navPredict(nav.lat, nav.lon, nav.heading, NAV_PREDICT_NM);
+    if (pr.artNm != null && pr.artNm <= NAV_BOUNDARY_WARN_NM) {
+      if (nav.boundaryWarn < 1) { nav.boundaryWarn = 1; log(state, "I'm getting too far off course."); }
+    } else if (pr.artNm == null || pr.artNm > NAV_REARM_NM) nav.boundaryWarn = 0;
+    if (navPointInRing(x, y, NAV.approach)) { nav.landWarn = 0; return; } // NAWILIWILI APPROACH: close land is normal here
+    if (pr.landNm != null && pr.landNm <= NAV_LAND_CLOSE_NM) {
+      if (nav.landWarn < 2) { nav.landWarn = 2; log(state, "I'm getting too close. I should change course."); }
+    } else if (pr.landNm != null && pr.landNm <= NAV_LAND_AHEAD_NM) {
+      if (nav.landWarn < 1) { nav.landWarn = 1; log(state, 'Land ahead.'); }
+    } else if (pr.landNm == null || pr.landNm > NAV_REARM_NM) nav.landWarn = 0;
   }
 
-  // Called with where the boat's open-ocean movement would land this
-  // tick. If that point falls inside a landmass, the movement is
-  // rejected (caller does not apply it) rather than letting the boat's
-  // position pass through — this is what "do not allow the simulation
-  // to pass through islands" actually means mechanically. Grounding
-  // blocks movement and logs once per episode (tracked by name), not
-  // every tick the player leaves the boat pointed at the beach, but
-  // never damages the boat — there is no hull condition to damage.
-  // Clears silently the moment a tick's projected position no longer
-  // hits land.
-  function applyGroundingIfNeeded(state, projectedLat, projectedLon) {
-    for (var i = 0; i < LAND_MASSES.length; i++) {
-      var lm = LAND_MASSES[i];
-      if (distanceBetween(projectedLat, projectedLon, lm.lat, lm.lon) < lm.radiusNm) {
-        if (state.nav.groundedOn !== lm.name) {
-          state.nav.groundedOn = lm.name;
-          log(state, 'Aground on ' + lm.name + ' \u2014 hull\u2019s fine, but she\u2019s not moving. Change course to work free.');
-        }
-        return true;
+  // FREE SOLACE (after its 20 s): move her only as far as needed back into clear water and turn her away from the land she struck.
+  function navFreeSolace(state) {
+    navInit();
+    var nav = state.nav, x = navGeoLon(nav.lon), y = nav.lat, near = navNearestOnEdges(x, y, NAV.landEdges);
+    var brg = Number.isFinite(nav.groundBearing) ? nav.groundBearing : normalizeDeg((nav.heading || 0) + 180);
+    if (near && near.nm > 1e-6) brg = bearingBetween(near.y, near.x, nav.lat, nav.lon);
+    if (near) {
+      var tries = [150, 100, 60, 30];
+      for (var i = 0; i < tries.length; i++) {
+        var c = destinationPoint(near.y, near.x, brg, tries[i] / 1852), cx = navGeoLon(c.lon);
+        if (!navInWater(cx, c.lat)) continue;
+        if (navFirstHit(x, y, cx, c.lat, NAV.landEdges) || navFirstHit(x, y, cx, c.lat, NAV.artEdges)) continue;
+        nav.lat = c.lat; nav.lon = c.lon; break;
       }
     }
-    if (state.nav.groundedOn) state.nav.groundedOn = null;
-    return false;
+    nav.setCourse = Math.round(brg); nav.autopilotHeading = nav.setCourse; nav.driftHeading = brg; nav.heading = brg; nav.courseDraft = null; nav.tack = null;
+    nav.grounded = false; nav.groundBearing = null; nav.landWarn = 0;
+  }
+  // A save whose position is not in valid water (inside land, or outside the Pacific ring) is moved the minimum distance back into it.
+  function navSnapToWater(state) {
+    navInit();
+    var nav = state.nav, x = navGeoLon(nav.lon), y = nav.lat;
+    if (navInWater(x, y)) return;
+    var inIsland = NAV.islands.some(function (isl) { return navPointInRing(x, y, isl.ring); });
+    var near = navNearestOnEdges(x, y, inIsland ? NAV.islandEdges : NAV.landEdges.concat(NAV.artEdges));
+    if (!near) return;
+    var brg = inIsland ? bearingBetween(near.y, near.x, y, nav.lon) : bearingBetween(near.y, near.x, FINAL_DEST.lat, FINAL_DEST.lon);
+    var tries = [200, 400, 800, 1600];
+    for (var i = 0; i < tries.length; i++) {
+      var c = destinationPoint(near.y, near.x, brg, tries[i] / 1852);
+      if (navInWater(navGeoLon(c.lon), c.lat)) { nav.lat = c.lat; nav.lon = c.lon; return; }
+    }
+  }
+  function navAnnounceGroundingIfNeeded(state, animate) {
+    var nav = state.nav;
+    if (!nav.grounded || nav.groundedShown) return;
+    nav.groundedShown = true;
+    var say = function (s) { log(s, 'Aground \u2014 hull\u2019s fine, but she\u2019s not moving.'); flushNewLogEntries(s); };
+    if (animate && !uiBusy) runShortAction(state, { label: 'RUN AGROUND', duration: 3, action: say });
+    else say(state);
+  }
+  function migrateNavGeoIfNeeded(state) {
+    var nav = state.nav;
+    delete nav.groundedOn; // the old circle model's marker
+    if (typeof nav.grounded !== 'boolean') nav.grounded = false;
+    if (typeof nav.groundedShown !== 'boolean') nav.groundedShown = true;
+    if (!Number.isFinite(nav.timesAground)) nav.timesAground = 0;
+    if (nav.landWarn !== 0 && nav.landWarn !== 1 && nav.landWarn !== 2) nav.landWarn = 0;
+    if (nav.boundaryWarn !== 0 && nav.boundaryWarn !== 1) nav.boundaryWarn = 0;
+    if (nav.groundBearing === undefined) nav.groundBearing = null;
+    if (state.flags && state.flags.landOnHorizonShown === undefined) state.flags.landOnHorizonShown = false;
+    var f = state.finale;
+    if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null };
+    else { if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.codaAt === undefined) f.codaAt = null; if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
+    if (state.finale.phase === 'none' && nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX && Number.isFinite(nav.lat) && Number.isFinite(nav.lon)) navSnapToWater(state);
+  }
+
+  /* ======================================================================
+     THE FINAL ARRIVAL (a scripted finale, not sailing simulation)
+     ----------------------------------------------------------------------
+     Entering the capture funnel ends normal navigation for good: the world stops (see simTick -- no diesel, battery, hunger or rescue
+     clock can interfere, and nothing is consumed), the Helm / GPS / menus are replaced by the finale's own, and the autopilot takes her
+     in. state.finale is the whole persisted state: phase 'none' | 'arrival' | 'done', and `step` into FINALE_STEPS with `stepAt`, the
+     real time that step began -- so a reload resumes the step with exactly the time that is left, never replays or skips one.
+     The five 'auto' legs add up to 75 s (engine start, only if it was off, takes its own few seconds on top).
+     ====================================================================== */
+  var FINALE_STEPS = [
+    { id: 'enter',    kind: 'auto',   label: 'ENTERING N\u0100WILIWILI HARBOR', secs: 10 },
+    { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } }, // skipped if the engine is already running
+    { id: 'making',   kind: 'auto',   label: 'MAKING FOR THE MARINA', secs: 22 },
+    { id: 'approach', kind: 'auto',   label: 'APPROACHING THE SLIP', secs: 20 },
+    { id: 'slowing',  kind: 'auto',   label: 'SLOWING', secs: 10 },
+    { id: 'lining',   kind: 'auto',   label: 'LINING UP WITH THE SLIP', secs: 13 },
+    { id: 'stop',     kind: 'action', option: { label: 'STOP ENGINE', action: 'finale-engine-stop' } },
+    { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
+    { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
+    { id: 'ashes',    kind: 'action', option: { label: 'SCATTER ASHES', action: 'finale-ashes' } },
+    { id: 'fade',     kind: 'ui' },
+    { id: 'title',    kind: 'ui' },
+    { id: 'summary',  kind: 'ui' },
+  ];
+  function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
+  var FINALE_FADE_SECS = 4, FINALE_TITLE_FADE_SECS = 3, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions
+  var FINALE_CODA_PATH = 'audio/saloon/Coda.mp3';
+  var finaleTimer = null, finaleRendering = null, finaleCodaEl = null, finaleWired = false, finaleCodaTries = 0;
+
+  function finaleAtStep(state, id) {
+    var f = state.finale;
+    return !!(f && f.phase === 'arrival' && FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === id);
+  }
+  function finaleOptions(state) {
+    var st = FINALE_STEPS[state.finale.step];
+    return (st && st.kind === 'action') ? [st.option] : [];
+  }
+  function navBeginFinale(state) {
+    state.finale = { phase: 'arrival', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: state.meta.voyageMinutes }; // stepAt 0 = not yet SHOWN: its clock starts when the UI first renders the step (finaleRender)
+    state.nav.grounded = false;
+    state.flags.arrivedAtDestination = true;
+    state.pendingChoice = null; state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
+  }
+  function finalePlaceAtDock(state) {
+    var d = NAV_GEO.dock, f = NAV_GEO.funnel, h = bearingBetween(f[1], f[0], d[1], d[0]); // she lies as she came in: from the funnel's point toward the slip
+    state.nav.lat = d[1]; state.nav.lon = d[0]; state.nav.heading = h; state.nav.setCourse = Math.round(h); state.nav.autopilotHeading = state.nav.setCourse; state.nav.driftHeading = h; state.boat.speed = 0;
+  }
+  function finaleAdvance(state) {
+    var f = state.finale, prev = FINALE_STEPS[f.step] ? FINALE_STEPS[f.step].id : null;
+    f.step++;
+    if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'start' && state.boat.engineOn) f.step++; // already running: no needless stop / restart
+    f.stepAt = Date.now();
+    if (prev === 'lining') finalePlaceAtDock(state);
+    if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'summary') f.phase = 'done';
+    saveGameState(state);
+    setTimeout(function () { finaleRender(state); }, 40);
+  }
+  function finaleKick(state) { if (state && state.finale && state.finale.phase !== 'none') finaleRender(state); }
+  function finaleSyncChrome(state) { if (state.finale.phase !== 'none') restartBtn.hidden = true; } // NEW VOYAGE appears only when the ending has completed (inside the summary)
+  function finaleSchedule(state, secs) {
+    if (finaleTimer) clearTimeout(finaleTimer);
+    finaleTimer = setTimeout(function () { finaleTimer = null; finaleRender(state); }, Math.max(60, secs * 1000));
+  }
+  function finaleEls() { return { ov: document.getElementById('ending-overlay'), title: document.getElementById('ending-title'), sum: document.getElementById('ending-summary'), btn: document.getElementById('ending-newvoyage') }; }
+  function finaleShow(el, cls, instant) {
+    if (el.classList.contains(cls)) return;
+    if (instant) { el.style.transition = 'none'; el.classList.add(cls); void el.offsetWidth; el.style.transition = ''; }
+    else { void el.offsetWidth; el.classList.add(cls); }
+  }
+  function finaleWire() {
+    if (finaleWired) return; finaleWired = true;
+    document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.finale && GAME.finale.phase === 'done') confirmRestart(); });
+  }
+  function finaleRender(state) {
+    var f = state.finale; if (!f || f.phase === 'none') return;
+    var st = FINALE_STEPS[f.step]; if (!st) return;
+    finaleWire(); finaleSyncChrome(state); finaleEnsureAudio(state);
+    if (!f.stepAt && st.kind !== 'action') { f.stepAt = Date.now(); saveGameState(state); } // the step's clock starts the moment it is first shown, however long after capture that is
+    if (st.kind === 'auto') {
+      var token = f.step + ':' + f.stepAt;
+      if (uiBusy || finaleRendering === token) return;
+      var remaining = st.secs - (Date.now() - f.stepAt) / 1000;
+      if (remaining < 0.4) { finaleAdvance(state); return; }
+      finaleRendering = token;
+      runShortAction(state, { label: st.label, duration: remaining, action: function (s) { finaleRendering = null; finaleAdvance(s); } });
+    } else if (st.kind === 'action') {
+      if (!uiBusy) renderOptions(state);
+    } else finaleUi(state, st.id);
+  }
+  function finaleUi(state, id) {
+    var f = state.finale, E = finaleEls(), el = (Date.now() - f.stepAt) / 1000;
+    E.ov.hidden = false;
+    if (id === 'fade') { // the whole presentation fades to black; CODA carries on underneath
+      finaleShow(E.ov, 'show', el > 1);
+      if (el >= FINALE_FADE_SECS) { finaleAdvance(state); return; }
+      finaleSchedule(state, FINALE_FADE_SECS - el + 0.1);
+    } else if (id === 'title') { // LANDFALL, alone: nothing else is on screen, no controls of any kind
+      finaleShow(E.ov, 'show', true); finaleShow(E.title, 'show', el > 1);
+      var end = FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS;
+      if (el >= end) { finaleAdvance(state); return; }
+      finaleSchedule(state, end - el);
+    } else { // summary: stays indefinitely; NEW VOYAGE appears only once it has fully faded in
+      finaleShow(E.ov, 'show', true); finaleShow(E.title, 'show', true);
+      finaleBuildSummary(state, E);
+      finaleShow(E.sum, 'show', el > 1);
+      if (el >= FINALE_SUMMARY_FADE_SECS) { E.btn.hidden = false; finaleShow(E.btn, 'show', el > FINALE_SUMMARY_FADE_SECS + 1); }
+      else { finaleSchedule(state, FINALE_SUMMARY_FADE_SECS - el + 0.1); }
+    }
+  }
+  // Only statistics the game really tracks. (Not tracked, so not shown: time under sail, time on autopilot, fish caught, books finished,
+  // cassettes played.)
+  function finaleSummaryRows(state) {
+    var vl = state.vesselLog, days = (vl && Array.isArray(vl.completedDays)) ? vl.completedDays.slice() : [];
+    if (vl && vl.currentDay) days.push(vl.currentDay);
+    var engineHrs = 0, repairs = 0;
+    days.forEach(function (d) { engineHrs += Number.isFinite(d.engineHours) ? d.engineHours : (Number.isFinite(d.engineMinutes) ? d.engineMinutes / 60 : 0); repairs += Array.isArray(d.repairs) ? d.repairs.length : 0; });
+    var mins = state.meta.voyageMinutes, hrs = mins / 60, nm = state.nav.distanceTraveled;
+    var dd = Math.floor(mins / 1440), hh = Math.floor((mins % 1440) / 60), mm = Math.floor(mins % 60);
+    var underway = dd > 0 ? dd + (dd === 1 ? ' DAY ' : ' DAYS ') + hh + ' HRS' : hh + ' HRS ' + mm + ' MIN';
+    var arrived = state.meta.departedAt + (state.finale.arrivedMinutes != null ? state.finale.arrivedMinutes : mins) * 60000;
+    return [
+      { text: 'S/V ' + VESSEL_NAME }, { text: 'SHILSHOLE BAY \u2192 N\u0100WILIWILI', gap: true },
+      { label: 'DEPARTED', value: formatShipTime(state.meta.departedAt) }, { label: 'ARRIVED', value: formatShipTime(arrived) },
+      { label: 'TIME UNDERWAY', value: underway }, { label: 'DISTANCE SAILED', value: Math.round(nm).toLocaleString() + ' NM' },
+      { label: 'AVERAGE SPEED', value: (hrs > 0 ? nm / hrs : 0).toFixed(1) + ' KT' }, { label: 'TIME UNDER ENGINE', value: engineHrs.toFixed(1) + ' HRS' },
+      { label: 'REPAIRS MADE', value: String(repairs) }, { label: 'TIMES RUN AGROUND', value: String(state.nav.timesAground || 0) },
+    ];
+  }
+  function finaleBuildSummary(state, E) {
+    if (E.sum.getAttribute('data-built') === '1') return;
+    E.sum.setAttribute('data-built', '1');
+    finaleSummaryRows(state).forEach(function (r) {
+      var el;
+      if (r.label) {
+        el = document.createElement('div'); el.className = 'data-row data-row-lg';
+        var a = document.createElement('span'); a.textContent = r.label; var b = document.createElement('span'); b.textContent = r.value; el.appendChild(a); el.appendChild(b);
+      } else { el = document.createElement('p'); el.className = 'line dim ending-line'; el.textContent = r.text; if (r.gap) el.style.marginBottom = '1.2rem'; }
+      E.sum.appendChild(el);
+    });
+  }
+
+  // ---- audio: CODA, and the underway -> marina transition (both reuse the game's existing audio machinery)
+  function finaleStartCoda(state, offsetSec) {
+    if (finaleCodaEl || !audioUnlocked || finaleCodaTries >= 4) return; // (a missing / refused file is retried a few times, never in a loop)
+    finaleCodaTries++;
+    try { finaleCodaEl = new Audio(FINALE_CODA_PATH); } catch (e) { finaleCodaEl = null; return; }
+    finaleCodaEl.volume = muted ? 0 : TAPE_VOLUME_BELOW; // the file's own normal level; the narrator is below, the same as the cassette player
+    if (offsetSec > 1) finaleCodaEl.addEventListener('loadedmetadata', function () { if (offsetSec < finaleCodaEl.duration) finaleCodaEl.currentTime = offsetSec; else finaleCodaEl.pause(); });
+    var p = finaleCodaEl.play();
+    if (p && p.catch) p.catch(function (e) { finaleCodaEl = null; }); // not allowed to start yet: tried again on the next gesture
+  }
+  function finaleEnsureAudio(state) { // idempotent; also resumes both after a reload (each is a no-op until the browser lets audio play)
+    var f = state.finale;
+    if (!f || f.phase === 'none' || !audioUnlocked) return;
+    if (f.step > finaleStepIndex('stop')) finaleStartMarina();
+    if (f.codaAt != null && f.step > finaleStepIndex('ashore')) finaleStartCoda(state, (Date.now() - f.codaAt) / 1000);
+  }
+  var finaleMarinaOn = false;
+  function finaleStartMarina() {
+    if (finaleMarinaOn || !audioUnlocked) return;
+    finaleMarinaOn = true;
+    var el = playMarinaOneShot('marinaSound', null); // the existing marina ambience, faded in
+    if (el) el.loop = true; // the voyage is over: it simply stays
+    marinaAmbienceStarted.marinaSound = true;
+  }
+  function applyMuteToFinaleAudio() { if (finaleCodaEl) finaleCodaEl.volume = muted ? 0 : TAPE_VOLUME_BELOW; }
+  function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
+    if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
+    finaleRendering = null; finaleMarinaOn = false; finaleCodaTries = 0;
+    if (finaleCodaEl) { try { finaleCodaEl.pause(); } catch (e) {} finaleCodaEl = null; }
+    ['marinaSound', 'pnwBirds'].forEach(function (k) { var el = marinaAudioEls[k]; if (el) { try { el.pause(); } catch (e) {} el.loop = false; } });
+    marinaAmbienceStarted = { pnwBirds: false, marinaSound: false };
+    var E = finaleEls(); if (!E.ov) return;
+    ['ov', 'title', 'sum', 'btn'].forEach(function (k) { E[k].classList.remove('show'); });
+    E.sum.innerHTML = ''; E.sum.removeAttribute('data-built'); E.btn.hidden = true; E.ov.hidden = true;
   }
 
   var TOTAL_ROUTE_NM = 0;
@@ -5225,7 +5652,7 @@
   }
 
   function simTick(state) {
-    if (state.voyageEnd && state.voyageEnd.phase !== 'none') return; // RESCUE -- the voyage is over: the world stops (see checkNeglectRescue)
+    if ((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none')) return; // RESCUE / THE FINAL ARRIVAL -- the voyage is over: the world stops (see checkNeglectRescue)
     state.meta.voyageMinutes += TICK_MINUTES;
     // VESSEL LOG -- must run before this tick's own speed/wind/engine
     // sample is taken (see sampleVesselLogTick at the end of this
@@ -5257,14 +5684,15 @@
     //
     // OPEN OCEAN: once the loop below clears the corridor (or the tick
     // started already clear of it), any remaining budget moves in a
-    // straight line along the heading -- checked against N\u0101wiliwili
-    // (arrival) and against LAND_MASSES (grounding) rather than against
-    // any further waypoint.
+    // straight line along the heading -- tested by navMove against real land,
+    // the ocean boundaries and the capture funnel (see NAVIGATION), rather than
+    // against any further waypoint.
     //
     // Applies identically whether this tick is live or part of a
     // multi-tick offline catch-up, since both just call simTick.
     var heading = computeHeading(state);
     var boatSpeed = computeBoatSpeed(state, heading);
+    if (state.nav.grounded) boatSpeed = 0; // RUN AGROUND: 0.0 kt until FREE SOLACE (everything else -- weather, needs, power -- carries on as normal)
     state.boat.speed = boatSpeed;
     state.nav.heading = heading;
 
@@ -5330,24 +5758,7 @@
       // it. distanceTraveled still tracks actual nm sailed even though
       // nothing is being "arrived at" along the way -- only N\u0101wiliwili
       // itself, and land, matter now.
-      var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-      if (distToFinal <= nmRemaining) {
-        state.nav.lat = FINAL_DEST.lat;
-        state.nav.lon = FINAL_DEST.lon;
-        state.nav.distanceTraveled += distToFinal;
-        if (!state.flags.arrivedAtDestination) {
-          state.flags.arrivedAtDestination = true;
-          log(state, waypointArrivalLine(FINAL_DEST));
-        }
-      } else {
-        var projected = destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
-        if (!applyGroundingIfNeeded(state, projected.lat, projected.lon)) {
-          state.nav.lat = projected.lat;
-          state.nav.lon = projected.lon;
-          state.nav.distanceTraveled += nmRemaining;
-          if (state.nav.tack) state.nav.tackDistanceNm += nmRemaining;
-        }
-      }
+      navMove(state, heading, nmRemaining); // land, the ocean boundaries and the capture funnel -- see NAVIGATION
     }
 
     // Drives the luffing/sail_fill sequence off the heading this tick
@@ -5358,7 +5769,7 @@
     // two fighting over the same loop/one-shot.
     if (!activeTurn) updateNoGoZoneAudio(state);
 
-    checkLandProximity(state);
+    navCheckWarnings(state);
 
     updateCrew(state);
     checkFuel(state);
@@ -7018,6 +7429,7 @@
   // sea/wind/rain/creak crossfade at (transitionEngineLocationAudio),
   // not inferred from render state.
   function updateAudioForState(state) {
+    finaleEnsureAudio(state); // THE FINAL ARRIVAL: CODA / marina, resumed after a reload once audio may play
     updateSeaAudioForState(state);
     updateCreakAudioForState(state); // AMBIENT-AUDIO ENHANCEMENT PASS -- layered on top of interior sea, see its own section notes
     updateWindAudioForState(state);
@@ -7048,6 +7460,7 @@
     applyMuteToTapeAudio(); // CASSETTE HOOK (tape_start/track/tape_stop) -- same reasoning as engine audio
     applyMuteToCompanionwayAudio(); // COMPANIONWAY HOOK (upstairs/downstairs transition SFX) -- same reasoning as engine audio
     applyMuteToMarinaAudio(); // MARINA HOOK (opening/departure ambience + board.mp3) -- same reasoning as engine audio
+    applyMuteToFinaleAudio(); // THE FINAL ARRIVAL -- CODA
     updateSoundLabel();
   }
 
@@ -17615,6 +18028,12 @@
       if (pc && pc.id === 'restart-choice') return pc.options;
       return ve.phase === 'pending' ? rescueCallChoice().options : [{ label: 'RESTART', action: 'confirm-restart' }];
     }
+    if (state.finale && state.finale.phase !== 'none') return finaleOptions(state); // THE FINAL ARRIVAL: nothing but its own actions
+    if (state.nav.grounded && state.crew.watchState !== 'sleeping') { // RUN AGROUND: until she is freed, FREE SOLACE is what there is (the header's restart request stays answerable)
+      var pcg = state.pendingChoice;
+      if (pcg && pcg.id === 'restart-choice') return pcg.options;
+      return [{ label: 'FREE SOLACE', action: 'free-solace' }];
+    }
     // A pending decision always wins -- including a restart request made
     // mid-departure, mid-attempt, or mid-sleep, which must be answerable
     // even though those states otherwise show just one button.
@@ -18520,6 +18939,50 @@
             },
           });
           break;
+        case 'free-solace':
+          if (!state.nav.grounded) break;
+          runShortAction(state, {
+            label: 'FREEING SOLACE',
+            duration: 20,
+            action: function (s) { navFreeSolace(s); log(s, 'SOLACE IS FREE.'); flushNewLogEntries(s); },
+          });
+          break;
+        case 'finale-engine-start':
+          if (!finaleAtStep(state, 'start')) break;
+          runAudioSyncedAction(state, {
+            label: 'STARTING ENGINE',
+            watchdogMarginSeconds: 2,
+            playAudio: function (onEnded) { return beginEngineStartAudio(state.crew.location, onEnded); },
+            action: function (s) { s.boat.engineOn = true; finaleAdvance(s); }, // starts whatever the diesel / battery: the finale is not sailing simulation
+          });
+          break;
+        case 'finale-engine-stop':
+          if (!finaleAtStep(state, 'stop')) break;
+          runAudioSyncedAction(state, {
+            label: 'STOPPING ENGINE',
+            watchdogMarginSeconds: 2,
+            playAudio: function (onEnded) { return beginEngineStopAudio(state.crew.location, onEnded); },
+            action: function (s) {
+              s.boat.engineOn = false; s.boat.speed = 0;
+              s.departure.ambienceSuppressed = true; // the open-ocean ambience fades out on its own crossfade...
+              updateAudioForState(s);
+              finaleStartMarina();                   // ...and the marina fades in: the voyage is over
+              finaleAdvance(s);
+            },
+          });
+          break;
+        case 'finale-secure':
+          if (!finaleAtStep(state, 'secure')) break;
+          runShortAction(state, { label: 'SECURING LINES', duration: 4, action: function (s) { finaleAdvance(s); } });
+          break;
+        case 'finale-ashore':
+          if (!finaleAtStep(state, 'ashore')) break;
+          runShortAction(state, { label: 'STEPPING ASHORE', duration: 5, action: function (s) { s.finale.codaAt = Date.now(); finaleStartCoda(s, 0); finaleAdvance(s); } });
+          break;
+        case 'finale-ashes':
+          if (!finaleAtStep(state, 'ashes')) break;
+          runShortAction(state, { label: 'SCATTERING ASHES', duration: 6, action: function (s) { finaleAdvance(s); } });
+          break;
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
         state.nav.autopilotHeading = state.nav.setCourse; // the player's newest explicit heading — what AUTOPILOT (if on) now holds
@@ -18713,9 +19176,11 @@
       // cheap signal for that.
       if (ticks > 0 || printedCount < GAME.log.length) {
         flushNewLogEntries(GAME);
+        navAnnounceGroundingIfNeeded(GAME, true); // RUN AGROUND (its dots own the options panel while they run)
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
         updateAudioForState(GAME);
       }
+      finaleKick(GAME); // the final arrival: starts / resumes its current step (idempotent)
       saveGameState(GAME);
     }, LIVE_TICK_SECONDS * 1000);
   }
@@ -18809,6 +19274,7 @@
     // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
     // an in-progress voyage, it just starts over exactly like a first visit.
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save:', describeError(e)); }
+    finaleResetUi(); // nothing of a finished voyage's ending (overlay, CODA, marina) may leak into the next one
     stopAllEngineLoops(); // the discarded voyage's engine (if it was running) must not keep sounding over the fresh one -- and the fresh voyage's own START ENGINE must begin from a clean engine-audio state
     GAME = null;
     printedCount = 0;
@@ -18846,7 +19312,6 @@
     if (nav.autopilotHeading === undefined) nav.autopilotHeading = null; // a save from before the heading-hold autopilot: seeded lazily from the player's own setCourse the first tick it's needed (see autopilotSteeringSolution)
     if (nav.courseDraft === undefined) nav.courseDraft = null;
     if (nav.landWarningLevel === undefined) nav.landWarningLevel = 'none';
-    if (nav.groundedOn === undefined) nav.groundedOn = null;
     if (nav.sailTrimState === undefined) nav.sailTrimState = 'good';
     if (nav.lastTrimHeading === undefined || nav.lastTrimHeading === null) nav.lastTrimHeading = nav.heading;
     if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
@@ -19339,6 +19804,7 @@
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
     migrateRescueIfNeeded(GAME); // RESCUE -- drop the retired mechanics, start the two timers from the existing hunger/thirst record
+    migrateNavGeoIfNeeded(GAME); // NAVIGATION -- the new grounding / warning / finale state; a save in invalid water is moved the minimum distance back into it
     migrateWeatherStateIfNeeded(GAME); // PHASE 5 -- retire any old scripted-weather state, keep what the player is experiencing
     migrateWeatherDirectionIfNeeded(GAME);
     migrateRealWeatherIfNeeded(GAME);
@@ -19356,6 +19822,9 @@
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
     renderReturn(GAME, ticks);
+    navAnnounceGroundingIfNeeded(GAME, false);
+    finaleKick(GAME); // a reload during / after the final arrival resumes it where it was
+    finaleSyncChrome(GAME);
     startLiveLoop();
     updateClock();
   }
