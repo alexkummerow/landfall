@@ -13584,11 +13584,12 @@
   var PONG_BALL_SIZE = 40; // slightly larger than a strict 34px square for on-screen visibility at typical phone widths, confirmed visually -- still clearly smaller than the paddle's own footprint
   var PONG_BASE_SPEED = 1300; // px/sec (logical) at serve -- moderately fast, not a sluggish opening rally
   var PONG_SPEED_INCREASE = 1.06; // per paddle hit
-  var PONG_MAX_SPEED = 2600; // caps the rally so it excites without becoming unplayable
+  var PONG_MAX_STEP_PX = 24; // the ball has NO speed cap, so each frame's movement is split into steps no longer than this -- far thinner than the paddle zone (~66 px), so it can never skip over a paddle however fast a long rally gets
   var PONG_AI_MAX_SPEED = 1000; // deliberately below what's needed to track a fast, sharply-angled ball at full rally speed -- this, not perfect tracking, is what keeps it beatable (see this file's own AI-tuning history: 950 -> 1100 -> back down to this, as the AI grew a full wall-bounce-aware prediction and had to be pulled back to compensate)
   var PONG_AI_RETARGET_MIN = 0.10, PONG_AI_RETARGET_RANGE = 0.14; // seconds between AI re-evaluations (0.10-0.24, reaction lag)
   var PONG_AI_ERROR_RANGE = 180; // +-90 units of random imprecision layered onto the AI's own target
   var PONG_AI_PREDICTION_WEIGHT = 0.75; // how much of the anticipated arrival X (vs. the ball's own CURRENT X) the AI's target is built from -- see this constant's own call site for why blending, not using the prediction outright, is what keeps the prediction from reading as exact future knowledge
+  var PONG_AI_MISREAD_RANGE = 300; // each new shot the AI misjudges where the ball will land by up to +-150 units (triangular: usually small, occasionally large) and holds that misreading until the ball turns away -- unlike the per-retarget error above, it can't average out, so the AI now and then lets one through
   var PONG_WIN_SCORE = 5;
   var PONG_SERVE_DELAY = 0.7; // seconds the ball sits frozen at center before each serve, for readability
 
@@ -13610,6 +13611,7 @@
       winner: null, // 'player' | 'computer', once phase is 'ended'
       aiTargetX: PONG_W / 2,
       aiRetargetTimer: 0,
+      aiMisread: 0, aiApproaching: false, // see PONG_AI_MISREAD_RANGE
     };
     pongServe(g, Math.random() < 0.5);
     return g;
@@ -13642,7 +13644,7 @@
   // player, false for the player paddle sending it back up.
   function pongBounceOffPaddle(g, paddleX, sendDown) {
     var offset = clamp((g.ballX - paddleX) / (PONG_PADDLE_W / 2), -1, 1);
-    var speed = Math.min(Math.sqrt(g.ballVX * g.ballVX + g.ballVY * g.ballVY) * PONG_SPEED_INCREASE, PONG_MAX_SPEED);
+    var speed = Math.sqrt(g.ballVX * g.ballVX + g.ballVY * g.ballVY) * PONG_SPEED_INCREASE; // no cap: every return, by either paddle, speeds it up for as long as the rally lasts
     var maxAngle = 60 * Math.PI / 180;
     var angle = offset * maxAngle;
     var dir = sendDown ? 1 : -1;
@@ -13680,7 +13682,7 @@
     // to the pixel the instant it leaves the player's paddle. While the
     // ball is heading away, there's no arrival to anticipate yet, so it
     // just stays loosely positioned on the ball's current X.
-    // Beatability comes from four places together: the blend above
+    // Beatability comes from five places together: the held per-shot misread (PONG_AI_MISREAD_RANGE), the blend above
     // (never the raw prediction), the random error term below, the
     // retarget delay (most exposed right as the ball changes direction
     // off the player's paddle), and PONG_AI_MAX_SPEED itself -- a
@@ -13690,13 +13692,16 @@
     if (g.aiRetargetTimer <= 0) {
       g.aiRetargetTimer = PONG_AI_RETARGET_MIN + Math.random() * PONG_AI_RETARGET_RANGE;
       var targetX;
+      var approaching = g.ballVY < 0;
+      if (approaching && !g.aiApproaching) g.aiMisread = (Math.random() + Math.random() - 1) * PONG_AI_MISREAD_RANGE / 2; // a fresh misreading for each new shot
+      g.aiApproaching = approaching;
       if (g.ballVY < 0) {
         var timeToArrive = Math.max((g.ballY - PONG_PADDLE_MARGIN) / -g.ballVY, 0); // clamped at 0 for the rare frame where the ball has already passed the paddle's own Y-line (a miss, about to score) but hasn't yet crossed the goal -- falls back to the ball's current X rather than projecting backward
         var rawX = g.ballX + g.ballVX * timeToArrive;
         var period = 2 * PONG_W;
         var folded = ((rawX % period) + period) % period; // normalize into [0, period)
         var predictedX = folded <= PONG_W ? folded : period - folded; // reflect back in for every wall bounce along the way
-        targetX = g.ballX * (1 - PONG_AI_PREDICTION_WEIGHT) + predictedX * PONG_AI_PREDICTION_WEIGHT;
+        targetX = g.ballX * (1 - PONG_AI_PREDICTION_WEIGHT) + predictedX * PONG_AI_PREDICTION_WEIGHT + g.aiMisread;
       } else {
         targetX = g.ballX;
       }
@@ -13710,58 +13715,63 @@
 
     if (g.phase !== 'playing') return; // ball stays frozen during 'serving', and nothing else here applies once 'ended'
 
-    g.ballX += g.ballVX * dt;
-    g.ballY += g.ballVY * dt;
+    var ballSteps = Math.max(1, Math.ceil(Math.sqrt(g.ballVX * g.ballVX + g.ballVY * g.ballVY) * dt / PONG_MAX_STEP_PX));
+    var stepDt = dt / ballSteps;
+    for (var ballStep = 0; ballStep < ballSteps; ballStep++) {
+      g.ballX += g.ballVX * stepDt;
+      g.ballY += g.ballVY * stepDt;
 
-    // Side walls -- reflect, reposition exactly to the boundary (so the
-    // ball is never still overlapping the wall next frame), play once.
-    var half = PONG_BALL_SIZE / 2;
-    if (g.ballX - half <= 0 && g.ballVX < 0) {
-      g.ballX = half;
-      g.ballVX = -g.ballVX;
-      pongPlay('pongWall');
-    } else if (g.ballX + half >= PONG_W && g.ballVX > 0) {
-      g.ballX = PONG_W - half;
-      g.ballVX = -g.ballVX;
-      pongPlay('pongWall');
-    }
+      // Side walls -- reflect, reposition exactly to the boundary (so the
+      // ball is never still overlapping the wall next frame), play once.
+      var half = PONG_BALL_SIZE / 2;
+      if (g.ballX - half <= 0 && g.ballVX < 0) {
+        g.ballX = half;
+        g.ballVX = -g.ballVX;
+        pongPlay('pongWall');
+      } else if (g.ballX + half >= PONG_W && g.ballVX > 0) {
+        g.ballX = PONG_W - half;
+        g.ballVX = -g.ballVX;
+        pongPlay('pongWall');
+      }
 
-    // Player paddle (bottom) -- only while genuinely descending toward
-    // it, so a ball already heading back up can never re-trigger this
-    // on the very next frame even if it's still technically within
-    // range vertically.
-    var playerPaddleY = PONG_H - PONG_PADDLE_MARGIN;
-    if (g.ballVY > 0 && g.ballY + half >= playerPaddleY - PONG_PADDLE_H / 2
-        && g.ballY - half <= playerPaddleY + PONG_PADDLE_H / 2
-        && Math.abs(g.ballX - g.playerX) <= PONG_PADDLE_W / 2 + half) {
-      g.ballY = playerPaddleY - PONG_PADDLE_H / 2 - half;
-      pongBounceOffPaddle(g, g.playerX, false);
-      pongPlay('pongHit');
-    }
+      // Player paddle (bottom) -- only while genuinely descending toward
+      // it, so a ball already heading back up can never re-trigger this
+      // on the very next frame even if it's still technically within
+      // range vertically.
+      var playerPaddleY = PONG_H - PONG_PADDLE_MARGIN;
+      if (g.ballVY > 0 && g.ballY + half >= playerPaddleY - PONG_PADDLE_H / 2
+          && g.ballY - half <= playerPaddleY + PONG_PADDLE_H / 2
+          && Math.abs(g.ballX - g.playerX) <= PONG_PADDLE_W / 2 + half) {
+        g.ballY = playerPaddleY - PONG_PADDLE_H / 2 - half;
+        pongBounceOffPaddle(g, g.playerX, false);
+        pongPlay('pongHit');
+      }
 
-    // Computer paddle (top) -- same reasoning, mirrored.
-    var computerPaddleY = PONG_PADDLE_MARGIN;
-    if (g.ballVY < 0 && g.ballY - half <= computerPaddleY + PONG_PADDLE_H / 2
-        && g.ballY + half >= computerPaddleY - PONG_PADDLE_H / 2
-        && Math.abs(g.ballX - g.computerX) <= PONG_PADDLE_W / 2 + half) {
-      g.ballY = computerPaddleY + PONG_PADDLE_H / 2 + half;
-      pongBounceOffPaddle(g, g.computerX, true);
-      pongPlay('pongHit');
-    }
+      // Computer paddle (top) -- same reasoning, mirrored.
+      var computerPaddleY = PONG_PADDLE_MARGIN;
+      if (g.ballVY < 0 && g.ballY - half <= computerPaddleY + PONG_PADDLE_H / 2
+          && g.ballY + half >= computerPaddleY - PONG_PADDLE_H / 2
+          && Math.abs(g.ballX - g.computerX) <= PONG_PADDLE_W / 2 + half) {
+        g.ballY = computerPaddleY + PONG_PADDLE_H / 2 + half;
+        pongBounceOffPaddle(g, g.computerX, true);
+        pongPlay('pongHit');
+      }
 
-    // Scoring -- past the GOAL (the playfield's own top/bottom edge),
-    // not just past the paddle, so a miss genuinely sails all the way
-    // out exactly like a real point.
-    if (g.ballY - half > PONG_H) {
-      g.computerScore++;
-      if (g.computerScore >= PONG_WIN_SCORE) { pongEndMatch('computer'); return; }
-      pongPlay('pongComputerScore');
-      pongServe(g, true); // serve toward the player, who just conceded the point
-    } else if (g.ballY + half < 0) {
-      g.playerScore++;
-      if (g.playerScore >= PONG_WIN_SCORE) { pongEndMatch('player'); return; }
-      pongPlay('pongPlayerScore');
-      pongServe(g, false);
+      // Scoring -- past the GOAL (the playfield's own top/bottom edge),
+      // not just past the paddle, so a miss genuinely sails all the way
+      // out exactly like a real point.
+      if (g.ballY - half > PONG_H) {
+        g.computerScore++;
+        if (g.computerScore >= PONG_WIN_SCORE) { pongEndMatch('computer'); return; }
+        pongPlay('pongComputerScore');
+        pongServe(g, true); // serve toward the player, who just conceded the point
+      } else if (g.ballY + half < 0) {
+        g.playerScore++;
+        if (g.playerScore >= PONG_WIN_SCORE) { pongEndMatch('player'); return; }
+        pongPlay('pongPlayerScore');
+        pongServe(g, false);
+      }
+      if (g.phase !== 'playing') return; // a point just ended and the next serve is frozen -- no more movement this frame
     }
   }
 
