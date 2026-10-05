@@ -7017,6 +7017,11 @@
     }
     return elementVolumeIgnoredCache;
   }
+  // iPhone / iPad (including iPadOS reporting itself as a Mac with a touch screen).
+  function isAppleTouchDevice() {
+    var ua = navigator.userAgent || '';
+    return /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
 
   // gainFallbackForIgnoredVolume (optional, ENGINE only): when the browser
   // ignores element volume, each slot is routed through its own GainNode and
@@ -7031,7 +7036,7 @@
     var generation = 0;
 
     function ensureSlot(i) {
-      var wantGain = gainFallbackForIgnoredVolume && audioCtx && elementVolumeIsIgnored();
+      var wantGain = gainFallbackForIgnoredVolume && audioCtx && (elementVolumeIsIgnored() || isAppleTouchDevice());
       var existing = slots[i];
       // A slot built before the current AudioContext existed, or for one a
       // hard audio rebuild has since closed, would be silent -- replace it.
@@ -7048,18 +7053,29 @@
       var el = new Audio();
       el.preload = 'auto';
       var routedCtx = null;
+      var routedParam = null;
       if (wantGain) {
         try {
           var gainNode = audioCtx.createGain();
           gainNode.gain.value = 0;
           audioCtx.createMediaElementSource(el).connect(gainNode).connect(audioCtx.destination);
-          var level = 0;
+          var slotCtx = audioCtx;
+          var param = gainNode.gain;
+          // Reads report the gain's CURRENT value; an instant set cancels any
+          // ramp in flight first. Fades themselves are scheduled on the audio
+          // thread in fadeSlotVolume (the same automation calls the sea / wind
+          // / rain / creak channels use), not stepped from a timer.
           Object.defineProperty(el, 'volume', {
             configurable: true,
-            get: function () { return level; },
-            set: function (v) { level = v; gainNode.gain.value = v; }
+            get: function () { return param.value; },
+            set: function (v) {
+              var now = slotCtx.currentTime;
+              param.cancelScheduledValues(now);
+              param.setValueAtTime(v, now);
+            }
           });
-          routedCtx = audioCtx;
+          routedCtx = slotCtx;
+          routedParam = param;
         } catch (e) {
           console.warn(errorLabel + ' audio: gain routing unavailable, using element volume:', describeError(e));
         }
@@ -7068,7 +7084,7 @@
       el.addEventListener('error', function () {
         console.error(errorLabel + ' AUDIO FILE ERROR', 'path:', el.currentSrc || el.src, 'code:', el.error ? el.error.code : null);
       });
-      var slot = { el: el, fadeTimer: null, nearEndTimer: null, myGeneration: -1, ctx: routedCtx };
+      var slot = { el: el, fadeTimer: null, nearEndTimer: null, myGeneration: -1, ctx: routedCtx, gainParam: routedParam };
       slots[i] = slot;
       return slot;
     }
@@ -7077,7 +7093,7 @@
       if (slot.nearEndTimer) { clearTimeout(slot.nearEndTimer); slot.nearEndTimer = null; }
     }
     function clearFadeTimer(slot) {
-      if (slot.fadeTimer) { clearInterval(slot.fadeTimer); slot.fadeTimer = null; }
+      if (slot.fadeTimer) { clearInterval(slot.fadeTimer); clearTimeout(slot.fadeTimer); slot.fadeTimer = null; }
     }
 
     // Same shape as every other fadeXVolume in this file -- plain
@@ -7090,6 +7106,18 @@
       if (Math.abs(target - start) < 0.001 || seconds <= 0) {
         el.volume = target;
         if (onComplete) onComplete();
+        return;
+      }
+      if (slot.gainParam) {
+        // Routed through a GainNode (iOS): ramp on the audio thread.
+        var rampNow = slot.ctx.currentTime;
+        slot.gainParam.cancelScheduledValues(rampNow);
+        slot.gainParam.setValueAtTime(start, rampNow);
+        slot.gainParam.linearRampToValueAtTime(target, rampNow + seconds);
+        slot.fadeTimer = setTimeout(function () {
+          slot.fadeTimer = null;
+          if (onComplete) onComplete();
+        }, seconds * 1000);
         return;
       }
       var stepMs = 20;
@@ -7431,7 +7459,18 @@
       if (el.paused) safePlay(el);
     }
 
+    // Read-only snapshot of every slot, for the ?audiodiag readout.
+    function diagLines() {
+      return slots.map(function (slot, i) {
+        if (!slot) return ' s' + i + '  -';
+        var el = slot.el;
+        var name = (el.getAttribute('src') || '').split('/').pop() || '(none)';
+        return ' s' + i + (i === activeIndex ? '*' : ' ') + ' ' + name + '  ' + (slot.gainParam ? 'routed' : 'plain') + '  vol ' + Number(el.volume).toFixed(2) + '  ' + (el.paused ? 'PAUSED' : 'playing') + '  t ' + (el.currentTime || 0).toFixed(1);
+      });
+    }
+
     return {
+      diagLines: diagLines,
       crossfadeTo: crossfadeTo,
       crossfadeToLoop: crossfadeToLoop,
       crossfadeToOneShot: crossfadeToOneShot,
@@ -20113,6 +20152,19 @@
   // in that case boot() runs completely normally, exactly as if
   // ?reset=1 had never been present, since loadGameState's own
   // parse-failure handling already treats that the same way.
+  // ?audiodiag -- a read-only on-screen readout of the engine's audio slots,
+  // for checking the deck crossfade on a phone. Does nothing unless the page
+  // address contains ?audiodiag (e.g. index.html?audiodiag).
+  if (new URLSearchParams(window.location.search).get('audiodiag') !== null) {
+    var diagEl = document.createElement('pre');
+    diagEl.style.cssText = 'position:fixed;left:0;right:0;top:env(safe-area-inset-top,0);margin:0;padding:4px 6px;z-index:99999;pointer-events:none;font:10px/1.25 monospace;color:#9f9;background:rgba(0,0,0,0.78);white-space:pre';
+    document.body.appendChild(diagEl);
+    setInterval(function () {
+      var head = 'ENGINE AUDIO  ctx:' + (audioCtx ? audioCtx.state : 'none') + '  volIgnored:' + (elementVolumeIsIgnored() ? 'Y' : 'N') + '  iOS:' + (isAppleTouchDevice() ? 'Y' : 'N') + '  phase:' + engineAudioPhase + '  key:' + engineActiveKey + '  loc:' + (GAME ? GAME.crew.location : '?');
+      diagEl.textContent = head + '\n' + engineAudio.diagLines().join('\n');
+    }, 250);
+  }
+
   var devResetRequested = new URLSearchParams(window.location.search).get('reset') === '1';
   if (!devResetRequested || !performDevReset()) {
     boot();
