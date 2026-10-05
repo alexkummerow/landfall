@@ -11650,6 +11650,7 @@
       } else {
         printLine('Autopilot engaged.', 'dim');
       }
+      printLine('HEADING HELD STEADY.', 'dim'); // temporary feedback only -- the lasting state is the AUTOPILOT row and its lamp
     } else {
       printBlank();
       printLine('Autopilot disengaged.', 'dim');
@@ -12106,8 +12107,17 @@
     }
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
     printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
-    var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
-    var speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg');
+    var vmgEl, speedEl;
+    function printVmgRow() { vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg'); }
+    function printSpeedRow() { speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg'); }
+    if (omitTitle) { // the HELM screen: BOAT SPEED, then VELOCITY MADE GOOD, as their own group beneath HEADING / BEARING
+      printBlank();
+      printSpeedRow();
+      printVmgRow();
+    } else { // CHANGE COURSE keeps its existing order
+      printVmgRow();
+      printSpeedRow();
+    }
     printBlank();
     printDataRow('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0', 'data-row-lg');
     printDataRow('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT', 'data-row-lg');
@@ -12160,7 +12170,6 @@
     var nav = state.nav;
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printRoomHeader('HELM');
-    printBlank();
 
     var isCoastal = nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX;
 
@@ -12171,7 +12180,9 @@
       }
     }
 
-    var trimRow = { label: 'TRIM SAILS', action: 'trim-sails' };
+    // TRIM SAILS is only on the menu while the sails actually need trimming -- the same state the SAIL TRIM row shows,
+    // read each time the helm is drawn; when they're fine there is no row at all (no placeholder, no gap).
+    var trimRows = nav.sailTrimState === 'needsTrim' ? [{ label: 'TRIM SAILS', action: 'trim-sails' }] : [];
     var autopilotRow = { label: 'AUTOPILOT', action: 'toggle-autopilot', indicator: state.boat.autopilotOn ? 'on' : 'off' };
 
     if (state.boat.steering === 'DAMAGED') {
@@ -12187,7 +12198,7 @@
       }
       printBlank();
       printLine('Rudder is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      state.pendingChoice = { id: 'helm-menu', options: pushBack([trimRow, autopilotRow], 'cancel') };
+      state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([autopilotRow]), 'cancel') };
       return;
     }
 
@@ -12199,8 +12210,6 @@
       // time, never an instant snap.
       state.crew.atHelm = true;
       nav.driftHeading = null;
-      printLine('At the helm. Heading held steady.', 'dim');
-      printBlank();
       if (!isCoastal) {
         beginCourseTurn(state, { targetHeading: courseSteeringTarget(state) });
       }
@@ -12211,7 +12220,19 @@
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    state.pendingChoice = { id: 'helm-menu', options: pushBack([trimRow, { label: 'CHANGE COURSE', action: 'cmd:change-course' }, autopilotRow], 'leave-helm') };
+    state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([{ label: 'CHANGE COURSE', action: 'cmd:change-course' }, autopilotRow]), 'leave-helm') };
+  }
+
+  // The helm is drawn once, so when the sails start (or stop) needing trim while it is open -- typically the tick right
+  // after a course change -- TRIM SAILS and the SAIL TRIM row would stay out of date until the player left and came back.
+  // renderOptions calls this on every render: if the open helm's TRIM SAILS no longer matches the sails' state, redraw it.
+  function redrawHelmIfTrimChanged(state) {
+    var pc = state.pendingChoice;
+    if (uiBusy || !pc || pc.id !== 'helm-menu') return;
+    var shown = pc.options.some(function (o) { return o.action === 'trim-sails'; });
+    if (shown === (state.nav.sailTrimState === 'needsTrim')) return;
+    clearTempView();
+    cmdHelm(state);
   }
 
   // TRIM SAILS — audio-synced, same architecture as WASH/CHANGE/MAKE
@@ -18369,6 +18390,7 @@
     // for why. Toggled here, every render, the same way #controls'
     // content itself is decided.
     optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
+    redrawHelmIfTrimChanged(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
       if (opt.divider) {
