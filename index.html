@@ -1137,6 +1137,8 @@
         hoursSinceRest: 3,
         hoursSinceMeal: 2,
         hoursSinceWater: 2,
+        lastDrankAt: -120,           // RESCUE -- voyageMinutes of the last successful drink (water / coffee / tea: exactly the actions that reset hoursSinceWater). -120 = the 2 h before departure that hoursSinceWater already assumes.
+        lastAteAt: -120,             // RESCUE -- voyageMinutes of the last successful meal or snack (exactly where hoursSinceMeal is reset). Chocolate is comfort only and never counts.
         morale: 72,
         watchState: 'awake',        // 'awake' | 'sleeping' — see the SLEEP note above wakeUp. Entered the moment SLEEP finishes, left only by the player's own WAKE UP.
         sleepStartedAt: null,        // voyageMinutes (the real-elapsed-time voyage clock) when this sleep began -- how long he has slept is always current clock minus this, so it counts correctly across a closed browser
@@ -1144,7 +1146,6 @@
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
         coffeeCount: 0,
-        inLifeRaft: false,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // physically at the Helm -- a pure presence flag now, independent of AUTOPILOT (see cmdHelm/computeHeading: autopilot still wins the actual steering whenever both are true); ends automatically on GO BELOW, SLEEP, BACK (leave-helm), or STEERING damage -- no longer on autopilot re-engaging
         lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
@@ -1216,7 +1217,6 @@
         spares: {
           sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
         },
-        safety: { flares: 6 }, // EPIRB/life raft are status, not a count — see state.rescue / crew.inLifeRaft
       },
       // FISHING HOOK -- the only persisted fishing state; the in-progress
       // cast/bite/reaction session itself is NOT here (see the FISHING
@@ -1263,17 +1263,7 @@
         weatherSoftwareUpdated: false,     // ...and once the player has run it, WINDY exists on the computer (permanent)
         pacificObservationShown: false,    // guards the coastal-tutorial "course is mine now" observation (Cape Flattery arrival, open-water threshold) so it fires exactly once per voyage
       },
-      rescue: {
-        epirbOn: false,
-        activatedAt: null,       // voyageMinutes
-        phase: 'none',           // 'none' | 'traveling' | 'searching' | 'rescued'
-        travelMinutes: 0,        // computed once at activation, from position/conditions
-        nextSearchEventAt: null,
-        encounterActive: false,
-        encounterStartedAt: null,
-        encounterKind: null,     // 'aircraft' | 'vessel'
-        encounterFlareFired: false,
-      },
+      voyageEnd: { phase: 'none', reason: null, at: null }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL FOR RESCUE is all that is offered) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -3520,6 +3510,19 @@
     if (!fin(rw.fetchedAt) || !rw.position || !fin(rw.position.lat) || !fin(rw.position.lon)) return false;
     return true;
   }
+  // OLD-SAVE COMPATIBILITY -- a player who is ALREADY past Cape Flattery (Pacific controlled journeying has begun) before they ever met the
+  // weather/Windy SYSTEM UPDATE must not have to start over or travel backward to get it. On load, if the update has not been RUN yet, it is
+  // simply made available: the very same flag the normal trigger sets (see windHandoffCompleted), so the ordinary SYSTEM UPDATE AVAILABLE ->
+  // UPDATE -> WINDY experience plays on the next Ship's Computer visit. This never runs or completes the update itself.
+  //   - before Cape Flattery ............ nothing (the normal trigger fires when they get there)
+  //   - past it, update not yet run ..... weatherSoftwareUpdateAvailable = true (already true -> unchanged)
+  //   - past it, update already run ..... nothing (weatherSoftwareUpdated is permanent, and UPDATE clears Available)
+  // Idempotent by construction: it only ever sets Available, never when Updated is true, so reloading repeatedly changes nothing once handled.
+  function queueWeatherUpdateForExistingSavesIfNeeded(state) {
+    var f = state && state.flags;
+    if (!f || !state.nav) return;
+    if (pacificControlBegun(state) && !f.weatherSoftwareUpdated) f.weatherSoftwareUpdateAvailable = true;
+  }
   function migrateRealWeatherIfNeeded(state) {
     var rw = state.realWeather;
     ['realWindUnlocked', 'weatherSoftwareUpdateAvailable', 'weatherSoftwareUpdated'].forEach(function (k) { if (state.flags && state.flags[k] === undefined) state.flags[k] = false; });
@@ -3639,7 +3642,7 @@
   function resolveAutoTack(state, desired, targetPoint) {
     var nav = state.nav, w = state.weather, b = state.boat;
 
-    if (b.sailConfig === 'furled' || state.crew.inLifeRaft) {
+    if (b.sailConfig === 'furled') {
       if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
       return desired;
     }
@@ -4629,7 +4632,6 @@
   var WATER_STARTING_GALLONS = 50.0;
   var ORIGINAL_COFFEE = 24;
   var ORIGINAL_TEA = 24;
-  var ORIGINAL_FLARES = 6;
   var ORIGINAL_SPARES = {
     sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
   };
@@ -4728,7 +4730,7 @@
   // Shared CURRENT / ORIGINAL formatting. Gallons keep one decimal place
   // only when the value actually has one — "50" not "50.0", but "42.3"
   // stays "42.3" — matching the existing water/fuel precision. Countable
-  // items (food servings, coffee, tea, spares, flares) are always whole
+  // items (food servings, coffee, tea, spares) are always whole
   // numbers already; String() is enough.
   function formatGal(n) {
     var s = n.toFixed(1);
@@ -4762,10 +4764,6 @@
   function consumeWater(state, amountGal) {
     state.water.gallons = Math.max(0, state.water.gallons - amountGal);
   }
-
-  var DRIFT_BASE_KT = 0.2;           // ambient windage on the hull — used for an abandoned life raft's own drift (see computeDriftSpeed); present even with sails furled and the engine off
-  var DRIFT_WIND_FACTOR = 0.025;     // more wind pushes an unpowered hull a little faster over the ground
-  var DRIFT_MAX_KT = 1.0;            // this is NOT propulsion — keep it small and capped
 
   // RELIABILITY PASS (sailing-speed investigation) -- shared, always-on
   // warning for a non-finite value anywhere in the speed-calculation
@@ -4819,23 +4817,11 @@
     return Math.max(0, speed);
   }
 
-  function computeDriftSpeed(state) {
-    // Used ONLY for an abandoned life raft now (see computeBoatSpeed's
-    // inLifeRaft branch) -- a small, wind-shaped stand-in for its
-    // motion since it has no sail/engine/heading of its own to speak
-    // of. No longer added to normal sailing/motoring speed through the
-    // water: a boat with nothing actually propelling it (no wind on
-    // the sails, engine off) now correctly reads 0.0 KT, exactly as a
-    // real becalmed boat would.
-    return clamp(DRIFT_BASE_KT + state.weather.windSpeed * DRIFT_WIND_FACTOR, 0.1, DRIFT_MAX_KT);
-  }
-
   function isSailingUseful(state, heading) {
     return computeSailSpeed(state, heading) > SAIL_PROPULSION_THRESHOLD_KT;
   }
 
   function propulsionState(state, heading) {
-    if (state.crew.inLifeRaft) return 'drifting'; // the boat's abandoned — its sails/engine are no longer relevant
     var sailing = isSailingUseful(state, heading);
     var engineOn = state.boat.engineOn;
     if (sailing && engineOn) return 'motor-sailing';
@@ -4850,15 +4836,6 @@
   }
 
   function computeBoatSpeed(state, heading) {
-    if (state.crew.inLifeRaft) {
-      // Nothing to sail or motor anymore — the raft only goes where the
-      // wind takes it, same drift term as a furled, engine-off boat, and
-      // nothing more. (This is the one case where this function is NOT
-      // a sails-and-engine speed — an abandoned, unmanned raft has no
-      // heading of its own to speak of, so the drift baseline stands in
-      // for its entire motion.)
-      return +computeDriftSpeed(state).toFixed(2);
-    }
     var sailSpeed = computeSailSpeed(state, heading);
     // SAIL TRIM PENALTY — applied to the sail component specifically,
     // never the engine's, so a motoring/furled boat is never touched by
@@ -5248,6 +5225,7 @@
   }
 
   function simTick(state) {
+    if (state.voyageEnd && state.voyageEnd.phase !== 'none') return; // RESCUE -- the voyage is over: the world stops (see checkNeglectRescue)
     state.meta.voyageMinutes += TICK_MINUTES;
     // VESSEL LOG -- must run before this tick's own speed/wind/engine
     // sample is taken (see sampleVesselLogTick at the end of this
@@ -5388,7 +5366,7 @@
     checkAftLocker(state);
     checkScheduledFailures(state);
     checkStormRisk(state);
-    checkRescue(state);
+    checkNeglectRescue(state);
     checkWeatherNarration(state, prevCondition);
     checkFatigueNarration(state);
     checkThirstNarration(state);
@@ -5924,7 +5902,6 @@
 
   function checkScheduledFailures(state) {
     var b = state.boat;
-    if (state.crew.inLifeRaft) return; // no boat systems left to fail
     if (state.meta.voyageMinutes < b.nextFailureAt) return;
     var sys = pickFailureSystem(state);
     if (!sys) {
@@ -5979,7 +5956,6 @@
 
   function checkStormSailRisk(state) {
     var b = state.boat, w = state.weather;
-    if (state.crew.inLifeRaft) return;
     if (b.sails !== 'GOOD') return;
     var configFactor = SAIL_STORM_CONFIG_FACTOR[b.sailConfig];
     if (!configFactor) return; // furled, or an unrecognized config -- no exposure
@@ -6000,7 +5976,6 @@
 
   function checkStormSteeringRisk(state) {
     var b = state.boat, w = state.weather;
-    if (state.crew.inLifeRaft) return;
     if (b.steering !== 'GOOD') return;
     var base = STEERING_STORM_P10_BY_SEASTATE[w.seaState];
     if (!base) return;
@@ -6025,122 +6000,68 @@
   }
 
   /* --------------------------------------------------------------
-     RESCUE
+     RESCUE -- the ONLY way the voyage ends other than reaching Kaua\u02bbi
 
-     EPIRB -> real-time travel to the search area -> a SEARCH phase
-     made of discrete, widely-spaced "encounters" (an aircraft or
-     vessel actually searching nearby) each open for a real multi-hour
-     window — long enough that checking Landfall a couple of times a
-     day is enough to catch one and fire a flare. Missing a window
-     never fails the rescue; it just means the next encounter, a few
-     hours later, resolves without the flare's help. This is real
-     time throughout: nothing here is a caller of advanceSimulation(),
-     it only ever reads state.meta.voyageMinutes and reschedules a
-     future timestamp for simTick to notice on some later real tick.
+     Neglect, nothing else: 72 continuous hours without drinking, or 168 continuous hours (7 days) without eating. Rescue means the
+     sailor can no longer safely continue the solo voyage -- it does not mean he dies.
+
+     This LISTENS to the existing hunger/thirst system; it does not replace or change it. crew.lastDrankAt / crew.lastAteAt are
+     voyageMinutes timestamps stamped at exactly the points where that system resets hoursSinceWater / hoursSinceMeal -- a successful
+     drink (water, coffee, tea) and a successful meal or snack. Chocolate is comfort only and, like it never touches hunger, never counts.
+     They are measured against meta.voyageMinutes, the one authoritative game clock simTick advances, so the thresholds run in real time:
+     a reload (catchUpFromRealTime replays the away time as ordinary ticks) lands on exactly the same minute as if the game had stayed
+     open. Nothing here is ever shown -- no countdown, no hours remaining, no bar; hunger and thirst already say it.
+
+     state.voyageEnd.phase is one-way: 'none' -> 'pending' (a threshold was reached; CALL FOR RESCUE is all that is offered) -> 'ended'
+     (VOYAGE ENDED; RESTART). Nothing moves it backward and only 'none' can trigger it, so exactly one ending can ever happen. Once it
+     leaves 'none' the world stops (see simTick): nothing more can happen, and the day and distance shown stay exactly as they were.
      -------------------------------------------------------------- */
-  var RESCUE_ENCOUNTER_WINDOW_MINUTES = 180; // how long an encounter stays open for a flare response
-  var RESCUE_ENCOUNTER_MIN_GAP = 180;        // 3-8 real hours between search encounters
-  var RESCUE_ENCOUNTER_MAX_GAP = 480;
+  var RESCUE_WATER_HOURS = 72;
+  var RESCUE_FOOD_HOURS = 168;
+  var RESCUE_MIGRATION_GRACE_MINUTES = 60; // old saves only: never load straight into a rescue (see migrateRescueIfNeeded)
 
-  function estimateRescueTravelMinutes(state) {
-    var phase = voyagePhase(state);
-    var baseHours = { inland: 1, strait: 2, coastal: 4, offshore: 20, tropics: 16, approach: 7 }[phase];
-    if (baseHours == null) baseHours = 14;
-    var weatherFactor = (state.weather.seaState >= 5) ? 1.4 : 1.0;
-    return Math.round(baseHours * weatherFactor * 60);
+  function rescueCallChoice() {
+    return { id: 'rescue-call', options: [{ label: 'CALL FOR RESCUE', action: 'call-for-rescue' }] };
   }
 
-  function rescueEncounterChance(state) {
-    var r = state.rescue;
-    var chance = 0.4; // aboard the boat, reasonable visibility, baseline
-    if (state.crew.inLifeRaft) chance -= 0.15; // a much smaller target
-    var tod = timeOfDayPhase(state);
-    if (tod === 'night') chance -= 0.15;
-    if (state.weather.condition === 'squall' || state.weather.seaState >= 5) chance -= 0.1;
-    if (r.encounterFlareFired) {
-      var boost = 0.4;
-      if (state.crew.inLifeRaft) boost += 0.1;  // exactly where a flare matters most
-      if (tod === 'night') boost += 0.1;
-      chance += boost;
-    }
-    return clamp(chance, 0.1, 0.95);
+  function checkNeglectRescue(state) {
+    var ve = state.voyageEnd, c = state.crew, now = state.meta.voyageMinutes;
+    if (!ve || ve.phase !== 'none') return;
+    var reason = null;
+    if (Number.isFinite(c.lastDrankAt) && now - c.lastDrankAt >= RESCUE_WATER_HOURS * 60) reason = 'water';
+    else if (Number.isFinite(c.lastAteAt) && now - c.lastAteAt >= RESCUE_FOOD_HOURS * 60) reason = 'food';
+    if (!reason) return;
+    ve.phase = 'pending'; ve.reason = reason; ve.at = now;
+    c.watchState = 'awake'; c.sleepStartedAt = null; // whatever he was in the middle of (asleep, reading, a menu) ends here
+    log(state, "You can't continue like this.");
+    state.pendingChoice = rescueCallChoice();
   }
 
-  function beginRescueEncounter(state) {
-    var r = state.rescue;
-    r.encounterActive = true;
-    r.encounterStartedAt = state.meta.voyageMinutes;
-    r.encounterFlareFired = false;
-    r.encounterKind = Math.random() < 0.5 ? 'aircraft' : 'vessel';
-    log(state, r.encounterKind === 'aircraft'
-      ? 'You hear an aircraft. It circles somewhere in the distance.'
-      : 'A vessel is visible, working a search pattern.');
-    log(state, 'Rescuers are searching the area.');
-    flushNewLogEntries(state);
-  }
-
-  function resolveRescueEncounter(state) {
-    var r = state.rescue;
-    var success = Math.random() < rescueEncounterChance(state);
-    r.encounterActive = false;
-    if (success) {
-      r.phase = 'rescued';
-      log(state, r.encounterKind === 'aircraft'
-        ? 'The aircraft circles once more. This time it stays.'
-        : 'The vessel alters course toward you. It keeps coming.');
-      log(state, 'RESCUED');
-      flushNewLogEntries(state);
-    } else {
-      log(state, r.encounterKind === 'aircraft'
-        ? "The aircraft's gone quiet. It could come back."
-        : 'The vessel moves off, still searching elsewhere.');
-      flushNewLogEntries(state);
-      r.nextSearchEventAt = state.meta.voyageMinutes + rand(RESCUE_ENCOUNTER_MIN_GAP, RESCUE_ENCOUNTER_MAX_GAP);
+  // OLD SAVES -- brings ANY older save to the neglect-only rescue system. The retired mechanics (flares, the life raft, the old EPIRB /
+  // search state and their menus) are dropped, never reactivated. The two new timestamps come from the existing needs counters when
+  // they are there (hoursSinceWater / hoursSinceMeal are the reliable record of how long ago he last drank / ate), capped a little
+  // under each threshold so nobody is rescued the instant they load merely because these timestamps are new; a missing or corrupt
+  // counter means "just now". A save that already ended under the old system stays ended (it shows VOYAGE ENDED + RESTART).
+  function migrateRescueIfNeeded(state) {
+    var c = state.crew, now = state.meta.voyageMinutes;
+    var wasEnded = !!(state.rescue && state.rescue.phase === 'rescued');
+    delete c.inLifeRaft;
+    if (state.supplies) delete state.supplies.safety;
+    delete state.rescue;
+    var ve = state.voyageEnd;
+    if (!ve || typeof ve !== 'object' || ['none', 'pending', 'ended'].indexOf(ve.phase) < 0) {
+      state.voyageEnd = { phase: wasEnded ? 'ended' : 'none', reason: wasEnded ? 'legacy' : null, at: wasEnded ? now : null };
     }
-  }
-
-  function checkRescue(state) {
-    var r = state.rescue;
-    if (!r.epirbOn || r.phase === 'rescued') return;
-
-    if (r.phase === 'traveling') {
-      if (state.meta.voyageMinutes >= r.activatedAt + r.travelMinutes) {
-        r.phase = 'searching';
-        log(state, "You're in the search area now.");
-        flushNewLogEntries(state);
-        r.nextSearchEventAt = state.meta.voyageMinutes + rand(RESCUE_ENCOUNTER_MIN_GAP, RESCUE_ENCOUNTER_MAX_GAP);
-      }
-      return;
-    }
-
-    if (r.phase !== 'searching') return;
-
-    if (r.encounterActive) {
-      if (state.meta.voyageMinutes >= r.encounterStartedAt + RESCUE_ENCOUNTER_WINDOW_MINUTES) {
-        resolveRescueEncounter(state);
-      }
-      return;
-    }
-
-    if (r.nextSearchEventAt != null && state.meta.voyageMinutes >= r.nextSearchEventAt) {
-      beginRescueEncounter(state);
-    }
-  }
-
-  // The ONLY normal conditions under which RADIO FOR RESCUE becomes
-  // available. Repair is always expected first -- this only returns
-  // true once repair genuinely isn't possible (the relevant spare is
-  // gone) or there's no potable water at all (no repair path exists
-  // for that one). Deliberately does NOT factor in engine or
-  // electrical condition -- the voyage can continue under sail or
-  // without power. This governs only whether rescue can be INITIATED;
-  // once active, rescue-related status/actions stay reachable
-  // regardless of what this returns afterward (see getContextualOptions).
-  function canRadioForRescue(state) {
-    var sailsUnrecoverable = state.boat.sails === 'DAMAGED' && state.supplies.spares.sailRepairKit <= 0;
-    var steeringUnrecoverable = state.boat.steering === 'DAMAGED' && state.supplies.spares.steeringParts <= 0;
-    var noWater = state.water.gallons <= 0;
-    return sailsUnrecoverable || steeringUnrecoverable || noWater;
+    var since = function (hours, thresholdHours) {
+      var mins = (Number.isFinite(hours) && hours > 0) ? hours * 60 : 0;
+      return now - Math.min(mins, thresholdHours * 60 - RESCUE_MIGRATION_GRACE_MINUTES);
+    };
+    if (!Number.isFinite(c.lastDrankAt)) c.lastDrankAt = since(c.hoursSinceWater, RESCUE_WATER_HOURS);
+    if (!Number.isFinite(c.lastAteAt)) c.lastAteAt = since(c.hoursSinceMeal, RESCUE_FOOD_HOURS);
+    if (c.lastDrankAt > now) c.lastDrankAt = now; // a timestamp from the future can only be corruption
+    if (c.lastAteAt > now) c.lastAteAt = now;
+    var id = state.pendingChoice && state.pendingChoice.id;
+    if (id === 'rescue-status-menu' || id === 'radio-rescue-confirm' || id === 'rescue-ending') state.pendingChoice = null; // menus of the retired system
   }
 
   function weatherChangeLine(condition) {
@@ -6361,7 +6282,6 @@
 
   function ambientEventsAllowed(state) {
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) return false; // mid opening-sequence — no room for musing
-    if (state.crew.inLifeRaft) return false; // pure survival focus — no idle noticing from a raft
     if (state.crew.watchState !== 'awake') return false;      // asleep — not noticing anything
     if (state.pendingChoice) return false;                    // mid-decision, not the moment for a stray thought
     if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
@@ -11272,11 +11192,7 @@
     state.pendingChoice = {
       id: 'position-menu',
       options: [
-        // Reachable from both NAV STATION (the normal case) and the
-        // life-raft menu (raftOptions, above, once the boat itself is
-        // gone) -- BACK has to return to whichever of those actually
-        // led here, never unconditionally to NAV STATION.
-        { label: 'BACK', action: state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station' },
+        { label: 'BACK', action: 'cmd:nav-station' },
       ],
     };
   }
@@ -11291,9 +11207,7 @@
     state.pendingChoice = {
       id: 'weather-menu',
       options: [
-        // Reachable from both NAV STATION and the life-raft menu -- see
-        // the same note on cmdPosition's BACK button above.
-        { label: 'BACK', action: state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station' },
+        { label: 'BACK', action: 'cmd:nav-station' },
       ],
     };
   }
@@ -11559,7 +11473,7 @@
   }
 
   function cmdInventory(state) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station'); return; }
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
     printBlank();
     printLine('INVENTORY', 'heading-label');
     state.pendingChoice = {
@@ -11570,95 +11484,18 @@
         { label: 'DIESEL', action: 'inventory:fuel' },
         { label: 'SPARES', action: 'inventory:spares' },
         { divider: true },
-        // Reachable from both NAV STATION and the life-raft menu -- see
-        // the same note on cmdPosition's BACK button above.
-        { label: 'BACK', action: state.crew.inLifeRaft ? 'cancel' : 'cmd:nav-station' },
+        { label: 'BACK', action: 'cmd:nav-station' },
       ],
     };
   }
 
-  function rescueStatusLine(state) {
-    var r = state.rescue;
-    if (r.phase === 'traveling') return 'help is on the way.';
-    if (r.phase === 'searching') return r.encounterActive ? 'rescuers searching nearby.' : 'search underway.';
-    if (r.phase === 'rescued') return 'rescued.';
-    return '';
-  }
-
-  // Reachable only once rescue is already underway (via RESCUE
-  // STATUS in getContextualOptions) -- the old entry point (DISTRESS,
-  // with ACTIVATE EPIRB/DEPLOY LIFE RAFT as player choices) is gone;
-  // see cmdRadioForRescue below for how rescue actually starts now.
-  // FIRE FLARE is the one action that still happens here, unchanged.
-  function cmdDistress(state) {
+  // RESCUE -- the ending screen (see the RESCUE note above checkNeglectRescue): the existing voyage information, nothing more.
+  function printVoyageEnded(state) {
     printBlank();
-    printLine('RESCUE STATUS', 'heading-label');
-    var r = state.rescue;
-    var opts = [];
-    printLine('RESCUE REQUESTED \u2014 ' + rescueStatusLine(state));
-    if (r.encounterActive && state.supplies.safety.flares > 0) {
-      opts.push({ label: 'FIRE FLARE', action: 'fire-flare' });
-    }
-    state.pendingChoice = { id: 'rescue-status-menu', options: pushBack(opts, 'cancel') };
-  }
-
-  // The point-of-no-return warning -- selecting RADIO FOR RESCUE never
-  // starts rescue by itself; only COMMENCE RESCUE (handled in
-  // handleAction) actually does, ending the voyage immediately via
-  // beginRescueEndingSequence below.
-  function cmdRadioForRescue(state) {
+    printLine('VOYAGE ENDED', 'heading-label');
     printBlank();
-    printLine('RADIO FOR RESCUE', 'heading-label');
-    printBlank();
-    printLine('Requesting rescue will end the voyage.');
-    printLine('You will not continue to Kaua\u02bbi.');
-    state.pendingChoice = {
-      id: 'radio-rescue-confirm',
-      options: [
-        { label: 'COMMENCE RESCUE', action: 'commence-rescue' },
-        { label: 'CANCEL', action: 'cancel' },
-      ],
-    };
-  }
-
-  // The rescue ending itself -- immediate and final, no search/travel/
-  // flare/EPIRB/life-raft sequence. A short, timed staggered reveal
-  // (same "..." pacing rhythm as the marlin reveal elsewhere in this
-  // file) culminating in the one permanent end state: NO LANDFALL,
-  // with RESTART as the only way forward. uiBusy is held for the
-  // duration so the header restart button can't interrupt it partway
-  // through (same reasoning as runShortAction's own use of it).
-  var RESCUE_ENDING_LINES = [
-    'You make the call.',
-    '...',
-    'Someone answers.',
-    '...',
-    'You won\u2019t reach Kaua\u02bbi this time.',
-    '...',
-  ];
-  function beginRescueEndingSequence(state) {
-    uiBusy = true;
-    var index = 0;
-    function showNext() {
-      printLine(RESCUE_ENDING_LINES[index]);
-      scrollToBottom();
-      index++;
-      if (index < RESCUE_ENDING_LINES.length) {
-        setTimeout(showNext, 1400);
-      } else {
-        setTimeout(function () {
-          printBlank();
-          printLine('NO LANDFALL', 'heading-label');
-          state.rescue.phase = 'rescued';
-          state.pendingChoice = { id: 'rescue-ending', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
-          uiBusy = false;
-          renderOptions(state);
-          saveGameState(state);
-          scrollToBottom();
-        }, 1400);
-      }
-    }
-    showNext();
+    printDataRow('DAY', String(voyageDayNumber(state)), 'data-row-lg');
+    printDataRow('DISTANCE TRAVELED', Math.round(state.nav.distanceTraveled).toLocaleString() + ' NM', 'data-row-lg');
   }
 
   // The three conditions cmdEngine itself refuses START ENGINE on --
@@ -12421,8 +12258,6 @@
     if (hasRepairableDamage(state) || (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)) {
       rows.push({ label: 'REPAIR', action: 'cmd:repair' });
     }
-    var rescueItem = rescueMenuOption(state);
-    if (rescueItem) rows.push(rescueItem);
     return rows;
   }
 
@@ -12493,10 +12328,8 @@
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
     }
     var toolsOpt = choreOptionIfDue(state, 'tools');
-    var rescueItem = rescueMenuOption(state);
     var extraGroup = [];
     if (toolsOpt) extraGroup.push(toolsOpt);
-    if (rescueItem) extraGroup.push(rescueItem);
 
     // The electrical panel itself: no ELECTRICAL heading (the controls
     // are self-explanatory), no divider line bracketing it -- just its
@@ -15006,6 +14839,7 @@
       // Hunger: a full meal resets to FULL; a snack is a smaller reset
       // (see HUNGER_RESET_HOURS_BY_TYPE).
       c.hoursSinceMeal = item.type === 'snack' ? Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack) : HUNGER_RESET_HOURS_BY_TYPE.meal;
+      c.lastAteAt = s.meta.voyageMinutes; // RESCUE -- a successful meal or snack restarts only the food clock
 
       // Meal-history monotony (hidden, never shown): an exponential
       // moving average nudged toward 1 by a snack, toward 0 by a real
@@ -15105,6 +14939,7 @@
       action: function (s) {
         consumeWater(s, WATER_DRINK_GAL);
         s.crew.hoursSinceWater = 0;
+        s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
         log(s, 'You drink some water.');
@@ -15140,6 +14975,7 @@
         s.drinks.coffee -= 1;
         consumeWater(s, WATER_COFFEE_GAL);
         s.crew.hoursSinceWater = 0;
+        s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.lastCoffeeAt = s.meta.voyageMinutes;
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
         log(s, 'Coffee, strong and hot. The world sharpens a little.');
@@ -15175,6 +15011,7 @@
         s.drinks.tea -= 1;
         consumeWater(s, WATER_TEA_GAL);
         s.crew.hoursSinceWater = 0;
+        s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
         log(s, 'Tea, warm in your hands. Something steadying about it.');
         flushNewLogEntries(s);
@@ -15441,8 +15278,6 @@
     'ships-computer': cmdShipsComputer,
     'marine-forecast': cmdMarineForecast,
     inventory: cmdInventory,
-    'rescue-status': cmdDistress,
-    'radio-for-rescue': cmdRadioForRescue,
     sails: cmdSails,
     engine: cmdEngine,
     helm: cmdHelm,
@@ -17769,79 +17604,34 @@
     scrollToBottom();
   }
 
-  // What (if anything) the top-level rescue-related menu item should
-  // be right now. Once rescue is actually underway, it stays
-  // reachable regardless of canRadioForRescue's current value (e.g. a
-  // later repair shouldn't hide an already-active rescue) -- see the
-  // ACTIVE RESCUE note on canRadioForRescue above. Returns null when
-  // neither applies, so callers can simply skip adding anything.
-  // Rescue now resolves immediately on COMMENCE RESCUE -- there is no
-  // longer a traveling/searching interim phase to show status for, so
-  // this only ever needs to check whether rescue can be initiated at
-  // all. (phase === 'rescued' is handled earlier, in
-  // getContextualOptions, before this function is ever called.)
-  function rescueMenuOption(state) {
-    if (canRadioForRescue(state)) {
-      return { label: 'RADIO FOR RESCUE', action: 'cmd:radio-for-rescue' };
-    }
-    return null;
-  }
 
   function getContextualOptions(state) {
-    // A pending decision always wins — including a restart request made
+    // THE VOYAGE IS OVER (see RESCUE, near checkNeglectRescue): once a neglect threshold has been reached the only thing left is CALL FOR
+    // RESCUE and then RESTART -- whatever menu, short action or sleep was in progress. The one exception is the header's own restart
+    // request (NEW VOYAGE: YES / NO), which stays answerable.
+    var ve = state.voyageEnd;
+    if (ve && ve.phase !== 'none') {
+      var pc = state.pendingChoice;
+      if (pc && pc.id === 'restart-choice') return pc.options;
+      return ve.phase === 'pending' ? rescueCallChoice().options : [{ label: 'RESTART', action: 'confirm-restart' }];
+    }
+    // A pending decision always wins -- including a restart request made
     // mid-departure, mid-attempt, or mid-sleep, which must be answerable
-    // even though those states otherwise show just one button. Pending
-    // choices (SAILS' FULL/REEFED/etc, the rescue warning's COMMENCE
-    // RESCUE/CANCEL, RESCUE STATUS' FIRE FLARE, and so on) are unaffected
-    // by physical location — a rescue interaction started below can
-    // still surface FIRE FLARE regardless of where the sailor is standing.
+    // even though those states otherwise show just one button.
     if (state.pendingChoice) return state.pendingChoice.options;
 
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) {
       return [{ label: DEPARTURE_STEPS[state.departure.stageIndex].label, action: 'departure-step' }];
     }
 
-    if (state.rescue.phase === 'rescued') {
-      // The voyage is over -- rescue was called in and the attempt to
-      // reach Kaua'i has ended. Nothing left to do but restart; see
-      // beginRescueEndingSequence, which already sets this exact
-      // pendingChoice itself (checked above, before this branch is
-      // ever reached) -- this is just a defensive fallback matching it.
-      return [{ label: 'RESTART', action: 'confirm-restart' }];
-    }
 
     if (state.crew.watchState === 'sleeping') {
       return [{ label: 'WAKE UP', action: 'wake-up' }];
     }
 
-    var rescueItem = rescueMenuOption(state);
 
-    if (state.crew.inLifeRaft) {
-      // Nothing left to sail, motor, steer, or fix — the voyage has
-      // become survival until rescue, full stop. There's no boat left
-      // to be above or below on, so this stays the one flat list it
-      // always was (minus STATUS, which is gone everywhere now).
-      var raftOptions = [
-        { label: 'POSITION', action: 'cmd:position' },
-        { label: 'WEATHER', action: 'cmd:weather' },
-        { label: 'INVENTORY', action: 'cmd:inventory' },
-        { divider: true },
-        { label: 'EAT', action: 'cmd:eat' },
-        { label: 'DRINK', action: 'cmd:drink' },
-        { label: 'SLEEP', action: 'cmd:sleep' },
-      ];
-      if (rescueItem) raftOptions.push(rescueItem);
-      return raftOptions;
-    }
-
-    // REPAIR no longer lives here at all — it's reachable only from
-    // STATUS now, and only while hasRepairableDamage(state) (or a
-    // still-pending aft-locker event) is true; see cmdStatus. RADIO
-    // FOR RESCUE/RESCUE STATUS keeps its existing placement above deck
-    // (aboveMiscGroup, below) — below deck it now lives inside NAV
-    // STATION only (see cmdNavStation), matching the stated design
-    // intent that dealing with an emergency, like everything else
-    // below, means going to the room where that's handled.
+    // REPAIR no longer lives here at all -- it's reachable only from STATUS now, and only while hasRepairableDamage(state) (or a
+    // still-pending aft-locker event) is true; see cmdStatus.
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
 
     if (state.crew.location === 'below') {
@@ -17875,8 +17665,6 @@
     }
 
     // ABOVE (the default/starting location).
-    var aboveMiscGroup = [];
-    if (rescueItem) aboveMiscGroup.push(rescueItem);
     return groupedOptions([
       [
         { label: 'HELM', action: 'cmd:helm' },
@@ -17884,7 +17672,6 @@
         { label: 'ENGINE', action: 'cmd:engine' },
         { label: 'FISH', action: 'cmd:fish' },
       ],
-      aboveMiscGroup,
       [{ label: goLabel, action: 'go-above-below' }],
     ]);
   }
@@ -18719,44 +18506,17 @@
             },
           });
           break;
-        case 'commence-rescue':
+        case 'call-for-rescue':
+          if (!state.voyageEnd || state.voyageEnd.phase !== 'pending') break; // exactly one ending: never replayed, never reachable twice
           runShortAction(state, {
-            label: 'CALLING FOR HELP',
+            label: 'CALLING FOR RESCUE',
             duration: 4,
             action: function (s) {
-              s.rescue.epirbOn = true; // internal legacy field, kept for save compatibility -- no longer drives any player-facing search/travel logic
-              // Empty options here (not null) so runShortAction's own
-              // finish() -- which fires immediately after this action
-              // returns, before beginRescueEndingSequence's own timers
-              // resolve -- renders nothing instead of falling back to
-              // the normal contextual menu for a moment.
-              s.pendingChoice = { id: 'rescue-ending', options: [] };
-              beginRescueEndingSequence(s);
-            },
-          });
-          break;
-        case 'deploy-life-raft':
-          runShortAction(state, {
-            label: 'DEPLOYING LIFE RAFT',
-            duration: 6,
-            action: function (s) {
-              s.crew.inLifeRaft = true;
-              log(s, 'The raft inflates alongside.');
-              log(s, 'You climb aboard, and cut away from the boat.');
+              s.voyageEnd.phase = 'ended';
+              log(s, 'Your voyage ends here.');
               flushNewLogEntries(s);
-            },
-          });
-          break;
-        case 'fire-flare':
-          runShortAction(state, {
-            label: 'FIRING FLARE',
-            duration: 3,
-            action: function (s) {
-              s.supplies.safety.flares = clamp(s.supplies.safety.flares - 1, 0, 999);
-              s.rescue.encounterFlareFired = true;
-              log(s, 'A red flare climbs above the water.');
-              flushNewLogEntries(s);
-              resolveRescueEncounter(s);
+              printVoyageEnded(s);
+              s.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
             },
           });
           break;
@@ -19068,6 +18828,7 @@
     }
     state.log.forEach(printLogEntry);
     printedCount = state.log.length;
+    if (state.voyageEnd && state.voyageEnd.phase === 'ended') printVoyageEnded(state); // reloaded after the ending: the same VOYAGE ENDED screen
     renderOptions(state);
     scrollToBottom();
   }
@@ -19401,14 +19162,6 @@
         fuses: ORIGINAL_SPARES.fuses,
       };
     }
-    if (c.inLifeRaft === undefined) c.inLifeRaft = false;
-    if (!state.rescue) {
-      state.rescue = {
-        epirbOn: false, activatedAt: null, phase: 'none', travelMinutes: 0,
-        nextSearchEventAt: null, encounterActive: false, encounterStartedAt: null,
-        encounterKind: null, encounterFlareFired: false,
-      };
-    }
     // One-time conversion from the old five-tier numeric condition model
     // (HULL/RIGGING/SAILS/ENGINE/ELECTRICAL/STEERING, 0-100, plus
     // flooding and per-system major-repair tracking) to the new
@@ -19585,9 +19338,11 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateRescueIfNeeded(GAME); // RESCUE -- drop the retired mechanics, start the two timers from the existing hunger/thirst record
     migrateWeatherStateIfNeeded(GAME); // PHASE 5 -- retire any old scripted-weather state, keep what the player is experiencing
     migrateWeatherDirectionIfNeeded(GAME);
     migrateRealWeatherIfNeeded(GAME);
+    queueWeatherUpdateForExistingSavesIfNeeded(GAME); // OLD-SAVE COMPATIBILITY -- past Cape Flattery with the update not yet run: make it available now (after the line above, which gives very old saves their flags)
     migrateVesselLogIfNeeded(GAME);
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
