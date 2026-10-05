@@ -12107,17 +12107,9 @@
     }
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
     printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
-    var vmgEl, speedEl;
-    function printVmgRow() { vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg'); }
-    function printSpeedRow() { speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg'); }
-    if (omitTitle) { // the HELM screen: BOAT SPEED, then VELOCITY MADE GOOD, as their own group beneath HEADING / BEARING
-      printBlank();
-      printSpeedRow();
-      printVmgRow();
-    } else { // CHANGE COURSE keeps its existing order
-      printVmgRow();
-      printSpeedRow();
-    }
+    printBlank();
+    var speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg');
+    var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
     printBlank();
     printDataRow('WIND FROM', Math.round(state.weather.windDirection) + '\u00B0', 'data-row-lg');
     printDataRow('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT', 'data-row-lg');
@@ -12257,7 +12249,7 @@
       return;
     }
     runAudioSyncedAction(state, {
-      label: 'TRIMMING SAILS...',
+      label: 'TRIMMING SAILS',
       playAudio: function (onEnded) { return playSailsOneShot('winch', onEnded, state); },
       action: function (s) {
         s.nav.sailTrimState = 'good';
@@ -15464,7 +15456,7 @@
       return;
     }
     runAudioSyncedAction(state, {
-      label: 'POURING WATER',
+      label: 'FILLING WATER',
       playAudio: function (onEnded) { return playGalleyOneShot('water', onEnded); },
       action: function (s) {
         consumeWater(s, WATER_DRINK_GAL);
@@ -17609,31 +17601,17 @@
     optionsEl.innerHTML = '';
     clearTempView();
 
-    // Same transientLabel option as runShortAction: normally the blank
-    // line and the label are printed permanently, same as everything
-    // else in the scrollback; transientLabel opts a specific action out
-    // of BOTH -- the entire block (blank line, label, dots) shows only
-    // while the action runs and is gone once resolved, leaving nothing
-    // behind but whatever the action's own result adds. Previously only
-    // the label was ever made transient here -- the blank line above it
-    // was always printed via the untracked, permanent printPersistentBlank,
-    // which is exactly the leftover gap/spacing artifact this now fixes:
-    // a transient action now removes the SAME blank line it added,
-    // rather than leaving an untracked one behind forever.
-    var blankEl = null;
-    var labelEl = null;
-    if (config.transientLabel) {
-      blankEl = document.createElement('p');
-      blankEl.className = 'gap';
-      outputEl.insertBefore(blankEl, tempViewEl);
-      labelEl = document.createElement('p');
-      labelEl.className = 'line heading-label';
-      labelEl.textContent = config.label;
-      outputEl.insertBefore(labelEl, tempViewEl);
-    } else {
-      printPersistentBlank();
-      printPersistentLine(config.label, 'heading-label');
-    }
+    // An action in progress -- its ALL-CAPS label, with the animated dots on the NEXT line -- is temporary screen state,
+    // never scrollback and never log. The blank line above it, the label and the dots are all tracked here and removed
+    // when the action resolves, so only whatever the action's own result adds is left behind. (This is now how every
+    // action behaves; the old per-action transientLabel option no longer changes anything.)
+    var blankEl = document.createElement('p');
+    blankEl.className = 'gap';
+    outputEl.insertBefore(blankEl, tempViewEl);
+    var labelEl = document.createElement('p');
+    labelEl.className = 'line heading-label';
+    labelEl.textContent = actionLabelText(config.label);
+    outputEl.insertBefore(labelEl, tempViewEl);
 
     var dotsLine = document.createElement('p');
     dotsLine.className = 'line dim';
@@ -17790,6 +17768,12 @@
     if (fishingSession.dotsLineEl && fishingSession.dotsLineEl.parentNode) {
       fishingSession.dotsLineEl.parentNode.removeChild(fishingSession.dotsLineEl);
     }
+    if (fishingSession.labelLineEl && fishingSession.labelLineEl.parentNode) {
+      fishingSession.labelLineEl.parentNode.removeChild(fishingSession.labelLineEl); // WATCHING THE LINE goes with its dots when the wait ends
+    }
+    if (fishingSession.blankLineEl && fishingSession.blankLineEl.parentNode) {
+      fishingSession.blankLineEl.parentNode.removeChild(fishingSession.blankLineEl);
+    }
   }
 
   function fishingIdleOptions() {
@@ -17821,16 +17805,21 @@
     // single DOM node whose text content is updated in place -- never
     // prints a new line while waiting.
     printRoomHeader('FISH'); // "> FISH" stays fixed at the top while casting
-    var dotsLine = document.createElement('p'); // the whole status -- label and animated dots -- is this one line
-    dotsLine.className = 'line heading-label';
-    dotsLine.textContent = 'WATCHING THE LINE .';
+    // WATCHING THE LINE is temporary fishing-state UI, never log: gap, ALL-CAPS label, dots on the NEXT line -- all tracked
+    // so clearFishingTimers removes them the moment the wait ends.
+    printBlank();
+    fishingSession.blankLineEl = tempViewEl.lastElementChild;
+    fishingSession.labelLineEl = printLine('WATCHING THE LINE', 'heading-label');
+    var dotsLine = document.createElement('p');
+    dotsLine.className = 'line dim';
+    dotsLine.textContent = '.';
     tempViewEl.appendChild(dotsLine);
     fishingSession.dotsLineEl = dotsLine;
     var frames = ['.', '..', '...'];
     var frameIndex = 0;
     fishingSession.dotsTimer = setInterval(function () {
       frameIndex = (frameIndex + 1) % frames.length;
-      dotsLine.textContent = 'WATCHING THE LINE ' + frames[frameIndex];
+      dotsLine.textContent = frames[frameIndex];
     }, DOT_FRAME_MS);
 
     state.pendingChoice = { id: 'fish-waiting', options: [{ label: 'STOP FISHING', action: 'fish-stop' }] };
@@ -18627,6 +18616,11 @@
     }
   }
 
+  // The one rule for temporary action text: ALL CAPS, no trailing dots (the animation is its own line beneath it).
+  function actionLabelText(label) {
+    return String(label == null ? '' : label).toUpperCase().replace(/[\s.\u2026]+$/, '');
+  }
+
   function runShortAction(state, config) {
     uiBusy = true;
     var choiceAtStart = state.pendingChoice; // preserved/cleared the same way handleAction's tail would
@@ -18634,31 +18628,17 @@
     optionsEl.innerHTML = '';
     clearTempView(); // whatever menu was open is done being looked at once an action starts
 
-    // Normally the blank line and the label (e.g. "STARTING ENGINE") are
-    // printed permanently, same as everything else in the scrollback.
-    // config.transientLabel opts a specific action out of BOTH: the
-    // whole block shows only while the dots are running and is gone
-    // once resolved, leaving just the result line behind — for actions
-    // minor enough that only the outcome, not the doing, belongs in the
-    // permanent record. See runAudioSyncedAction's own matching comment
-    // for why the blank line is tracked and removed here too, not just
-    // the label -- an untracked, always-persistent printPersistentBlank
-    // would otherwise leave exactly the leftover-gap artifact that
-    // option exists to avoid.
-    var blankEl = null;
-    var labelEl = null;
-    if (config.transientLabel) {
-      blankEl = document.createElement('p');
-      blankEl.className = 'gap';
-      outputEl.insertBefore(blankEl, tempViewEl);
-      labelEl = document.createElement('p');
-      labelEl.className = 'line heading-label';
-      labelEl.textContent = config.label;
-      outputEl.insertBefore(labelEl, tempViewEl);
-    } else {
-      printPersistentBlank();
-      printPersistentLine(config.label, 'heading-label');
-    }
+    // An action in progress -- its ALL-CAPS label (e.g. "STARTING ENGINE"), with the animated dots on the NEXT line -- is
+    // temporary screen state, never scrollback and never log. The blank line above it, the label and the dots are all
+    // tracked here and removed when the dots finish, so only whatever the action's own result adds is left behind. (This
+    // is now how every action behaves; the old per-action transientLabel option no longer changes anything.)
+    var blankEl = document.createElement('p');
+    blankEl.className = 'gap';
+    outputEl.insertBefore(blankEl, tempViewEl);
+    var labelEl = document.createElement('p');
+    labelEl.className = 'line heading-label';
+    labelEl.textContent = actionLabelText(config.label);
+    outputEl.insertBefore(labelEl, tempViewEl);
 
     // One animated "." / ".." / "..." run, for `durationSeconds` real seconds,
     // then `onDone`. Factored out so a short action can optionally chain a
@@ -19008,7 +18988,6 @@
               // computeHeading() also rolls a per-tick drift wobble that
               // must only ever happen on an actual simulated tick.
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
-              log(s, 'BATTERY CHARGING');
               flushNewLogEntries(s);
               printBlank();
               printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
@@ -19227,7 +19206,6 @@
     {
       label: 'START ENGINE',
       workingLabel: 'START ENGINE',
-      text: 'BATTERY CHARGING',
       // Audio-synced, exactly like the ENGINE menu's own STARTING
       // ENGINE action (see the 'engine-start' case): start.mp3 begins
       // the instant this step is chosen, and "START ENGINE. .. …" stays
@@ -19402,7 +19380,17 @@
     updateClock();
   }
 
+  // BATTERY CHARGING used to be written to the log each time the engine started; it is no longer shown or logged, so entries
+  // already in a saved voyage are dropped when it loads (they would otherwise be replayed on every load). Idempotent.
+  function dropRetiredLogEntries(state) {
+    if (!Array.isArray(state.log)) return;
+    var before = state.log.length;
+    state.log = state.log.filter(function (entry) { return !entry || entry.text !== 'BATTERY CHARGING'; });
+    if (state.log.length !== before) saveGameState(state); // write the cleaned log back now, not only at the next autosave
+  }
+
   function renderReturn(state, ticks) {
+    dropRetiredLogEntries(state);
     resetOutputEl();
     printPersistentLine('S/V ' + VESSEL_NAME + ' \u2014 underway', 'heading-label');
     if (ticks > 0) {
