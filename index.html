@@ -1095,8 +1095,9 @@
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
         autopilotWobble: 0,        // open ocean, whenever something is ACTIVELY holding course — AUTOPILOT ON or AT THE HELM — small bounded correction oscillation around the steering solution; see computeHeading
-        sailTrimState: 'good',     // 'good' | 'needsTrim' — see updateSailTrimForHeading (called from computeHeading's three open-ocean branches, against the CLEAN pre-wobble/pre-noise steered value so ordinary steering jitter alone can never trip it) and TRIM SAILS (cmdTrimSails/performTrimSails), the only thing that ever sets this back to 'good'
-        lastTrimHeading: startBearing, // the heading the sails were last actually, properly trimmed for — see SAIL_TRIM_THRESHOLD_DEG in updateSailTrimForHeading
+        sailTrimState: 'good',     // 'good' | 'needsTrim' — see updateSailTrimForPointOfSail (called from computeHeading's three open-ocean branches, against the CLEAN pre-wobble/pre-noise steered value so ordinary steering jitter alone can never trip it) and TRIM SAILS (cmdTrimSails/performTrimSails), the only thing that ever sets this back to 'good'
+        lastTrimHeading: startBearing, // the heading the sails were last trimmed at -- kept for saved games; trimming is now driven by POINT OF SAIL changes (trimPointOfSail), not by this
+        trimPointOfSail: null,     // the POINT OF SAIL last seen by updateSailTrimForPointOfSail (null until the first check, and again right after a trim)
         heading: startBearing,
         positionConfidence: 'good',
         coastalRouteMigrated: true, // a fresh voyage never needs the one-time resync migrateCoastalWaypointIndexIfNeeded() does for older saves
@@ -4176,29 +4177,28 @@
   // branch, the only place this is read.
   var DRIFT_SAIL_FACTOR = { full: 1.00, reefed: 0.60, minimal: 0.30, furled: 0.12 };
 
-  // SAIL TRIM — a simple GOOD/NEEDS TRIM state, entirely separate from
+  // SAIL TRIM -- a simple GOOD/NEEDS TRIM state, entirely separate from
   // steering. See cmdTrimSails/performTrimSails for the only place this
-  // ever resets to 'good'; here it's a one-way trip to 'needsTrim' once
-  // the CLEAN steered value (see the three call sites in computeHeading
-  // below) has moved SAIL_TRIM_THRESHOLD_DEG or more from
-  // nav.lastTrimHeading. Deliberately checked against the pre-wobble,
-  // pre-noise steered value in each branch (nav.setCourse while AT THE
-  // HELM, the autopilot steering solution while AUTOPILOT ON, or
-  // nav.driftHeading while genuinely drifting) rather than the final
-  // nav.heading the player sees — nav.heading always carries a little
-  // per-tick steering wobble/noise on top even while properly holding
-  // course (see computeHeading's own notes), and none of that ordinary
-  // jitter should ever look like a "meaningful heading change" on its
-  // own. Idempotent and cheap to call every tick.
-  var SAIL_TRIM_THRESHOLD_DEG = 5;
+  // ever resets to 'good'; here it's a one-way trip to 'needsTrim' the
+  // moment SOLACE moves from one POINT OF SAIL to another (pointOfSailLabel
+  // -- the one existing calculation, no thresholds of its own here), whether
+  // the heading moved (a course change, the autopilot, drift) or the wind did.
+  // A heading or wind change that stays inside the same point of sail does
+  // nothing. The category is read from the CLEAN steered value (see the
+  // call sites in computeHeading -- before the per-tick wobble/noise) and,
+  // during a course turn, from the turning heading itself (see
+  // beginCourseTurn), so ordinary jitter never reads as a change of point.
   var SAIL_TRIM_PENALTY_FRACTION = 0.1; // ~10% off the SAIL component of speed specifically while NEEDS TRIM -- see computeBoatSpeed. Never catastrophic, never affects the engine component at all.
-  function updateSailTrimForHeading(state, referenceHeading) {
+  // Returns true on the call that actually flips the sails to NEEDS TRIM.
+  function updateSailTrimForPointOfSail(state, heading) {
     var nav = state.nav;
-    if (nav.lastTrimHeading == null) { nav.lastTrimHeading = referenceHeading; return; }
-    if (nav.sailTrimState === 'needsTrim') return;
-    if (Math.abs(signedAngleDiff(referenceHeading, nav.lastTrimHeading)) >= SAIL_TRIM_THRESHOLD_DEG) {
-      nav.sailTrimState = 'needsTrim';
-    }
+    if (!Number.isFinite(state.weather.windDirection)) return false; // no wind angle to read a point of sail from
+    var pointOfSail = pointOfSailLabel(heading, state.weather.windDirection);
+    var previous = nav.trimPointOfSail;
+    nav.trimPointOfSail = pointOfSail;
+    if (previous == null || previous === pointOfSail || nav.sailTrimState === 'needsTrim') return false;
+    nav.sailTrimState = 'needsTrim';
+    return true;
   }
 
   function computeHeading(state) {
@@ -4234,7 +4234,7 @@
 
       if (state.boat.autopilotOn && state.boat.steering !== 'DAMAGED') {
         steered = autopilotSteeringSolution(state, targetPoint);
-        updateSailTrimForHeading(state, steered); // against the CLEAN solution, before the oscillation below -- see the function's own notes
+        updateSailTrimForPointOfSail(state, steered); // against the CLEAN solution, before the oscillation below -- see the function's own notes
 
         // Small bounded correction oscillation: whoever's actively
         // holding course — the autopilot here, or a human AT THE HELM
@@ -4258,7 +4258,7 @@
         // bounded correction oscillation as autopilot, above, standing in
         // for imperfect human steering.
         steered = nav.setCourse;
-        updateSailTrimForHeading(state, steered); // against the CLEAN set course, before the oscillation below
+        updateSailTrimForPointOfSail(state, steered); // against the CLEAN set course, before the oscillation below
         var helmOscBound = 1 + state.weather.seaState;
         var helmOscStep = (0.3 + state.weather.seaState * 0.35) * (TICK_MINUTES / 10);
         if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
@@ -4313,7 +4313,7 @@
 
         if (nav.tack) { nav.tack = null; nav.tackDistanceNm = 0; }
         steered = nav.driftHeading;
-        updateSailTrimForHeading(state, steered); // nav.driftHeading itself never carries the wobble/noise terms, so this is already the clean value
+        updateSailTrimForPointOfSail(state, steered); // nav.driftHeading itself never carries the wobble/noise terms, so this is already the clean value
       }
     }
     // Small per-tick heading noise: imperfect helming, wave action, minor
@@ -5451,6 +5451,7 @@
       return;
     }
 
+    if (nav.trimPointOfSail == null && Number.isFinite(state.weather.windDirection)) nav.trimPointOfSail = pointOfSailLabel(nav.heading, state.weather.windDirection); // the point of sail she is leaving
     headingTurnActive = true;
     var currentOpts = opts;
 
@@ -5468,6 +5469,7 @@
       // — the boat is never just visually rotating while the
       // simulation waits for a final value.
       state.boat.speed = computeBoatSpeed(state, nav.heading);
+      var trimFlipped = updateSailTrimForPointOfSail(state, nav.heading); // crossed into another point of sail: needs trim now, not at the next sim tick
 
       // If the player is currently looking at the HELM screen, this
       // updates its live HEADING/BOAT SPEED/POINT OF SAIL/VELOCITY MADE
@@ -5487,6 +5489,7 @@
         activeTurn.headerRefs.vmgEl.textContent = liveFigures.vmg.toFixed(1) + ' KT';
       }
       updateNavStrip(state); // the persistent DAY/SPEED/HEADING/LOCATION strip stays live too, regardless of which screen is open
+      if (trimFlipped) { syncHelmTrim(state); if (!uiBusy) renderOptions(state); } // SAIL TRIM row + TRIM SAILS appear right away
 
       // Luffing/sail_fill driven purely off the actual heading this
       // tick, via the one shared state machine every heading-change
@@ -12115,7 +12118,7 @@
     printDataRow('WIND SPEED', Math.round(state.weather.windSpeed) + ' KT', 'data-row-lg');
     var pointOfSailEl = printDataRow('POINT OF SAIL', figures.pointOfSail, 'data-row-lg');
     printBlank();
-    printDataRow('SAIL TRIM', sailTrimLabel(state), 'data-row-lg');
+    helmSailTrimEl = printDataRow('SAIL TRIM', sailTrimLabel(state), 'data-row-lg');
     printDataRow('AUTOPILOT', state.boat.autopilotOn ? 'ON' : 'OFF', 'data-row-lg');
 
     var refs = { headingEl: headingEl, speedEl: speedEl, pointOfSailEl: pointOfSailEl, vmgEl: vmgEl };
@@ -12215,16 +12218,20 @@
     state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([{ label: 'CHANGE COURSE', action: 'cmd:change-course' }, autopilotRow]), 'leave-helm') };
   }
 
-  // The helm is drawn once, so when the sails start (or stop) needing trim while it is open -- typically the tick right
-  // after a course change -- TRIM SAILS and the SAIL TRIM row would stay out of date until the player left and came back.
-  // renderOptions calls this on every render: if the open helm's TRIM SAILS no longer matches the sails' state, redraw it.
-  function redrawHelmIfTrimChanged(state) {
+  // The helm is drawn once, so when the sails start (or stop) needing trim while it is open -- a course turn crossing into another
+  // point of sail, a wind shift on a tick -- the SAIL TRIM row and the TRIM SAILS menu item are brought up to date IN PLACE (no
+  // redraw, so the "Course set to ..." line and the rest of the screen stay put). renderOptions calls this on every render, and
+  // the course-turn timer calls it the moment the point of sail changes.
+  var helmSailTrimEl = null; // the SAIL TRIM row's value element on the helm / CHANGE COURSE screen currently drawn
+  function syncHelmTrim(state) {
+    var needsTrim = state.nav.sailTrimState === 'needsTrim';
+    if (helmSailTrimEl && helmSailTrimEl.isConnected) helmSailTrimEl.textContent = sailTrimLabel(state);
     var pc = state.pendingChoice;
     if (uiBusy || !pc || pc.id !== 'helm-menu') return;
-    var shown = pc.options.some(function (o) { return o.action === 'trim-sails'; });
-    if (shown === (state.nav.sailTrimState === 'needsTrim')) return;
-    clearTempView();
-    cmdHelm(state);
+    var at = -1;
+    pc.options.forEach(function (o, i) { if (o.action === 'trim-sails') at = i; });
+    if (needsTrim && at < 0) pc.options.unshift({ label: 'TRIM SAILS', action: 'trim-sails' });
+    else if (!needsTrim && at >= 0) pc.options.splice(at, 1);
   }
 
   // TRIM SAILS — audio-synced, same architecture as WASH/CHANGE/MAKE
@@ -12254,6 +12261,7 @@
       action: function (s) {
         s.nav.sailTrimState = 'good';
         s.nav.lastTrimHeading = s.nav.heading;
+        s.nav.trimPointOfSail = null; // re-read from wherever she is pointing on the next check
         cmdHelm(s);
       },
     });
@@ -18379,7 +18387,7 @@
     // for why. Toggled here, every render, the same way #controls'
     // content itself is decided.
     optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
-    redrawHelmIfTrimChanged(state);
+    syncHelmTrim(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
       if (opt.divider) {
@@ -19419,6 +19427,7 @@
     if (nav.landWarningLevel === undefined) nav.landWarningLevel = 'none';
     if (nav.sailTrimState === undefined) nav.sailTrimState = 'good';
     if (nav.lastTrimHeading === undefined || nav.lastTrimHeading === null) nav.lastTrimHeading = nav.heading;
+    if (nav.trimPointOfSail === undefined) nav.trimPointOfSail = null;
     if (state.flags && state.flags.arrivedAtDestination === undefined) state.flags.arrivedAtDestination = false;
     if (state.flags && state.flags.breakwaterObservationShown === undefined) state.flags.breakwaterObservationShown = false;
     if (state.flags && state.flags.pacificObservationShown === undefined) state.flags.pacificObservationShown = false;
