@@ -6999,7 +6999,31 @@
   // of the start -> cruise overlap) would have to reuse that still-
   // audible element immediately, cutting it off mid-fade; a third slot
   // lets that fade finish on its own first.
-  function makeCrossfadeLoopController(errorLabel, slotCount) {
+  // iOS Safari treats HTMLMediaElement.volume as read-only (it always
+  // reads 1), so a fade built on el.volume does nothing there: the
+  // incoming loop starts at full level and the outgoing one is simply cut
+  // off when its "fade" ends. Everywhere else the volume is honored and
+  // this reports false. Tested once, with a throwaway element.
+  var elementVolumeIgnoredCache = null;
+  function elementVolumeIsIgnored() {
+    if (elementVolumeIgnoredCache === null) {
+      try {
+        var probe = new Audio();
+        probe.volume = 0.5;
+        elementVolumeIgnoredCache = Math.abs(probe.volume - 0.5) > 0.01;
+      } catch (e) {
+        elementVolumeIgnoredCache = false;
+      }
+    }
+    return elementVolumeIgnoredCache;
+  }
+
+  // gainFallbackForIgnoredVolume (optional, ENGINE only): when the browser
+  // ignores element volume, each slot is routed through its own GainNode and
+  // the element's own `volume` property is redirected to that node's gain, so
+  // every fade/mute/instant-set below drives the gain with no other change.
+  // Browsers that honor element volume never take this path.
+  function makeCrossfadeLoopController(errorLabel, slotCount, gainFallbackForIgnoredVolume) {
     var slotTotal = slotCount || 2;
     var slots = [];
     for (var s = 0; s < slotTotal; s++) slots.push(null);
@@ -7007,14 +7031,44 @@
     var generation = 0;
 
     function ensureSlot(i) {
+      var wantGain = gainFallbackForIgnoredVolume && audioCtx && elementVolumeIsIgnored();
+      var existing = slots[i];
+      // A slot built before the current AudioContext existed, or for one a
+      // hard audio rebuild has since closed, would be silent -- replace it.
+      if (existing && wantGain && existing.ctx !== audioCtx) {
+        clearNearEndTimer(existing);
+        clearFadeTimer(existing);
+        existing.el.onended = null;
+        existing.el.ontimeupdate = null;
+        existing.el.loop = false;
+        if (!existing.el.paused) existing.el.pause();
+        slots[i] = null;
+      }
       if (slots[i]) return slots[i];
       var el = new Audio();
       el.preload = 'auto';
+      var routedCtx = null;
+      if (wantGain) {
+        try {
+          var gainNode = audioCtx.createGain();
+          gainNode.gain.value = 0;
+          audioCtx.createMediaElementSource(el).connect(gainNode).connect(audioCtx.destination);
+          var level = 0;
+          Object.defineProperty(el, 'volume', {
+            configurable: true,
+            get: function () { return level; },
+            set: function (v) { level = v; gainNode.gain.value = v; }
+          });
+          routedCtx = audioCtx;
+        } catch (e) {
+          console.warn(errorLabel + ' audio: gain routing unavailable, using element volume:', describeError(e));
+        }
+      }
       el.volume = 0;
       el.addEventListener('error', function () {
         console.error(errorLabel + ' AUDIO FILE ERROR', 'path:', el.currentSrc || el.src, 'code:', el.error ? el.error.code : null);
       });
-      var slot = { el: el, fadeTimer: null, nearEndTimer: null, myGeneration: -1 };
+      var slot = { el: el, fadeTimer: null, nearEndTimer: null, myGeneration: -1, ctx: routedCtx };
       slots[i] = slot;
       return slot;
     }
@@ -9224,7 +9278,7 @@
   // 'ended' never comes.
   var ENGINE_STARTUP_COMPLETE_MARGIN_SECONDS = 0.15;
 
-  var engineAudio = makeCrossfadeLoopController('ENGINE', 3);
+  var engineAudio = makeCrossfadeLoopController('ENGINE', 3, true); // true: fade through a GainNode where the browser ignores element volume (iOS)
   // Which ENGINE_AUDIO_FILES key engineAudio is currently playing (or
   // null) -- the controller itself only knows raw paths/volumes, not
   // domain keys, so this is purely for applyMuteToEngineAudio's
