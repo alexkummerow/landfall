@@ -709,29 +709,13 @@
     margin: 0.35rem 0;
   }
 
-  /* A category heading inside #options (CHANGE CLOTHES): plain text in the heading-label look, directly above its own rows. Not a button. */
-  .option-heading {
-    color: var(--phosphor);
-    font-size: 0.92rem;
-    letter-spacing: 0.08em;
-    padding: 0.05rem 0 0;
-  }
-
-  /* CHANGE CLOTHES only: five headed categories (eleven items plus BACK) must fit the screen with NO scrolling -- so, unlike every other menu, #options is not
-     capped at 48vh and never becomes a scroll panel. Same font size and the same label / value grid as everywhere else; only the vertical rhythm tightens: a
-     smaller row gap, slimmer row padding, and a small (not a full group) gap between categories. renderOptions toggles this class by pendingChoice.id. */
+  /* CHANGE CLOTHES only: its eleven items plus BACK use exactly the same row gap, padding and group dividers as every other menu, which makes it taller than the usual
+     48vh cap allows -- so here (and only here) #options is released from that cap and never becomes a scroll panel: the whole menu, BACK included, simply takes
+     more of the screen. renderOptions toggles this class by pendingChoice.id. */
   #options.clothing-fit {
     max-height: none;
     overflow-y: visible;
-    gap: 0.06rem;
   }
-  #options.clothing-fit .option,
-  #options.clothing-fit .option-heading {
-    padding-top: 0.04rem;
-    padding-bottom: 0.04rem;
-  }
-  #options.clothing-fit .option-heading { padding-top: 0.1rem; }
-  #options.clothing-fit .option-divider { margin: 0.12rem 0 0; }
 
   .option {
     background: none;
@@ -4825,15 +4809,15 @@
     shorts: 'SHORTS', pants: 'PANTS', socks: 'WOOL SOCKS', deckShoes: 'DECK SHOES', beanie: 'KNIT CAP', gloves: 'GLOVES',
   };
   // The menu's groups, top to bottom. The blank grid row between groups is the ONLY grouping the player sees (no headings).
-  // The menu's categories, top to bottom. SHIRTS and PANTS are "exactly one": the player always wears one shirt (T-SHIRT or LONG-SLEEVE SHIRT) and one
+  // The menu's groups, top to bottom (no headings: the standard gap between groups is the only grouping the player sees). SHIRTS and PANTS are "exactly one": the player always wears one shirt (T-SHIRT or LONG-SLEEVE SHIRT) and one
   // bottom (SHORTS or PANTS), and picking one switches the other off. The rest are independent toggles (socks and shoes layer; the three outer layers layer;
   // cap and gloves are each optional). warmer = what a save that had BOTH on keeps; fallback = what a save that had NEITHER on gets (the default outfit's choice).
   var CLOTHING_CATEGORIES = [
-    { title: 'SHIRTS', keys: ['tshirt', 'longSleeve'], exactlyOne: true, warmer: 'longSleeve', fallback: 'tshirt' },
-    { title: 'PANTS', keys: ['shorts', 'pants'], exactlyOne: true, warmer: 'pants', fallback: 'pants' },
-    { title: 'SHOES', keys: ['socks', 'deckShoes'] },
-    { title: 'OUTERWEAR', keys: ['sweater', 'fleece', 'rainShell'] },
-    { title: 'ACCESSORIES', keys: ['beanie', 'gloves'] },
+    { keys: ['tshirt', 'longSleeve'], exactlyOne: true, warmer: 'longSleeve', fallback: 'tshirt' },
+    { keys: ['shorts', 'pants'], exactlyOne: true, warmer: 'pants', fallback: 'pants' },
+    { keys: ['socks', 'deckShoes'] },
+    { keys: ['sweater', 'fleece', 'rainShell'] },
+    { keys: ['beanie', 'gloves'] },
   ];
   function clothingCategoryOf(key) {
     for (var i = 0; i < CLOTHING_CATEGORIES.length; i++) if (CLOTHING_CATEGORIES[i].keys.indexOf(key) >= 0) return CLOTHING_CATEGORIES[i];
@@ -15204,15 +15188,10 @@
     printRoomHeader('CHANGE CLOTHES');
     renderComfortRows(state, 'pending');
     var row = function (key) { return { label: CLOTHING_LABEL[key], value: (clo[key] ? 'ON' : 'OFF') + clothingStatusSuffix(state, key), action: 'toggle-pending:' + key }; };
-    var opts = [];
-    CLOTHING_CATEGORIES.forEach(function (cat, i) {
-      if (i > 0) opts.push({ divider: true });
-      opts.push({ heading: cat.title });
-      cat.keys.forEach(function (k) { opts.push(row(k)); });
-    });
-    opts.push({ divider: true });
-    opts.push({ label: 'BACK', action: 'commit-clothing' }); // the single exit: the changing sequence plays only if the outfit now differs from the one the player walked in with
-    state.pendingChoice = { id: 'clothing-menu', options: opts }; // renderOptions gives this menu its compact "fit" spacing (see #options.clothing-fit)
+    var groups = CLOTHING_CATEGORIES.map(function (cat) { return cat.keys.map(row); });
+    // The same spacing as every other menu: one standard group gap between the five groups, and the global BACK treatment (pushBack). BACK is the single exit: the
+    // changing sequence plays only if the outfit now differs from the one the player walked in with.
+    state.pendingChoice = { id: 'clothing-menu', options: pushBack(groupedOptions(groups), 'commit-clothing') };
   }
 
   // The DRYING detail screen -- shown instead of putting a drying garment straight on; PUT ON WET is the only way to interrupt a drying cycle.
@@ -19016,7 +18995,7 @@
     // for why. Toggled here, every render, the same way #controls'
     // content itself is decided.
     optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
-    optionsEl.classList.toggle('clothing-fit', !!(state.pendingChoice && state.pendingChoice.id === 'clothing-menu')); // CHANGE CLOTHES: compact spacing, never a scrolling panel
+    optionsEl.classList.toggle('clothing-fit', !!(state.pendingChoice && state.pendingChoice.id === 'clothing-menu')); // CHANGE CLOTHES: standard spacing, but never a scrolling panel
     syncHelmTrim(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
@@ -19024,13 +19003,6 @@
         var div = document.createElement('div');
         div.className = 'option-divider';
         optionsEl.appendChild(div);
-        return;
-      }
-      if (opt.heading) { // a category heading: plain, non-clickable, sits directly above its rows
-        var headingDiv = document.createElement('div');
-        headingDiv.className = 'option-heading';
-        headingDiv.textContent = opt.heading;
-        optionsEl.appendChild(headingDiv);
         return;
       }
       if (opt.status) {
