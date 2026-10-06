@@ -709,6 +709,30 @@
     margin: 0.35rem 0;
   }
 
+  /* A category heading inside #options (CHANGE CLOTHES): plain text in the heading-label look, directly above its own rows. Not a button. */
+  .option-heading {
+    color: var(--phosphor);
+    font-size: 0.92rem;
+    letter-spacing: 0.08em;
+    padding: 0.05rem 0 0;
+  }
+
+  /* CHANGE CLOTHES only: five headed categories (eleven items plus BACK) must fit the screen with NO scrolling -- so, unlike every other menu, #options is not
+     capped at 48vh and never becomes a scroll panel. Same font size and the same label / value grid as everywhere else; only the vertical rhythm tightens: a
+     smaller row gap, slimmer row padding, and a small (not a full group) gap between categories. renderOptions toggles this class by pendingChoice.id. */
+  #options.clothing-fit {
+    max-height: none;
+    overflow-y: visible;
+    gap: 0.06rem;
+  }
+  #options.clothing-fit .option,
+  #options.clothing-fit .option-heading {
+    padding-top: 0.04rem;
+    padding-bottom: 0.04rem;
+  }
+  #options.clothing-fit .option-heading { padding-top: 0.1rem; }
+  #options.clothing-fit .option-divider { margin: 0.12rem 0 0; }
+
   .option {
     background: none;
     appearance: none;
@@ -4801,7 +4825,38 @@
     shorts: 'SHORTS', pants: 'PANTS', socks: 'WOOL SOCKS', deckShoes: 'DECK SHOES', beanie: 'KNIT CAP', gloves: 'GLOVES',
   };
   // The menu's groups, top to bottom. The blank grid row between groups is the ONLY grouping the player sees (no headings).
-  var CLOTHING_GROUPS = [['tshirt', 'longSleeve'], ['sweater', 'fleece', 'rainShell'], ['shorts', 'pants'], ['socks', 'deckShoes'], ['beanie', 'gloves']];
+  // The menu's categories, top to bottom. SHIRTS and PANTS are "exactly one": the player always wears one shirt (T-SHIRT or LONG-SLEEVE SHIRT) and one
+  // bottom (SHORTS or PANTS), and picking one switches the other off. The rest are independent toggles (socks and shoes layer; the three outer layers layer;
+  // cap and gloves are each optional). warmer = what a save that had BOTH on keeps; fallback = what a save that had NEITHER on gets (the default outfit's choice).
+  var CLOTHING_CATEGORIES = [
+    { title: 'SHIRTS', keys: ['tshirt', 'longSleeve'], exactlyOne: true, warmer: 'longSleeve', fallback: 'tshirt' },
+    { title: 'PANTS', keys: ['shorts', 'pants'], exactlyOne: true, warmer: 'pants', fallback: 'pants' },
+    { title: 'SHOES', keys: ['socks', 'deckShoes'] },
+    { title: 'OUTERWEAR', keys: ['sweater', 'fleece', 'rainShell'] },
+    { title: 'ACCESSORIES', keys: ['beanie', 'gloves'] },
+  ];
+  function clothingCategoryOf(key) {
+    for (var i = 0; i < CLOTHING_CATEGORIES.length; i++) if (CLOTHING_CATEGORIES[i].keys.indexOf(key) >= 0) return CLOTHING_CATEGORIES[i];
+    return null;
+  }
+  // One selection applied to an outfit. An exactly-one category SWITCHES (choosing what is already on leaves it on); anything else toggles.
+  function applyClothingSelection(outfit, key) {
+    var cat = clothingCategoryOf(key);
+    if (cat && cat.exactlyOne) { cat.keys.forEach(function (k) { outfit[k] = (k === key); }); }
+    else outfit[key] = !outfit[key];
+    return outfit;
+  }
+  // Brings any outfit (an old save) to a valid one: exactly one shirt and one bottom. Both on keeps the warmer; neither on gets the default outfit's choice.
+  function normalizeClothingOutfit(outfit) {
+    CLOTHING_CATEGORIES.forEach(function (cat) {
+      if (!cat.exactlyOne) return;
+      var on = cat.keys.filter(function (k) { return outfit[k]; });
+      if (on.length === 1) return;
+      var keep = on.length > 1 ? cat.warmer : cat.fallback;
+      cat.keys.forEach(function (k) { outfit[k] = (k === keep); });
+    });
+    return outfit;
+  }
   var ALL_GARMENT_KEYS = ['tshirt', 'longSleeve', 'sweater', 'fleece', 'rainShell', 'shorts', 'pants', 'socks', 'deckShoes', 'beanie', 'gloves'];
   var CLOTHING_CORE_WARMTH = { tshirt: 1.5, longSleeve: 2.5, sweater: 4, fleece: 3.5, rainShell: 1, shorts: 1, pants: 3 }; // the shell is a layer, not an insulator: a small amount
   var CLOTHING_PERIPHERAL_WARMTH = { socks: 0.4, deckShoes: 0.5, beanie: 0.5, gloves: 0.5 };                               // all four together (1.9) stay below the COLD tolerance
@@ -5557,6 +5612,7 @@
       c.clothing = n;
     }
     ALL_GARMENT_KEYS.forEach(function (k) { c.clothing[k] = !!c.clothing[k]; });
+    normalizeClothingOutfit(c.clothing); // exactly one shirt and one bottom, whatever the save held
     delete c.clothing.sunglasses; delete c.clothing.top; delete c.clothing.outer; delete c.clothing.bottom; delete c.clothing.feet;
     if (!c.garmentCondition) c.garmentCondition = {};
     var gc = c.garmentCondition;
@@ -15092,9 +15148,15 @@
     return '';
   }
 
-  // PENDING OUTFIT -- the CHANGE screen assembles a full outfit before anything is actually worn. A module-level variable, never saved: null
-  // whenever the player is not inside the CHANGE screen; cmdClothing starts it from what is worn, and BACK (performClothingCommit) clears it.
-  var pendingClothing = null;
+  // THE CLOTHING SESSION -- everything the CHANGE screen needs, in one transient object (never saved; null whenever the player is not inside CHANGE CLOTHES):
+  //   entry     what was being worn at the moment the player ENTERED the menu (the snapshot BACK compares against)
+  //   draft     the outfit as edited so far (what the rows show and what COMFORT ABOVE / BELOW read)
+  //   committing  true once BACK has started the changing sequence: no more input, and a second BACK does nothing
+  var clothingSession = null;
+  function ensureClothingSession(state) {
+    if (!clothingSession) clothingSession = { entry: cloneClothing(state.crew.clothing), draft: cloneClothing(state.crew.clothing), committing: false };
+    return clothingSession;
+  }
   function cloneClothing(clo) {
     var o = {};
     ALL_GARMENT_KEYS.forEach(function (k) { o[k] = !!clo[k]; });
@@ -15107,7 +15169,7 @@
   // The read-out rows. They live in ONE wrapper so they can be refreshed in place (see refreshComfortRows) when the weather changes while the
   // screen is open. source 'worn' (the CABIN: ENERGY, then the comfort rows) or 'pending' (CHANGE CLOTHES: the draft outfit, no ENERGY).
   function comfortRowData(state, source) {
-    var outfit = source === 'pending' && pendingClothing ? pendingClothing : state.crew.clothing, rows = [];
+    var outfit = source === 'pending' && clothingSession ? clothingSession.draft : state.crew.clothing, rows = [];
     if (source !== 'pending') rows.push(['ENERGY', ENERGY_LABELS[energyLevel(state.crew.fatigue)]]);
     rows.push(['COMFORT ABOVE', comfortAboveLabel(state, outfit)]);
     rows.push(['COMFORT BELOW', comfortBelowLabel(state, outfit)]);
@@ -15138,14 +15200,19 @@
 
   function cmdClothing(state) {
     // Changing clothes is allowed even in a nighttime battery failure, so the darkness gate other below-deck actions use is deliberately absent.
-    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
+    var clo = ensureClothingSession(state).draft;
     printRoomHeader('CHANGE CLOTHES');
     renderComfortRows(state, 'pending');
-    var clo = pendingClothing;
     var row = function (key) { return { label: CLOTHING_LABEL[key], value: (clo[key] ? 'ON' : 'OFF') + clothingStatusSuffix(state, key), action: 'toggle-pending:' + key }; };
-    var groups = CLOTHING_GROUPS.map(function (g) { return g.map(row); });
-    groups.push([{ label: 'BACK', action: 'commit-clothing' }]); // the single exit: applies the draft (with the changing sequence) only if it differs from what is worn
-    state.pendingChoice = { id: 'clothing-menu', options: groupedOptions(groups) };
+    var opts = [];
+    CLOTHING_CATEGORIES.forEach(function (cat, i) {
+      if (i > 0) opts.push({ divider: true });
+      opts.push({ heading: cat.title });
+      cat.keys.forEach(function (k) { opts.push(row(k)); });
+    });
+    opts.push({ divider: true });
+    opts.push({ label: 'BACK', action: 'commit-clothing' }); // the single exit: the changing sequence plays only if the outfit now differs from the one the player walked in with
+    state.pendingChoice = { id: 'clothing-menu', options: opts }; // renderOptions gives this menu its compact "fit" spacing (see #options.clothing-fit)
   }
 
   // The DRYING detail screen -- shown instead of putting a drying garment straight on; PUT ON WET is the only way to interrupt a drying cycle.
@@ -15161,47 +15228,52 @@
     var cond = resolveGarmentCondition(state, key);
     if (cond && cond.dryAtGameMinutes != null) { cond.dryAtGameMinutes = null; cond.wet = true; }
     syncClothesWetSinceMinutes(state); // this garment is wet and (still, for the moment) unworn -- may have just become hangable again
-    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
-    pendingClothing[key] = true;
+    applyClothingSelection(ensureClothingSession(state).draft, key);
     cmdClothing(state);
   }
-  // Tapping an item flips it in the DRAFT and redraws the same screen, so COMFORT ABOVE / BELOW update live. Nothing worn changes until BACK.
+  // Tapping an item edits the DRAFT and redraws the same screen, so COMFORT ABOVE / BELOW update live: a shirt or bottom SWITCHES (the other goes off, and choosing
+  // the one already on changes nothing); everything else toggles. Nothing worn changes until BACK -- and once BACK has started the changing sequence, no input is taken.
   function performTogglePendingClothing(state, key) {
     if (ALL_GARMENT_KEYS.indexOf(key) < 0) return;
-    if (!pendingClothing) pendingClothing = cloneClothing(state.crew.clothing);
-    if (!pendingClothing[key] && garmentStatus(state, key) === 'drying') { cmdGarmentDryingDetail(state, key); return; }
-    pendingClothing[key] = !pendingClothing[key];
+    var sess = ensureClothingSession(state);
+    if (sess.committing) return;
+    if (!sess.draft[key] && garmentStatus(state, key) === 'drying') { cmdGarmentDryingDetail(state, key); return; }
+    applyClothingSelection(sess.draft, key);
     cmdClothing(state);
   }
 
-  // BACK -- the single exit. Unchanged outfit: returns at once, no sequence. Changed: ONE audio-synced changing action applies the whole draft.
+  // BACK -- the single exit. It compares the FINAL outfit with the outfit the player ENTERED with (the entry snapshot) -- never whether something was clicked, so
+  // switching shorts -> pants -> shorts is no change at all. Unchanged: straight back to the cabin, no sound, no sequence, no delay. Changed: ONE audio-synced
+  // action (the existing runAudioSyncedAction + audio/cabin/change.mp3): the label and dots stay up for the sound's real playback and the whole draft is
+  // applied when it actually ends. A second BACK (or any clothing input) while it runs is ignored.
   function performClothingCommit(state) {
-    var outfit = pendingClothing || cloneClothing(state.crew.clothing);
-    if (clothingOutfitsEqual(outfit, state.crew.clothing)) {
-      pendingClothing = null;
+    var sess = clothingSession;
+    if (sess && sess.committing) return; // the sequence is already running: exactly one, never stacked
+    if (!sess || clothingOutfitsEqual(sess.draft, sess.entry)) {
+      clothingSession = null;
       cmdCabin(state);
       return;
     }
+    sess.committing = true;
     runAudioSyncedAction(state, {
-      label: 'CHANGING',
+      label: 'CHANGING CLOTHES',
       playAudio: function (onEnded) { return playCabinOneShot('changeClothes', onEnded); },
       action: function (s) {
         // Taking a wet garment OFF never dries it: wetness belongs to the garment; only HANG WET CLOTHES starts it drying.
         var env = s.crew.location === 'above' ? 'above' : 'below';
-        var before = { worn: cloneClothing(s.crew.clothing) };
+        var before = { worn: sess.entry };
         before.wet = ALL_GARMENT_KEYS.some(function (k) { return before.worn[k] && isGarmentWet(s, k); });
         before.warmth = outfitWarmth(s, before.worn).total;
         before.verdict = evaluateOutfit(s, before.worn, env).verdict;
-        ALL_GARMENT_KEYS.forEach(function (k) { s.crew.clothing[k] = !!outfit[k]; });
+        ALL_GARMENT_KEYS.forEach(function (k) { s.crew.clothing[k] = !!sess.draft[k]; });
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
-        pendingClothing = null;
+        clothingSession = null;
         // A diary line only when nothing worn is wet (as before), and it says only what the change really did.
-        var wearingAnything = ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k); });
         var wearingWet = ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); });
         if (!wearingWet) {
           var dWarmth = outfitWarmth(s, s.crew.clothing).total - before.warmth;
           var ctx = { improved: before.verdict !== 'appropriate' && evaluateOutfit(s, s.crew.clothing, env).verdict === 'appropriate' };
-          var pool = !wearingAnything ? 'changeNone' : (before.wet ? 'changeDry' : (dWarmth >= 2 ? 'changeWarmer' : (dWarmth <= -2 ? 'changeLighter' : 'changePlain')));
+          var pool = before.wet ? 'changeDry' : (dWarmth >= 2 ? 'changeWarmer' : (dWarmth <= -2 ? 'changeLighter' : 'changePlain'));
           log(s, pickVariant(DAILY_COPY[pool], pool, ctx));
         }
         syncComfortExposure(s); // the new outfit in the place the player is standing: the 60-second clock starts (or clears) from this moment
@@ -15790,7 +15862,6 @@
     changeWarmer: ['Changed into something warmer.', 'Put on something warmer.', { t: 'Changed into something warmer. Better.', when: function (c) { return c.improved; } }],
     changeLighter: ['Changed into something lighter.', 'Put on something lighter.', { t: 'Changed into something lighter. Better.', when: function (c) { return c.improved; } }],
     changePlain: ['Changed clothes.', 'Changed into something else.', 'Changed into dry clothes.', { t: 'Changed clothes. Felt better.', when: function (c) { return c.improved; } }],
-    changeNone: ['Took my clothes off.', 'Took off everything I was wearing.'],
   };
 
   var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 };
@@ -18945,6 +19016,7 @@
     // for why. Toggled here, every render, the same way #controls'
     // content itself is decided.
     optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
+    optionsEl.classList.toggle('clothing-fit', !!(state.pendingChoice && state.pendingChoice.id === 'clothing-menu')); // CHANGE CLOTHES: compact spacing, never a scrolling panel
     syncHelmTrim(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
@@ -18952,6 +19024,13 @@
         var div = document.createElement('div');
         div.className = 'option-divider';
         optionsEl.appendChild(div);
+        return;
+      }
+      if (opt.heading) { // a category heading: plain, non-clickable, sits directly above its rows
+        var headingDiv = document.createElement('div');
+        headingDiv.className = 'option-heading';
+        headingDiv.textContent = opt.heading;
+        optionsEl.appendChild(headingDiv);
         return;
       }
       if (opt.status) {
