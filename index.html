@@ -1308,9 +1308,9 @@
     // NIGHT / LOW-LIGHT START -- a voyage beginning anywhere the
     // existing natural-light curve would already read below full
     // brightness (naturalLightBrightness(state) < 1 -- this covers the
-    // full night period AND the 30-minute pre-sunset ramp alike, since
+    // full night period AND the 30-minute dusk and dawn ramps alike, since
     // that's exactly what the curve itself already models; see
-    // NATURAL_LIGHT_TRANSITION_MINUTES/NATURAL_LIGHT_SUNSET_HOUR) opens
+    // DUSK_MINUTES/DAWN_MINUTES in the astronomical daylight system) opens
     // with NAV LIGHTS and CABIN LIGHTS already on, so the opening and
     // departure sequence stay readable. This is the ONLY thing this
     // condition changes -- normal lighting rules, battery drain, and
@@ -2301,37 +2301,214 @@
     return 'approach';
   }
 
-  // The ONE shared day/night boundary in this file -- night is 19:00
-  // through 05:59. isDark/needsCabinLight, isNavLightsNight/
-  // needsNavLights, the natural-light text-dimming curve
-  // (NATURAL_LIGHT_SUNSET_HOUR/NATURAL_LIGHT_SUNRISE_HOUR below), and
-  // buildForecastPeriods's own TONIGHT/TODAY split all read this same
-  // function (directly or via isDark) rather than each keeping an
-  // independent hour check -- see each of their own comments. Only the
-  // two thresholds that touch 'night' itself changed (5->6, 20->19);
-  // dawn's and dusk's OTHER edges (7, 18) are untouched on purpose, so
-  // dawn/dusk simply narrow to what's left adjacent to the new night
-  // boundary rather than being independently redefined.
-  function timeOfDayPhase(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var h = d.getHours();
-    if (h < 6) return 'night';
-    if (h < 7) return 'dawn';
-    if (h < 11) return 'morning';
-    if (h < 15) return 'midday';
-    if (h < 18) return 'afternoon';
-    if (h < 19) return 'dusk';
-    return 'night';
+  /* ==============================================================
+     ASTRONOMICAL DAYLIGHT -- the ONE source of truth for time of day.
+     ------------------------------------------------------------
+     Replaces the old fixed-hour DAY/NIGHT rule, which read the BROWSER's local clock hour. Everything here is a pure function of
+     two things only: the game instant (departedAt + voyage minutes -- an absolute UTC moment, since the game clock equals the real
+     clock) and SOLACE's simulated position (state.nav.lat / state.nav.lon). The player's own timezone, location and clock face never
+     enter into it, and nothing is persisted: every value is recomputed from state each time, so a reload or an offline catch-up simply
+     lands on the correct point of the cycle.
+
+     SUNRISE / SUNSET are calculated locally (NOAA solar-position series: declination + equation of time), then each event time is
+     refined by solving the same solar-elevation function for the standard rise/set elevation of -0.833 deg (the sun's upper limb on the
+     horizon, with refraction). Events are found for the local mean solar days either side of "now", so a position change as SOLACE sails
+     west and south moves them naturally, and longitude/timezone need no special handling (everything is UTC + longitude).
+
+     THE SEVEN PHASES (getDaylightPhase) -- boundaries relative to astronomical sunrise (SR) and sunset (SS):
+       DAY             SR + 30 min  ->  SS - 3 h
+       LATE AFTERNOON  SS - 3 h     ->  SS - 30 min
+       SUNSET          SS - 30 min  ->  SS            (the sun going down; ends at the astronomical sunset)
+       DUSK            SS           ->  SS + 30 min   (exactly 30 minutes)
+       NIGHT           SS + 30 min  ->  SR - 30 min
+       DAWN            SR - 30 min  ->  SR            (exactly 30 minutes)
+       SUNRISE         SR           ->  SR + 30 min
+     Only DUSK and DAWN change the text brightness (see naturalLightBrightness); only NIGHT is mechanically dark (see isDark). */
+  var SUN_HORIZON_DEG = -0.833;       // standard sunrise/sunset elevation of the sun's centre (upper limb on the horizon, with refraction)
+  var DUSK_MINUTES = 30;              // DUSK: exactly the 30 minutes immediately AFTER astronomical sunset
+  var DAWN_MINUTES = 30;              // DAWN: exactly the 30 minutes immediately BEFORE astronomical sunrise
+  var SUNSET_PHASE_MINUTES = 30;      // SUNSET: the 30 minutes leading up to astronomical sunset
+  var SUNRISE_PHASE_MINUTES = 30;     // SUNRISE: the 30 minutes immediately after astronomical sunrise
+  var LATE_AFTERNOON_MINUTES = 150;   // LATE AFTERNOON: the 2.5 hours before SUNSET begins (3 h to 30 min before sunset)
+  var SOLAR_FULL_ELEVATION_DEG = 15;  // the sun this far above the rise/set line delivers the panels' full (unchanged) output; below it, output follows sin(elevation). 15 deg keeps a clear day's total at ~10-10.5 %/day on this route -- inside the roughly 10-15% the SOLAR note above describes -- while sunrise and sunset stay continuous
+  var daylightDebugOffsetMs = 0;      // DEVELOPER TEST AID ONLY (see window.landfallDaylight below) -- never saved, always 0 in normal play
+
+  // The game instant the daylight system reads: the simulated clock plus the sub-minute carry, so a 30-minute fade moves smoothly rather
+  // than in whole-minute steps. The debug offset is 0 unless a developer set it.
+  function daylightInstantMs(state) {
+    var carry = clamp(state.meta.leftoverMinutes || 0, 0, 1); // the unsimulated fraction of a tick; never more than one tick's worth
+    return state.meta.departedAt + (state.meta.voyageMinutes + carry) * 60000 + daylightDebugOffsetMs;
   }
 
+  // Sun declination (radians) and equation of time (minutes) at a UTC instant -- NOAA's low-order series, good to well under a minute.
+  function sunDeclinationAndEqTime(tMs) {
+    var rad = Math.PI / 180;
+    var jd = tMs / 86400000 + 2440587.5;
+    var T = (jd - 2451545.0) / 36525.0;
+    var L0 = (280.46646 + T * (36000.76983 + T * 0.0003032)) % 360;
+    var M = 357.52911 + T * (35999.05029 - 0.0001537 * T);
+    var e = 0.016708634 - T * (0.000042037 + 0.0000001267 * T);
+    var Mr = M * rad;
+    var C = Math.sin(Mr) * (1.914602 - T * (0.004817 + 0.000014 * T)) + Math.sin(2 * Mr) * (0.019993 - 0.000101 * T) + Math.sin(3 * Mr) * 0.000289;
+    var omega = 125.04 - 1934.136 * T;
+    var appLong = (L0 + C) - 0.00569 - 0.00478 * Math.sin(omega * rad);
+    var eps = 23 + (26 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60) / 60 + 0.00256 * Math.cos(omega * rad);
+    var y = Math.tan(eps * rad / 2); y *= y;
+    var L0r = L0 * rad;
+    return {
+      decl: Math.asin(Math.sin(eps * rad) * Math.sin(appLong * rad)),
+      eqTime: (4 / rad) * (y * Math.sin(2 * L0r) - 2 * e * Math.sin(Mr) + 4 * e * y * Math.sin(Mr) * Math.cos(2 * L0r) - 0.5 * y * y * Math.sin(4 * L0r) - 1.25 * e * e * Math.sin(2 * Mr)),
+    };
+  }
+
+  // The sun's elevation above the horizon (degrees) at a UTC instant for a position (lat N+, lon E+ -- west is negative, as everywhere in this file).
+  function solarElevationDeg(tMs, latDeg, lonDeg) {
+    var rad = Math.PI / 180;
+    var sun = sunDeclinationAndEqTime(tMs);
+    var utcMin = (((tMs / 60000) % 1440) + 1440) % 1440;           // minutes since UTC midnight
+    var trueSolarMin = utcMin + sun.eqTime + 4 * lonDeg;            // apparent solar time at this longitude: 4 minutes per degree
+    var hourAngle = (trueSolarMin / 4 - 180) * rad;
+    var lat = latDeg * rad;
+    var cosZenith = Math.sin(lat) * Math.sin(sun.decl) + Math.cos(lat) * Math.cos(sun.decl) * Math.cos(hourAngle);
+    return 90 - Math.acos(clamp(cosZenith, -1, 1)) / rad;
+  }
+
+  // One sunrise or sunset (UTC ms) for local mean solar day `dayIndex` at a position, or null if the sun does not rise/set that day there
+  // (polar day/night -- unreachable on this voyage, handled only so nothing can break). First the standard hour-angle estimate, then a few
+  // Newton steps on solarElevationDeg itself, so the event time and the elevation curve agree to a fraction of a second.
+  function sunEventMs(dayIndex, latDeg, lonDeg, rising) {
+    var rad = Math.PI / 180;
+    var noonMs = dayIndex * 86400000 + 43200000 - lonDeg * 240000; // local MEAN noon in UTC ms (240000 ms of time per degree of longitude)
+    var sun = sunDeclinationAndEqTime(noonMs);
+    var lat = latDeg * rad;
+    var cosH = (Math.sin(SUN_HORIZON_DEG * rad) - Math.sin(lat) * Math.sin(sun.decl)) / (Math.cos(lat) * Math.cos(sun.decl));
+    if (!(cosH > -1 && cosH < 1)) return null;
+    var halfDayMs = Math.acos(cosH) / rad * 240000;
+    var t = noonMs - sun.eqTime * 60000 + (rising ? -halfDayMs : halfDayMs);
+    for (var i = 0; i < 5; i++) {
+      var h = 60000;
+      var slope = (solarElevationDeg(t + h, latDeg, lonDeg) - solarElevationDeg(t - h, latDeg, lonDeg)) / (2 * h); // degrees per ms
+      if (!isFinite(slope) || Math.abs(slope) < 1e-9) break;
+      var dt = (SUN_HORIZON_DEG - solarElevationDeg(t, latDeg, lonDeg)) / slope;
+      t += dt;
+      if (Math.abs(dt) < 200) break;
+    }
+    return t;
+  }
+
+  // Every sunrise/sunset in the local mean solar days around `tMs`, in time order: [{ kind: 'sunrise'|'sunset', t }].
+  function daylightEvents(tMs, latDeg, lonDeg) {
+    var day = Math.floor((tMs + lonDeg * 240000) / 86400000);
+    var events = [];
+    for (var k = day - 1; k <= day + 1; k++) {
+      var rise = sunEventMs(k, latDeg, lonDeg, true), set = sunEventMs(k, latDeg, lonDeg, false);
+      if (rise != null) events.push({ kind: 'sunrise', t: rise });
+      if (set != null) events.push({ kind: 'sunset', t: set });
+    }
+    events.sort(function (a, b) { return a.t - b.t; });
+    return events;
+  }
+
+  // THE centralized calculation. Returns the phase plus the figures every other system derives from (minutes since/until the events), so
+  // nothing else ever repeats a sunrise/sunset check. Memoized on (instant, position): many gates ask in the same render.
+  var daylightCache = { key: null, snap: null };
+  function daylightSnapshot(state) {
+    var t = daylightInstantMs(state), lat = state.nav.lat, lon = state.nav.lon;
+    var key = t + '|' + lat + '|' + lon;
+    if (daylightCache.key === key) return daylightCache.snap;
+    var events = daylightEvents(t, lat, lon), last = null, next = null;
+    for (var i = 0; i < events.length; i++) {
+      if (events[i].t <= t) last = events[i]; else { next = events[i]; break; }
+    }
+    var snap = { t: t, phase: 'day', last: last, next: next, minutesSinceSunset: null, minutesToSunrise: null, minutesSinceSunrise: null, minutesToSunset: null };
+    if (!last || !next) {
+      // no rise/set pair around now (polar day/night): fall back to the sun's elevation alone
+      snap.phase = solarElevationDeg(t, lat, lon) > SUN_HORIZON_DEG ? 'day' : 'night';
+    } else if (last.kind === 'sunset') {
+      snap.minutesSinceSunset = (t - last.t) / 60000;
+      snap.minutesToSunrise = (next.t - t) / 60000;
+      if (snap.minutesSinceSunset < DUSK_MINUTES) snap.phase = 'dusk';
+      else if (snap.minutesToSunrise <= DAWN_MINUTES) snap.phase = 'dawn';
+      else snap.phase = 'night';
+    } else {
+      snap.minutesSinceSunrise = (t - last.t) / 60000;
+      snap.minutesToSunset = (next.t - t) / 60000;
+      if (snap.minutesSinceSunrise < SUNRISE_PHASE_MINUTES) snap.phase = 'sunrise';
+      else if (snap.minutesToSunset <= SUNSET_PHASE_MINUTES) snap.phase = 'sunset';
+      else if (snap.minutesToSunset <= SUNSET_PHASE_MINUTES + LATE_AFTERNOON_MINUTES) snap.phase = 'lateAfternoon';
+      else snap.phase = 'day';
+    }
+    daylightCache = { key: key, snap: snap };
+    return snap;
+  }
+
+  // Exactly one of: 'day' | 'lateAfternoon' | 'sunset' | 'dusk' | 'night' | 'dawn' | 'sunrise'. Everything that cares about time of day --
+  // the darkness gates, text brightness, solar charging, observations -- derives from this (via the snapshot above).
+  function getDaylightPhase(state) {
+    return daylightSnapshot(state).phase;
+  }
+
+  // How much of the panels' full output the sun itself allows right now, 0..1, from its ACTUAL elevation: exactly 0 at astronomical sunset
+  // and sunrise and throughout the night, rising with the sine of the elevation above that line, and reaching 1 (the unchanged maximum)
+  // once the sun is SOLAR_FULL_ELEVATION_DEG (15 deg) up. Weather is applied on top of this in solarChargeRate; it is not part of it.
+  function solarAvailability(state) {
+    var aboveLine = solarElevationDeg(daylightInstantMs(state), state.nav.lat, state.nav.lon) - SUN_HORIZON_DEG;
+    if (!(aboveLine > 0)) return 0;
+    return clamp(Math.sin(aboveLine * Math.PI / 180) / Math.sin(SOLAR_FULL_ELEVATION_DEG * Math.PI / 180), 0, 1);
+  }
+
+  // DEVELOPER TEST AID (temporary). Moves the DAYLIGHT clock only -- never the simulation, never saved (a reload clears it) -- to a point
+  // relative to the real sunrise/sunset at SOLACE's current position, so each phase can be seen without waiting through a day. From the console:
+  //   landfallDaylight.at('sunset', 15)    15 minutes after the next astronomical sunset (mid-DUSK)
+  //   landfallDaylight.at('sunrise', -1)   1 minute before the next sunrise (late DAWN)
+  //   landfallDaylight.report()            phase, brightness, minutes since/to each event, sun elevation, solar availability
+  //   landfallDaylight.clear()             back to the real clock
+  // Until something is called the offset is 0 and nothing here has any effect on the game.
+  function daylightDebugRefresh() {
+    daylightCache = { key: null, snap: null };
+    if (!GAME) return;
+    applyCabinLighting(GAME);
+    applyNaturalLightDimming(GAME);
+    if (!uiBusy) renderOptions(GAME); // the darkness-gated menus follow the phase straight away
+  }
+  window.landfallDaylight = {
+    at: function (eventName, minutes) {
+      if (!GAME || (eventName !== 'sunrise' && eventName !== 'sunset')) { console.warn("landfallDaylight.at('sunrise' | 'sunset', minutesAfter)"); return null; }
+      var real = daylightInstantMs(GAME) - daylightDebugOffsetMs;
+      var upcoming = daylightEvents(real, GAME.nav.lat, GAME.nav.lon).filter(function (e) { return e.kind === eventName && e.t > real; });
+      if (!upcoming.length) { console.warn('landfallDaylight: no upcoming ' + eventName + ' found'); return null; }
+      daylightDebugOffsetMs = upcoming[0].t + (minutes || 0) * 60000 - real;
+      daylightDebugRefresh();
+      return window.landfallDaylight.report();
+    },
+    shift: function (minutes) { daylightDebugOffsetMs += (minutes || 0) * 60000; daylightDebugRefresh(); return window.landfallDaylight.report(); },
+    clear: function () { daylightDebugOffsetMs = 0; daylightDebugRefresh(); return window.landfallDaylight.report(); },
+    phase: function () { return GAME ? getDaylightPhase(GAME) : null; },
+    report: function () {
+      if (!GAME) return null;
+      var snap = daylightSnapshot(GAME);
+      var iso = function (e) { return e ? new Date(e.t).toISOString() : null; };
+      var out = {
+        phase: snap.phase, gameInstantUTC: new Date(snap.t).toISOString(), debugOffsetMinutes: daylightDebugOffsetMs / 60000,
+        position: { lat: GAME.nav.lat, lon: GAME.nav.lon },
+        textBrightness: naturalLightBrightness(GAME), mechanicallyDark: isDark(GAME),
+        minutesSinceSunset: snap.minutesSinceSunset, minutesToSunrise: snap.minutesToSunrise, minutesSinceSunrise: snap.minutesSinceSunrise, minutesToSunset: snap.minutesToSunset,
+        previousEventUTC: iso(snap.last), nextEventUTC: iso(snap.next),
+        sunElevationDeg: solarElevationDeg(snap.t, GAME.nav.lat, GAME.nav.lon), solarAvailability: solarAvailability(GAME), solarChargeRatePctPerHour: solarChargeRate(GAME),
+      };
+      console.log(out);
+      return out;
+    },
+  };
+
   // Darkness gating — physical below-deck tasks need CABIN LIGHTS after
-  // dark. Uses the existing time-of-day system rather than a second
-  // clock; see the below-deck command functions for where this is
+  // dark. Uses the astronomical daylight system (getDaylightPhase) rather
+  // than a second clock; see the below-deck command functions for where this is
   // applied (EAT, COFFEE/TEA, READ, WASH, CHANGE, CHORES, REPAIR below
   // deck). Informational/emergency functions and SLEEP are deliberately
   // never gated by this.
   function isDark(state) {
-    return timeOfDayPhase(state) === 'night';
+    return getDaylightPhase(state) === 'night'; // ONLY NIGHT is mechanically dark: dusk and dawn can look dim but never restrict an action
   }
   function needsCabinLight(state) {
     return isDark(state) && !state.boat.cabinLightsOn;
@@ -2345,7 +2522,7 @@
   // NAV LIGHTS gating — physical Above Deck activities (HELM, SAILS,
   // ENGINE, FISH) need NAV LIGHTS on after dark, the same shape as
   // needsCabinLight/blockedByDarkness above. Now the SAME night boundary
-  // as isDark/timeOfDayPhase (they coincide exactly, 19:00-05:59), so
+  // as isDark (they coincide exactly: the astronomical NIGHT phase), so
   // this defers to isDark directly rather than keeping its own
   // independent day/night calculation -- one shared night-state system,
   // not two that happen to agree. GO BELOW is never gated by this (see
@@ -4533,12 +4710,9 @@
   var SOLAR_RATE_BY_CONDITION = { clear: 1.0, overcast: 0.5, rain: 0.25, squall: 0.1 };
   var SOLAR_RATE_FALLBACK = 0.5;
 
-  // 0 outside dawn-through-dusk daylight (see timeOfDayPhase); otherwise
-  // the weather-tiered rate above. Read by both updateBattery (the
-  // actual charge) and solarOutputWatts (the player-facing watt
-  // display, on the NAV STATION SOLAR line), so the two always agree.
-  function solarChargeRate(state) {
-    if (timeOfDayPhase(state) === 'night') return 0; // unchanged: no sun, no solar, whatever the cloud
+  // The existing weather-tiered rate (%/hour at FULL sun) -- unchanged logic, minus the old night gate: whether the sun is up at all is
+  // now the astronomical solarAvailability's job. The real-cloud-cover path and the scripted-weather lookup are exactly as they were.
+  function solarWeatherRate(state) {
     var w = state.weather;
     // PHASE 2: while real data drives the sky, dry weather is the real cloud cover (0-100%) read through the table's
     // OWN clear and overcast rates -- no second solar model -- and rain / squall still use the table's rain / squall
@@ -4549,6 +4723,16 @@
     }
     var rate = SOLAR_RATE_BY_CONDITION[w.condition];
     return rate != null ? rate : SOLAR_RATE_FALLBACK;
+  }
+
+  // Actual solar charging (%/hour) = the sun's astronomical availability (0 through the night, rising from sunrise with the sun's real
+  // elevation, 1 once it is high) x the existing weather/cloud rate. Read by both updateBattery (the actual charge) and solarOutputWatts
+  // (the player-facing watt display, on the NAV STATION SOLAR line), so the two always agree. Maximum output, battery capacity and every
+  // other energy figure are untouched: this only decides WHEN, and how much of the existing output, the sun makes available.
+  function solarChargeRate(state) {
+    var available = solarAvailability(state);
+    if (available <= 0) return 0;
+    return available * solarWeatherRate(state);
   }
 
   var SOLAR_NOMINAL_WATTS = 100; // the boat's nominal solar installation size -- purely a physical-looking display number; the 1.0 multiplier solarChargeRate already produces in CLEAR daylight maps directly to this
@@ -5845,7 +6029,7 @@
   // and moving lastTick to now -- so real time is neither thrown away
   // nor counted twice, and the game clock stays equal to the real
   // clock (1 real minute = 1 game minute), which is what the header
-  // clock, night falling at 8 PM, and the day counter all rely on.
+  // clock, the astronomical sun cycle, and the day counter all rely on.
   //
   // Nothing else may write meta.lastTick: an earlier version reset it
   // to "now" on hide/pagehide and discarded any sub-minute gap here,
@@ -6515,7 +6699,7 @@
   // SUNGLASSES — glare/sunlight comfort only, entirely separate from
   // the thermal warmth model above (see computeClothingWarmth, which
   // deliberately never reads clothing.sunglasses). Reuses the existing
-  // location, timeOfDayPhase, and weather.condition signals as the
+  // location, isDark (the astronomical NIGHT phase), and weather.condition signals as the
   // only source of "how much glare is there right now" — no second
   // daylight or weather system. Above deck, clear conditions, daytime:
   // glare either bothers the eyes (no sunglasses) or doesn't
@@ -6528,7 +6712,7 @@
   // real survival lever.
   function sunglassesGlareState(state) {
     if (state.crew.location !== 'above') return 'none';
-    if (timeOfDayPhase(state) === 'night') {
+    if (isDark(state)) {
       return state.crew.clothing.sunglasses ? 'nightUnneeded' : 'none';
     }
     if (state.weather.condition !== 'clear') return 'none'; // overcast/rain/squall -- little to no glare
@@ -10869,7 +11053,7 @@
   }
 
   function clearTempView() {
-    if (activeMarineTransmission) { activeMarineTransmission.left = true; stopWeatherFax(); } // the screen is being left mid-transmission: the fax stops with it (and never starts if TUNING was still running)
+    if (activeMarineTransmission) { activeMarineTransmission.left = true; stopWeatherFax(); } // the screen is being left mid-transmission: the fax stops with it
     tempViewEl.innerHTML = '';
     // SHIP'S PLAN's full-viewport overlay (see its CSS notes and
     // cmdShipsPlan) -- same reasoning: closed here, at the start of
@@ -11855,8 +12039,8 @@
     if (el && !el.paused) fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) {} });
   }
 
-  // WEATHER FAX -- the nav-station pool's own element (never a second copy), started with the FIRST typed character of a new
-  // transmission and kept going -- repeating, because the file is only a few seconds -- until the LAST character appears. The typing
+  // WEATHER FAX -- the nav-station pool's own element (never a second copy), started the moment a NEW forecast is selected
+  // (see cmdMarineForecast) and kept going -- repeating, because the file is only a few seconds -- until the LAST character appears. The typing
   // decides when it stops (see runMarineForecastTransmission); nothing here knows or estimates how long the forecast is.
   var WEATHER_FAX_FADE_SECONDS = 0.3;   // the short natural fade-out when the last character lands (or the screen is left)
   var activeMarineTransmission = null;  // the transmission now running, or null; clearTempView() marks it as left
@@ -11908,7 +12092,6 @@
     }
     function typeLines() {
       var li = 0, ci = 0, p = null;
-      if (!tx.left) startWeatherFax(); // the fax starts in the same moment as the first character (the first step() below prints it)
       (function step() {
         if (li >= lines.length) { finish(); return; }
         var ln = lines[li];
@@ -11955,6 +12138,7 @@
       state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() };
       return;
     }
+    startWeatherFax(); // a NEW issuance (rows and id exist, viewedId !== id): the fax starts immediately on selection, before TUNING. Same single start path as ever; the existing typing end stops it
     runMarineForecastTransmission(state, lines, id);
   }
 
@@ -15616,12 +15800,12 @@
   function pickObservation(state) {
     var phase = voyagePhase(state);
     var pool = OBSERVATIONS[phase] || OBSERVATIONS.offshore;
-    var tod = timeOfDayPhase(state);
+    var tod = getDaylightPhase(state); // any of the seven phases is available here; the pools below key off the same moments as before
     var special = [];
     if (tod === 'night' && pool.awe_night) special = special.concat(pool.awe_night);
     if (tod !== 'night' && pool.awe_day) special = special.concat(pool.awe_day);
-    if (tod === 'dawn' && pool.sunrise) special = special.concat(pool.sunrise);
-    if (tod === 'dusk' && pool.sunset) special = special.concat(pool.sunset);
+    if ((tod === 'dawn' || tod === 'sunrise') && pool.sunrise) special = special.concat(pool.sunrise);
+    if ((tod === 'sunset' || tod === 'dusk') && pool.sunset) special = special.concat(pool.sunset);
     if (pool.awe) special = special.concat(pool.awe);
     var recent = state.flags.recentAmbientTexts || [];
     if (special.length && Math.random() < 0.18) {
@@ -16996,7 +17180,7 @@
     mouse: 'audio/nav_station/mouse.mp3',
     radioStatic: 'audio/nav_station/radio_static.mp3', // MARINE FORECAST: static under TUNING (silent if the file is absent)
     radioTick: 'audio/nav_station/radio_tick.mp3',     // MARINE FORECAST: the subtle tick as characters appear (silent if absent)
-    weatherFax: 'audio/nav_station/weather_fax.mp3',   // MARINE FORECAST: starts with the first typed character, ends with the last -- see runMarineForecastTransmission
+    weatherFax: 'audio/nav_station/weather_fax.mp3',   // MARINE FORECAST: starts the moment a new forecast is selected, ends with the last typed character -- see cmdMarineForecast / runMarineForecastTransmission
     sailRepair: 'audio/nav_station/sail_repair.mp3',
     steeringRepair: 'audio/nav_station/steering_repair.mp3', // file name unchanged -- see REPAIR SYSTEM section: player-facing text says RUDDER, the asset itself stays steering_repair.mp3
     fuseRepair: 'audio/nav_station/fuse_repair.mp3',
@@ -18210,43 +18394,22 @@
      by any of this either — only the five CSS variables actually used
      for text color are ever overridden.
 
-     SUNSET/SUNRISE: this codebase has no separate astronomical
-     sunrise/sunset calculation — 'night' already begins at hour 19 and
-     ends at hour 6 (see timeOfDayPhase/isDark), and that IS the
-     existing authoritative day/night boundary already governing the
-     cabin-light darkness gates elsewhere in this file. These two
-     constants simply name that same existing boundary rather than
-     inventing a new one. */
-  var NATURAL_LIGHT_SUNSET_HOUR = 19;
-  var NATURAL_LIGHT_SUNRISE_HOUR = 6;
-  var NATURAL_LIGHT_TRANSITION_MINUTES = 30; // how long the dim/brighten ramp takes on either side of sunset/sunrise
+     DUSK / DAWN: the brightness below is derived from the astronomical daylight system (daylightSnapshot, up in the ASTRONOMICAL
+     DAYLIGHT section), never from a clock hour. ONLY those two phases change it: DUSK fades it down over exactly the 30 minutes after
+     astronomical sunset, DAWN brings it back up over exactly the 30 minutes before astronomical sunrise; every other phase is stable.
+     It is text brightness ONLY -- whether an action is available never reads it (see isDark). */
   var NIGHT_TEXT_BRIGHTNESS = 0.2; // the one tunable dim floor -- 1.0 is full/normal (unchanged) brightness; this is as dim as natural light alone ever gets (80% darker than normal, per the task this implements). Retune only this.
 
-  // Returns 0..1: how bright natural light ALONE makes the text right
-  // now — continuous through the two 30-minute ramps, 1 (untouched)
-  // through the day, pinned at NIGHT_TEXT_BRIGHTNESS through the night.
-  // Never reads cabinLightsOn; that override lives separately in
-  // applyNaturalLightDimming below, so this stays a pure function of
-  // time alone, exactly like timeOfDayPhase it's anchored to.
+  // Returns 0..1: how bright natural light ALONE makes the text right now, as a pure function of the game instant and SOLACE's position.
+  // 1 (untouched) in DAY, LATE AFTERNOON, SUNSET and SUNRISE; fading linearly 1 -> NIGHT_TEXT_BRIGHTNESS across exactly the 30 minutes of
+  // DUSK (elapsed minutes since astronomical sunset / 30, clamped); pinned at NIGHT_TEXT_BRIGHTNESS through NIGHT; and rising linearly back
+  // to 1 across exactly the 30 minutes of DAWN. Nothing is stored: a reload or offline catch-up recomputes the exact point in the fade.
+  // Never reads cabinLightsOn; that override lives separately in applyNaturalLightDimming below.
   function naturalLightBrightness(state) {
-    var d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000);
-    var minOfDay = d.getHours() * 60 + d.getMinutes();
-    var sunsetMin = NATURAL_LIGHT_SUNSET_HOUR * 60;
-    var sunriseMin = NATURAL_LIGHT_SUNRISE_HOUR * 60;
-    var dimStart = sunsetMin - NATURAL_LIGHT_TRANSITION_MINUTES;
-    var brightenStart = sunriseMin - NATURAL_LIGHT_TRANSITION_MINUTES;
-
-    if (minOfDay >= dimStart && minOfDay < sunsetMin) {
-      var tDim = (minOfDay - dimStart) / NATURAL_LIGHT_TRANSITION_MINUTES;
-      return 1 - tDim * (1 - NIGHT_TEXT_BRIGHTNESS);
-    }
-    if (minOfDay >= brightenStart && minOfDay < sunriseMin) {
-      var tBright = (minOfDay - brightenStart) / NATURAL_LIGHT_TRANSITION_MINUTES;
-      return NIGHT_TEXT_BRIGHTNESS + tBright * (1 - NIGHT_TEXT_BRIGHTNESS);
-    }
-    if (minOfDay >= sunsetMin || minOfDay < brightenStart) {
-      return NIGHT_TEXT_BRIGHTNESS;
-    }
+    var snap = daylightSnapshot(state);
+    if (snap.phase === 'dusk') return 1 - clamp(snap.minutesSinceSunset / DUSK_MINUTES, 0, 1) * (1 - NIGHT_TEXT_BRIGHTNESS);
+    if (snap.phase === 'dawn') return NIGHT_TEXT_BRIGHTNESS + clamp((DAWN_MINUTES - snap.minutesToSunrise) / DAWN_MINUTES, 0, 1) * (1 - NIGHT_TEXT_BRIGHTNESS);
+    if (snap.phase === 'night') return NIGHT_TEXT_BRIGHTNESS;
     return 1;
   }
 
