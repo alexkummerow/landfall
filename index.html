@@ -10869,6 +10869,7 @@
   }
 
   function clearTempView() {
+    if (activeMarineTransmission) { activeMarineTransmission.left = true; stopWeatherFax(); } // the screen is being left mid-transmission: the fax stops with it (and never starts if TUNING was still running)
     tempViewEl.innerHTML = '';
     // SHIP'S PLAN's full-viewport overlay (see its CSS notes and
     // cmdShipsPlan) -- same reasoning: closed here, at the start of
@@ -11854,6 +11855,23 @@
     if (el && !el.paused) fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) {} });
   }
 
+  // WEATHER FAX -- the nav-station pool's own element (never a second copy), started with the FIRST typed character of a new
+  // transmission and kept going -- repeating, because the file is only a few seconds -- until the LAST character appears. The typing
+  // decides when it stops (see runMarineForecastTransmission); nothing here knows or estimates how long the forecast is.
+  var WEATHER_FAX_FADE_SECONDS = 0.3;   // the short natural fade-out when the last character lands (or the screen is left)
+  var activeMarineTransmission = null;  // the transmission now running, or null; clearTempView() marks it as left
+  function startWeatherFax() {
+    var el = playNavStationOneShot('weatherFax'); // restarts that one element in place; master-muted like every nav-station sound
+    if (el) { el._faxStopping = false; el.loop = true; } // repeat for as long as the typing lasts
+  }
+  function stopWeatherFax() {
+    var el = navStationAudioEls.weatherFax;
+    if (!el || el._faxStopping || el.paused) return; // idempotent: the last character, finish() and a screen change may all ask
+    el._faxStopping = true;
+    el.loop = false;
+    fadeNavStationVolume(el, 0, WEATHER_FAX_FADE_SECONDS, function () { try { el.pause(); } catch (e) {} });
+  }
+
   var marineForecastBackOptions = function () { return [{ label: 'BACK', action: 'cmd:nav-station' }]; };
   function printMarineForecastInstant(lines) {
     lines.forEach(function (ln) {
@@ -11868,6 +11886,7 @@
     uiBusy = true;
     optionsEl.innerHTML = '';
     var choice = state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() }; // a sane screen if the page is reloaded mid-way
+    var tx = activeMarineTransmission = { left: false }; // clearTempView() sets .left if the screen is left before the typing ends
 
     var labelEl = document.createElement('p'); labelEl.className = 'line heading-label'; labelEl.textContent = 'TUNING'; tempViewEl.appendChild(labelEl);
     var dotsEl = document.createElement('p'); dotsEl.className = 'line dim'; dotsEl.textContent = ACTIVITY_DOT_FRAMES[0]; tempViewEl.appendChild(dotsEl);
@@ -11875,12 +11894,13 @@
     var frame = 0;
     var dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
     playNavStationOneShot('radioStatic');
-    playNavStationOneShot('weatherFax'); // the fax starts with TUNING. This function only runs for an issuance not yet received (see cmdMarineForecast), so a forecast already viewed stays silent; one element, restarted in place, never looped
 
     function finish() {
       var rw = state.realWeather;
       if (rw) { if (!rw.forecastView || typeof rw.forecastView !== 'object') rw.forecastView = { viewedId: null }; rw.forecastView.viewedId = issuanceId; } // received: it is never transmitted again
       if (state.pendingChoice === choice) state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() };
+      stopWeatherFax(); // already stopped by the last character; this only matters if the lines ever end some other way
+      if (activeMarineTransmission === tx) activeMarineTransmission = null;
       uiBusy = false;
       renderOptions(state);
       saveGameState(state);
@@ -11888,6 +11908,7 @@
     }
     function typeLines() {
       var li = 0, ci = 0, p = null;
+      if (!tx.left) startWeatherFax(); // the fax starts in the same moment as the first character (the first step() below prints it)
       (function step() {
         if (li >= lines.length) { finish(); return; }
         var ln = lines[li];
@@ -11897,7 +11918,11 @@
         p.textContent = ln.text.slice(0, ci);
         if (ci % MARINE_FORECAST_TICK_EVERY === 1 && ln.text.charAt(ci - 1) !== ' ') playRadioTick();
         scrollToBottom();
-        if (ci >= ln.text.length) { p = null; li++; ci = 0; setTimeout(step, MARINE_FORECAST_CHAR_MS * 6); }
+        if (ci >= ln.text.length) {
+          p = null; li++; ci = 0;
+          if (li >= lines.length) stopWeatherFax(); // the LAST character of the forecast has just appeared: the typing itself ends the sound
+          setTimeout(step, MARINE_FORECAST_CHAR_MS * 6);
+        }
         else setTimeout(step, MARINE_FORECAST_CHAR_MS);
       })();
     }
@@ -16971,7 +16996,7 @@
     mouse: 'audio/nav_station/mouse.mp3',
     radioStatic: 'audio/nav_station/radio_static.mp3', // MARINE FORECAST: static under TUNING (silent if the file is absent)
     radioTick: 'audio/nav_station/radio_tick.mp3',     // MARINE FORECAST: the subtle tick as characters appear (silent if absent)
-    weatherFax: 'audio/nav_station/weather_fax.mp3',   // MARINE FORECAST: starts with TUNING -- see runMarineForecastTransmission
+    weatherFax: 'audio/nav_station/weather_fax.mp3',   // MARINE FORECAST: starts with the first typed character, ends with the last -- see runMarineForecastTransmission
     sailRepair: 'audio/nav_station/sail_repair.mp3',
     steeringRepair: 'audio/nav_station/steering_repair.mp3', // file name unchanged -- see REPAIR SYSTEM section: player-facing text says RUDDER, the asset itself stays steering_repair.mp3
     fuseRepair: 'audio/nav_station/fuse_repair.mp3',
