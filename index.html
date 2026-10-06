@@ -7328,13 +7328,8 @@
      schedule can always be walked back to a normal bedtime without
      ever gaining extra credit for it.
      -------------------------------------------------------------- */
-  function sleepSettleNarrative() {
-    var options = [
-      "Lay down and listened to the water against the hull.",
-      "Lay down and let the boat rock me.",
-      "Closed my eyes. The hull talked quietly until I stopped listening.",
-    ];
-    return options[Math.floor(Math.random() * options.length)];
+  function sleepSettleNarrative(state) {
+    return pickVariant(DAILY_COPY.sleepStart, 'sleepStart', lifeCtx(state));
   }
 
   function describeSleepDuration(minutes) {
@@ -7349,11 +7344,10 @@
   // passed (see updateCrew) -- as have hunger, hydration and hygiene --
   // so this just ends the sleeping state and reports how long it was,
   // measured from the stored start timestamp.
-  function sleepEntryText(minutes) {
-    // describeSleepDuration reads "a few minutes" / "under an hour" / "7.5 hours" -- "roughly" only fits the hours form.
-    if (minutes < 20) return 'Slept for a few minutes.';
-    if (minutes < 60) return 'Slept for under an hour.';
-    return 'Slept for roughly ' + describeSleepDuration(minutes) + '.';
+  function sleepEntryText(minutes, state) {
+    var key = minutes < 20 ? 'wakeShort' : (minutes < 60 ? 'wakeMid' : 'wakeLong');
+    var ctx = { minutes: minutes, afloat: !state || !state.nav || !state.nav.grounded };
+    return pickVariant(DAILY_COPY[key], key, ctx).split('{D}').join(describeSleepDuration(minutes));
   }
   function wakeUp(state) {
     var start = state.crew.sleepStartedAt;
@@ -7362,7 +7356,7 @@
     state.crew.sleepStartedAt = null;
     if (state.crew.bunkUnmadeSinceMinutes == null) state.crew.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
     momentNoteWake(state, minutesAsleep);
-    log(state, sleepEntryText(minutesAsleep));
+    log(state, sleepEntryText(minutesAsleep, state));
     flushNewLogEntries(state);
   }
 
@@ -12986,7 +12980,7 @@
         s.crew.atHelm = false; // can't stay at the helm while asleep — see cmdHelm
         s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and WAKE UP never actually appears
         clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
-        log(s, sleepSettleNarrative());
+        log(s, sleepSettleNarrative(s));
         flushNewLogEntries(s);
       },
     });
@@ -13139,15 +13133,15 @@
   // constantly — picked at random each time; small pools are plenty for
   // something this incidental.
   var CHORE_LINES = {
-    dishes: ['Did the dishes. The galley looked better afterward.'],
+    dishes: ['Did the dishes. The galley looked better afterward.', 'Washed the dishes. Nice to have the sink empty again.', "Did the dishes. Didn't take long.", 'Washed up after eating.', 'Did the dishes. Everything back where it belonged.', 'Cleaned the dishes. The galley felt less cluttered.', 'Did the dishes. Small job. Still felt good to finish it.'],
     tools: ['Put the tools away. Hopefully for a while.'],
-    bunk: ['Made the bunk. Not much, but the cabin felt better.'],
-    air: ['Opened the hatch and aired out the cabin. The damp had gotten into everything.'],
-    tidy: ['Tidied up below. Things had started to collect.'],
+    bunk: ['Made the bunk. Not much, but the cabin felt better.', 'Made the bunk. The cabin looked better for it.', 'Straightened the bunk.', 'Made the bunk. Small thing.', 'Fixed up the bunk. Better.', 'Made the bunk. Nice to have one thing in order.'],
+    // AIR OUT CABIN is only offered once the cabin has gone damp (see choreOptionIfDue), so the damp lines are true -- but they still check the state captured before the chore cleared it.
+    air: [{ t: 'Opened the hatch and aired out the cabin. The damp had gotten into everything.', when: function (c) { return c.damp; } }, 'Opened the hatch and let some air through.', 'Aired out the cabin. It needed it.', 'Opened the hatch for some fresh air.', 'Let some air through the cabin. Better.', { t: 'Aired things out below. Felt less stuffy afterward.', when: function (c) { return c.damp; } }],
+    tidy: ['Tidied up below. Things had started to collect.', 'Straightened up the saloon. Better.', 'Put a few things back where they belonged.', 'Tidied up. The space felt bigger afterward.', "Straightened things up. Didn't take much.", 'Cleaned up the clutter. Felt better.', 'Put things back in order.'],
   };
-  function pickChoreLine(kind) {
-    var pool = CHORE_LINES[kind];
-    return pool[Math.floor(Math.random() * pool.length)];
+  function pickChoreLine(kind, ctx) {
+    return pickVariant(CHORE_LINES[kind], 'chore:' + kind, ctx);
   }
 
   // One definition per chore: what clears it, what (if anything) gates
@@ -13257,11 +13251,12 @@
     // adding a second copy of it.
     if (kind === 'air') playSaloonOneShot('hatchOpen');
     var doChore = function (s) {
+      var life = lifeCtx(s); life.damp = s.crew.cabinStuffySinceMinutes != null || s.crew.dampCabinHours > 0; // before the chore clears anything
       if (def.consume) def.consume(s);
       def.clear(s);
       var gain = routineMoraleGain(s, def.moraleKey, def.moraleGain);
       s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-      log(s, pickChoreLine(kind));
+      log(s, pickChoreLine(kind, life));
       flushNewLogEntries(s);
       var returnCmd = chorePendingReturn(kind);
       if (returnCmd) returnCmd(s);
@@ -15075,11 +15070,12 @@
       label: 'WASHING',
       playAudio: function (onEnded) { return playHeadOneShot('wash', onEnded); },
       action: function (s) {
+        var life = lifeCtx(s); // before the wash resets hygiene
         consumeWater(s, WATER_WASH_GAL);
         s.crew.hygieneHours = 0; // FRESH again -- see hoursSinceWash
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'Washed with fresh water. Felt human again.');
+        log(s, pickVariant(DAILY_COPY.wash, 'wash', life));
         flushNewLogEntries(s);
         cmdHead(s);
       },
@@ -15191,12 +15187,22 @@
       playAudio: function (onEnded) { return playCabinOneShot('changeClothes', onEnded); },
       action: function (s) {
         // Taking a wet garment OFF never dries it: wetness belongs to the garment; only HANG WET CLOTHES starts it drying.
+        var env = s.crew.location === 'above' ? 'above' : 'below';
+        var before = { worn: cloneClothing(s.crew.clothing) };
+        before.wet = ALL_GARMENT_KEYS.some(function (k) { return before.worn[k] && isGarmentWet(s, k); });
+        before.warmth = outfitWarmth(s, before.worn).total;
+        before.verdict = evaluateOutfit(s, before.worn, env).verdict;
         ALL_GARMENT_KEYS.forEach(function (k) { s.crew.clothing[k] = !!outfit[k]; });
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
         pendingClothing = null;
-        // A diary line only when the player really did end up in dry clothes -- the player CAN put a wet garment back on, and the entry must not say otherwise.
-        if (!ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); })) {
-          log(s, 'Changed into dry clothes.');
+        // A diary line only when nothing worn is wet (as before), and it says only what the change really did.
+        var wearingAnything = ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k); });
+        var wearingWet = ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); });
+        if (!wearingWet) {
+          var dWarmth = outfitWarmth(s, s.crew.clothing).total - before.warmth;
+          var ctx = { improved: before.verdict !== 'appropriate' && evaluateOutfit(s, s.crew.clothing, env).verdict === 'appropriate' };
+          var pool = !wearingAnything ? 'changeNone' : (before.wet ? 'changeDry' : (dWarmth >= 2 ? 'changeWarmer' : (dWarmth <= -2 ? 'changeLighter' : 'changePlain')));
+          log(s, pickVariant(DAILY_COPY[pool], pool, ctx));
         }
         syncComfortExposure(s); // the new outfit in the place the player is standing: the 60-second clock starts (or clears) from this moment
         flushNewLogEntries(s);
@@ -15259,7 +15265,7 @@
         // routine conceptually, just restructured; see routineMoraleGain.
         var gain = routineMoraleGain(s, 'dryClothes', 3);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'Hung the wet clothes up to dry.');
+        log(s, pickVariant(DAILY_COPY.hang, 'hang', { wearingWet: ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); }) })); // "everything" only if nothing wet is still being worn
         flushNewLogEntries(s);
         cmdCabin(s);
       },
@@ -15346,7 +15352,7 @@
         s.crew.readingBookId = bookId;
         s.crew.readingLastSyncedAt = currentGameMinutes(s); // starts the continuous clock fresh — nothing before this moment counts toward this session
         bumpClutter(s, 1); // the book itself, left out
-        log(s, 'Started reading ' + bookDef.title + '.');
+        log(s, pickVariant(DAILY_COPY.readStart, 'readStart', { seen: bookState.minutesRead > 0 }).split('{T}').join(bookDef.title)); // "went back to" only for a book that really has been read before
         flushNewLogEntries(s);
         s.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
       },
@@ -15380,7 +15386,7 @@
       transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
       action: function (s) {
-        log(s, 'Read for a while. Forgot where I was.');
+        log(s, pickVariant(DAILY_COPY.readStop, 'readStop'));
         flushNewLogEntries(s);
         cmdBookshelf(s);
       },
@@ -15689,54 +15695,104 @@
     if (h >= 16) return 'dinner';
     return 'late';
   }
+  // DAILY LIFE COPY -- the human routines' result lines. Every pool is a list of lines; a line is either a plain string or { t: text, when: fn(ctx) }
+  // for a line that is only true in some states (ctx = lifeCtx(), captured BEFORE the action changes anything). Each line describes only the action
+  // that just happened and how it felt -- never another chore (eating never washes up, sleeping never makes the bunk, changing never hangs anything).
+  // One shared picker (pickVariant) keeps a tiny session-only memory of the last line used per activity so the same line never repeats back to back;
+  // it is never saved (after a reload the worst case is a one-in-N repeat).
+  var lastVariantText = {};
+  function pickVariant(pool, key, ctx) {
+    var ok = [];
+    pool.forEach(function (e) { if (typeof e === 'string') ok.push(e); else if (!e.when || e.when(ctx || {})) ok.push(e.t); });
+    if (!ok.length) return '';
+    var fresh = ok.length > 1 ? ok.filter(function (t) { return t !== lastVariantText[key]; }) : ok;
+    var t = fresh[Math.floor(Math.random() * fresh.length)];
+    lastVariantText[key] = t;
+    return t;
+  }
+  // The pre-action snapshot the condition-aware lines read. Call it at the START of an action's callback, before hunger / thirst / hygiene reset.
+  function lifeCtx(state) {
+    var c = state.crew, d = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000), comfort = cabinComfort(state);
+    return {
+      hunger: hungerLevel(c.hoursSinceMeal), thirst: thirstLevel(c.hoursSinceWater), energy: energyLevel(c.fatigue), hygiene: hygieneLevel(hoursSinceWash(state)),
+      hour: d.getHours(), afloat: !state.nav.grounded, chilly: c.location === 'below' && (comfort === 'COLD' || comfort === 'COOL'),
+    };
+  }
+  var hungry = function (c) { return c.hunger >= 3; };        // PECKISH or worse
+  var starving = function (c) { return c.hunger >= 5; };      // VERY HUNGRY or worse
+  var tiredOrHungry = function (c) { return c.energy <= 2 || c.hunger >= 4; };
+  var evening = function (c) { return c.hour >= 18; };
+  var afloat = function (c) { return c.afloat; };
+
   var MEAL_ENTRY_POOLS = {
-    breakfast: ['Made [FOOD] for breakfast. Just what I needed.', 'Made [FOOD] for breakfast. Nice to have something hot.', 'Made [FOOD] for breakfast. Better than it had any right to be.', 'Made [FOOD] for breakfast. Nothing fancy.', 'Made [FOOD] for breakfast. Ate every bit.', 'Made [FOOD] for breakfast. A good start.'],
-    lunch: ['Made [FOOD] for lunch. Hit the spot.', 'Made [FOOD] for lunch. Nothing fancy.', 'Made [FOOD] for lunch. Better than I expected.', 'Made [FOOD] for lunch. Nice to have something hot.', 'Made [FOOD] for lunch. Ate every bit.', 'Made [FOOD] for lunch. Good enough.'],
-    dinner: ['Made [FOOD] for dinner. Exactly what I needed.', 'Made [FOOD] for dinner. Nice to have something hot.', 'Made [FOOD] for dinner. Better than I expected.', 'Made [FOOD] for dinner. Ate every bit.', 'Made [FOOD] for dinner. Not bad at all.', 'Made [FOOD] for dinner. Felt almost civilized.'],
-    late: ['Made [FOOD] in the galley. Strange hour for a meal.'],
+    breakfast: ['Made [FOOD] for breakfast. Just what I needed.', 'Made [FOOD] for breakfast. Nice to have something hot.', 'Made [FOOD] for breakfast. Better than it had any right to be.', 'Made [FOOD] for breakfast. Nothing fancy.', 'Made [FOOD] for breakfast. Ate every bit.', 'Made [FOOD] for breakfast. A good start.',
+      'Made [FOOD] for breakfast. Hit the spot.', 'Made [FOOD] for breakfast. Better than I expected.', 'Made [FOOD] for breakfast. Exactly what I wanted.', 'Made [FOOD] for breakfast. Tasted pretty good.', 'Made [FOOD] for breakfast. Felt good to eat something hot.',
+      { t: 'Made [FOOD] for breakfast. I was hungrier than I thought.', when: hungry }],
+    lunch: ['Made [FOOD] for lunch. Hit the spot.', 'Made [FOOD] for lunch. Nothing fancy.', 'Made [FOOD] for lunch. Better than I expected.', 'Made [FOOD] for lunch. Nice to have something hot.', 'Made [FOOD] for lunch. Ate every bit.', 'Made [FOOD] for lunch. Good enough.',
+      'Made [FOOD] for lunch. Tasted better than it looked.', 'Made [FOOD] for lunch. Not bad.',
+      { t: 'Made [FOOD] for lunch. I needed that.', when: tiredOrHungry }, { t: 'Made [FOOD] for lunch. I was ready for it.', when: hungry }],
+    dinner: ['Made [FOOD] for dinner. Exactly what I needed.', 'Made [FOOD] for dinner. Nice to have something hot.', 'Made [FOOD] for dinner. Better than I expected.', 'Made [FOOD] for dinner. Ate every bit.', 'Made [FOOD] for dinner. Not bad at all.', 'Made [FOOD] for dinner. Felt almost civilized.',
+      'Made [FOOD] for dinner. Took my time with it.',
+      { t: 'Made [FOOD] for dinner. I was starving.', when: starving }, { t: 'Made [FOOD] for dinner. Tasted good tonight.', when: evening }, { t: 'Made [FOOD] for dinner. Good way to end the day.', when: evening }],
+    late: ['Made [FOOD] in the galley. Strange hour for a meal.', 'Made [FOOD]. Hit the spot.', 'Made [FOOD]. Nice to have something hot.', 'Made [FOOD]. Ate every bit.', 'Made [FOOD]. Not bad.',
+      { t: 'Made [FOOD]. I was hungry enough not to care what time it was.', when: hungry }],
   };
-  var FISH_MEAL_ENTRIES = ["Made the [FISH] for [MEAL]. Couldn't get much fresher.", 'Cooked the [FISH] for [MEAL]. Worth waiting on the line.', 'Made the [FISH] for [MEAL]. Better than anything from a package.', 'Cooked the [FISH] for [MEAL]. Not bad for something I caught myself.', 'Made the [FISH] for [MEAL]. Felt almost civilized.'];
-  var FISH_MEAL_ENTRY_LATE = 'Cooked the [FISH] in the galley. Strange hour for a meal.';
+  var FISH_MEAL_ENTRIES = ["Made the [FISH] for [MEAL]. Couldn't get much fresher.", 'Cooked the [FISH] for [MEAL]. Worth waiting on the line.', 'Made the [FISH] for [MEAL]. Better than anything from a package.', 'Cooked the [FISH] for [MEAL]. Not bad for something I caught myself.', 'Made the [FISH] for [MEAL]. Felt almost civilized.',
+    'Cooked the [FISH] for [MEAL]. Turned out pretty well.', 'Made the [FISH] for [MEAL]. I was proud of that one.', 'Cooked the [FISH] for [MEAL]. Tasted as fresh as it gets.'];
+  var FISH_MEAL_ENTRIES_LATE = ['Cooked the [FISH] in the galley. Strange hour for a meal.', "Made the [FISH]. Couldn't get much fresher.", 'Cooked the [FISH]. Worth waiting on the line.', 'Made the [FISH]. Not bad for something I caught myself.', 'Cooked the [FISH]. Turned out pretty well.', 'Made the [FISH]. Tasted as fresh as it gets.'];
   var SNACK_ENTRIES = {
-    'Popcorn': 'Had some popcorn. Better than nothing.',
-    'Dried Fruit': 'Ate some dried fruit. Sweet and chewy.',
-    'Mixed Nuts': 'Ate a handful of mixed nuts. Held me over.',
-    'Energy Bar': 'Ate an energy bar. Still tastes like sawdust.',
+    'Popcorn': ['Had some popcorn. Better than nothing.', 'Made some popcorn. Ate more than I meant to.', 'Had some popcorn. Hit the spot.', 'Made popcorn. Nice to have something warm.', 'Had some popcorn. Pretty good, actually.', 'Made popcorn. The whole bag disappeared.'],
+    'Dried Fruit': ['Ate some dried fruit. Sweet and chewy.', 'Had some dried fruit. Better than I remembered.', 'Ate a handful of dried fruit.', 'Had some dried fruit. Hit the spot.', 'Ate some dried fruit. I wanted something sweet.'],
+    'Mixed Nuts': ['Ate a handful of mixed nuts. Held me over.', 'Had some mixed nuts. Salty. Good.', 'Had a handful of nuts. Enough for now.', 'Ate some mixed nuts. Nothing exciting. Still good.', { t: 'Ate some mixed nuts. I was hungrier than I thought.', when: hungry }],
+    'Energy Bar': ['Ate an energy bar. Still tastes like sawdust.', 'Had an energy bar. Food, technically.', 'Ate an energy bar. Better than being hungry.', 'Ate an energy bar. Did the job.', { t: 'Had an energy bar. Not exactly dinner.', when: function (c) { return c.hour >= 16; } }],
+    'Chocolate': ['Had some chocolate. Needed that.', 'Ate some chocolate. Saved the best thing aboard for a reason.', 'Had some chocolate. That helped.', 'Ate some chocolate. Worth it.', 'Had some chocolate. Hard to be unhappy about chocolate.'],
   };
-  var lastMealEntryIndex = {}; // per pool: never the same line twice running (session-only; nothing to save)
-  function pickMealEntry(pool, key) {
-    var i = Math.floor(Math.random() * pool.length);
-    if (pool.length > 1 && i === lastMealEntryIndex[key]) i = (i + 1 + Math.floor(Math.random() * (pool.length - 1))) % pool.length;
-    lastMealEntryIndex[key] = i;
-    return pool[i];
-  }
-  function preparedMealEntry(state, foodName) {
+  function preparedMealEntry(state, foodName, ctx) {
     var period = mealPeriodName(state);
-    return pickMealEntry(MEAL_ENTRY_POOLS[period], period).replace('[FOOD]', String(foodName).toLowerCase());
+    return pickVariant(MEAL_ENTRY_POOLS[period], period, ctx || lifeCtx(state)).replace('[FOOD]', String(foodName).toLowerCase());
   }
-  function fishMealEntry(state, fishName) {
+  function fishMealEntry(state, fishName, ctx) {
     var period = mealPeriodName(state), fish = fishNameForProse(fishName);
-    if (period === 'late') return FISH_MEAL_ENTRY_LATE.replace('[FISH]', fish);
-    return pickMealEntry(FISH_MEAL_ENTRIES, 'fish').replace('[FISH]', fish).replace('[MEAL]', period);
+    if (period === 'late') return pickVariant(FISH_MEAL_ENTRIES_LATE, 'fishLate', ctx).replace('[FISH]', fish);
+    return pickVariant(FISH_MEAL_ENTRIES, 'fish', ctx).replace('[FISH]', fish).replace('[MEAL]', period);
   }
-  // Prose form of a fish name: lower case, except "Pacific"; and the right article for "Caught a / an ...".
   function fishNameForProse(name) { return String(name).toLowerCase().replace(/\bpacific\b/g, 'Pacific'); }
   function fishArticleAndName(name) { var n = fishNameForProse(name); return (/^[aeiou]/i.test(n) ? 'an ' : 'a ') + n; }
-  // Snacks have their own lines and never use meal terms. Cup Noodles is MECHANICALLY a snack (its hunger effect is unchanged) but reads as a prepared meal.
-  function eatFlavorLine(state, item) {
-    if (item.key === HELD_FISH_KEY) return fishMealEntry(state, item.fishName || 'fish');
-    if (item.type === 'snack' && item.name !== 'Cup Noodles' && SNACK_ENTRIES[item.name]) return SNACK_ENTRIES[item.name];
-    return preparedMealEntry(state, item.name);
+  function eatFlavorLine(state, item, ctx) {
+    ctx = ctx || lifeCtx(state);
+    if (item.key === HELD_FISH_KEY) return fishMealEntry(state, item.fishName || 'fish', ctx);
+    if (item.type === 'snack' && item.name !== 'Cup Noodles' && SNACK_ENTRIES[item.name]) return pickVariant(SNACK_ENTRIES[item.name], 'snack:' + item.name, ctx);
+    return preparedMealEntry(state, item.name, ctx);
   }
 
-  // What eating does to hoursSinceMeal. A full MEAL puts the sailor
-  // back at the very start of the cadence (FULL). A SNACK is a smaller
-  // reset: it brings hunger back to about the 3-hour mark (SATISFIED)
-  // -- enough to bridge the gap between breakfast and dinner as a light
-  // lunch -- but only ever moves the clock BACKWARD toward that mark
-  // (Math.min), so a snack while already full changes nothing and can
-  // never make anyone hungrier. Chocolate isn't listed: it never
-  // touches hoursSinceMeal at all (morale/comfort only).
+  var DAILY_COPY = {
+    water: ['Drank a long glass of cold water.', 'Had a long drink of water.', 'Drank some cold water. Felt better.', 'Had some water. Simple pleasure.', 'Had a glass of water.', 'Drank some water. Plain and good.',
+      { t: 'Had some water. I needed it.', when: function (c) { return c.thirst >= 2; } }, { t: "Drank until I wasn't thirsty anymore.", when: function (c) { return c.thirst >= 2; } }, { t: 'Drank a glass of water. I was thirstier than I realized.', when: function (c) { return c.thirst >= 2; } }],
+    coffee: ['Made coffee. Strong and hot. Everything felt a little sharper afterward.', 'Made coffee. First sip was the best one.', 'Made coffee. Exactly what I needed.', 'Made coffee. Strong enough.', 'Made coffee. Held the cup for a minute before drinking it.', 'Made coffee. The smell alone helped.', 'Made coffee. Better than I expected.', 'Made coffee. Took my time with it.', 'Made coffee. Felt more awake afterward.', 'Made coffee. One of the better routines aboard.',
+      { t: 'Made coffee. Nice to have something warm.', when: function (c) { return c.chilly; } }],
+    tea: ['Made tea. Held the cup for a while before drinking it.', 'Made tea. Took my time with it.', 'Made tea. Sat with it for a minute.', 'Made tea. Hit the spot.', 'Made tea. Better than I expected.', "Made tea. I didn't rush it.",
+      { t: 'Made tea. Nice to have something warm.', when: function (c) { return c.chilly; } }, { t: 'Made tea. The warmth helped.', when: function (c) { return c.chilly; } }],
+    wash: ['Washed with fresh water. Felt human again.', 'Washed with fresh water. Felt better afterward.', 'Washed up. Amazing what a little water can do.', 'Washed my face and cleaned up a little.', 'Washed up. Felt more awake afterward.', 'Washed with fresh water. Nice to feel clean.', 'Cleaned myself up. Better.',
+      { t: 'Washed up. I needed that.', when: function (c) { return c.hygiene <= 2; } }, { t: 'Washed up. I really needed that.', when: function (c) { return c.hygiene <= 1; } }],
+    sleepStart: [{ t: 'Lay down and listened to the water against the hull.', when: afloat }, { t: 'Lay down and let the boat rock me.', when: afloat }, { t: 'Closed my eyes. The hull talked quietly until I stopped listening.', when: afloat },
+      { t: 'Climbed into the bunk. I was ready for it.', when: function (c) { return c.energy <= 3; } }, "Lay down. Didn't take long to get comfortable.", { t: 'Got into the bunk. The boat kept moving underneath me.', when: afloat },
+      { t: 'Lay down. I was more tired than I thought.', when: function (c) { return c.energy <= 3; } }, { t: 'Closed my eyes and listened to Solace move.', when: afloat }, 'Got into the bunk. Everything felt quieter down there.'],
+    // WAKE: the duration phrase ({D}) always comes from describeSleepDuration, so it is exactly the length the game measured.
+    wakeShort: ['Slept for a few minutes.', 'Woke up after a few minutes.', 'Only slept for a few minutes.', { t: 'Slept for a few minutes. The boat was still moving.', when: afloat }],
+    wakeMid: ['Slept for under an hour.', 'Woke up after less than an hour.', 'Got under an hour of sleep.', { t: 'Slept for under an hour. The boat was still moving.', when: afloat }],
+    wakeLong: ['Slept for roughly {D}.', 'Slept for about {D}.', 'Got about {D} of sleep.', 'Woke up after roughly {D}.', { t: 'Slept for about {D}. Took me a minute to remember where I was.', when: function (c) { return c.minutes >= 120; } },
+      { t: 'Woke after about {D}. The boat was still moving.', when: afloat }, { t: 'Slept for about {D}. Felt better.', when: function (c) { return c.minutes >= 240; } }],
+    readStart: ['Started reading {T}.', 'Picked up {T}.', 'Opened {T} and started reading.', { t: 'Went back to {T}.', when: function (c) { return c.seen; } }],
+    readStop: ['Read for a while. Forgot where I was.', "Put the book down. I'd lost track of time.", 'Read for a while. Nice to think about something else.', 'Put the book down. Good place to stop.', 'Read for a while. The boat disappeared for a bit.', "Closed the book. Felt like I'd been somewhere else."],
+    hang: ['Hung the wet clothes up to dry.', 'Put the wet clothes up to dry.', 'Got the wet clothes out of the way.', "Hung the wet things up. Hopefully they'll dry.", { t: 'Hung everything wet up.', when: function (c) { return !c.wearingWet; } }],
+    // CHANGE CLOTHES: only what the change really did. A line says "dry" only when nothing worn is wet, "warmer" / "lighter" only when the outfit's warmth moved that way.
+    changeDry: ['Changed into dry clothes.', 'Got into dry clothes. Much better.', 'Changed into dry clothes. Better.'],
+    changeWarmer: ['Changed into something warmer.', 'Put on something warmer.', { t: 'Changed into something warmer. Better.', when: function (c) { return c.improved; } }],
+    changeLighter: ['Changed into something lighter.', 'Put on something lighter.', { t: 'Changed into something lighter. Better.', when: function (c) { return c.improved; } }],
+    changePlain: ['Changed clothes.', 'Changed into something else.', 'Changed into dry clothes.', { t: 'Changed clothes. Felt better.', when: function (c) { return c.improved; } }],
+    changeNone: ['Took my clothes off.', 'Took off everything I was wearing.'],
+  };
+
   var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 };
 
   // Comfort, not sustenance — no prep, no seastate/water gates,
@@ -15754,7 +15810,7 @@
   }
   // Chocolate never relieves hunger itself (see performEat) -- it is a lift in mood, and the one line says so.
   function eatChocolateLine(state) {
-    return 'Had some chocolate. Needed that.';
+    return pickVariant(SNACK_ENTRIES['Chocolate'], 'snack:Chocolate', lifeCtx(state));
   }
 
   // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
@@ -15906,6 +15962,7 @@
     // that map) still gets the generic form exactly as before.
     var label = SNACK_ACTION_LABEL[item.name] || ((item.cooked ? 'MAKING ' : 'PREPARING ') + item.name.toUpperCase());
     var doEat = function (s) {
+      var life = lifeCtx(s); // before hunger resets, so "I was starving" is only ever said of a sailor who was
       var c = s.crew;
       if (waterNeeded > 0) consumeWater(s, waterNeeded);
       // FISHING HOOK -- the held catch is consumed whole, species and
@@ -15947,7 +16004,7 @@
       if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
       c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
       c.morale = clamp(c.morale + moraleGain, 0, 100);
-      log(s, eatFlavorLine(s, item));
+      log(s, eatFlavorLine(s, item, life));
       momentNoteMeal(s, item);
       flushNewLogEntries(s);
       cmdGalley(s);
@@ -16019,12 +16076,13 @@
       label: 'FILLING WATER',
       playAudio: function (onEnded) { return playGalleyOneShot('water', onEnded); },
       action: function (s) {
+        var life = lifeCtx(s); // before thirst resets
         consumeWater(s, WATER_DRINK_GAL);
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
-        log(s, 'Drank a long glass of cold water.');
+        log(s, pickVariant(DAILY_COPY.water, 'water', life));
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -16054,13 +16112,14 @@
       label: 'MAKING COFFEE',
       playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
+        var life = lifeCtx(s);
         s.drinks.coffee -= 1;
         consumeWater(s, WATER_COFFEE_GAL);
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.lastCoffeeAt = s.meta.voyageMinutes;
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
-        log(s, 'Made coffee. Strong and hot. Everything felt a little sharper afterward.');
+        log(s, pickVariant(DAILY_COPY.coffee, 'coffee', life));
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -16090,12 +16149,13 @@
       label: 'MAKING TEA',
       playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
+        var life = lifeCtx(s);
         s.drinks.tea -= 1;
         consumeWater(s, WATER_TEA_GAL);
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
-        log(s, 'Made tea. Held the cup for a while before drinking it.');
+        log(s, pickVariant(DAILY_COPY.tea, 'tea', life));
         flushNewLogEntries(s);
         cmdGalley(s);
       },
