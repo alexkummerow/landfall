@@ -3546,6 +3546,7 @@
       if (!atmos.ok) throw rwError(atmos.kind, atmos.message);
       var rw = state.realWeather;
       if (!rw) return;
+      var issuanceBefore = marineForecastIssuanceId(state); // which issuance the cache held before this fetch (null if none)
       var marine = null;
       if (marineRes.ok) {
         var m = rwNormalizeMarine(marineRes.value, nowMs);
@@ -3566,6 +3567,17 @@
       realWeatherRuntime.fetchedThisSession = true;
       rw.status = rwStatusFor(state, realWeatherAssess(state, nowMs)); // set BEFORE the save, so the stored copy is never behind the live one
       if (typeof GAME !== 'undefined' && GAME === state) saveGameState(state);
+      // WEATHER FAX -- SOLACE has just RECEIVED a new marine forecast: this successful fetch replaced the cache and the forecast's identity
+      // (marineForecastIssuanceId, the same one the MARINE FORECAST screen uses to decide what counts as a new issuance) has changed. A refresh
+      // that stays inside the same issuance, a failed fetch (the catch below), and merely opening the screen never get here / never differ, so
+      // they stay silent. Only once the player has MARINE FORECAST at all (the fetch itself starts with the first tick, long before that).
+      // Its own try/catch: a sound problem must never be recorded as a failed fetch. playNavStationOneShot restarts its one element in place.
+      try {
+        var issuanceAfter = marineForecastIssuanceId(state);
+        if (issuanceAfter && issuanceAfter !== issuanceBefore && typeof GAME !== 'undefined' && GAME === state && marineForecastAvailable(state)) playNavStationOneShot('weatherFax');
+      } catch (faxError) {
+        console.warn('Weather fax audio failed:', describeError(faxError));
+      }
     } catch (e) {
       rwRecordFailure(state, e);
     } finally {
@@ -16970,6 +16982,7 @@
     mouse: 'audio/nav_station/mouse.mp3',
     radioStatic: 'audio/nav_station/radio_static.mp3', // MARINE FORECAST: static under TUNING (silent if the file is absent)
     radioTick: 'audio/nav_station/radio_tick.mp3',     // MARINE FORECAST: the subtle tick as characters appear (silent if absent)
+    weatherFax: 'audio/nav_station/weather_fax.mp3',   // MARINE FORECAST: SOLACE receiving a NEW forecast -- see rwRunRefresh (never tied to opening the screen)
     sailRepair: 'audio/nav_station/sail_repair.mp3',
     steeringRepair: 'audio/nav_station/steering_repair.mp3', // file name unchanged -- see REPAIR SYSTEM section: player-facing text says RUDDER, the asset itself stays steering_repair.mp3
     fuseRepair: 'audio/nav_station/fuse_repair.mp3',
@@ -16991,6 +17004,7 @@
     mouse: 0.5,
     radioStatic: 0.3,
     radioTick: 0.2,
+    weatherFax: 0.5, // a device sound at the same level as the other nav-station equipment (startup, shutdown, repairs)
     sailRepair: 0.5,
     steeringRepair: 0.5,
     fuseRepair: 0.5,
