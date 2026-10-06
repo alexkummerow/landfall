@@ -5304,43 +5304,21 @@
     return angleDiff(heading, state.weather.windDirection) < 35;
   }
 
-  // Whether the boat is CURRENTLY luffing, per the state machine below
-  // -- deliberately its own tracked flag rather than reading the
-  // luffing audio element's raw .paused, since that lags behind during
-  // stopSailsLuffingLoop's fade-out (a repeat call mid-fade would
-  // otherwise see .paused still false and misread it as still luffing).
-  // This is the single source of truth shared by every caller.
+  // The previous answer to "are the sails luffing?" -- kept ONLY to catch the moment the boat leaves the no-go zone with its sails up (that is when sail_fill plays).
+  // The luffing audio does not read it: syncLuffingAudio asks isInNoGoZone directly every time, so the audio can never be stale (after a reload, a sleep, or audio
+  // that was still locked when luffing began).
   var isCurrentlyLuffing = false;
 
-  // The ONE shared no-go-zone audio state machine -- called any time
-  // nav.heading may have just changed, for ANY reason (beginCourseTurn's
-  // own real-time interval, or an ordinary simTick's autopilot
-  // correction/auto-tack/drift/wobble alike, or a coastal leg change).
-  // Reuses isInNoGoZone (the existing 35 degree boundary, see above) as
-  // the only source of truth for the zone itself -- never a second one.
-  // Responds purely to the CURRENT actual heading each time it's
-  // called, so it naturally keeps working correctly across a
-  // beginCourseTurn retarget (see "RETARGETING MUST ALSO WORK WITH
-  // LUFFING") without needing to know anything about targets at all.
-  // On exiting the zone: stop the loop, then immediately play sail_fill
-  // once -- deliberately never chained to winch here. Winch now plays
-  // ONLY from TRIM SAILS (cmdTrimSails/performTrimSails) -- steering
-  // events of any kind (beginCourseTurn completing, autopilot, drift)
-  // never trigger it any more; see that function's own notes.
+  // Called any time nav.heading may have just changed, for ANY reason (beginCourseTurn's own real-time interval, an ordinary simTick's autopilot correction / auto-tack /
+  // drift / wobble, a coastal leg change), and again by updateAudioForState as a defensive re-sync. It responds purely to the CURRENT actual heading, so it keeps working
+  // across a beginCourseTurn retarget. Leaving the zone with sails up plays sail_fill once -- deliberately never chained to winch, which plays ONLY from TRIM SAILS.
+  // The luffing loop itself is the one controller below (syncLuffingAudio); this just asks the one definition (isInNoGoZone) and hands the answer over.
   function updateNoGoZoneAudio(state) {
-    if (state.boat.sailConfig === 'furled') {
-      if (isCurrentlyLuffing) { isCurrentlyLuffing = false; stopSailsLuffingLoop(); }
-      return;
-    }
     var nowLuffing = isInNoGoZone(state, state.nav.heading);
-    if (nowLuffing && !isCurrentlyLuffing) {
-      isCurrentlyLuffing = true;
-      startSailsLuffingLoop(state);
-    } else if (!nowLuffing && isCurrentlyLuffing) {
-      isCurrentlyLuffing = false;
-      stopSailsLuffingLoop();
-      playSailsOneShot('fill', null, state);
-    }
+    var wasLuffing = isCurrentlyLuffing;
+    isCurrentlyLuffing = nowLuffing;
+    if (wasLuffing && !nowLuffing && state.boat.sailConfig !== 'furled') playSailsOneShot('fill', null, state);
+    syncLuffingAudio(state);
   }
 
   // The heading the boat should physically turn toward whenever
@@ -8189,12 +8167,8 @@
     updateCreakAudioForState(state); // AMBIENT-AUDIO ENHANCEMENT PASS -- layered on top of interior sea, see its own section notes
     updateWindAudioForState(state);
     updateRainAudioForState(state);
-    // Defensive re-sync only (idempotent — see updateNoGoZoneAudio's own
-    // isCurrentlyLuffing guard) for any path that moved nav.heading
-    // without going through simTick or beginCourseTurn explicitly, and
-    // also re-applies the current above/below-deck audibility to
-    // whatever's already playing, covering GO ABOVE/GO BELOW (this runs
-    // after every action's own tail).
+    // The luffing check + its audio: idempotent (see syncLuffingAudio), so this is also what rebuilds the right luffing loop after a reload, a sleep, SOUND ON or audio
+    // that was still locked -- and what moves it for any path that changed nav.heading or the sails without going through simTick or beginCourseTurn.
     updateNoGoZoneAudio(state);
     syncSailsAudioVolumes(state);
   }
@@ -17974,6 +17948,7 @@
         transitionCreakAudioThroughCompanionway(GAME, targetLocation); // AMBIENT-AUDIO ENHANCEMENT PASS -- same moment as sea's own location crossfade, see its own section notes
         transitionWindAudioThroughCompanionway(GAME, targetLocation);
         transitionRainAudioThroughCompanionway(GAME, targetLocation);
+        transitionLuffingAudioThroughCompanionway(GAME, targetLocation); // SAILS LUFFING -- ext <-> int at this SAME moment, over this SAME duration, never a stop / restart
         transitionEngineLocationAudio(GAME, targetLocation); // ENGINE AUDIO REBUILD -- cruise <-> interior over this SAME COMPANIONWAY_CROSSFADE_SECONDS, fired at this SAME moment, so the whole soundscape changes perspective together; a no-op if the engine isn't running
       }
     }
@@ -18050,19 +18025,20 @@
     lowerLong: 'audio/sails/lower_sail_long.mp3',
     lowerShort: 'audio/sails/lower_sail_short.mp3',
     fill: 'audio/sails/sail_fill.mp3',
-    luffing: 'audio/sails/sails_luffing_loop.mp3',
+    luffingExt: 'audio/sails/luffing_ext.mp3',
+    luffingInt: 'audio/sails/luffing_int.mp3',
     winch: 'audio/sails/winch_short.mp3',
   };
   var SAILS_AUDIO_VOLUME = {
     raiseLong: 0.6, raiseShort: 0.6, lowerLong: 0.6, lowerShort: 0.6,
-    fill: 0.55, luffing: 0.4, winch: 0.55,
+    fill: 0.55, luffingExt: 0.4, luffingInt: 0.4, winch: 0.55,
   };
   // Only the sail-HANDLING sounds (the boat actually crossing the wind,
   // or the sheets being trimmed in once it arrives) are above-deck-only
   // -- raising/lowering canvas is mechanical, ship-wide noise (halyard
   // work) audible below deck too, same as it always was; unaffected by
   // this.
-  var SAILS_LOCATION_GATED_KEYS = { luffing: true, fill: true, winch: true };
+  var SAILS_LOCATION_GATED_KEYS = { fill: true, winch: true };
   var SAILS_CROSSFADE_SECONDS = 0.1; // quick fade-in every one-shot uses at its own start (click prevention only), same as fishing
 
   var sailsAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded) -- same pattern as fishingAudioEls
@@ -18147,34 +18123,41 @@
     return el;
   }
 
-  // The luffing loop -- built on makeCrossfadeLoopController (see its
-  // own notes, near AUDIO_DEBUG) rather than getSailsAudioEl's native
-  // loop=true, so each repetition crossfades seamlessly into the next
-  // rather than waiting for the file to end and restarting cold.
+  // THE LUFFING-AUDIO CONTROLLER. Luffing is an environmental condition, not an action: while the sails are luffing there is one continuous loop, and it is heard from
+  // wherever the player is -- audio/sails/luffing_ext.mp3 above deck, luffing_int.mp3 below: the SAME physical sound from two places aboard, so moving between them
+  // CROSSFADES one into the other rather than stopping one luffing and starting another. Built on makeCrossfadeLoopController (each repetition crossfades seamlessly into
+  // the next) and on the master audio path every element made by createGameAudio already uses, so SOUND OFF / ON, the browser unlock and the master gain all apply.
   var luffingAudio = makeCrossfadeLoopController('SAILS LUFFING');
+  var LUFFING_PERSPECTIVE_FADE_SECONDS = COMPANIONWAY_CROSSFADE_SECONDS; // ext <-> int takes exactly as long as the sea / wind / rain / engine perspective crossfades
+  var luffingPerspective = null; // 'ext' | 'int' -- where the player is hearing the sails from (see syncLuffingAudio)
+  var luffingAudioKey = null;    // 'ext' | 'int' | null -- which loop this controller last started; runtime only, never saved, always rebuilt from the game state
+  function luffingPerspectiveFor(location) { return location === 'below' ? 'int' : 'ext'; }
 
-  // isCurrentlyLuffing (checked by the sole caller, updateNoGoZoneAudio)
-  // is the authoritative "should this be playing" signal; this always
-  // restarts fresh from the beginning rather than trying to detect
-  // "is it already running" -- crossfadeToLoop's own generation
-  // tracking makes that unconditional restart safe even if called
-  // again during an in-flight fade, and preserves the exact behavior
-  // this replaces: cancelling any in-flight fade and restarting
-  // cleanly every time is deliberate, not redundant -- it's what fixes
-  // luffing failing to restart if the boat re-enters the no-go zone
-  // shortly after leaving it (e.g. a quick direction reversal). Starts
-  // (silently, if below deck) regardless of audibility -- the loop
-  // tracks the boat's actual luffing condition, not whether anyone can
-  // hear it.
-  function startSailsLuffingLoop(state) {
-    if (!audioUnlocked) return;
-    luffingAudio.crossfadeToLoop(SAILS_AUDIO_FILES.luffing, function () { return sailsAudibleVolume(GAME || state, 'luffing'); }); // re-read at every crossfade (incl. each loop seam) so mute and above/below-deck gating always apply to the CURRENT state, never the state at the moment the loop first began
+  // IDEMPOTENT: compares what SHOULD be heard (ext, int, or nothing -- from isInNoGoZone, the game's one definition of luffing, and where the player is) with what is
+  // playing, and corrects only the difference. Still luffing and already on the right loop -> nothing happens (the loop is never restarted); begins luffing -> fade in;
+  // stops luffing (course, sail change, wind, furling) -> fade out; luffing and the player changes place -> crossfade to the other perspective. Because it re-derives
+  // everything from state every call, a reload, a return from sleep, SOUND ON, a backgrounded tab or audio that was locked when luffing began all simply converge.
+  // The player's place is crew.location -- except through a companionway transition, when it moves at the transition's own crossfade moment (before crew.location has
+  // settled) and must not be pulled back by an ordinary reconcile in between (same reason the engine tracks its own perspective).
+  function syncLuffingAudio(state, fadeSeconds) {
+    if (!companionwayTransitionActive || luffingPerspective == null) luffingPerspective = luffingPerspectiveFor(state.crew.location);
+    var perspective = luffingPerspective;
+    if (!isInNoGoZone(state, state.nav.heading)) { // not luffing (including: no sail up at all)
+      if (luffingAudioKey !== null || luffingAudio.isActive()) luffingAudio.stop(LOOP_CROSSFADE_SECONDS);
+      luffingAudioKey = null;
+      return;
+    }
+    if (luffingAudioKey === perspective && luffingAudio.isActive()) { luffingAudio.resumeIfSuspended(); return; } // already the right loop: leave it be (resumes it in place only if the browser paused it)
+    var crossing = luffingAudioKey !== null && luffingAudio.isActive();
+    var which = perspective === 'int' ? 'luffingInt' : 'luffingExt';
+    luffingAudio.crossfadeToLoop(SAILS_AUDIO_FILES[which], SAILS_AUDIO_VOLUME[which], crossing ? (fadeSeconds || LUFFING_PERSPECTIVE_FADE_SECONDS) : undefined);
+    luffingAudioKey = luffingAudio.isActive() ? perspective : null; // audio still locked: nothing started, so nothing is recorded and the next reconcile simply tries again
   }
 
-  // Fades out over the same LOOP_CROSSFADE_SECONDS window, then stops.
-  // A no-op if nothing is currently active.
-  function stopSailsLuffingLoop() {
-    luffingAudio.stop(LOOP_CROSSFADE_SECONDS);
+  // The companionway's own crossfade moment (see startCompanionwayForTransition): the same instant, and the same duration, as the sea / creak / wind / rain / engine layers.
+  function transitionLuffingAudioThroughCompanionway(state, targetLocation) {
+    luffingPerspective = luffingPerspectiveFor(targetLocation);
+    syncLuffingAudio(state, COMPANIONWAY_CROSSFADE_SECONDS);
   }
 
   // Applies the current above/below-deck audibility to whichever sails
@@ -18182,8 +18165,7 @@
   // updateAudioForState (location possibly changing, e.g. GO ABOVE/GO
   // BELOW). Mute is not its business: the master handles that. Never
   // starts, stops, or restarts anything -- purely a volume sync for
-  // whatever's already playing. Covers the luffing
-  // loop separately since it no longer lives in sailsAudioEls.
+  // whatever's already playing.
   function syncSailsAudioVolumes(state) {
     var s = state || GAME;
     Object.keys(sailsAudioEls).forEach(function (key) {
@@ -18192,9 +18174,6 @@
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       el.volume = s ? sailsAudibleVolume(s, key) : ((el._baseVolume || 0));
     });
-    if (luffingAudio.isActive()) {
-      luffingAudio.applyVolumeInstantly(s ? sailsAudibleVolume(s, 'luffing') : (SAILS_AUDIO_VOLUME.luffing));
-    }
   }
 
   // Same overall shape and tail as runShortAction (dots indicator,
