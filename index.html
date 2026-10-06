@@ -6857,6 +6857,7 @@
   //     that context, which would permanently silence every element already tied to it.)
   // Every <audio> element in the game is created through createGameAudio, which applies the master state as it is made.
   // The play() guard below catches anything that ever skips it, so no sound can be audible outside the master.
+  var playRejectionLoggedAt = {}; // file name -> when its last rejected play() was logged
   var gameAudioKnown = new WeakSet();
   var gameAudioRefs = []; // weak, so one-shot elements the game has dropped can still be garbage collected
   function registerGameAudio(el) {
@@ -6873,7 +6874,18 @@
     var nativePlay = HTMLMediaElement.prototype.play;
     HTMLMediaElement.prototype.play = function () {
       registerGameAudio(this); // a no-op for everything created by createGameAudio
-      return nativePlay.apply(this, arguments);
+      var el = this, promise = nativePlay.apply(this, arguments);
+      // Never fail silently: every rejected play() is logged (callers still get the original promise and their own handlers).
+      if (promise && typeof promise.catch === 'function') {
+        promise.catch(function (error) {
+          if (error && error.name === 'AbortError') return; // the app's own pause()/src change interrupting a play (e.g. the engine-start sound handing off) -- expected, not a failure
+          var file = (el.getAttribute('src') || '').split('/').pop(), now = Date.now(); // one line per file per 10 s: a browser that keeps refusing must not flood the console
+          if (playRejectionLoggedAt[file] && now - playRejectionLoggedAt[file] < 10000) return;
+          playRejectionLoggedAt[file] = now;
+          console.warn('[AUDIO] play() rejected:', file, error && error.name, error && error.message);
+        });
+      }
+      return promise;
     };
   })();
   function setMasterMuted(isMuted) {
@@ -6916,6 +6928,9 @@
   var audioRecoveryInProgress = false;
   var audioRecoveryNeedsGesture = false; // section 12 -- set when automatic recovery can't complete due to autoplay/media policy; cleared once a gesture-triggered attempt actually succeeds
   var lastHardRebuildAtMs = 0;
+  var ambiencePlayBlocked = false;           // an ambience play() was refused for lack of a user gesture (NotAllowedError) -- the next gesture retries; cleared the moment any loop is confirmed playing
+  var AMBIENCE_PENDING_TIMEOUT_MS = 5000;    // a play attempt unconfirmed this long counts as failed, so a play() that never settles can never block every later retry
+  var lastAmbienceSnapshotAt = 0;
   var AUDIO_RECOVERY_COOLDOWN_MS = 4000;   // section 14 -- minimum real-world gap between two hard rebuilds, so a still-broken environment logs and waits rather than rebuilding in a tight loop
   var AUDIO_HEALTH_CHECK_WAIT_MS = 850;    // section 3 -- within the suggested 750-1000ms window
   var AUDIO_WATCHDOG_INTERVAL_MS = 7000;   // section 13 -- within the suggested 5-10s window
@@ -6936,6 +6951,53 @@
     if (!AUDIO_DEBUG) return;
     console.log('[AUDIO] ' + msg);
   }
+  // The seven persistent environmental loops, for the diagnostics and the reconciler below.
+  function ambienceChannelPairs() {
+    return [['sea exterior', seaChannels.exterior], ['sea interior', seaChannels.interior], ['creak interior', creakChannels.interior],
+            ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
+            ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]];
+  }
+
+  // One-shot diagnostics for when environmental audio goes missing: the context, the master, what each loop is supposed to
+  // be, and what each of its two slots is actually doing. Rate-limited so a persistent fault cannot flood the console, and
+  // only ever called when something is already wrong (or by hand: window.landfallAudioSnapshot()).
+  function ambienceSnapshot(reason, force) {
+    var now = Date.now();
+    if (!force && now - lastAmbienceSnapshotAt < 4000) return;
+    lastAmbienceSnapshotAt = now;
+    var rows = {};
+    ambienceChannelPairs().forEach(function (pair) {
+      var ch = pair[1];
+      rows[pair[0]] = {
+        wanted: ch.desiredPath, confirmed: ch.currentPath, attempting: ch.loadingPath, activeSlot: ch.activeIndex,
+        slots: ch.slots.map(function (sl) {
+          return !sl ? null : { paused: sl.el.paused, ended: sl.el.ended, t: +sl.el.currentTime.toFixed(2), duration: isFinite(sl.el.duration) ? +sl.el.duration.toFixed(1) : null, gain: sl.gainTarget, file: (sl.el.src || '').split('/').pop() };
+        }),
+      };
+    });
+    console.warn('[AUDIO SNAPSHOT] ' + reason, {
+      audioContext: audioCtx ? audioCtx.state : 'none', soundMuted: muted, masterGain: masterGain ? masterGain.gain.value : null, playBlockedAwaitingGesture: ambiencePlayBlocked,
+      location: GAME ? GAME.crew.location : null,
+      weather: GAME ? { condition: GAME.weather.condition, rain: GAME.weather.rainLevel, windKt: GAME.weather.windSpeed, seaState: GAME.weather.seaState } : null,
+      engine: { on: !!(GAME && GAME.boat.engineOn), phase: engineAudioPhase, key: engineActiveKey },
+      channels: rows,
+    });
+  }
+  window.landfallAudioSnapshot = function () { ambienceSnapshot('manual', true); };
+
+  // A loop whose element reaches its natural end while it is STILL the channel's active, wanted loop has been outrun by its
+  // own self-loop timer -- timers run late on a throttled background tab or a busy page, and that timer is armed to fire only
+  // LOOP_CROSSFADE_SECONDS before the end. Repeat it from the media's own 'ended' event instead of waiting for the timer (the
+  // late timer, when it does arrive, finds its generation superseded and does nothing). An outgoing slot finishing its
+  // fade-out, or a channel nobody wants any more, is not ours to restart. `perform` is the channel's own crossfade function.
+  function repeatEndedAmbienceLoop(channel, slot, perform) {
+    var active = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
+    var path = channel.desiredPath;
+    if (active !== slot || path == null || !slot.el.src || slot.el.src.indexOf(path) === -1) return;
+    ambienceSnapshot('loop ran off its end before its self-loop timer fired: ' + path);
+    perform(channel, path, '(loop ended)', '(loop ended)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
+  }
+
   function audioDebugError(soundId, err) {
     if (!AUDIO_DEBUG) return;
     console.log('[AUDIO ERROR] ' + soundId + ': ' + describeError(err));
@@ -7530,8 +7592,27 @@
     syncSailsAudioVolumes(state);
   }
 
+  // THE ENVIRONMENTAL AUDIO RECONCILER. Compares what the game says should be heard (location, weather, rain, SOUND state, the
+  // boat's state) with what is actually playing and corrects only the difference. IDEMPOTENT: every layer it drives (sea,
+  // creak, wind, rain, luffing -- see updateAudioForState) first checks that its loop is genuinely, verifiably playing at the
+  // right gain and then does nothing, so calling it repeatedly never restarts a loop, duplicates one, or resets a position.
+  // The loops are persistent; this only restores one that has died. If the AudioContext is not running it is resumed -- the
+  // SAME context, never a new one (see recoverLandfallAudio). Called on a steady interval by the live loop and after the events
+  // that can disturb the mix: unlock, SOUND ON, returning from a tape, the page becoming visible again, window focus.
+  function reconcileEnvironmentalAudio() {
+    if (!GAME) return;
+    updateAudioForState(GAME);
+    if (GAME.boat.engineOn || engineAudioPhase !== 'idle') resumeEngineAudioIfSuspended(); // also mid-start/mid-stop, when the gameplay flag is on the other side of the transition
+  }
+  function syncEnvironmentalAudio(reason) {
+    if (!audioUnlocked || !audioCtx || !GAME) return;
+    if (audioCtx.state !== 'running') { recoverLandfallAudio(reason); return; } // resumes this same context, then reconciles
+    reconcileEnvironmentalAudio();
+  }
+
   function toggleMute() {
     setMasterMuted(!muted); // the master only -- nothing else in the game reads or applies the mute state
+    if (!muted) syncEnvironmentalAudio('sound on'); // SOUND ON: confirm the right loops are there to be heard -- idempotent, nothing is restarted
   }
 
   function updateSoundLabel() {
@@ -7750,6 +7831,9 @@
         // the Promise path may already have committed (or may yet).
         commitSeaChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
       });
+      el.addEventListener('ended', function () {
+        repeatEndedAmbienceLoop(channel, slot, performSeaChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
+      });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
@@ -7801,6 +7885,7 @@
     if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (sea commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
     channel.currentPath = path;
     channel.loadingPath = null;
+    ambiencePlayBlocked = false; // a loop is genuinely playing again
     audioDebugLog('started: ' + path + ' (sea)');
     if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
     slot.selfLoopScheduledForGeneration = myGeneration;
@@ -7923,6 +8008,7 @@
     }
 
     channel.loadingPath = desiredPath;
+    channel.loadingSince = Date.now();
     audioDebugLog('play: ' + desiredPath + ' (sea, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
 
     try {
@@ -7962,6 +8048,7 @@
           commitSeaChannelPlayback(channel, incoming, desiredPath, myGeneration);
         }, function (error) {
           console.error('SEA AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
           // currentPath was never set for this attempt -- nothing to
           // undo. Only clear loadingPath if this is still the most
           // recent attempt (a newer one may already be in flight).
@@ -8029,7 +8116,7 @@
       }
     }
 
-    if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
+    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
 
     performSeaChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
   }
@@ -8158,6 +8245,9 @@
       el.addEventListener('playing', function () {
         commitCreakChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
       });
+      el.addEventListener('ended', function () {
+        repeatEndedAmbienceLoop(channel, slot, performCreakChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
+      });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
@@ -8184,6 +8274,7 @@
     if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (creak commit, ' + channel.name + '): ' + path); return; }
     channel.currentPath = path;
     channel.loadingPath = null;
+    ambiencePlayBlocked = false; // a loop is genuinely playing again
     audioDebugLog('started: ' + path + ' (creak)');
     if (slot.selfLoopScheduledForGeneration === myGeneration) return;
     slot.selfLoopScheduledForGeneration = myGeneration;
@@ -8242,6 +8333,7 @@
     }
 
     channel.loadingPath = desiredPath;
+    channel.loadingSince = Date.now();
     audioDebugLog('play: ' + desiredPath + ' (creak, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
 
     try {
@@ -8276,6 +8368,7 @@
           commitCreakChannelPlayback(channel, incoming, desiredPath, myGeneration);
         }, function (error) {
           console.error('CREAK AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
           if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
         });
       }
@@ -8307,7 +8400,7 @@
       }
     }
 
-    if (desiredPath != null && channel.loadingPath === desiredPath) return;
+    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return;
 
     performCreakChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
   }
@@ -8523,6 +8616,9 @@
         // the Promise path may already have committed (or may yet).
         commitWindChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
       });
+      el.addEventListener('ended', function () {
+        repeatEndedAmbienceLoop(channel, slot, performWindChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
+      });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
@@ -8574,6 +8670,7 @@
     if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (wind commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
     channel.currentPath = path;
     channel.loadingPath = null;
+    ambiencePlayBlocked = false; // a loop is genuinely playing again
     audioDebugLog('started: ' + path + ' (wind)');
     if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
     slot.selfLoopScheduledForGeneration = myGeneration;
@@ -8680,6 +8777,7 @@
     }
 
     channel.loadingPath = desiredPath;
+    channel.loadingSince = Date.now();
     audioDebugLog('play: ' + desiredPath + ' (wind, ' + locationForLog + ', wind ' + windSpeedForLog + ')');
 
     try {
@@ -8719,6 +8817,7 @@
           commitWindChannelPlayback(channel, incoming, desiredPath, myGeneration);
         }, function (error) {
           console.error('WIND AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
           // currentPath was never set for this attempt -- nothing to
           // undo. Only clear loadingPath if this is still the most
           // recent attempt (a newer one may already be in flight).
@@ -8786,7 +8885,7 @@
       }
     }
 
-    if (desiredPath != null && channel.loadingPath === desiredPath) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
+    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
 
     performWindChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds);
   }
@@ -8967,6 +9066,9 @@
         // even though the Promise path may already have committed.
         commitRainChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
       });
+      el.addEventListener('ended', function () {
+        repeatEndedAmbienceLoop(channel, slot, performRainChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
+      });
       var source = audioCtx.createMediaElementSource(el);
       var gain = audioCtx.createGain();
       gain.gain.value = 0;
@@ -8997,6 +9099,7 @@
     if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (rain commit, ' + channel.name + '): ' + path); return; }
     channel.currentPath = path;
     channel.loadingPath = null;
+    ambiencePlayBlocked = false; // a loop is genuinely playing again
     audioDebugLog('started: ' + path + ' (rain)');
     if (slot.selfLoopScheduledForGeneration === myGeneration) return;
     slot.selfLoopScheduledForGeneration = myGeneration;
@@ -9063,6 +9166,7 @@
     }
 
     channel.loadingPath = desiredPath;
+    channel.loadingSince = Date.now();
     audioDebugLog('play: ' + desiredPath + ' (rain, ' + locationForLog + ', level ' + rainLevelForLog + ')');
 
     try {
@@ -9099,6 +9203,7 @@
           commitRainChannelPlayback(channel, incoming, desiredPath, myGeneration);
         }, function (error) {
           console.error('RAIN AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
+          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
           if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
         });
       }
@@ -9145,7 +9250,7 @@
       }
     }
 
-    if (desiredPath != null && channel.loadingPath === desiredPath) return;
+    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return;
 
     performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds);
   }
@@ -9952,6 +10057,7 @@
       beginTapeStopSequence();
     } else if (tapePhase === 'stopping') {
       tapePhase = null;
+      syncEnvironmentalAudio('tape ended'); // back to the plain mix -- idempotent
       refreshTapePlayerIfOpen(); // natural end -- return to the full TAPE SELECTION MENU on its own, without waiting for the player to click anything
     }
   }
@@ -10169,7 +10275,8 @@
      ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
      ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
       var label = pair[0], channel = pair[1];
-      if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex]) {
+      var attemptPending = channel.loadingPath != null && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS;
+      if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex] && !attemptPending) {
         expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'environment' });
       }
     });
@@ -10211,6 +10318,7 @@
       if (slot.pauseTimer) { clearTimeout(slot.pauseTimer); slot.pauseTimer = null; }
       if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
       try { if (slot.gain) slot.gain.gain.cancelScheduledValues(0); } catch (e) { /* the old AudioContext may already be unusable -- nothing more to do */ }
+      try { if (slot.gain) slot.gain.disconnect(); } catch (e) {} // off the master bus, so a reset on the same context leaves nothing dangling
       try { slot.el.pause(); } catch (e) {}
       try { slot.el.src = ''; } catch (e) {}
     });
@@ -10312,7 +10420,7 @@
     var oldGeneration = audioRuntimeGeneration;
     audioRuntimeGeneration++;
     var newGeneration = audioRuntimeGeneration;
-    console.warn('HARD AUDIO REBUILD START (trigger: ' + triggerSource + ', generation ' + oldGeneration + ' -> ' + newGeneration + ')');
+    console.warn('AUDIO CHANNEL RESET START (trigger: ' + triggerSource + ', generation ' + oldGeneration + ' -> ' + newGeneration + ') -- the AudioContext is kept unless it is closed');
 
     if (seaChannels.exterior) disposeAmbienceChannel(seaChannels.exterior);
     if (seaChannels.interior) disposeAmbienceChannel(seaChannels.interior);
@@ -10324,13 +10432,32 @@
     disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
 
     var oldCtx = audioCtx;
-    audioCtx = null;
-    masterGain = null;
+    // The SAME AudioContext (and its master gain, with the SOUND state on it) is kept whenever it is still usable: only the
+    // ambience channels -- their elements and gain nodes -- are rebuilt. A new context is created only if the old one is closed.
+    var keepContext = !!oldCtx && oldCtx.state !== 'closed';
+    if (!keepContext) {
+      audioCtx = null;
+      masterGain = null;
+    }
     seaChannels = { exterior: makeSeaChannel('exterior', seaChannels.exterior.targetGain), interior: makeSeaChannel('interior', seaChannels.interior.targetGain) };
     creakChannels = { interior: makeCreakChannel('interior', creakChannels.interior.targetGain) }; // AMBIENT-AUDIO ENHANCEMENT PASS -- reuses its own existing targetGain, never a new hardcoded value, same as every other layer here
     windChannels = { exterior: makeWindChannel('exterior', windChannels.exterior.targetGain), interior: makeWindChannel('interior', windChannels.interior.targetGain) };
     rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
 
+    if (keepContext) {
+      try {
+        if (oldCtx.state !== 'running') await oldCtx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', describeError(e));
+        audioRecoveryNeedsGesture = true;
+      }
+      if (newGeneration !== audioRuntimeGeneration) return;
+      if (GAME) updateAudioForState(GAME);
+      catchUpEngineAudioIfRunning(GAME);
+      audioDebugLog('AUDIO CHANNEL RESET complete -- same AudioContext kept (state ' + oldCtx.state + ')');
+      await recoverCassetteHard();
+      return;
+    }
     if (oldCtx) {
       try {
         await oldCtx.close();
@@ -10410,10 +10537,7 @@
 
       // SOFT REASSERT -- in place, idempotent, never restarts anything
       // already healthy; see each function's own guards.
-      if (GAME) {
-        updateAudioForState(GAME);
-        if (GAME.boat.engineOn || engineAudioPhase !== 'idle') resumeEngineAudioIfSuspended(); // (also mid-start/mid-stop, when the gameplay flag is on the "wrong" side of the transition -- see the ENGINE AUDIO section notes)
-      }
+      reconcileEnvironmentalAudio(); // in place and idempotent -- see its notes
       resumeTapeAudioIfSuspended();
 
       var stalled = await findStalledPersistentAudio();
@@ -10422,7 +10546,12 @@
       var stalledEnvironment = stalled.filter(function (e) { return e.group === 'environment'; });
       audioDebugLog('SOFT RECOVERY RESULT: ' + stalled.length + ' stalled (' + stalled.map(function (e) { return e.label; }).join(', ') + ')');
 
-      if (stalledEnvironment.length > 0) {
+      if (stalledEnvironment.length > 0 && ambiencePlayBlocked) {
+        // The browser is refusing playback until the player next interacts -- rebuilding anything now could not help, and
+        // repeated rebuilds would only churn. The next gesture (see handleAction) retries.
+        audioDebugLog('stalled environment audio is waiting for a user gesture -- no rebuild');
+        ambienceSnapshot('environment audio stalled, waiting for a user gesture');
+      } else if (stalledEnvironment.length > 0) {
         // The AudioContext graph itself is wedged and resume() alone
         // did not bring it back -- section 4's "do not continue
         // trusting it forever". Escalate.
@@ -10470,10 +10599,15 @@
     if (audioRecoveryInProgress) return;
     var suspicious = audioCtx.state !== 'running';
     if (!suspicious) {
-      suspicious = collectExpectedPlayingAudio().some(function (entry) { return entry.el.paused && !entry.el.ended; });
+      suspicious = collectExpectedPlayingAudio().some(function (entry) {
+        // An environmental loop that has ENDED is as dead as a paused one (it repeats by timer, and a late timer lets it run off
+        // its end); only the cassette/engine legitimately sit ended between sounds.
+        return entry.group === 'environment' ? (entry.el.paused || entry.el.ended) : (entry.el.paused && !entry.el.ended);
+      });
     }
     if (suspicious) {
       audioDebugLog('WATCHDOG: suspicious state detected, invoking recovery');
+      ambienceSnapshot('watchdog: an expected environmental loop is not playing');
       recoverLandfallAudio('watchdog');
     }
   }
@@ -18548,7 +18682,7 @@
     // never clears it unconditionally, so a genuinely still-broken
     // environment keeps retrying on each subsequent action rather than
     // silently giving up after one failed attempt.
-    if (audioRecoveryNeedsGesture) {
+    if (audioRecoveryNeedsGesture || ambiencePlayBlocked) {
       recoverLandfallAudio('user-gesture');
     }
 
@@ -19071,8 +19205,8 @@
         flushNewLogEntries(GAME);
         navAnnounceGroundingIfNeeded(GAME, true); // RUN AGROUND (its dots own the options panel while they run)
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
-        updateAudioForState(GAME);
       }
+      syncEnvironmentalAudio('live loop'); // every interval, not just on a simulation tick (about one a minute)
       finaleKick(GAME); // the final arrival: starts / resumes its current step (idempotent)
       saveGameState(GAME);
     }, LIVE_TICK_SECONDS * 1000);
