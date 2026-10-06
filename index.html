@@ -1271,11 +1271,6 @@
         completedDays: [],
       },
       flags: {
-        aftLockerTriggerAt: rand(8 * 60, 16 * 60), // guaranteed once, sometime hour 8-16
-        aftLockerTriggered: false,
-        aftLockerResolved: false,
-        aftLockerEscalated: false,
-        aftLockerDeferredAt: null,
         fatigueNarrated: false,
         thirstNarrated: false,
         hungerNarrated: false,
@@ -5776,7 +5771,6 @@
     updateCrew(state);
     checkFuel(state);
     updateBattery(state);
-    checkAftLocker(state);
     checkScheduledFailures(state);
     checkStormRisk(state);
     checkNeglectRescue(state);
@@ -6117,36 +6111,6 @@
     }
   }
 
-  function checkAftLocker(state) {
-    var f = state.flags;
-    if (!f.aftLockerTriggered && state.meta.voyageMinutes >= f.aftLockerTriggerAt) {
-      if (state.crew.watchState === 'sleeping') return; // nothing wakes him automatically -- it simply happens once he's up, since the trigger is a threshold that stays crossed
-      f.aftLockerTriggered = true;
-      log(state, "Something in the aft locker has come loose. A dull, irregular thud with every roll.");
-      state.pendingChoice = {
-        id: 'aft-locker',
-        options: [
-          { label: 'INSPECT NOW', action: 'resolve-aft-locker-now' },
-          { label: 'SECURE IT LATER', action: 'defer-aft-locker' },
-        ],
-      };
-      return;
-    }
-    if (f.aftLockerTriggered && !f.aftLockerResolved && f.aftLockerDeferredAt !== null && !f.aftLockerEscalated) {
-      var hoursSinceDeferred = (state.meta.voyageMinutes - f.aftLockerDeferredAt) / 60;
-      if (hoursSinceDeferred > 5) {
-        f.aftLockerEscalated = true;
-        state.crew.morale = clamp(state.crew.morale - 4, 0, 100);
-        if (state.boat.steering === 'GOOD') {
-          state.boat.steering = 'DAMAGED';
-          log(state, "The thud from aft has worked something loose against the rudder. Should have looked sooner.");
-        } else {
-          log(state, "The thud from aft has worked something loose. Should have looked sooner.");
-        }
-      }
-    }
-  }
-
   /* --------------------------------------------------------------
      BOAT SYSTEM FAILURES
 
@@ -6474,7 +6438,7 @@
     if (c.lastDrankAt > now) c.lastDrankAt = now; // a timestamp from the future can only be corruption
     if (c.lastAteAt > now) c.lastAteAt = now;
     var id = state.pendingChoice && state.pendingChoice.id;
-    if (id === 'rescue-status-menu' || id === 'radio-rescue-confirm' || id === 'rescue-ending') state.pendingChoice = null; // menus of the retired system
+    if (id === 'rescue-status-menu' || id === 'radio-rescue-confirm' || id === 'rescue-ending' || id === 'aft-locker') state.pendingChoice = null; // menus of retired systems (the aft-locker prompt was removed)
   }
 
   function weatherChangeLine(condition) {
@@ -6699,7 +6663,6 @@
     if (state.pendingChoice) return false;                    // mid-decision, not the moment for a stray thought
     if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
     if (state.weather.seaState >= 5) return false;
-    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) return false; // an active problem aboard
     if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) return false;  // severe hunger/thirst — physical concerns dominate
     if (thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY) return false;
     return true;
@@ -6772,26 +6735,6 @@
     return lines[wp.name] || (wp.name + ' behind you now.');
   }
 
-  function resolveAftLocker(state) {
-    var c = state.crew;
-    var penalty = 0;
-    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) penalty += 0.12;
-    if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) penalty += 0.15;
-    if (coffeeActive(state)) penalty -= 0.05;
-    if (c.morale < 40) penalty += 0.06; // rattled, more likely to fumble it
-    var successChance = clamp(0.92 - c.fatigue / 150 - penalty, 0.2, 0.92);
-    var success = Math.random() < successChance;
-    state.flags.aftLockerResolved = true;
-    c.fatigue = clamp(c.fatigue + 4, 0, 100);
-    if (success) {
-      log(state, "Found it: a jerry can, worked loose from its strap. Lashed down tight. Quiet again.");
-    } else {
-      log(state, "Fumbled it in the dark \u2014 a bruised knuckle, and it's still not quite secure.");
-    }
-    flushNewLogEntries(state);
-    cmdRepair(state);
-  }
-
   /* --------------------------------------------------------------
      SLEEP -- real time, player-controlled
 
@@ -6817,9 +6760,9 @@
      -------------------------------------------------------------- */
   function sleepSettleNarrative() {
     var options = [
-      "You go below and settle into the bunk. The autopilot holds her course.",
-      "You lie down, still half dressed, and let the boat rock you under.",
-      "Eyes closed. The hull talks quietly; you stop listening.",
+      "I lie down and listen to the water against the hull.",
+      "I lie down and let the boat rock me.",
+      "Eyes closed. The hull talks quietly; I stop listening.",
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -11620,7 +11563,6 @@
       } else {
         printLine('Autopilot engaged.', 'dim');
       }
-      printLine('HEADING HELD STEADY.', 'dim'); // temporary feedback only -- the lasting state is the AUTOPILOT row and its lamp
     } else {
       printBlank();
       printLine('Autopilot disengaged.', 'dim');
@@ -12749,7 +12691,7 @@
       { dataRow: true, label: 'ENGINE', value: b.engine, widthCls: 'data-row-md' },
       { dataRow: true, label: 'ELECTRICAL', value: b.electrical, widthCls: 'data-row-md' },
     ]);
-    if (hasRepairableDamage(state) || (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved)) {
+    if (hasRepairableDamage(state)) {
       rows.push({ label: 'REPAIR', action: 'cmd:repair' });
     }
     return rows;
@@ -14398,7 +14340,7 @@
         s.crew.hygieneHours = 0; // FRESH again -- see hoursSinceWash
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'A wash-up with fresh water. Small thing, helps anyway.');
+        log(s, 'A wash. Feeling like myself again.');
         flushNewLogEntries(s);
         cmdHead(s);
       },
@@ -14770,7 +14712,7 @@
   // the existing runAudioSyncedAction machinery -- exactly the same
   // "audio is authoritative, no hard-coded duration" pattern used for a
   // repair or the companionway transition. Nothing about the reading
-  // session itself (readingBookId, readingLastSyncedAt, the "You open
+  // session itself (readingBookId, readingLastSyncedAt, the "Reading
   // [title]." log line, clutter, or the STOP READING screen) starts
   // until that audio has genuinely finished -- until then, no other
   // action is available (uiBusy) and no progress accumulates, since
@@ -14786,13 +14728,13 @@
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
     runAudioSyncedAction(state, {
       label: 'SETTLING IN',
-      transientLabel: true, // gone once the real "You open [title]." log line takes over, same as GOING ABOVE/REPAIRING X
+      transientLabel: true, // gone once the real "Reading [title]." log line takes over, same as GOING ABOVE/REPAIRING X
       playAudio: function (onEnded) { return playSaloonOneShot('bookOpen', onEnded); },
       action: function (s) {
         s.crew.readingBookId = bookId;
         s.crew.readingLastSyncedAt = currentGameMinutes(s); // starts the continuous clock fresh — nothing before this moment counts toward this session
         bumpClutter(s, 1); // the book itself, left out
-        log(s, 'You open ' + bookDef.title + '.');
+        log(s, 'Reading ' + bookDef.title + '.');
         flushNewLogEntries(s);
         s.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
       },
@@ -14826,7 +14768,7 @@
       transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
       action: function (s) {
-        log(s, 'You close the book.');
+        log(s, 'A little while lost in a story.');
         flushNewLogEntries(s);
         cmdBookshelf(s);
       },
@@ -15021,8 +14963,7 @@
       }
     }
 
-    // Something else already took over the screen (an aft-locker prompt
-    // and the like) -- reading quietly stops rather than fighting for
+    // Something else already took over the screen (a random-event prompt) -- reading quietly stops rather than fighting for
     // the UI; the interrupting event's own message already explains
     // what happened. No explicit stopActivityDots() needed here --
     // pendingChoice is already something other than 'reading' by this
@@ -15126,11 +15067,18 @@
     state.pendingChoice = { id: 'snacks-menu', options: buildSnacksOptions(state) };
   }
 
+  // The result line after eating. Every proper meal (the cooked meals and a held, cooked fish) gets the meal line; each snack
+  // has its own. (Chocolate has its own function below.)
+  var EAT_RESULT_MEAL = 'A hot meal. Just what I needed.';
+  var EAT_RESULT_SNACK = {
+    'Cup Noodles': 'Nothing fancy. Hits the spot.',
+    'Popcorn': 'Popcorn makes everything a little better.',
+    'Dried Fruit': 'Sweet and chewy. Enough for now.',
+    'Mixed Nuts': 'Not much, but it holds me over.',
+    'Energy Bar': 'Does the job. Tastes like sawdust.',
+  };
   function eatFlavorLine(state, item) {
-    var rough = state.weather.seaState >= 4;
-    var verb = item.cooked ? 'You make' : 'You eat';
-    var where = rough ? 'below, braced against the motion' : (item.cooked ? 'in the galley' : 'in the cockpit');
-    return verb + ' ' + item.name.toLowerCase() + ' ' + where + '.';
+    return item.type === 'snack' ? EAT_RESULT_SNACK[item.name] : EAT_RESULT_MEAL;
   }
 
   // What eating does to hoursSinceMeal. A full MEAL puts the sailor
@@ -15156,21 +15104,9 @@
     if (hoursSince >= 3) return Math.round(fullGain * 0.4);
     return Math.max(1, Math.round(fullGain * 0.15));
   }
-  // Two pools depending on whether the sailor is still hungry (hungerLevel
-  // > 0, i.e. not FULL) when the chocolate goes down — chocolate never
-  // relieves hunger itself (see performEat), so a still-hungry sailor
-  // gets copy that says so honestly rather than reading like a meal.
-  var CHOCOLATE_LINES_FULL = ['You eat some chocolate.', 'A square of chocolate. Small, but it helps.'];
-  var CHOCOLATE_LINES_HUNGRY = [
-    'You\u2019re still hungry, but your spirits lift a little.',
-    'You\u2019re still hungry. The chocolate helps anyway.',
-    'It doesn\u2019t do much for the hunger, but your mood lifts.',
-    'Still hungry, but a little better for it.',
-  ];
+  // Chocolate never relieves hunger itself (see performEat) -- it is a lift in mood, and the one line says so.
   function eatChocolateLine(state) {
-    if (state.food.chocolate === 0) return 'You eat the last of the chocolate, and sit for a while.';
-    var lines = hungerLevel(state.crew.hoursSinceMeal) >= 2 ? CHOCOLATE_LINES_HUNGRY : CHOCOLATE_LINES_FULL;
-    return lines[Math.floor(Math.random() * lines.length)];
+    return 'Not much of a meal, but it lifts my mood.';
   }
 
   // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
@@ -15439,7 +15375,7 @@
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
-        log(s, 'You drink some water.');
+        log(s, 'A long drink of cold water.');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -15510,7 +15446,7 @@
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
-        log(s, 'Tea, warm in your hands. Something steadying about it.');
+        log(s, 'Tea, warm in my hands. I feel more calm already.');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -15715,28 +15651,18 @@
     });
   }
 
-  // What's actually reachable and worth offering: the aft locker (its
-  // own separate, unrelated event) plus whichever of the four tracked
-  // systems are currently DAMAGED — nothing else, and never anything
-  // GOOD, since there's nothing to do there.
+  // What's actually reachable and worth offering: whichever of the four tracked systems are currently DAMAGED -- nothing else,
+  // and never anything GOOD, since there's nothing to do there.
   function buildDamagedSystemsList(state) {
     var b = state.boat;
     var items = [];
-    if (state.flags.aftLockerTriggered && !state.flags.aftLockerResolved) {
-      items.push({ label: 'AFT LOCKER', action: 'repair:aftLocker' });
-    }
     BOAT_FAIL_SYSTEMS.forEach(function (k) {
       if (b[k] === 'DAMAGED') items.push({ label: REPAIR_SYSTEM_LABEL[k], action: 'repair-select:' + k });
     });
     return items;
   }
 
-  // Whether any of the four tracked boat systems is currently DAMAGED
-  // -- used to decide whether STATUS offers REPAIR at all (see
-  // cmdStatus). Deliberately narrower than buildDamagedSystemsList
-  // above: it does not count a pending, still-deferrable aft-locker
-  // event on its own, since that's a one-off notice rather than a
-  // standing system failure -- cmdStatus's own gate accounts for both.
+  // Whether any of the four tracked boat systems is currently DAMAGED -- used to decide whether STATUS offers REPAIR at all (see cmdStatus).
   function hasRepairableDamage(state) {
     return BOAT_FAIL_SYSTEMS.some(function (k) { return state.boat[k] === 'DAMAGED'; });
   }
@@ -17595,12 +17521,12 @@
   // same log line per target config, just no longer tied to a fixed
   // duration.
   var SAIL_CHANGE_WORKING_LABEL = {
-    full: 'SETTING FULL SAIL', reefed: 'PUTTING IN A REEF', minimal: 'REDUCING SAIL', furled: 'FURLING SAILS',
+    full: 'SETTING FULL SAIL', reefed: 'PUTTING IN A REEF', minimal: 'SETTING MINIMAL SAIL', furled: 'FURLING SAILS',
   };
   var SAIL_CHANGE_LOG_LINES = {
-    full: "Full sail set. More speed, more motion.",
-    reefed: "Put a reef in. Quieter below, a little slower.",
-    minimal: "Reduced to minimal canvas. Slow, but she's not fighting the wind anymore.",
+    full: "Full sail set. The wind takes hold.",
+    reefed: "Put a reef in.",
+    minimal: "Set to minimal canvas.",
     furled: "Sails furled. No canvas up at all.",
   };
 
@@ -17967,11 +17893,10 @@
     if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.pendingCatch) return;
     var caught = fishingSession.pendingCatch;
     var speciesId = fishingSession.species.id;
-    var mealName = FISH_MEAL_BY_SPECIES[speciesId] || caught.displayName;
     state.fishing.heldFish = { speciesId: speciesId, caughtDay: voyageDayNumber(state) };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
     bumpHygiene(state, 2); // handling a fish
-    log(state, 'Kept: ' + mealName.toUpperCase() + ' \u2014 1 MEAL (' + caught.displayName + ', ' + caught.weightLb.toFixed(1) + ' lb).');
+    log(state, 'That takes care of dinner.');
     flushNewLogEntries(state);
     // VESSEL LOG -- whole-pound figure here (the task's own "14 LB
     // MAHI" style), distinct from the narrative log line above, which
@@ -18043,8 +17968,7 @@
     }
 
 
-    // REPAIR no longer lives here at all -- it's reachable only from STATUS now, and only while hasRepairableDamage(state) (or a
-    // still-pending aft-locker event) is true; see cmdStatus.
+    // REPAIR no longer lives here at all -- it's reachable only from STATUS now, and only while hasRepairableDamage(state) is true; see cmdStatus.
     var goLabel = state.crew.location === 'below' ? 'GO ABOVE' : 'GO BELOW';
 
     if (state.crew.location === 'below') {
@@ -18391,7 +18315,7 @@
 
      A reusable working-indicator system for physical tasks that
      shouldn't resolve instantly — starting the engine, reefing,
-     checking the aft locker, pouring water. NOT a loading spinner:
+     pouring water. NOT a loading spinner:
      it represents the sailor actually doing something, so it runs
      on real wall-clock seconds (setTimeout/setInterval), same as a
      human would take a moment. This is orthogonal to — and never
@@ -18703,8 +18627,6 @@
       } else {
         showInventoryCategory(state, invCat);
       }
-    } else if (action === 'repair:aftLocker') {
-      runShortAction(state, { label: 'CHECKING AFT LOCKER', duration: 6, action: resolveAftLocker });
     } else if (action.indexOf('repair-select:') === 0) {
       cmdRepairSystem(state, action.slice(14));
     } else if (action.indexOf('attempt-repair:') === 0) {
@@ -18903,9 +18825,6 @@
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
               log(s, 'Engine stopped.');
               flushNewLogEntries(s);
-              printBlank();
-              printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
-              printLine(s.boat.speed.toFixed(1) + ' kt', 'dim');
               cmdEngine(s);
             },
           });
@@ -18929,7 +18848,7 @@
           runShortAction(state, {
             label: 'FREEING SOLACE',
             duration: 20,
-            action: function (s) { navFreeSolace(s); log(s, 'SOLACE IS FREE.'); flushNewLogEntries(s); },
+            action: function (s) { navFreeSolace(s); log(s, 'Solace is free.'); flushNewLogEntries(s); },
           });
           break;
         case 'finale-engine-start':
@@ -19005,8 +18924,6 @@
         // the last CHANGE COURSE settled while at the helm -- see the
         // driftHeading note in the nav state block.
         state.nav.driftHeading = state.nav.heading;
-        printBlank();
-        printLine('You leave the helm.', 'dim');
         // Deliberately no cmdHelm(state) call here (unlike every other
         // Helm action) -- HELM now always means AT THE HELM, so there's
         // no "unattended Helm view" to fall back to any more. Leaving
@@ -19014,14 +18931,6 @@
         // clear it and fall back to the ordinary ABOVE DECK menu via
         // getContextualOptions, exactly like the generic 'cancel'
         // action does elsewhere.
-        break;
-      case 'resolve-aft-locker-now':
-        resolveAftLocker(state);
-        break;
-      case 'defer-aft-locker':
-        state.flags.aftLockerDeferredAt = state.meta.voyageMinutes;
-        printBlank();
-        printLine('It can wait. For now.', 'dim');
         break;
       case 'departure-step':
         var step = DEPARTURE_STEPS[state.departure.stageIndex];
