@@ -6242,41 +6242,67 @@
   // never overshooting past the target either way, so a sudden swing in
   // outside temperature or a heater/hatch toggle is still felt
   // gradually, not snapped instantly.
+  // THE OUTSIDE AIR TEMPERATURE THE CABIN FOLLOWS, at a given simulated instant. Real weather is authoritative. Three cases:
+  //  * Live play, real data driving the live reading: the live reading itself (it already eases gently between fetches).
+  //  * A GAP being folded in (a sleep, a locked phone, a closed tab): the real series the game already holds -- the same hourly data the
+  //    Marine Forecast shows -- sampled at the moment being simulated. NOT the live field: while a gap is replayed, the live field is judged
+  //    against the wake-up clock, finds the cache "too old to trust" and falls back to a latitude line (47 F at Seattle's latitude) for the
+  //    WHOLE gap. That placeholder is not a measurement of anything, and it once dragged the cabin to 47 F on a night that never left 58-62 F.
+  //  * No real data at all (a brand-new game before its first reading): the live field, exactly as before. This is the ONLY case the
+  //    placeholder is used: once the game has held any real reading the cabin never reverts to it. If a gap runs past the hours the data
+  //    covers, the series simply holds its last real value (rwSampleHours clamps to its ends) -- a real temperature, never an invented one.
+  var CABIN_TEMP_STEP_MINUTES = 5;                    // a gap is folded in as steps this long, each against ITS OWN outside temperature
+  var CABIN_LIVE_READING_WINDOW_MS = 15 * 60 * 1000;  // within this of "now", real-driven live play uses the live reading
+  function cabinOutsideTempF(state, instantMs, nowMs) {
+    var w = state.weather, rw = state.realWeather, live = w.temperatureF;
+    if (rw && rw.environment && rw.environment.temp === 'real' && Number.isFinite(live) && nowMs - instantMs <= CABIN_LIVE_READING_WINDOW_MS) return live;
+    var hours = rw && rw.forecast && rw.forecast.hours;
+    if (rw && rw.current && Array.isArray(hours) && hours.length && Number.isFinite(rw.fetchedAt)) {
+      var t = rwTarget(rw, instantMs);
+      if (t && rwInRange(t.tempF, RW_LIMITS.tempF)) return t.tempF;
+    }
+    return live;
+  }
+
   function syncCabinTemperature(state) {
     var b = state.boat;
     var now = currentGameMinutes(state);
     if (b.cabinTemperatureLastSyncedAt == null) b.cabinTemperatureLastSyncedAt = now;
-    var elapsed = now - b.cabinTemperatureLastSyncedAt;
+    var from = b.cabinTemperatureLastSyncedAt;
+    var elapsed = now - from;
     b.cabinTemperatureLastSyncedAt = now;
     if (elapsed <= 0) return; // nothing to add (also guards a clock that hasn't moved, or moved backward)
 
-    var outside = state.weather.temperatureF;
-    if (b.cabinTemperatureF == null) b.cabinTemperatureF = outside;
-    // HEATER -- OFF: unchanged, cabin simply tracks outside, same as
-    // always. ON: the cabin moves toward getHeatedCabinTarget(outside)
-    // instead of a fixed ceiling, so a mild day warms the cabin only as
-    // far as a mild day should (not all the way to the old fixed 68F).
-    // Critically, the heater only ever pulls the cabin UP toward that
-    // target, never down: once the cabin is already at or above it
-    // (outside itself has risen past the heater's own ceiling, say),
-    // the heater contributes nothing further and the target falls back
-    // to outside -- exactly the unheated behavior, never a cooling
-    // device pulling the cabin back down to the heated target.
-    var cabinTarget;
-    if (b.heaterOn) {
-      var heatedTarget = getHeatedCabinTarget(outside);
-      cabinTarget = b.cabinTemperatureF > heatedTarget ? outside : heatedTarget;
-    } else {
-      cabinTarget = outside;
-    }
+    if (b.cabinTemperatureF == null) b.cabinTemperatureF = state.weather.temperatureF;
     var changeRate = b.hatchOpen ? CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_OPEN_F : CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_CLOSED_F;
-    var maxCabinChange = changeRate * elapsed;
-    if (b.cabinTemperatureF < cabinTarget) {
-      b.cabinTemperatureF = Math.min(cabinTarget, b.cabinTemperatureF + maxCabinChange);
-    } else if (b.cabinTemperatureF > cabinTarget) {
-      b.cabinTemperatureF = Math.max(cabinTarget, b.cabinTemperatureF - maxCabinChange);
+    // The real instant each simulated minute corresponds to (the game clock equals the real clock: departedAt + minutes).
+    var departed = Number.isFinite(state.meta.departedAt) ? state.meta.departedAt : Date.now() - now * 60000;
+    var nowMs = departed + now * 60000;
+    // Fold the gap in as short steps. Each step moves the cabin toward the outside temperature AT THAT MOMENT, by at most rate x step, and
+    // never past it -- so however long the gap, the cabin can only ever lie between where it started and what the outside actually was.
+    var steps = Math.max(1, Math.ceil(elapsed / CABIN_TEMP_STEP_MINUTES)), dt = elapsed / steps;
+    for (var i = 0; i < steps; i++) {
+      var outside = cabinOutsideTempF(state, departed + (from + (i + 0.5) * dt) * 60000, nowMs);
+      if (!Number.isFinite(outside)) continue; // never write a bad number into the cabin
+      // HEATER -- OFF: the cabin simply tracks outside. ON: it moves toward getHeatedCabinTarget(outside), but the heater only ever pulls the
+      // cabin UP toward that target, never down: once the cabin is at or above it the target falls back to outside -- exactly the unheated
+      // behavior, never a cooling device pulling the cabin back down to the heated target.
+      var cabinTarget;
+      if (b.heaterOn) {
+        var heatedTarget = getHeatedCabinTarget(outside);
+        cabinTarget = b.cabinTemperatureF > heatedTarget ? outside : heatedTarget;
+      } else {
+        cabinTarget = outside;
+      }
+      var maxCabinChange = changeRate * dt;
+      if (b.cabinTemperatureF < cabinTarget) {
+        b.cabinTemperatureF = Math.min(cabinTarget, b.cabinTemperatureF + maxCabinChange);
+      } else if (b.cabinTemperatureF > cabinTarget) {
+        b.cabinTemperatureF = Math.max(cabinTarget, b.cabinTemperatureF - maxCabinChange);
+      }
     }
   }
+
 
   /* --------------------------------------------------------------
      BOAT SYSTEM FAILURES
