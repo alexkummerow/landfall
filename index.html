@@ -1158,7 +1158,7 @@
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
-        hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears heat-stuffiness immediately (isCabinHeatStuffy), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateSeaAudioForState/updateWindAudioForState/updateRainAudioForState)
+        hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears STUFFY immediately (cabinComfort is derived from it), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateSeaAudioForState/updateWindAudioForState/updateRainAudioForState)
       },
       crew: {
         fatigue: 8,
@@ -1202,6 +1202,9 @@
         bunkUnmadeSinceMinutes: null, // voyageMinutes since last waking, or null once made — cleared by MAKE BUNK
         dampCabinHours: 0,            // accumulates while below deck in bad weather; resets when the cabin is aired out
         cabinStuffySinceMinutes: null, // voyageMinutes dampCabinHours first crossed the threshold, or null — cleared by AIR OUT CABIN
+        cabinDiscomfortKind: null,    // null | 'cold' | 'stuffy' -- the cabin condition the player has been continuously in, below deck and awake (for the occasional complaint)
+        cabinDiscomfortSinceMin: null,// game minute that continuous stretch began
+        cabinComplaintAtMin: null,    // game minute of the last cabin complaint (so they stay infrequent)
         clutterCount: 0,              // small accumulator from minor activity (eating, reading); resets once TIDY UP is done
         clutterSinceMinutes: null,    // voyageMinutes clutterCount first crossed the threshold, or null — for consistent chore ordering
         readingBookId: null,          // id into BOOKS while continuous reading is active, or null — see syncReadingProgress
@@ -2925,24 +2928,10 @@
     if (bunkHours > 24) target -= clamp((bunkHours - 24) * 0.08, 0, 3);
 
     if (c.cabinStuffySinceMinutes != null) target -= 4;
-    if (isCabinHeatStuffy(state)) target -= 3; // gentle, immediately-reversible pressure -- see isCabinHeatStuffy's own notes; distinct from the damp-cabin STUFFY penalty just above, which is its own separate, chore-cleared condition
     if (c.clutterCount >= CLUTTER_TIDY_THRESHOLD) target -= 3;
 
-    // Cabin comfort: same gentle, capped shape as the drags above, and
-    // naturally self-correcting — there's no separate bonus for
-    // bringing the cabin back to COMFORTABLE, the penalty below just
-    // stops applying once it's not COLD or HOT anymore. COLD gets no
-    // rescue from the heater beyond its own effect on the real
-    // temperature — only the actual temperature rising resolves it; HOT
-    // is symmetric, with no equivalent rescue of its own either.
-    var cabinTempF = state.boat.cabinTemperatureF;
-    if (cabinTempF != null) {
-      if (cabinTempF < CABIN_TEMP_COLD_MAX_F) {
-        target -= clamp((CABIN_TEMP_COLD_MAX_F - cabinTempF) * 0.4, 0, 6);
-      } else if (cabinTempF > CABIN_TEMP_HOT_MIN_F) {
-        target -= clamp((cabinTempF - CABIN_TEMP_HOT_MIN_F) * 0.4, 0, 6);
-      }
-    }
+    // CABIN COMFORT -- only COLD and STUFFY press on morale, gently; see cabinComfortMoralePenalty.
+    target -= cabinComfortMoralePenalty(state);
 
     // Meal monotony: a snack instead of a real meal is nothing on its
     // own — this only engages once recent eating has genuinely skewed
@@ -4748,13 +4737,11 @@
     return Math.round(solarChargeRate(state) * SOLAR_NOMINAL_WATTS);
   }
 
-  // Cabin temperature — comfort/morale only, never a survival mechanic.
-  // Centralized here so the COLD/COMFORTABLE/HOT bands are easy to
-  // retune. Boundaries are strict (below/above), matching "65°F =
-  // COMFORTABLE" and "78°F = COMFORTABLE" being the inclusive edges of
-  // the comfortable range.
-  var CABIN_TEMP_COLD_MAX_F = 65;   // strictly below: COLD
-  var CABIN_TEMP_HOT_MIN_F = 78;    // strictly above: HOT — 65-78 inclusive is COMFORTABLE
+  // CABIN COMFORT bands -- see cabinComfort (the one definition). Whole degrees, as shown by CABIN TEMP.
+  var CABIN_COLD_BELOW_F = 55;      // below 55: COLD
+  var CABIN_COOL_BELOW_F = 65;      // 55-64: COOL
+  var CABIN_WARM_FROM_F = 75;       // 65-74: PLEASANT; 75 and up: WARM
+  var CABIN_STUFFY_ABOVE_F = 73;    // above 73 with the hatch CLOSED: STUFFY (overrides the band)
   // HEATER TARGET TABLE -- centralized here (not scattered through
   // syncCabinTemperature or anywhere else) so these seven thresholds
   // stay easy to retune in one place. A real boat heater reads as a
@@ -4782,7 +4769,6 @@
   // syncCabinTemperature's own min/max clamping, untouched by this.
   var CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_CLOSED_F = 0.1;
   var CABIN_TEMP_CHANGE_PER_MINUTE_HATCH_OPEN_F = 0.5;
-  var CABIN_STUFFY_TEMP_F = 75; // strictly above this, with the hatch closed and the player below deck, the cabin reads STUFFY -- see isCabinHeatStuffy
 
   /* ==============================================================
      CLOTHING + ENVIRONMENTAL COMFORT
@@ -4804,9 +4790,9 @@
      warmth the conditions call for falls as it gets warmer (requiredWarmth). GOOD is a wide window around that, so there are always
      several sensible outfits; only obvious mistakes read COLD or HOT.
 
-     CONSEQUENCES (the displayed words change instantly; consequences do not): only the environment she is actually in counts, and only after
+     CONSEQUENCES (the displayed words change instantly; consequences do not): only the environment the player is actually in counts, and only after
      60 CONTINUOUS seconds of COLD or HOT there: one first-person complaint, then a small, steady morale drain that stops the moment that
-     environment is GOOD again (morale is not refunded -- it relaxes at the ordinary rate). Rain wets the clothes she is wearing after 60
+     environment is GOOD again (morale is not refunded -- it relaxes at the ordinary rate). Rain wets the clothes the player is wearing after 60
      continuous seconds above deck in rain with the RAIN SHELL off. Wetness stays with the garment until HANG WET CLOTHES dries it; going
      below, changing, or time alone never dries anything.
      -------------------------------------------------------------- */
@@ -4936,7 +4922,7 @@
       c.rainExposureSinceMin = null;
       c.rainWetWarned = false;
     }
-    // COMFORT: only the environment she is actually in, only while awake (sleep is evaluated separately)
+    // COMFORT: only the environment the player is actually in, only while awake (sleep is evaluated separately)
     var kind = null;
     if (awake) {
       var verdict = evaluateOutfit(state, c.clothing, above ? 'above' : 'below').verdict;
@@ -5791,6 +5777,7 @@
     syncReadingProgress(state);
     syncCabinTemperature(state);
     syncComfortExposure(state); // after the cabin has caught up, so COMFORT BELOW reads the real cabin temperature
+    checkCabinComplaint(state);
     return ticks;
   }
 
@@ -11982,41 +11969,54 @@
   /* ============================================================
      8. COMMANDS
      ============================================================ */
-  // The DISPLAYED/perceived condition — COLD/COMFORTABLE/HOT. Distinct
-  // from the raw cabinTemperatureF number, which always stays visible
-  // and accurate (see formatCabinTemp) — a pure read of the real
-  // temperature against CABIN_TEMP_COLD_MAX_F/CABIN_TEMP_HOT_MIN_F,
-  // nothing else. Neither COLD nor HOT has any rescue of its own: only
-  // the actual temperature (heater, outside ambient, the hatch) ever
-  // moves it — see syncCabinTemperature.
-  function cabinConditionLabel(tempF) {
-    if (tempF == null) return 'COMFORTABLE';
-    if (tempF < CABIN_TEMP_COLD_MAX_F) return 'COLD';
-    if (tempF > CABIN_TEMP_HOT_MIN_F) return 'HOT';
-    return 'COMFORTABLE';
+  // CABIN COMFORT -- COLD / COOL / PLEASANT / WARM, with STUFFY overriding. The ONE definition of how the cabin feels, derived on demand from the
+  // real cabin temperature and the hatch. Nothing about it is stored, so a reload, sleep or offline stretch can never leave a stale status, and
+  // opening the hatch (or the temperature crossing a line) changes it at once. Judged on the whole degree the player sees as CABIN TEMP.
+  //   below 55 COLD | 55-64 COOL | 65-74 PLEASANT | 75 and up WARM | above 73 with the hatch CLOSED: STUFFY (so 74 closed is STUFFY, 74 open is PLEASANT)
+  function cabinComfort(state) {
+    var t = state.boat.cabinTemperatureF;
+    if (t == null) return 'PLEASANT';
+    var f = Math.round(t);
+    if (f > CABIN_STUFFY_ABOVE_F && !state.boat.hatchOpen) return 'STUFFY';
+    if (f < CABIN_COLD_BELOW_F) return 'COLD';
+    if (f < CABIN_COOL_BELOW_F) return 'COOL';
+    if (f < CABIN_WARM_FROM_F) return 'PLEASANT';
+    return 'WARM';
   }
 
-  function formatCabinTemp(tempF) {
-    if (tempF == null) return 'COMFORTABLE';
-    return Math.round(tempF) + '\u00B0F ' + cabinConditionLabel(tempF);
+  // MORALE: only COLD and STUFFY press on it, gently (a morale TARGET adjustment, like every other lived-in-boat drag, so it builds slowly and
+  // stops the moment the condition is corrected), and only while the player is actually in the cabin. A damp cabin already pressing for the
+  // same reason (cabinStuffySinceMinutes, cleared by AIR OUT CABIN) is not stacked with STUFFY.
+  var CABIN_COMFORT_MORALE_PENALTY = 3;
+  function cabinComfortMoralePenalty(state) {
+    if (state.crew.location !== 'below') return 0;
+    var k = cabinComfort(state);
+    if (k === 'COLD') return CABIN_COMFORT_MORALE_PENALTY;
+    if (k === 'STUFFY') return state.crew.cabinStuffySinceMinutes != null ? 0 : CABIN_COMFORT_MORALE_PENALTY;
+    return 0;
   }
 
-  // STUFFY — a simple, binary condition, deliberately independent of
-  // cabinConditionLabel's own COLD/COMFORTABLE/HOT (which stays exactly
-  // as it was; nothing here changes its inputs, outputs, or the 'HOT'
-  // string callers already compare against). Exists ONLY while all
-  // three hold at once: below deck, hatch closed, and cabin temperature
-  // above CABIN_STUFFY_TEMP_F. Opening the hatch (or the temperature
-  // dropping to the threshold or below, or leaving the cabin) clears it
-  // immediately -- there's no separate timestamp/gate to clear here,
-  // unlike the older damp-cabin STUFFY concept (cabinStuffySinceMinutes,
-  // cleared only by the AIR OUT CABIN chore): this one is a pure,
-  // stateless read of current conditions, on purpose, since section 7's
-  // morale pressure is meant to stop the instant any one of these three
-  // stops being true, not wait for an explicit chore.
-  function isCabinHeatStuffy(state) {
-    return state.crew.location === 'below' && !state.boat.hatchOpen
-      && state.boat.cabinTemperatureF != null && state.boat.cabinTemperatureF > CABIN_STUFFY_TEMP_F;
+  // COMPLAINTS: after about 10 continuous minutes in COLD or STUFFY, below deck and awake, an occasional in-character remark through the
+  // ordinary observation channel (log + flush, same as the ambient events). Occasional, never a nag: no more than one per 90 minutes. The
+  // timer lives in game minutes (survives reload), restarts whenever the condition ends, the player goes above, or falls asleep, and never
+  // speaks during an offline catch-up pass.
+  var CABIN_COMPLAINT_DELAY_MIN = 10;
+  var CABIN_COMPLAINT_GAP_MIN = 90;
+  var CABIN_COMPLAINTS = {
+    cold: ["It's getting cold down here. I should turn on the heater.", 'The cabin feels cold. Could use the heater.', 'Cold enough to notice. I should turn on the heater.', "It's getting chilly down here. Might be time for the heater."],
+    stuffy: ["It's getting stuffy down here. I should open the hatch.", 'The cabin feels stuffy. Could use some air.', 'Could use some air in here. I should open the hatch.', "It's getting warm and stuffy. Might be time to open the hatch."],
+  };
+  function checkCabinComplaint(state) {
+    var c = state.crew, now = currentGameMinutes(state);
+    var comfort = (c.location === 'below' && c.watchState === 'awake') ? cabinComfort(state) : null;
+    var kind = comfort === 'COLD' ? 'cold' : (comfort === 'STUFFY' ? 'stuffy' : null);
+    if (kind !== c.cabinDiscomfortKind) { c.cabinDiscomfortKind = kind; c.cabinDiscomfortSinceMin = kind ? now : null; return; }
+    if (!kind || inCatchUpPass) return;
+    if (now - c.cabinDiscomfortSinceMin < CABIN_COMPLAINT_DELAY_MIN) return;
+    if (c.cabinComplaintAtMin != null && now - c.cabinComplaintAtMin < CABIN_COMPLAINT_GAP_MIN) return;
+    c.cabinComplaintAtMin = now;
+    log(state, pickFromPool(CABIN_COMPLAINTS[kind]));
+    flushNewLogEntries(state);
   }
 
   // STATUS is now purely about Solace herself — HUNGER/THIRST moved to
@@ -13471,14 +13471,10 @@
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    // INFORMATION-ARCHITECTURE PASS -- the old CABIN: COLD/COMFORTABLE/
-    // HOT status word (and its now-dead helper, formerly cabinStatusWord,
-    // removed along with this) is gone entirely: redundant next to the
-    // exact CABIN TEMP reading right above it. The three remaining readings
-    // use the SAME shared label/value grid (.data-row-md, same width
-    // tier NAV STATION/STATUS/REPAIR already use) every other clean
-    // data display in the game uses -- no colons, no manual spacing.
+    // CABIN TEMP (the exact reading), CABIN COMFORT (derived from that temperature and the hatch -- see cabinComfort), then BATTERY and SOLAR
+    // CHARGING, all on the shared label/value grid (.data-row-md).
     printDataRow('CABIN TEMP', cabinTempDisplay, 'data-row-md');
+    printDataRow('CABIN COMFORT', cabinComfort(state), 'data-row-md');
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
     printDataRow('BATTERY', batteryLabel, 'data-row-md');
     printDataRow('SOLAR CHARGING', solarOutputWatts(state) + ' W', 'data-row-md');
@@ -15198,11 +15194,11 @@
         ALL_GARMENT_KEYS.forEach(function (k) { s.crew.clothing[k] = !!outfit[k]; });
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
         pendingClothing = null;
-        // A diary line only when she really did end up in dry clothes -- she CAN put a wet garment back on, and the entry must not say otherwise.
+        // A diary line only when the player really did end up in dry clothes -- the player CAN put a wet garment back on, and the entry must not say otherwise.
         if (!ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); })) {
           log(s, 'Changed into dry clothes.');
         }
-        syncComfortExposure(s); // the new outfit in the place she is standing: the 60-second clock starts (or clears) from this moment
+        syncComfortExposure(s); // the new outfit in the place the player is standing: the 60-second clock starts (or clears) from this moment
         flushNewLogEntries(s);
         cmdCabin(s);
       },
@@ -20109,6 +20105,9 @@
     if (c.bunkUnmadeSinceMinutes === undefined) c.bunkUnmadeSinceMinutes = null;
     if (c.dampCabinHours === undefined) c.dampCabinHours = 0;
     if (c.cabinStuffySinceMinutes === undefined) c.cabinStuffySinceMinutes = null;
+    if (c.cabinDiscomfortKind === undefined) c.cabinDiscomfortKind = null;
+    if (c.cabinDiscomfortSinceMin === undefined) c.cabinDiscomfortSinceMin = null;
+    if (c.cabinComplaintAtMin === undefined) c.cabinComplaintAtMin = null;
     if (c.clutterCount === undefined) c.clutterCount = 0;
     if (c.clutterSinceMinutes === undefined) c.clutterSinceMinutes = null;
     if (c.readingBookId === undefined) c.readingBookId = null;
