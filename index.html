@@ -1234,7 +1234,7 @@
       // section's fishingSession variable and its own comment for why).
       fishing: {
         keptFishOnDay: null,                     // voyageDayNumber() on which a fish was last kept, for the one-kept-fish-per-day rule
-        heldFish: null,                          // { speciesId, caughtDay } for the currently-held catch, or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
+        heldFish: null,                          // { speciesId, caughtDay, weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
       },
       books: newBooksState(),
       // VESSEL LOG -- an automatic, purely factual per-day record
@@ -12696,8 +12696,8 @@
     // only ENGINE gets the exception, and only during real recovery.
     if (needsNavLights(state) && !(state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
     printBlank();
-    printLine('STATUS: ' + (state.boat.engineOn ? 'RUNNING' : 'OFF'));
-    printLine('DIESEL: ' + galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS).toUpperCase());
+    printDataRow('STATUS', state.boat.engineOn ? 'RUNNING' : 'OFF', 'data-row-md');
+    printDataRow('DIESEL', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS).toUpperCase(), 'data-row-md');
     if (!state.boat.engineOn && systemDamageKnown(state, 'engine')) {
       printLine('Engine is damaged. Repair it before starting.', 'amber');
       state.pendingChoice = { id: 'engine-choice', options: [{ label: 'BACK', action: 'cancel' }] };
@@ -16640,20 +16640,23 @@
   // sailed rather than snapping at a boundary -- a species fading
   // in/out is just its weight rising from/falling to 0 across anchors,
   // nothing more special than that.
+  // Every species carries the plausible weight range for a catch from SOLACE: minLb..maxLb (a one-pound rockfish and a forty-pound chinook are both fine; a
+  // forty-pound herring or a two-ounce tuna are not). maxLb also gates which species a given rolled weight can be (pickFishSpeciesForWeight); minLb is applied by
+  // fishWeightForSpecies, once, when the bite is set up.
   var FISH_SPECIES = [
-    { id: 'coho', name: 'Coho Salmon', maxLb: 15 },
-    { id: 'pink', name: 'Pink Salmon', maxLb: 6 },
-    { id: 'chinook', name: 'Chinook Salmon', maxLb: 40 },
-    { id: 'herring', name: 'Pacific Herring', maxLb: 1.5 },
-    { id: 'mackerel', name: 'Pacific Mackerel', maxLb: 4 },
-    { id: 'rockfish', name: 'Rockfish', maxLb: 12 },
-    { id: 'lingcod', name: 'Lingcod', maxLb: 30 },
-    { id: 'bonito', name: 'Pacific Bonito', maxLb: 20 },
-    { id: 'albacore', name: 'Albacore', maxLb: 40 },
-    { id: 'skipjack', name: 'Skipjack Tuna', hawaiianName: 'Aku', maxLb: 25 },
-    { id: 'mahimahi', name: 'Mahi-Mahi', maxLb: 40 },
-    { id: 'yellowfin', name: 'Yellowfin Tuna', hawaiianName: 'Ahi', maxLb: 40 },
-    { id: 'wahoo', name: 'Wahoo', hawaiianName: 'Ono', maxLb: 40 },
+    { id: 'coho', name: 'Coho Salmon', minLb: 3, maxLb: 15 },
+    { id: 'pink', name: 'Pink Salmon', minLb: 2, maxLb: 6 },
+    { id: 'chinook', name: 'Chinook Salmon', minLb: 6, maxLb: 40 },
+    { id: 'herring', name: 'Pacific Herring', minLb: 0.3, maxLb: 1.5 },
+    { id: 'mackerel', name: 'Pacific Mackerel', minLb: 0.8, maxLb: 4 },
+    { id: 'rockfish', name: 'Rockfish', minLb: 1.5, maxLb: 12 },
+    { id: 'lingcod', name: 'Lingcod', minLb: 4, maxLb: 30 },
+    { id: 'bonito', name: 'Pacific Bonito', minLb: 3, maxLb: 20 },
+    { id: 'albacore', name: 'Albacore', minLb: 6, maxLb: 40 },
+    { id: 'skipjack', name: 'Skipjack Tuna', hawaiianName: 'Aku', minLb: 3, maxLb: 25 },
+    { id: 'mahimahi', name: 'Mahi-Mahi', minLb: 3, maxLb: 40 },
+    { id: 'yellowfin', name: 'Yellowfin Tuna', hawaiianName: 'Ahi', minLb: 5, maxLb: 40 },
+    { id: 'wahoo', name: 'Wahoo', hawaiianName: 'Ono', minLb: 7, maxLb: 40 },
   ];
   var FISH_SPECIES_BY_ID = {};
   FISH_SPECIES.forEach(function (sp) { FISH_SPECIES_BY_ID[sp.id] = sp; });
@@ -16761,6 +16764,16 @@
 
   function pickFishWeightLbInTier(tier) {
     return +(rand(tier.minLb, tier.maxLb)).toFixed(1);
+  }
+
+  // The weight of THIS fish. The tier roll (which sets the reel time, the hints and the landing sound) and the species pick (which uses the rolled weight)
+  // are exactly as before; this only makes the weight plausible for the species picked: a roll below the species' minimum is redrawn inside the SAME
+  // tier (so every tier boundary, and with it the timing and the landing sound, is untouched), and nothing ever exceeds the species' maximum. Called once,
+  // at the bite -- the result lives in the catch object and is never recomputed.
+  function fishWeightForSpecies(species, rolledLb, tier) {
+    var w = rolledLb;
+    if (w < species.minLb) w = +(rand(species.minLb, Math.min(species.maxLb, tier.maxLb))).toFixed(1);
+    return +Math.min(w, species.maxLb).toFixed(1);
   }
 
   function marlinEligible(state) {
@@ -18427,8 +18440,6 @@
     clearFishingTimers();
     stopFishingLandingSound(); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
     fishingSession = null;
-    log(state, 'Brought the line in.');
-    flushNewLogEntries(state);
     // pendingChoice deliberately left unset -- handleAction's tail
     // clears it (nothing here sets a new one), so the normal Above
     // Deck menu takes over on the next render, exactly like 'cancel'
@@ -18457,8 +18468,10 @@
     // see the FISHING_CONFIG.marlinChanceWithinTrophyTier comment.
     var isMarlin = tier.key === 'trophy' && marlinEligible(state) && Math.random() < FISHING_CONFIG.marlinChanceWithinTrophyTier;
     var species = isMarlin ? null : pickFishSpeciesForWeight(state, weightLb);
+    if (species) weightLb = fishWeightForSpecies(species, weightLb, tier);
 
-    fishingSession = { phase: 'bite-prompt', tier: tier, weightLb: weightLb, isMarlin: isMarlin, species: species, resolveTimer: null };
+    // THE catch: species + weight, decided here, once. The landing sound, the result screen, KEEP and THROW BACK all read this exact object.
+    fishingSession = { phase: 'bite-prompt', tier: tier, isMarlin: isMarlin, catch: { species: species, weightLb: weightLb, displayName: null }, resolveTimer: null };
 
     log(state, 'Something hit the line hard.');
     flushNewLogEntries(state);
@@ -18578,7 +18591,7 @@
         // trigger) comes later, inside revealMarlin -- the flash line
         // here is not yet marlin's last line before its reveal.
         stopFishingReelLoop();
-        playFishingLandingAudio(session.weightLb);
+        playFishingLandingAudio(session.catch.weightLb);
       }
       scrollToBottom();
       index++;
@@ -18595,25 +18608,25 @@
     fishingSession.resolveTimer = setTimeout(showNextLine, stepMs);
   }
 
+  // THE catch result: species on the left, weight in the value column, nothing else. The only place a catch is announced.
+  function showCatchResult(name, weightLb) {
+    printBlank();
+    printDataRow(String(name).toUpperCase(), weightLb.toFixed(1) + ' LB', 'data-row-lg');
+  }
+
   function resolveFishLanded(state) {
-    var session = fishingSession;
-    var displayName = fishSpeciesDisplayName(state, session.species);
+    var session = fishingSession, caught = session.catch;
+    caught.displayName = fishSpeciesDisplayName(state, caught.species); // fixed here, once -- KEEP reads exactly what is shown
 
     session.phase = 'keep-release';
-    session.pendingCatch = { displayName: displayName, weightLb: session.weightLb };
-
-    // No audio here -- the reel-stop and catch-sound trigger already
-    // happened in beginFishLandingSequence, tied directly to the final
-    // suspense line's own print step. This is just the text reveal.
-    log(state, 'Caught ' + fishArticleAndName(displayName) + '. ' + session.weightLb.toFixed(1) + ' LB.');
-    flushNewLogEntries(state);
+    showCatchResult(caught.displayName, caught.weightLb);
 
     if (fishAlreadyKeptToday(state)) {
       log(state, 'Already had enough for dinner.');
       flushNewLogEntries(state);
-      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
+      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'THROW BACK', action: 'fish-release' }] };
     } else {
-      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'KEEP', action: 'fish-keep' }, { label: 'RELEASE', action: 'fish-release' }] };
+      state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'KEEP', action: 'fish-keep' }, { label: 'THROW BACK', action: 'fish-release' }] };
     }
 
     renderOptions(state);
@@ -18648,9 +18661,8 @@
         // range, so this naturally resolves to catchLarge -- no
         // separate marlin audio logic needed.
         stopFishingReelLoop();
-        playFishingLandingAudio(session.weightLb);
-        log(state, 'Marlin. ' + session.weightLb.toFixed(1) + ' LB.');
-        flushNewLogEntries(state);
+        playFishingLandingAudio(session.catch.weightLb);
+        showCatchResult('Marlin', session.catch.weightLb);
         session.phase = 'marlin-release';
         state.pendingChoice = { id: 'fish-marlin-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
         renderOptions(state);
@@ -18661,17 +18673,13 @@
   }
 
   function performFishKeep(state) {
-    if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.pendingCatch) return;
-    var caught = fishingSession.pendingCatch;
-    var speciesId = fishingSession.species.id;
-    state.fishing.heldFish = { speciesId: speciesId, caughtDay: voyageDayNumber(state) };
+    if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.catch || !fishingSession.catch.species) return;
+    var caught = fishingSession.catch;
+    state.fishing.heldFish = { speciesId: caught.species.id, caughtDay: voyageDayNumber(state), weightLb: caught.weightLb };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
     bumpHygiene(state, 2); // handling a fish
     log(state, 'Kept the fish. Dinner taken care of.');
     flushNewLogEntries(state);
-    // VESSEL LOG -- whole-pound figure here (the task's own "14 LB
-    // MAHI" style), distinct from the narrative log line above, which
-    // keeps its own existing 1-decimal precision.
     logVesselLogEvent(state, 'FISH CAUGHT \u2014 ' + Math.round(caught.weightLb) + ' LB ' + caught.displayName.toUpperCase());
     showFishResultScreen(state);
   }
