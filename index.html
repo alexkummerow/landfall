@@ -2021,7 +2021,7 @@
     var x = navGeoLon(nav.lon), y = nav.lat;
     if (!state.flags.landOnHorizonShown) {
       var near = navNearestOnEdges(x, y, NAV.islandEdges);
-      if (near && near.nm <= NAV_SIGHT_NM) { state.flags.landOnHorizonShown = true; log(state, 'Land on the horizon.'); }
+      if (near && near.nm <= NAV_SIGHT_NM) { state.flags.landOnHorizonShown = true; var fsLine = firstSightOfKauaiLine(state); if (fsLine) log(state, fsLine); }
     }
     var pr = navPredict(nav.lat, nav.lon, nav.heading, NAV_PREDICT_NM);
     if (pr.artNm != null && pr.artNm <= NAV_BOUNDARY_WARN_NM) {
@@ -2564,24 +2564,21 @@
   }
 
 
+  // THE AMBIENT OBSERVATION LIBRARY -- 22 lines, each grounded by a rule in AMBIENT_RULES below (a line with no rule is never picked). The 19 lines
+  // that asserted an animal, a ship, a squall, a meteor, a splash, a swell period, land that was not there, or a moon the game does not model were
+  // removed: wildlife and vessels now come from the encounter systems (see ENCOUNTERS), and the rest was simply not a fact the game knows.
   var OBSERVATIONS = {
     inland: {
       quiet: [
-        'A ferry crosses well astern, lit up like a small town.',
         'The shoreline slides by, dark hills and scattered lights.',
-        'Gulls work the water off the bow, indifferent to the boat.',
         'Rain moves over the mainland, visible as a grey smear on the hills.',
-        'Another sailboat, reefed down, passes well to port.',
         'The smell of the tide flats carries out on the wind.',
       ],
       awe: ['The mountains catch the last light, briefly on fire before it fades.'],
     },
     strait: {
       quiet: [
-        'Cliffs rise pale on one side, open water on the other.',
-        'A container ship passes far off, low and enormous.',
         'Fog sits in patches over the water, thinning and thickening.',
-        'Seabirds ride the swell without apparent effort.',
       ],
       awe: ['For a few minutes the strait goes glassy, mountains doubled in the water.'],
     },
@@ -2589,29 +2586,18 @@
       quiet: [
         'The coastline is a low grey line, then nothing.',
         'Swell starts to build under the hull, the first real ocean motion.',
-        'A fishing boat works a line somewhere off to starboard.',
         'The water changes color, green to a deeper, colder blue.',
       ],
-      awe: ['The land disappears behind for good. Just water now, in every direction.'],
     },
     offshore: {
       quiet: [
         'Long swells lift and drop the boat, unhurried.',
-        'A seabird glides past without a single wingbeat.',
         'Clouds stack on the horizon, building into something or nothing.',
         'The horizon is empty in every direction.',
-        'A squall passes well clear, visible as a grey curtain of rain.',
         'The wake trails off pale behind the boat, then is gone.',
-        'Something logs a splash off the beam. Gone before you can look.',
       ],
       awe_night: [
-        'The wake glows faintly green — phosphorescence, stirred up by the hull.',
-        'No moon tonight. The stars are absurd, edge to edge, no city to dim them.',
-        'A meteor burns a long line across the sky and is gone.',
-      ],
-      awe_day: [
-        'A pod of dolphins rides the bow wave for a while, then peels off.',
-        'Flying fish scatter ahead of the hull, skimming the wave tops.',
+        'The stars are absurd tonight, edge to edge, no city to dim them.',
       ],
       sunrise: ['The sky goes from black to grey to a slow, deliberate orange.'],
       sunset: ['The sun goes down into the sea, no clouds to catch it, just gone.'],
@@ -2620,17 +2606,13 @@
       quiet: [
         "The air has gone warmer, thicker. Different ocean.",
         'Trade-wind clouds march by in orderly ranks, small and white.',
-        'Flying fish burst from a wave ahead, silver, then gone.',
         "The sea is a color it wasn't further north — a hard, deep blue.",
       ],
-      awe_night: ['The stars are different here. Lower ones you don\'t recognize.'],
-      awe_day: ['A pod of dolphins works the bow for a few minutes, unbothered by the boat.'],
+      awe_night: ['The stars are different here. Lower ones I don\'t recognize.'],
     },
     approach: {
       quiet: [
         'The cloud pattern ahead looks different — piled up over something solid.',
-        'A land bird, out here, improbably far from anywhere.',
-        'The swell has a shorter, steeper period than the open crossing.',
       ],
       awe: ['A smudge on the horizon that might be cloud, might be Kauaʻi. Too early to be sure.'],
     },
@@ -5967,6 +5949,7 @@
     checkClothingNarration(state);
     checkSpoilage(state);
     checkMilestones(state);
+    checkMoments(state);
     checkAmbientEvent(state);
 
     clampState(state);
@@ -6414,7 +6397,7 @@
       'Something lets go in the rig. The sail collapses loose.',
     ],
     steering: [
-      'The helm suddenly goes loose in your hands.',
+      'The helm suddenly goes loose in my hands.',
       'The wheel turns, but the rudder does not answer.',
     ],
     engine: [
@@ -6594,7 +6577,7 @@
     if (!reason) return;
     ve.phase = 'pending'; ve.reason = reason; ve.at = now;
     c.watchState = 'awake'; c.sleepStartedAt = null; // whatever he was in the middle of (asleep, reading, a menu) ends here
-    log(state, "You can't continue like this.");
+    log(state, "I can't continue like this.");
     state.pendingChoice = rescueCallChoice();
   }
 
@@ -6625,19 +6608,16 @@
     if (id === 'rescue-status-menu' || id === 'radio-rescue-confirm' || id === 'rescue-ending' || id === 'aft-locker') state.pendingChoice = null; // menus of retired systems (the aft-locker prompt was removed)
   }
 
+  // The old line for EVERY weather change is retired: rain, cloud and clearing are covered by the grounded, rate-limited moments (see
+  // MOMENTS), and its "stars, briefly" line claimed stars in daylight. A squall -- a genuine event the moments do not cover -- keeps its entry.
   function weatherChangeLine(condition) {
-    var lines = {
-      rain: "Rain starts, fine and steady.",
-      squall: "A squall line closing fast. Everything goes grey.",
-      overcast: "Cloud thickens overhead. The horizon dims.",
-      clear: "The overcast breaks. Stars, briefly, then gone again.",
-    };
-    return lines[condition] || ("Sky shifts to " + condition + ".");
+    return condition === 'squall' ? "A squall line closing fast. Everything goes grey." : null;
   }
 
   function checkWeatherNarration(state, prevCondition) {
     if (state.weather.condition !== prevCondition) {
-      log(state, weatherChangeLine(state.weather.condition));
+      var line = weatherChangeLine(state.weather.condition);
+      if (line) log(state, line);
     }
   }
 
@@ -6654,7 +6634,7 @@
     var f = state.flags;
     if (thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY && !f.thirstNarrated) {
       f.thirstNarrated = true;
-      log(state, "Your mouth feels like the inside of a sail bag. Water, before anything else.");
+      log(state, "My mouth feels like the inside of a sail bag. Water, before anything else.");
     }
     if (thirstLevel(state.crew.hoursSinceWater) < THIRST_THIRSTY) f.thirstNarrated = false;
   }
@@ -6802,7 +6782,7 @@
     var f = state.flags;
     if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY && !f.hungerNarrated) {
       f.hungerNarrated = true;
-      log(state, "Stomach's stopped asking and started aching. You need real food.");
+      log(state, "Stomach's stopped asking and started aching. I need real food.");
     }
     if (hungerLevel(state.crew.hoursSinceMeal) < HUNGER_HUNGRY) f.hungerNarrated = false;
   }
@@ -6812,7 +6792,7 @@
     var hours = hoursSinceWash(state);
     if (hours > 24 && !f.cleanlinessNarrated) {
       f.cleanlinessNarrated = true;
-      log(state, 'You could use a wash.');
+      log(state, 'I could use a wash.');
     }
     if (hours < 14) f.cleanlinessNarrated = false;
   }
@@ -6836,6 +6816,636 @@
      only ever decides whether THIS tick is the one that writes a log
      line.
      -------------------------------------------------------------- */
+  /* ==============================================================
+     VESSEL LOG MOMENTS -- occasional, restrained AUTOMATIC diary entries about what the voyage was like.
+     ------------------------------------------------------------
+     Separate from the action entries (those are written by the actions themselves) and from the existing ambient observation
+     stream (checkAmbientEvent, untouched). Every moment below is gated on a FACT THE SIMULATION ACTUALLY HOLDS -- the live weather
+     fields (real sky/cloud/rain/temperature/wave data, or the scripted fallback's condition), the boat's own state, SOLACE's
+     position, and the astronomical daylight system -- and is never inferred from geography or weather alone. A moment whose fact
+     the game does not track (wildlife, another vessel, stars through cloud, mountains in view...) simply is not in this table.
+
+     TIME WORDS ARE TRUE: any moment whose wording says morning / afternoon / evening / night / dawn / sunset carries a `tod` key
+     and is only eligible when BOTH the astronomical phase at SOLACE's position (getDaylightPhase) AND the game clock the entry is
+     stamped with (the same instant every log timestamp uses) agree with the word -- so "this morning" can never sit beside a 16:00 stamp.
+
+     FREQUENCY: ordinary moments are capped (MOMENT_MAX_PER_DAY a voyage day, at least MOMENT_MIN_GAP_MINUTES apart), many only roll
+     a chance once per day, and every moment has its own once/cooldown memory. Only GEOGRAPHIC / PROGRESS milestones (`ms`) bypass the daily
+     cap -- each can only ever happen once -- and they COUNT toward it, so ordinary moments yield on a milestone day. Weather "firsts"
+     (first calm, first swell...) are once-only ordinary moments that simply sit ahead of the generic ones in priority. Nothing fires because a number merely moved: wind uses stable REGIMES (a new regime must
+     hold for 30 minutes), and every "sustained" moment needs a minimum streak of the condition actually persisting.
+
+     MEMORY: everything lives in state.flags.moments (small, created on first use, tolerant of its absence in older saves). */
+  var MOMENT_MAX_PER_DAY = 3;
+  var MOMENT_MIN_GAP_MINUTES = 120;
+  // Mainland coast reference points, used (with the Hawaiian island edges) for an ESTIMATE of distance to the nearest land.
+  var MOMENT_COAST_REFS = [[48.40, -124.83], [40.44, -124.41], [34.45, -120.47], [32.67, -117.24], [22.88, -109.90]];
+  var MOMENT_TOTAL_NM = distanceBetween(WAYPOINTS[0].lat, WAYPOINTS[0].lon, FINAL_DEST.lat, FINAL_DEST.lon);
+
+  function momentMemory(state) {
+    var f = state.flags;
+    if (!f.moments || typeof f.moments !== 'object') f.moments = {};
+    var m = f.moments;
+    if (!m.fired) m.fired = {};      // id -> voyage minute it last fired
+    if (!m.rolled) m.rolled = {};    // id -> voyage day its chance was last rolled
+    if (!m.streak) m.streak = {};    // condition -> voyage minute it began (null when not holding)
+    if (!m.samp) m.samp = [];        // hourly weather samples, newest last (max 12)
+    if (!m.dist) m.dist = [];        // distance made good on each completed voyage day (max 6)
+    if (!m.day) m.day = { n: 0, count: 0, overMin: 0, lightMin: 0, trouble: 0, dist: 0, rainEps: 0, roughMin: 0 };
+    if (!m.topicAt) m.topicAt = {};    // topic -> voyage minute a MOMENT or ENCOUNTER last described it (the ambient stream yields to these)
+    if (!m.ambAt) m.ambAt = {};        // topic -> voyage minute an AMBIENT line last described it (the moments yield to these)
+    return m;
+  }
+  function angleDiffDeg(a, b) { var d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+  function windRegimeIndex(kt) { return kt < 6 ? 0 : kt < 12 ? 1 : kt < 18 ? 2 : kt < 25 ? 3 : kt < 33 ? 4 : 5; }
+
+  // A PURE read of everything a moment may be gated on.
+  function momentContext(state, m) {
+    var w = state.weather, n = state.nav, b = state.boat, t = state.meta.voyageMinutes;
+    var snap = daylightSnapshot(state);
+    var sky = String(w.sky || '').toUpperCase(), cond = w.condition;
+    var cloud = w.cloudPct != null ? w.cloudPct : (cond === 'clear' ? 10 : cond === 'overcast' ? 90 : 100);
+    var raining = w.rainLevel != null ? w.rainLevel !== 'none' : (cond === 'rain' || cond === 'squall');
+    var fog = sky === 'FOG';
+    var heavyRain = w.rainLevel === 'heavy' || sky === 'HEAVY RAIN' || sky === 'THUNDERSTORM';
+    var phase = snap.phase;
+    var hour = new Date(state.meta.departedAt + t * 60000).getHours(); // the clock every entry is stamped with
+    var daytime = phase === 'sunrise' || phase === 'day' || phase === 'lateAfternoon' || phase === 'sunset';
+    var noon = (snap.last && snap.next && snap.last.kind === 'sunrise') ? (snap.last.t + snap.next.t) / 2 : null;
+    var wp = n.waypointIndex;
+    var distDest = distanceBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    var vl = state.vesselLog;
+    var ctx = {
+      s: state, t: t, day: voyageDayNumber(state), w: w, n: n, snap: snap, phase: phase, hour: hour, daytime: daytime,
+      region: voyagePhase(state), wp: wp, inSound: wp <= 6, inStrait: wp >= 7 && wp <= 11, open: wp >= OPEN_WATER_WAYPOINT_INDEX,
+      sky: sky, cloud: cloud, raining: raining, fog: fog, heavyRain: heavyRain, clear: !raining && !fog && cloud <= 25,
+      wind: w.windSpeed, windDir: w.windDirection, sea: w.seaState, waveFt: w.waveHeightFt, tempF: w.temperatureF,
+      boatSpeed: b.speed, engineOn: !!b.engineOn, sailUp: b.sailConfig !== 'furled', rel: angleDiffDeg(w.windDirection, n.heading),
+      above: state.crew.location === 'above', awake: state.crew.watchState === 'awake', hatchOpen: !!b.hatchOpen,
+      distDest: distDest, progress: clamp(1 - distDest / MOMENT_TOTAL_NM, 0, 1),
+      landNm: m ? m.landNm : null,
+      distToday: vl && vl.currentDay ? Math.max(0, n.distanceTraveled - vl.currentDay.distanceTraveledAtStart) : 0,
+      tod: {
+        morning: (phase === 'sunrise' || phase === 'day') && noon != null && snap.t < noon && hour >= 5 && hour < 12,
+        afternoon: (phase === 'day' || phase === 'lateAfternoon' || phase === 'sunset') && noon != null && snap.t >= noon && hour >= 12 && hour < 19,
+        evening: (phase === 'sunset' || phase === 'dusk') && hour >= 16 && hour < 23,
+        toEvening: ((phase === 'lateAfternoon' && snap.minutesToSunset != null && snap.minutesToSunset <= 120) || phase === 'sunset' || phase === 'dusk') && hour >= 15 && hour < 23,
+        night: phase === 'night' && (hour >= 19 || hour < 6),
+        dawn: phase === 'dawn' && hour >= 3 && hour < 10,
+        afterNight: (phase === 'dawn' || phase === 'sunrise') && hour >= 3 && hour < 11,
+        sunset: phase === 'sunset',
+        nearSunset: daytime && snap.minutesToSunset != null && snap.minutesToSunset <= 75,
+        farFromSunset: daytime && !(snap.minutesToSunset != null && snap.minutesToSunset <= 75),
+        daytime: daytime,
+        dusk: phase === 'dusk',
+      },
+      st: {}, ended: {}, regChange: null,
+      dCape: distanceBetween(n.lat, n.lon, WAYPOINTS[11].lat, WAYPOINTS[11].lon),
+    };
+    ctx.encRegion = encRegion(ctx);
+    return ctx;
+  }
+
+  // Where she is, in the terms the wildlife / traffic / ambient systems care about -- from POSITION, not voyage percentage.
+  //   sound / strait: Puget Sound and the Strait of Juan de Fuca        offCoast: within ~250 nm of Cape Flattery
+  //   pacific: the open North Pacific       mid: far from both coasts (700+ nm from Cape Flattery AND from Kaua\u02BBi)
+  //   hawaiiFar: 650-150 nm out, approaching       hawaiiNear: within 150 nm of Kaua\u02BBi
+  function encRegion(c) {
+    if (c.wp <= 6) return 'sound';
+    if (c.wp <= 11) return 'strait';
+    if (c.distDest <= 150) return 'hawaiiNear';
+    if (c.distDest <= 650) return 'hawaiiFar';
+    if (c.dCape <= 250) return 'offCoast';
+    if (c.dCape >= 700 && c.distDest >= 700) return 'mid';
+    return 'pacific';
+  }
+
+  // Updates the sustained-condition memory and fills c.st (minutes a condition has now held) / c.ended (length of a run that ended this tick).
+  function trackMoments(state, c, m) {
+    encMemory(m);
+    if (state.flags.landOnHorizonShown && m.firstSightT == null) m.firstSightT = c.t; // when Kaua\u02BBi was first sighted (the mountains moment must come later)
+    var t = c.t, w = c.w, n = c.n, S = c.st, E = c.ended;
+    function streak(key, cond) {
+      var cur = m.streak[key];
+      if (cond) { if (cur == null) m.streak[key] = t; S[key] = t - m.streak[key]; }
+      else { if (cur != null && t - cur > 0) E[key] = t - cur; m.streak[key] = null; S[key] = 0; }
+    }
+    // distance from land (an ESTIMATE: the nearest coast reference point or Hawaiian island edge), refreshed every 30 minutes once in open water
+    if (c.open && (m.landT == null || t - m.landT >= 30)) {
+      var best = 99999;
+      MOMENT_COAST_REFS.forEach(function (r) { best = Math.min(best, distanceBetween(n.lat, n.lon, r[0], r[1])); });
+      navInit();
+      var isl = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.islandEdges);
+      if (isl) best = Math.min(best, isl.nm);
+      m.landNm = best; m.landT = t; c.landNm = best;
+    }
+    var calmWind = c.wind <= 4 && c.boatSpeed <= 1.2;
+    streak('clear', c.clear); streak('overcast', c.cloud >= 85 && !c.raining); streak('above', c.above);
+    streak('calm', calmWind); streak('becalmed', c.wind <= 3 && c.boatSpeed <= 0.8 && c.sailUp && !c.engineOn);
+    streak('lightWind', c.wind >= 2 && c.wind <= 6 && c.sailUp && !c.engineOn);
+    streak('gentle', c.sea <= 1 && (c.waveFt == null || c.waveFt <= 2.5)); streak('fog', c.fog);
+    streak('rain', c.raining); streak('heavyRain', c.heavyRain); streak('rainWind', c.raining && c.wind >= 20);
+    streak('headwind', c.wind >= 15 && c.rel <= 50); streak('adverse', c.wind >= 18 && c.rel <= 50); streak('follow', c.wind >= 18 && c.rel >= 135);
+    streak('goodWind', c.wind >= 12 && c.wind <= 24 && c.rel >= 60 && c.boatSpeed >= 3.5 && !c.engineOn);
+    streak('strongWind', c.wind >= 22); streak('rough4', c.sea >= 4); streak('rough5', c.sea >= 5);
+    streak('vrough', c.sea >= 6 || (c.waveFt != null && c.waveFt >= 13)); streak('swell', c.waveFt != null && c.waveFt >= 9 && c.wind <= 15);
+    streak('calmSea', c.sea <= 3); streak('overcastCalm', c.cloud >= 85 && c.wind <= 5 && c.sea <= 1);
+    streak('warm72', c.tempF >= 72); streak('steadyWind', c.wind >= 10 && c.wind <= 20);
+    streak('off', c.open && c.landNm != null && c.landNm >= 60);
+    // wind REGIMES: a different regime has to hold for 30 minutes before it counts as a change
+    var idx = windRegimeIndex(c.wind);
+    if (!m.reg) m.reg = { idx: idx, cand: idx, candSince: t };
+    if (idx !== m.reg.cand) { m.reg.cand = idx; m.reg.candSince = t; }
+    if (m.reg.cand !== m.reg.idx && t - m.reg.candSince >= 30) { c.regChange = { from: m.reg.idx, to: m.reg.cand }; m.reg.idx = m.reg.cand; }
+    // hourly samples
+    if (!m.samp.length || t - m.samp[m.samp.length - 1].t >= 60) { m.samp.push({ t: t, cloud: c.cloud, wind: c.wind, dir: c.windDir, sea: c.sea }); if (m.samp.length > 12) m.samp.shift(); }
+    // a new voyage day: keep the finished day's distance, reset the day's counters
+    if (m.day.n !== c.day) {
+      if (m.day.n) { m.dist.push(m.day.dist); if (m.dist.length > 6) m.dist.shift(); m.roughStreakDays = m.day.roughMin >= 240 ? (m.roughStreakDays || 0) + 1 : 0; }
+      m.day = { n: c.day, count: 0, overMin: 0, lightMin: 0, trouble: 0, dist: 0, rainEps: 0, roughMin: 0 };
+    }
+    m.day.dist = c.distToday;
+    if (c.sea >= 5) m.day.roughMin++;
+    if (c.daytime) { m.day.lightMin++; if (c.cloud >= 85 && !c.raining) m.day.overMin++; }
+    var damaged = ['sails', 'steering', 'engine', 'electrical'].some(function (k) { return state.boat[k] === 'DAMAGED'; });
+    if (c.sea >= 5 || c.w.condition === 'squall' || damaged || state.boat.batteryRecovering) m.day.trouble++;
+    // runs that just ended arm follow-up moments
+    if (E.rain != null) { if (E.rain < 90) m.day.rainEps++; if (E.rain >= 240) m.afterRainArm = t; }
+    if (E.becalmed != null && E.becalmed >= 120) m.windReturnArm = t;
+    if (E.rough5 != null) { if (E.rough5 >= 720) m.moderateArm = t; if (E.rough5 >= 360) m.stormMealArm = t; }
+    // the night's own record, for the morning-after entries
+    if (c.phase === 'dusk' && (!m.night || m.night.id !== c.day)) m.night = { id: c.day, startWind: c.wind, minWind: c.wind, maxSea: c.sea, slept: 0 };
+    if (m.night && (c.phase === 'night' || c.phase === 'dusk')) { m.night.minWind = Math.min(m.night.minWind, c.wind); m.night.maxSea = Math.max(m.night.maxSea, c.sea); if (!c.awake) m.night.slept++; }
+    if (c.phase === 'day' && m.night) m.night = null;
+  }
+  function momentSampleAgo(m, t, minutes) {
+    for (var i = m.samp.length - 1; i >= 0; i--) if (m.samp[i].t <= t - minutes) return m.samp[i];
+    return null;
+  }
+  function momentAfterNight(c, m) { return !!(m.night && c.tod.afterNight); }
+
+  var MOMENTS = [
+    // ---- PUGET SOUND / DEPARTURE ----
+    { id: 'sound-first-view', ms: true, once: true, text: 'Seattle disappeared behind me sooner than I expected.', when: function (c) { return c.wp >= 3 && c.wp <= 6 && !c.fog; } },
+    { id: 'sound-calm-morning', tod: 'morning', p: 0.6, text: 'The Sound was almost flat this morning.', when: function (c) { return c.inSound && c.sea <= 1 && c.wind <= 8; } },
+    { id: 'sound-overcast-morning', tod: 'morning', p: 0.8, text: 'Low clouds sat over the Sound all morning.', when: function (c, m) { return c.inSound && c.snap.minutesSinceSunrise >= 150 && c.st.overcast >= c.snap.minutesSinceSunrise - 30; } },
+    { id: 'sound-light-rain', once: true, text: 'A little rain on the way out. It felt like Seattle seeing me off.', when: function (c, m) { return c.inSound && c.wp >= 2 && c.raining && !c.heavyRain && c.st.rain >= 10; } },
+    { id: 'sound-wind-up', once: true, text: 'The wind picked up once I was clear of the marina.', when: function (c) { return c.inSound && c.wp >= 2 && c.regChange && c.regChange.to > c.regChange.from && c.regChange.to >= 2; } },
+    { id: 'sound-first-sunset', ms: true, once: true, tod: 'sunset', text: 'The first sunset underway. I watched it from the deck.', when: function (c) { return c.inSound && c.above && !c.raining && !c.fog && c.cloud < 70; } },
+    { id: 'first-night-aboard', ms: true, once: true, tod: 'night', text: "First night on Solace. Strange knowing the dock isn't there anymore.", when: function () { return true; } },
+    // ---- STRAIT OF JUAN DE FUCA ----
+    { id: 'strait-headwind', cd: 1440, text: 'The wind came straight down the Strait. Made slow progress.', when: function (c) { return c.inStrait && c.boatSpeed <= 3.5 && c.st.headwind >= 90; } },
+    { id: 'strait-rough', cd: 1440, text: 'The water got rougher as the Strait opened up.', when: function (c) { return c.inStrait && c.wp >= 8 && c.st.rough4 >= 30; } },
+    { id: 'strait-fog', cd: 1440, text: "Couldn't see much beyond Solace today. Kept checking the instruments.", when: function (c) { return c.inStrait && c.st.fog >= 60; } },
+    { id: 'strait-rain', cd: 1440, text: 'Rain most of the day. Everything aboard feels damp.', when: function (c) { return c.inStrait && c.st.rain >= 300; } },
+    { id: 'strait-clear', cd: 1440, text: 'Clear enough to see the mountains for a long time.', when: function (c) { return c.inStrait && c.daytime && c.st.clear >= 120; } },
+    // ---- FIRST OPEN PACIFIC ----
+    { id: 'ocean-coast-gone', ms: true, once: true, text: 'The coast finally disappeared. Just water now.', when: function (c) { return c.open && c.landNm != null && c.landNm >= 60; } },
+    { id: 'ocean-first-night', ms: true, once: true, tod: 'night', text: 'First night without land anywhere around me.', when: function (c, m) { return c.st.off >= 60; } },
+    { id: 'ocean-first-clear-night', once: true, tod: 'night', text: 'More stars than I remember there being.', when: function (c) { return c.st.off >= 60 && c.clear; } },
+    { id: 'ocean-first-calm', once: true, text: 'Almost no wind today. Solace barely moved.', when: function (c) { return c.open && c.st.calm >= 90; } },
+    { id: 'ocean-first-rough', once: true, text: 'The Pacific finally showed some teeth.', when: function (c) { return c.open && c.st.rough5 >= 60; } },
+    { id: 'ocean-first-swell', once: true, text: 'Long swells today. Solace climbed them one at a time.', when: function (c) { return c.open && c.st.swell >= 60; } },
+    { id: 'ocean-first-good-wind', once: true, text: 'Good wind all day. For once I mostly left things alone.', when: function (c) { return c.open && c.st.goodWind >= 480; } },
+    { id: 'ocean-first-high-mileage', once: true, tod: 'sunset', text: 'Covered a lot of water today. It felt good to see the number.', when: function (c) { return c.open && c.distToday >= 120; } },
+    { id: 'ocean-poor-mileage', cd: 2880, tod: 'toEvening', text: "Didn't get very far today. The ocean didn't seem concerned.", when: function (c, m) { return c.open && c.distToday <= 45 && m.dist.length >= 2; } },
+    // ---- GENERAL OPEN-PACIFIC WEATHER ----
+    { id: 'clear-morning', tod: 'morning', p: 0.35, cd: 4320, text: 'Clear this morning. Nothing between here and the horizon.', when: function (c) { return c.open && c.st.clear >= 60; } },
+    { id: 'clear-afternoon', tod: 'afternoon', p: 0.3, cd: 4320, text: 'Blue in every direction today.', when: function (c) { return c.open && c.st.clear >= 90; } },
+    { id: 'very-light-wind', p: 0.6, cd: 2880, text: 'Barely enough wind to fill the sails.', when: function (c) { return c.open && c.st.lightWind >= 120; } },
+    { id: 'becalmed', tod: 'afternoon', cd: 1440, text: 'The sails hung there most of the afternoon. Waited for the wind to come back.', when: function (c) { return c.open && c.st.becalmed >= 150; } },
+    { id: 'wind-returns', cd: 1440, text: "The wind came back. I hadn't realized how much I'd missed it.", when: function (c, m) { return m.windReturnArm != null && c.t - m.windReturnArm <= 120 && c.wind >= 7; } },
+    { id: 'gentle-seas', p: 0.4, cd: 4320, text: 'Easy water today. Solace hardly seemed to notice it.', when: function (c) { return c.open && c.st.gentle >= 180; } },
+    { id: 'warm-clear', p: 0.5, cd: 2880, text: 'Warm enough to stay on deck longer than I meant to.', when: function (c) { return c.open && c.above && c.awake && c.clear && c.daytime && c.tempF >= 78 && c.st.above >= 45; } },
+    { id: 'cool-clear-morning', tod: 'morning', p: 0.6, cd: 2880, text: 'Clear and cold this morning. The air woke me up faster than the coffee.', when: function (c) { return c.open && c.above && c.clear && c.tempF <= 55; } },
+    { id: 'clear-sunset', tod: 'sunset', p: 0.5, cd: 2880, text: 'Watched the sun disappear into the Pacific. Nothing interrupted it.', when: function (c) { return c.open && c.above && c.clear; } },
+    { id: 'clear-dawn', tod: 'dawn', p: 0.5, cd: 2880, text: 'First light came quietly this morning.', when: function (c) { return c.open && c.clear; } },
+    // ---- CLOUDS ----
+    { id: 'clouds-building', tod: 'afternoon', cd: 1440, text: 'Clouds started gathering in the afternoon.', when: function (c, m) { var o = momentSampleAgo(m, c.t, 180); return c.open && o && o.cloud <= 35 && c.cloud >= 70 && !c.raining; } },
+    { id: 'overcast-all-day', tod: 'evening', cd: 1440, text: 'Gray from morning to evening. Hard to tell where the sky ended.', when: function (c, m) { return c.open && m.day.lightMin >= 420 && m.day.overMin / m.day.lightMin >= 0.9; } },
+    { id: 'overcast-calm', cd: 1440, text: 'Gray sky, gray water, hardly any wind. The whole day felt still.', when: function (c) { return c.open && c.st.overcastCalm >= 300; } },
+    { id: 'clearing-near-sunset', tod: 'nearSunset', cd: 1440, text: 'The clouds broke just before sunset. Good timing.', when: function (c, m) { var o = momentSampleAgo(m, c.t, 120); return c.open && o && o.cloud >= 85 && c.cloud <= 45 && !c.raining; } },
+    { id: 'clouds-break', tod: 'farFromSunset', cd: 1440, text: "The clouds opened for a while. I'd forgotten how bright the water could be.", when: function (c, m) { var o = momentSampleAgo(m, c.t, 120); return c.open && o && o.cloud >= 85 && c.cloud <= 45 && !c.raining; } },
+    // ---- RAIN ----
+    { id: 'rain-begins-afternoon', tod: 'afternoon', cd: 1440, text: 'Rain started sometime this afternoon. Nothing serious.', when: function (c) { return c.open && c.raining && !c.heavyRain && c.st.rain >= 5 && c.st.rain <= 90; } },
+    { id: 'intermittent-showers', tod: 'evening', cd: 1440, text: 'Rain came and went all day.', when: function (c, m) { return c.open && m.day.rainEps >= 3; } },
+    { id: 'sustained-rain', cd: 1440, text: 'Rain most of the day. The cabin started to feel very small.', when: function (c) { return c.open && c.st.rain >= 360; } },
+    { id: 'heavy-rain', cd: 1440, text: "Hard rain today. Couldn't see much beyond the bow.", when: function (c) { return c.open && c.st.heavyRain >= 45; } },
+    { id: 'rain-strong-wind', cd: 1440, text: 'Wind and rain together. Spent most of the day keeping an eye on things.', when: function (c) { return c.open && c.st.rainWind >= 90; } },
+    { id: 'rain-ends', cd: 1440, text: 'The rain finally stopped. Everything smelled clean afterward.', when: function (c) { return c.open && c.ended.rain != null && c.ended.rain >= 120; } },
+    { id: 'first-sun-after-rain', cd: 1440, text: 'Sun for the first time in a while. I stood outside longer than necessary.', when: function (c, m) { return m.afterRainArm != null && c.t - m.afterRainArm <= 720 && c.above && c.awake && c.daytime && !c.raining && c.cloud <= 60; } },
+    // ---- WIND ----
+    { id: 'wind-builds', tod: 'afternoon', cd: 1440, text: 'The wind built through the afternoon.', when: function (c) { return c.open && c.regChange && c.regChange.to > c.regChange.from && c.regChange.to >= 2; } },
+    { id: 'wind-eases', tod: 'toEvening', cd: 1440, text: 'The wind eased toward evening. Solace settled with it.', when: function (c) { return c.open && c.regChange && c.regChange.to < c.regChange.from; } },
+    { id: 'strong-following', cd: 1440, text: 'Good wind behind me today. Solace seemed to know where she was going.', when: function (c) { return c.open && c.st.follow >= 180; } },
+    { id: 'strong-adverse', cd: 1440, text: 'Spent most of the day fighting the wind.', when: function (c) { return c.open && c.st.adverse >= 240; } },
+    { id: 'wind-shift', tod: 'afternoon', cd: 1440, text: 'The wind changed its mind this afternoon. Had to change mine too.', when: function (c, m) { var o = momentSampleAgo(m, c.t, 60); return c.open && o && c.wind >= 10 && angleDiffDeg(o.dir, c.windDir) >= 70 && c.s.nav.sailTrimState === 'needsTrim'; } },
+    { id: 'reef-worthy', cd: 2880, text: 'Put less sail up today. It was the right decision.', when: function (c) { return c.open && c.st.strongWind >= 90 && !c.engineOn && (c.s.boat.sailConfig === 'reefed' || c.s.boat.sailConfig === 'minimal'); } },
+    { id: 'wind-dies-overnight', tod: 'afterNight', cd: 1440, text: 'The wind disappeared sometime during the night.', when: function (c, m) { return c.open && momentAfterNight(c, m) && m.night.startWind >= 10 && m.night.minWind <= 3 && c.wind <= 6; } },
+    { id: 'wind-arrives-overnight', cd: 1440, text: 'Woke to Solace moving differently. The wind had come back.', when: function (c, m) { return c.open && m.lastWake && c.t - m.lastWake.t <= 10 && m.lastWake.len >= 120 && m.lastWake.windThen != null && m.lastWake.windThen <= 4 && c.wind >= 10; } },
+    // ---- ROUGH WATER ----
+    { id: 'seas-rough', tod: 'afternoon', cd: 1440, text: 'The sea got rough in the afternoon. Moving around below took some thought.', when: function (c, m) { var o = momentSampleAgo(m, c.t, 180); return c.open && c.st.rough4 >= 60 && o && o.sea <= 3; } },
+    { id: 'very-rough', cd: 1440, text: 'Big water today. Solace handled it better than I did.', when: function (c) { return c.open && c.st.vrough >= 60; } },
+    { id: 'rough-night', tod: 'afterNight', cd: 1440, text: 'Rough night. Slept when I could.', when: function (c, m) { return c.open && momentAfterNight(c, m) && m.night.maxSea >= 5 && m.night.slept >= 60; } },
+    { id: 'heavy-weather-persists', cd: 2880, text: 'Another day of rough water. Everything takes longer this way.', when: function (c, m) { return c.open && c.sea >= 5 && m.roughStreakDays >= 1 && m.day.roughMin >= 240; } },
+    { id: 'weather-moderates', cd: 2880, text: 'The sea settled down today. The quiet afterward felt strange.', when: function (c, m) { return m.moderateArm != null && c.t - m.moderateArm <= 1440 && c.st.calmSea >= 60; } },
+    // ---- VOYAGE PROGRESS ----
+    { id: 'first-full-day-no-land', ms: true, once: true, text: 'A whole day without seeing land.', when: function (c) { return c.st.off >= 1440; } },
+    { id: 'several-days-offshore', ms: true, once: true, text: "I'm starting to forget what standing still feels like.", when: function (c) { return c.st.off >= 4320; } },
+    { id: 'progress-25', ms: true, once: true, text: 'Seattle feels very far away now. Kaua\u02BBi still does too.', when: function (c) { return c.open && c.progress >= 0.25; } },
+    { id: 'progress-50', ms: true, once: true, text: 'Somewhere around halfway today. Too far to go back. Still a long way forward.', when: function (c) { return c.open && c.progress >= 0.5; } },
+    { id: 'furthest-from-land', ms: true, once: true, text: 'Nothing nearby in any direction. I tried not to think about the size of that.', when: function (c) { return c.open && c.landNm != null && c.landNm >= 700; } },
+    { id: 'routine-day', tod: 'evening', p: 0.5, cd: 5760, text: "Nothing much happened today. I think I'm starting to like days like that.", when: function (c, m) { return c.open && c.st.off >= 4320 && m.day.trouble === 0 && m.day.count === 0; } },
+    { id: 'good-progress-days', cd: 4320, text: "We've been making good time. I don't want to say it too loudly.", when: function (c, m) { return c.open && m.dist.length >= 3 && m.dist.slice(-3).every(function (d) { return d >= 110; }); } },
+    // ---- APPROACHING HAWAI'I ----
+    { id: 'warmer-first', once: true, text: 'Warmer today. First time the air felt different.', when: function (c) { return c.open && c.st.warm72 >= 360; } },
+    { id: 'warm-night-first', once: true, tod: 'night', text: 'Warm tonight. Left the hatch open longer than usual.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.tempF >= 70 && c.hatchOpen; } },
+    { id: 'warmer-region', ms: true, once: true, text: "Something about the air has changed. Kaua\u02BBi still isn't visible, but it feels closer.", when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.tempF >= 68; } },
+    { id: 'steady-warm-wind', p: 0.5, cd: 4320, text: 'Steady wind today. Warm and easy.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.daytime && c.tempF >= 72 && c.st.steadyWind >= 240; } },
+    { id: 'tropical-shower', tod: 'afternoon', cd: 1440, text: 'Warm rain this afternoon. Over almost as soon as it started.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.tempF >= 72 && c.ended.rain != null && c.ended.rain >= 5 && c.ended.rain <= 45; } },
+    { id: 'clear-warm-night', tod: 'night', p: 0.6, cd: 2880, text: 'Warm, clear night. Stayed above for a while.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.clear && c.tempF >= 70 && c.above && c.st.above >= 30; } },
+    { id: 'under-100', ms: true, once: true, text: 'Under a hundred miles now. For the first time, that sounds close.', when: function (c) { return c.open && c.distDest <= 100; } },
+    { id: 'under-50', ms: true, once: true, text: "Fifty miles to go. I kept checking the distance even though I knew it hadn't changed much.", when: function (c) { return c.open && c.distDest <= 50; } },
+    // ---- KAUA'I ----
+    { id: 'kauai-grows', ms: true, once: true, tod: 'daytime', text: 'The island looked bigger every time I checked.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 14 && c.distDest > 8 && !c.fog && !c.heavyRain; } },
+    { id: 'kauai-smell', ms: true, once: true, text: 'The air smelled different today. Soil and plants underneath the salt.', when: function (c) { return c.distDest <= 8 && c.distDest > 2.5 && !c.raining && angleDiffDeg(c.windDir, bearingBetween(c.n.lat, c.n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) <= 55 && c.wind >= 4; } },
+    { id: 'kauai-evening', ms: true, once: true, tod: 'evening', text: 'Kaua\u02BBi stayed on the horizon as the light went down.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 25 && !c.fog; } },
+    { id: 'kauai-night', ms: true, once: true, tod: 'night', text: 'Land somewhere ahead in the dark. Close now.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 20; } },
+    { id: 'kauai-dawn', ms: true, once: true, tod: 'afterNight', text: 'Kaua\u02BBi came back with the morning light.', when: function (c, m) { return m.fired['kauai-night'] != null && c.distDest <= 25 && c.cloud <= 85 && !c.fog; } },
+    // ---- N\u0100WILIWILI APPROACH (increasingly restrained: the final story is about to take over) ----
+    { id: 'approach-20', ms: true, once: true, text: 'Kaua\u02BBi ahead. No mistaking it now.', when: function (c) { return c.distDest <= 20 && c.daytime && !c.fog; } },
+    { id: 'approach-10', ms: true, once: true, text: 'Close enough to make out the shape of the coast.', when: function (c) { return c.distDest <= 10 && c.daytime && !c.fog && !c.heavyRain; } },
+    { id: 'approach-5', ms: true, once: true, text: 'N\u0101wiliwili ahead. Almost there.', when: function (c) { if (c.distDest > 15 || c.s.finale.phase !== 'none') return false; navInit(); return navPointInRing(navGeoLon(c.n.lon), c.n.lat, NAV.approach); } },
+    // ---- environmental facts the game did not track when this library was first written: now it does ----
+    { id: 'strait-both-sides', ms: true, once: true, tod: 'daytime', topic: 'land',
+      // the western half of the Strait (Strait Mid -> Strait West): both shores are within a few miles and Cape Flattery is the next thing ahead
+      when: function (c) { return c.wp >= 8 && c.wp <= 10 && c.n.lat >= 48.1 && c.n.lat <= 48.5 && c.n.lon >= -124.35 && c.n.lon <= -123.4 && !c.fog && !c.heavyRain; },
+      text: "Land on both sides today. It won't stay that way for long." },
+    { id: 'kauai-mountains', ms: true, once: true, tod: 'daytime', topic: 'land',
+      // later than the first sighting (15+ minutes, inside 18 nm), with cloud actually present but not a total grey-out
+      when: function (c, m) { return c.s.flags.landOnHorizonShown && m.firstSightT != null && c.t - m.firstSightT >= 15 && c.distDest <= 18 && c.cloud >= 40 && c.cloud <= 90 && !c.fog && !c.raining; },
+      text: 'Clouds hanging over the mountains. I could finally see where I was going.' },
+    { id: 'no-vessel-in-a-while', ms: true, once: true,
+      // only after the traffic system was genuinely ACTIVE and ELIGIBLE: 3+ days offshore, 15+ hours of daylight above deck with decent visibility
+      // in water where a ship is possible, and no sighting for 3+ days. Never "nothing happened to roll" -- an actual stretch of looking.
+      when: function (c, m) { return c.open && c.st.off >= 4320 && m.enc.vesselElig >= 900 && (m.enc.lastVesselT == null || c.t - m.enc.lastVesselT >= 4320) && (c.encRegion === 'pacific' || c.encRegion === 'mid'); },
+      text: "I haven't seen another boat in a while." },
+  ];
+
+  // What each moment is ABOUT, so the ambient stream stays quiet about a topic a moment just covered (and the moments wait if an ambient line just did).
+  var MOMENT_TOPICS = {
+    'sound-first-sunset': 'sunset', 'clear-sunset': 'sunset', 'clearing-near-sunset': 'sunset', 'clear-dawn': 'dawn', 'ocean-first-clear-night': 'stars',
+    'strait-fog': 'fog', 'sound-calm-morning': 'calm', 'gentle-seas': 'calm', 'ocean-first-calm': 'calm',
+    'sound-overcast-morning': 'cloud', 'clouds-building': 'cloud', 'overcast-all-day': 'cloud', 'overcast-calm': 'cloud', 'clouds-break': 'cloud',
+    'sound-light-rain': 'rain', 'strait-rain': 'rain', 'rain-begins-afternoon': 'rain', 'intermittent-showers': 'rain', 'sustained-rain': 'rain', 'heavy-rain': 'rain',
+    'rain-strong-wind': 'rain', 'rain-ends': 'rain', 'first-sun-after-rain': 'rain', 'tropical-shower': 'rain',
+    'strait-rough': 'sea', 'ocean-first-rough': 'sea', 'ocean-first-swell': 'sea', 'seas-rough': 'sea', 'very-rough': 'sea', 'rough-night': 'sea', 'heavy-weather-persists': 'sea', 'weather-moderates': 'sea',
+    'warm-clear': 'temp', 'cool-clear-morning': 'temp', 'warmer-first': 'temp', 'warm-night-first': 'temp', 'warmer-region': 'temp', 'clear-warm-night': 'temp', 'steady-warm-wind': 'temp',
+    'ocean-coast-gone': 'land', 'under-100': 'land', 'under-50': 'land', 'kauai-grows': 'land', 'kauai-smell': 'land', 'kauai-evening': 'land', 'kauai-night': 'land', 'kauai-dawn': 'land',
+    'approach-20': 'land', 'approach-10': 'land', 'approach-5': 'land',
+  };
+  MOMENTS.forEach(function (mo) { if (!mo.topic && MOMENT_TOPICS[mo.id]) mo.topic = MOMENT_TOPICS[mo.id]; });
+
+  function momentsActive(state) {
+    if (state.finale && state.finale.phase !== 'none') return false;       // the final story owns the log from here
+    if (state.voyageEnd && state.voyageEnd.phase !== 'none') return false;
+    if (state.departure.stageIndex < DEPARTURE_STEPS.length) return false; // still in the opening sequence
+    return true;
+  }
+
+  // Called once per simulation tick (after the other narration checks).
+  /* ----------------------------------------------------------------
+     ENCOUNTERS -- WILDLIFE AND OTHER VESSELS
+
+     Atmosphere only. Nothing here asks the player for anything, interrupts a control, gives a reward, or touches sailing, weather or survival.
+     An encounter is a short sighting the protagonist notices from the deck and writes down. Each one has a real DURATION and is logged when
+     it ENDS, so a line that describes an outcome ("they left without saying goodbye", "gone a few hours later") is only used when that outcome
+     actually happened -- an encounter cut short (she goes below, falls asleep, the weather closes in) drops the outcome wording or is not written.
+
+     What decides whether something can happen: the REGION (from position -- see encRegion), time of day (the real daylight phase), weather,
+     visibility (fog, heavy rain), sea state, whether she is on deck and awake, and per-kind rarity + cooldowns. A rate is a chance per HOUR of
+     eligible time; it is rolled each simulated minute. NO new encounter starts during an offline catch-up (she was not on deck to see it).
+     The existing marlin (a real fishing event) is NOT part of this -- there is no second, random marlin.
+
+     State (flags.moments.enc, tolerant of old saves): act = the sighting in progress; recent = the last sighting that was written (so a later
+     OBSERVE could refer to it); last/lastW/lastV = cooldown clocks; day = today's counts; birdsNear = recent seabird sightings inside 400 nm of
+     Kaua\u02BBi; vesselElig = minutes spent genuinely able to see a ship since the last one; lastVesselT.
+     ---------------------------------------------------------------- */
+  var ENC_MAX_PER_DAY = 2;               // wildlife + traffic together, per voyage day
+  var ENC_WILDLIFE_GAP_MINUTES = 300;    // between any two wildlife sightings
+  var ENC_VESSEL_GAP_MINUTES = 360;      // between any two vessel sightings (240 in the Sound / Strait, where traffic is ordinary)
+  var ENC_SECOND_OF_KIND_CHANCE = 0.15;  // a second wildlife (or vessel) sighting inside one day is allowed this often
+
+  // Chance per HOUR of eligible time, by region. Missing = impossible there.
+  var ENC_RATE = {
+    seabird:     { sound: 0.28, strait: 0.26, offCoast: 0.11, pacific: 0.035, mid: 0.02, hawaiiFar: 0.07, hawaiiNear: 0.20 },
+    dolphin:     { sound: 0.015, strait: 0.025, offCoast: 0.02, pacific: 0.007, mid: 0.005, hawaiiFar: 0.012, hawaiiNear: 0.025 },
+    whaleFar:    { sound: 0.012, strait: 0.018, offCoast: 0.02, pacific: 0.005, mid: 0.003, hawaiiFar: 0.004, hawaiiNear: 0.006 },
+    whaleNear:   { sound: 0.003, strait: 0.005, offCoast: 0.006, pacific: 0.0015, mid: 0.0009, hawaiiFar: 0.001, hawaiiNear: 0.0018 }, // ~25-30% of the distant-whale rate everywhere: a close whale is the rarest sighting there is
+    turtle:      { hawaiiFar: 0.012, hawaiiNear: 0.03 },
+    flyingFish:  { pacific: 0.04, mid: 0.05, hawaiiFar: 0.07, hawaiiNear: 0.07 },
+    biolum:      { offCoast: 0.01, pacific: 0.02, mid: 0.025, hawaiiFar: 0.03, hawaiiNear: 0.02 },
+    local:       { sound: 0.35 },
+    freighter:   { sound: 0.06, strait: 0.22, offCoast: 0.10, pacific: 0.010, mid: 0.003, hawaiiFar: 0.020, hawaiiNear: 0.06 },
+    distantShip: { strait: 0.03, offCoast: 0.05, pacific: 0.010, mid: 0.004, hawaiiFar: 0.02, hawaiiNear: 0.05 },
+    fishing:     { strait: 0.06, offCoast: 0.06, pacific: 0.003, hawaiiFar: 0.008, hawaiiNear: 0.05 },
+    sailboat:    { sound: 0.04, strait: 0.025, offCoast: 0.004, pacific: 0.002, mid: 0.0015, hawaiiFar: 0.003, hawaiiNear: 0.012 },
+  };
+  var ENC_WARM_F = 72;                   // flying fish and turtles are warm-water animals
+
+  function encBase(c) { return c.awake && c.above && c.w.condition !== 'squall' && c.sea <= 4 && c.wind < 28; } // on deck, awake, no severe weather
+  function encSeen(c) { return c.daytime && !c.fog && !c.heavyRain; }   // anything spotted at a distance needs daylight and some visibility
+  function encOffHarbor(c) { return c.distDest > 12; }                  // never in the way of the scripted arrival
+  function encRateOf(key, c) { var r = ENC_RATE[key][c.encRegion]; return r > 0 ? r : 0; }
+  function pickEncText(m, id, opts) {
+    if (!opts.length) return null;
+    var last = m.enc.lastText[id], pool = opts.filter(function (t) { return t !== last; });
+    if (!pool.length) pool = opts;
+    var t = pool[Math.floor(Math.random() * pool.length)];
+    m.enc.lastText[id] = t;
+    return t;
+  }
+
+  var ENC_LINES = {
+    birdFollow: 'A bird followed Solace for a while today. I wondered where it planned to go.',
+    birdOne: 'Saw one bird this afternoon. Strange how much company one bird can be.',
+    birdsAround: 'Birds around the boat today. Land is still nowhere close.',
+    birdsMore: 'More birds today. I started looking at the horizon differently.',
+    dolphins: 'Dolphins came alongside for a while. They left without saying goodbye.',
+    flyMorning: 'Found a flying fish on deck this morning. Bad luck for him.',
+    flyNeutral: 'Found a flying fish on deck. Bad luck for him.',
+    whaleFar: 'Saw a whale breathe in the distance. Then nothing.',
+    whaleNear: 'A whale surfaced close enough that I stopped what I was doing.',
+    turtle: 'Saw a turtle today, moving along like it had somewhere to be.',
+    biolum: 'The wake was glowing tonight. I stayed up to watch it.',
+    local: 'More boats around today. The Sound felt busy after the quiet of the marina.',
+    freighterA: 'A freighter passed in the distance.',
+    freighterB: 'Watched a container ship work its way across the horizon.',
+    shipGone: 'Saw a ship on the horizon today. Gone a few hours later.',
+    shipFirst: "A ship appeared on the horizon. First one I've seen in a while.",
+    shipFar: 'Passed a ship far off today. We never got close.',
+    shipMidToday: 'Saw another ship today. Strange how reassuring that was.',
+    shipMidAfternoon: "A ship on the horizon this afternoon. For a while I wasn't the only one out here.",
+    shipMidFar: 'Spotted a ship far off. It disappeared before long.',
+    fishing: 'Saw a fishing boat in the distance today.',
+    sailboat: 'Saw another sailboat today. We were too far apart to make much of each other.',
+  };
+
+  // `rate(c)` doubles as the eligibility test (0 = cannot happen here and now). `still(c)` is what must STAY true for it to continue.
+  // `text(c, a, m)` runs when it ends: c = the context NOW (time words are judged against this), a = the sighting (a.dur minutes, a.natural =
+  // it ran its course rather than being cut short, a.flock).
+  var ENCOUNTERS = [
+    { id: 'seabird', cat: 'wildlife', topic: 'bird', dur: [20, 150], minLog: 15,
+      rate: function (c) { return encBase(c) && c.daytime && !c.heavyRain ? encRateOf('seabird', c) : 0; },
+      cd: function (c) { return c.encRegion === 'hawaiiNear' ? 360 : c.encRegion === 'hawaiiFar' ? 540 : 720; },
+      still: function (c) { return c.daytime && !c.heavyRain; },
+      text: function (c, a, m) {
+        var o = [];
+        if (!a.flock && a.dur >= 20 && c.daytime) o.push(ENC_LINES.birdFollow);
+        if (!a.flock && c.tod.afternoon) o.push(ENC_LINES.birdOne);
+        if (a.flock && c.daytime && c.distDest > 150 && c.landNm != null && c.landNm >= 60) o.push(ENC_LINES.birdsAround);
+        return pickEncText(m, 'seabird', o);
+      } },
+    { id: 'dolphin', cat: 'wildlife', topic: 'dolphin', dur: [8, 35], minLog: 8,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 ? encRateOf('dolphin', c) : 0; },
+      cd: function () { return 4320; }, still: function (c) { return encSeen(c); },
+      text: function (c, a) { return a.natural ? ENC_LINES.dolphins : null; } },
+    { id: 'whaleFar', cat: 'wildlife', topic: 'whale', dur: [2, 6], minLog: 2,
+      rate: function (c) { return encBase(c) && encSeen(c) && !c.raining && c.sea <= 3 ? encRateOf('whaleFar', c) : 0; },
+      cd: function () { return 4320; }, still: function (c) { return encSeen(c) && !c.raining; },
+      text: function (c, a) { return a.natural ? ENC_LINES.whaleFar : null; } },
+    { id: 'whaleNear', cat: 'wildlife', topic: 'whale', dur: [4, 20], minLog: 4,
+      rate: function (c) { return encBase(c) && encSeen(c) && !c.raining ? encRateOf('whaleNear', c) : 0; },
+      cd: function () { return 8640; }, still: function (c) { return encSeen(c); },
+      text: function () { return ENC_LINES.whaleNear; } },
+    { id: 'turtle', cat: 'wildlife', topic: 'turtle', dur: [2, 5], minLog: 2,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 && c.tempF >= ENC_WARM_F && c.distDest <= 500 ? encRateOf('turtle', c) : 0; },
+      cd: function () { return 2880; }, still: function (c) { return encSeen(c); },
+      text: function (c) { return c.daytime ? ENC_LINES.turtle : null; } },
+    { id: 'flyingFish', cat: 'wildlife', topic: 'flyingfish', dur: [0, 0], minLog: 0,
+      // found on deck, so it is an instant event; far likelier to be found in the morning (they land during the night)
+      rate: function (c) { return encBase(c) && c.daytime && !c.heavyRain && c.tempF >= ENC_WARM_F && c.distDest <= 1500 ? encRateOf('flyingFish', c) * (c.tod.morning ? 2 : 0.5) : 0; },
+      cd: function () { return 2160; }, still: function (c) { return c.daytime; },
+      text: function (c) { return c.tod.morning ? ENC_LINES.flyMorning : ENC_LINES.flyNeutral; } },
+    { id: 'biolum', cat: 'wildlife', topic: 'biolum', dur: [20, 90], minLog: 15,
+      // the real NIGHT phase only, well before dawn, underway (there has to be a wake), calm enough to watch it, open water. No moon is simulated and none is claimed.
+      rate: function (c) { return encBase(c) && c.open && c.tod.night && c.snap.minutesToSunrise > 120 && !c.raining && c.sea <= 3 && c.wind <= 20 && c.boatSpeed >= 1.5 ? encRateOf('biolum', c) : 0; },
+      cd: function () { return 5760; }, still: function (c) { return c.tod.night && c.snap.minutesToSunrise > 35 && !c.raining && c.boatSpeed >= 1; },
+      text: function (c) { return c.tod.night ? ENC_LINES.biolum : null; } },
+    { id: 'local', cat: 'vessel', topic: 'ship', dur: [60, 240], minLog: 30,
+      rate: function (c) { return encBase(c) && encSeen(c) ? encRateOf('local', c) : 0; },
+      cd: function () { return 99999999; }, still: function (c) { return encSeen(c); },
+      text: function (c) { return c.daytime ? ENC_LINES.local : null; } },
+    { id: 'freighter', cat: 'vessel', topic: 'ship', dur: [40, 180], minLog: 20,
+      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('freighter', c) : 0; },
+      cd: function () { return 720; }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { var o = []; if (a.natural) { o.push(ENC_LINES.freighterA); if (a.dur >= 40) o.push(ENC_LINES.freighterB); } return pickEncText(m, 'freighter', o); } },
+    { id: 'distantShip', cat: 'vessel', topic: 'ship', dur: [90, 300], minLog: 30,
+      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('distantShip', c) : 0; },
+      cd: function () { return 1440; }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) {
+        var o = [];
+        if (c.encRegion === 'mid') { // the genuinely rare mid-ocean sighting
+          if (c.daytime) o.push(ENC_LINES.shipMidToday);
+          if (c.tod.afternoon && a.natural && a.dur >= 30) o.push(ENC_LINES.shipMidAfternoon);
+          if (a.natural && a.dur <= 90) o.push(ENC_LINES.shipMidFar);
+        } else {
+          if (c.daytime && a.natural && a.dur >= 120) o.push(ENC_LINES.shipGone);
+          if ((a.prevVesselT == null || a.startT - a.prevVesselT >= 2880) && (c.encRegion !== 'strait' && c.encRegion !== 'sound')) o.push(ENC_LINES.shipFirst);
+          if (c.daytime && a.natural) o.push(ENC_LINES.shipFar);
+        }
+        return pickEncText(m, 'distantShip', o);
+      } },
+    { id: 'fishing', cat: 'vessel', topic: 'ship', dur: [30, 150], minLog: 20,
+      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('fishing', c) : 0; },
+      cd: function () { return 2160; }, still: function (c) { return encSeen(c); },
+      text: function (c) { return c.daytime ? ENC_LINES.fishing : null; } },
+    { id: 'sailboat', cat: 'vessel', topic: 'ship', dur: [30, 120], minLog: 20,
+      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('sailboat', c) : 0; },
+      cd: function () { return 4320; }, still: function (c) { return encSeen(c); },
+      text: function (c) { return c.daytime ? ENC_LINES.sailboat : null; } },
+  ];
+  var ENC_BY_ID = {}; ENCOUNTERS.forEach(function (e) { ENC_BY_ID[e.id] = e; });
+
+  function encMemory(m) {
+    if (!m.enc || typeof m.enc !== 'object') m.enc = {};
+    var E = m.enc;
+    if (E.act === undefined) E.act = null;
+    if (!E.last) E.last = {};
+    if (E.lastW === undefined) E.lastW = null;
+    if (E.lastV === undefined) E.lastV = null;
+    if (!E.day) E.day = { n: 0, w: 0, v: 0 };
+    if (!E.birdsNear) E.birdsNear = [];
+    if (!E.lastText) E.lastText = {};
+    if (!(E.vesselElig >= 0)) E.vesselElig = 0;
+    if (E.lastVesselT === undefined) E.lastVesselT = null;
+    if (E.recent === undefined) E.recent = null;
+    return E;
+  }
+
+  function startEncounter(state, c, m, def, opts) {
+    opts = opts || {};
+    var E = m.enc;
+    var d = opts.dur != null ? opts.dur : def.dur[0] + Math.floor(Math.random() * (def.dur[1] - def.dur[0] + 1));
+    if (E.day.n !== c.day) E.day = { n: c.day, w: 0, v: 0 };
+    // a flock only where "land is still nowhere close" can honestly be said
+    var flock = def.id === 'seabird' && c.landNm != null && c.landNm >= 60 && c.distDest > 150 && Math.random() < 0.3;
+    E.act = { id: def.id, startT: c.t, endT: c.t + d, flock: flock, prevVesselT: E.lastVesselT, forced: !!opts.forced };
+    if (def.cat === 'wildlife') E.day.w++; else { E.day.v++; E.lastVesselT = c.t; E.vesselElig = 0; }
+    if (d <= 0) { var a = E.act; E.act = null; finishEncounter(state, c, m, a, def); }
+  }
+
+  function finishEncounter(state, c, m, a, def, silent) {
+    var E = m.enc;
+    a.dur = Math.max(0, c.t - a.startT);
+    a.natural = c.t >= a.endT;
+    E.last[def.id] = c.t;
+    if (def.cat === 'wildlife') E.lastW = c.t; else E.lastV = c.t;
+    if (silent || a.dur < def.minLog) return; // asleep (nothing is written while asleep) or too brief to have been noticed properly
+    var text = def.text(c, a, m);
+    if (def.id === 'seabird' && text && c.distDest <= 400) {
+      // approaching Hawai\u02BBi: the second qualifying sighting inside two days is "more birds" -- ONE entry, in place of the ordinary bird line
+      E.birdsNear.push(c.t); if (E.birdsNear.length > 4) E.birdsNear.shift();
+      var n = E.birdsNear.length;
+      if (n >= 2 && c.t - E.birdsNear[n - 2] <= 2880 && m.fired['more-birds'] == null && c.daytime) { text = ENC_LINES.birdsMore; m.fired['more-birds'] = c.t; }
+    }
+    if (!text) return;
+    log(state, text);
+    E.recent = { id: def.id, cat: def.cat, topic: def.topic, startT: a.startT, endT: c.t, dur: a.dur, text: text };
+    m.topicAt[def.topic] = c.t;
+    m.day.count++; // counts toward the day's budget, so an ordinary moment yields to it -- but is never blocked by that budget
+  }
+
+  function tickEncounters(state, c, m) {
+    var E = encMemory(m), t = c.t;
+    if (E.day.n !== c.day) E.day = { n: c.day, w: 0, v: 0 };
+    // time spent genuinely able to see a ship, for the "haven't seen another boat" moment
+    if (c.open && c.awake && c.above && encSeen(c) && encOffHarbor(c)) E.vesselElig++;
+    if (E.act) { // one at a time
+      var a = E.act, def = ENC_BY_ID[a.id];
+      if (!def) { E.act = null; return; }
+      if (t >= a.endT || !c.awake || !c.above || !def.still(c)) { E.act = null; finishEncounter(state, c, m, a, def, !c.awake); }
+      return;
+    }
+    if (inCatchUpPass) return;                 // she was not on deck for the time that went by offline
+    if (!c.awake || !c.above) return;
+    if (E.day.w + E.day.v >= ENC_MAX_PER_DAY) return;
+    var order = ENCOUNTERS.slice().sort(function () { return Math.random() - 0.5; });
+    for (var i = 0; i < order.length; i++) {
+      var d = order[i], r = d.rate(c, m);
+      if (!(r > 0)) continue;
+      if (d.cat === 'wildlife') {
+        if (E.lastW != null && t - E.lastW < ENC_WILDLIFE_GAP_MINUTES) continue;
+        if (E.day.w >= 1 && Math.random() >= ENC_SECOND_OF_KIND_CHANCE) continue;
+      } else {
+        if (E.lastV != null && t - E.lastV < ((c.encRegion === 'sound' || c.encRegion === 'strait') ? 240 : ENC_VESSEL_GAP_MINUTES)) continue;
+        if (E.day.v >= 1 && Math.random() >= ENC_SECOND_OF_KIND_CHANCE) continue;
+      }
+      if (E.last[d.id] != null && t - E.last[d.id] < d.cd(c)) continue;
+      if (Math.random() < r / 60) { startEncounter(state, c, m, d); return; }
+    }
+  }
+
+  // First sight of Kaua\u02BBi under cloud: the glimpse is written a few minutes after it happened, once it has "disappeared again".
+  function flushKauaiGlimpse(state, c, m) {
+    var g = m.glimpse;
+    if (!g || !c.awake || c.t < g.due) return;
+    m.glimpse = null;
+    log(state, (c.cloud >= 50 && c.daytime) ? 'Saw Kaua\u02BBi between the clouds for a moment. Then it disappeared again.' : 'Land on the horizon.');
+    m.fired['kauai-glimpse'] = c.t; m.topicAt.land = c.t; m.day.count++;
+  }
+
+  // Developer / test hook. Nothing here runs unless called, and forcing a sighting never changes the normal probabilities.
+  //   landfallEncounters.list()            the kinds        .eligible('dolphin')   would it be allowed here and now?
+  //   landfallEncounters.force('dolphin')  start one now (refused if the real conditions don't allow it; {override:true} skips that check, {minutes:n} sets the length)
+  //   landfallEncounters.report()          what is happening / happened        .clear()   drop the one in progress
+  window.landfallEncounters = {
+    list: function () { return ENCOUNTERS.map(function (e) { return e.id; }); },
+    eligible: function (id) {
+      if (!GAME || !ENC_BY_ID[id]) return null;
+      var m = momentMemory(GAME); encMemory(m);
+      return ENC_BY_ID[id].rate(momentContext(GAME, m), m) > 0;
+    },
+    force: function (id, opts) {
+      opts = opts || {};
+      if (!GAME || !ENC_BY_ID[id]) { console.warn("landfallEncounters.force('" + ENCOUNTERS.map(function (e) { return e.id; }).join("' | '") + "', {override, minutes})"); return { ok: false, why: 'unknown kind' }; }
+      var m = momentMemory(GAME), E = encMemory(m), c = momentContext(GAME, m), def = ENC_BY_ID[id];
+      if (E.act) return { ok: false, why: 'one is already in progress' };
+      if (!opts.override && !(def.rate(c, m) > 0)) return { ok: false, why: 'the real conditions here and now do not allow it' };
+      startEncounter(GAME, c, m, def, { forced: true, dur: opts.minutes });
+      if (!uiBusy) flushNewLogEntries(GAME);
+      return { ok: true, endsAfterMinutes: E.act ? E.act.endT - c.t : 0 };
+    },
+    report: function () {
+      if (!GAME) return null;
+      var m = momentMemory(GAME), E = encMemory(m);
+      return { region: momentContext(GAME, m).encRegion, inProgress: E.act, recent: E.recent, today: E.day, lastVesselMinutesAgo: E.lastVesselT == null ? null : GAME.meta.voyageMinutes - E.lastVesselT, vesselEligibleMinutes: E.vesselElig };
+    },
+    clear: function () { if (GAME) { var m = momentMemory(GAME); encMemory(m).act = null; } },
+  };
+
+  function checkMoments(state) {
+    if (!momentsActive(state)) return;
+    var m = momentMemory(state), c = momentContext(state, m);
+    trackMoments(state, c, m);
+    tickEncounters(state, c, m);      // wildlife / traffic: ends one in progress (and writes it), or maybe starts one
+    flushKauaiGlimpse(state, c, m);
+    if (!c.awake) return; // the diary is only written awake; the trackers above keep running
+    var ordinaryOk = m.day.count < MOMENT_MAX_PER_DAY && (m.lastOrdAt == null || c.t - m.lastOrdAt >= MOMENT_MIN_GAP_MINUTES);
+    for (var i = 0; i < MOMENTS.length; i++) {
+      var mo = MOMENTS[i];
+      if (mo.once && m.fired[mo.id] != null) continue;
+      if (!mo.ms && !ordinaryOk) continue;
+      if (mo.cd && m.fired[mo.id] != null && c.t - m.fired[mo.id] < mo.cd) continue;
+      if (mo.topic && m.ambAt[mo.topic] != null && c.t - m.ambAt[mo.topic] < 240) continue; // an ambient line just covered this -- wait, don't say it twice
+      if (mo.tod && !c.tod[mo.tod]) continue;
+      var ok = false;
+      try { ok = !!mo.when(c, m); } catch (e) { ok = false; }
+      if (!ok) continue;
+      if (mo.p != null && mo.p < 1) { // a chance, rolled ONCE per voyage day for this moment -- and only once everything else about it is true
+        if (m.rolled[mo.id] === c.day) continue;
+        m.rolled[mo.id] = c.day;
+        if (Math.random() >= mo.p) continue;
+      }
+      log(state, typeof mo.text === 'function' ? mo.text(c) : mo.text);
+      m.fired[mo.id] = c.t;
+      if (mo.topic) m.topicAt[mo.topic] = c.t;
+      m.day.count++; // milestones are never blocked by the cap, but they use up the day's budget -- ordinary moments yield
+      if (!mo.ms) { m.lastOrdAt = c.t; ordinaryOk = false; } // one ordinary moment per spacing window, never two in the same tick
+      else if (m.day.count >= MOMENT_MAX_PER_DAY) ordinaryOk = false;
+    }
+  }
+
+  // The first sight of Kaua'i is an EXISTING event (nav.flags.landOnHorizonShown); this only chooses its wording, from what the sky and clock can back.
+  function firstSightOfKauaiLine(state) {
+    var m = momentMemory(state), c = momentContext(state, m);
+    if (c.distDest <= 40 && c.daytime && !c.fog && !c.raining) {
+      if (c.cloud <= 60) { // a clear view
+        if (c.tod.morning) return 'Land on the horizon this morning. Kaua\u02BBi.';
+        return 'Kaua\u02BBi appeared on the horizon today. Smaller than I imagined.';
+      }
+      if (c.cloud >= 65 && c.cloud <= 95) { // real cloud, but not a total grey-out or rain: she catches it between the clouds, then it closes up again.
+        m.glimpse = { t: c.t, due: c.t + 3 + Math.floor(Math.random() * 8) }; // ...written a few minutes later (flushKauaiGlimpse), when that is true
+        return null;
+      }
+    }
+    return 'Land on the horizon.'; // the existing line, unchanged, whenever the sky / time of day can't support the fuller wording
+  }
+
+  // Wake-up and meal hooks (called from the actions themselves).
+  function momentNoteWake(state, minutesAsleep) {
+    var m = momentMemory(state), t = state.meta.voyageMinutes, start = t - minutesAsleep, then = null;
+    for (var i = m.samp.length - 1; i >= 0; i--) if (m.samp[i].t <= start) { then = m.samp[i].wind; break; }
+    m.lastWake = { t: t, len: minutesAsleep, windThen: then };
+  }
+  function momentNoteMeal(state, item) {
+    var m = momentMemory(state), t = state.meta.voyageMinutes;
+    if (item.type === 'meal' && item.cooked && m.stormMealArm != null && t - m.stormMealArm <= 1440 && state.weather.seaState <= 3) {
+      m.stormMealArm = null;
+      log(state, 'Made something hot once things settled down. It helped.');
+    }
+  }
+
   var AMBIENT_MIN_GAP_MINUTES = 90;   // at least 1.5h between ambient events
   var AMBIENT_MAX_GAP_MINUTES = 300;  // at most 5h — "substantial stretches" without one
   var AMBIENT_CATCHUP_CAP = 2;        // a long absence surfaces at most this many, never a backlog dump
@@ -6870,6 +7480,8 @@
     // This slot is purely observational — picks and logs one ambient
     // observation, nothing more.
     var text = pickObservation(state);
+    if (!text) return; // nothing true to say right now
+    var ambRule = ambientRuleFor(text); if (ambRule) momentMemory(state).ambAt[ambRule.topic] = state.meta.voyageMinutes;
     if (!f.recentAmbientTexts) f.recentAmbientTexts = [];
     f.recentAmbientTexts.push(text);
     if (f.recentAmbientTexts.length > AMBIENT_HISTORY_LENGTH) f.recentAmbientTexts.shift();
@@ -6887,7 +7499,7 @@
     var held = state.fishing.heldFish;
     if (held && held.caughtDay !== voyageDayNumber(state)) {
       state.fishing.heldFish = null;
-      log(state, 'The fish has spoiled. You throw it overboard.');
+      log(state, 'The fish had spoiled. I threw it overboard.');
     }
   }
 
@@ -6895,7 +7507,7 @@
     var milestone = Math.floor(state.nav.distanceTraveled / 300);
     if (milestone > state.flags.lastMilestone) {
       state.flags.lastMilestone = milestone;
-      log(state, (milestone * 300) + " nautical miles behind you now.");
+      log(state, (milestone * 300) + " nautical miles behind me now.");
     }
   }
 
@@ -6906,17 +7518,17 @@
       'Admiralty South': 'Into Admiralty Inlet \u2014 the water narrows here.',
       'Admiralty North': 'Clear of Marrowstone Island. Turning toward Port Townsend.',
       'Point Wilson': 'Port Townsend slides by off the beam. Almost to the strait.',
-      'Strait East': 'Into the Strait of Juan de Fuca proper.',
+      'Strait East': 'Entered the Strait of Juan de Fuca. Open water ahead.',
       'Strait East 2': 'Dungeness Spit somewhere off to port, well clear.',
       'Strait Mid': 'Mid-strait now \u2014 the Olympics to port, Vancouver Island to starboard.',
-      'Strait West': "Nearing the strait's mouth. Cape Flattery ahead.",
+      'Strait West': 'Cape Flattery ahead. After that, the Pacific.',
       'Cape Approach': 'Rounding toward Cape Flattery.',
-      'Cape Flattery': 'Clear of Cape Flattery. The Pacific opens up ahead.',
+      'Cape Flattery': 'Passed Cape Flattery. No land ahead now.',
       'open water, well offshore': 'Well clear of the coast now, turning south to find the trades.',
       'the trade wind belt': 'Into the trade winds. Turning west for Hawaiʻi.',
       'Kauaʻi': 'Kauaʻi rises off the bow.',
     };
-    return lines[wp.name] || (wp.name + ' behind you now.');
+    return lines[wp.name] || (wp.name + ' behind me now.');
   }
 
   /* --------------------------------------------------------------
@@ -6944,9 +7556,9 @@
      -------------------------------------------------------------- */
   function sleepSettleNarrative() {
     var options = [
-      "I lie down and listen to the water against the hull.",
-      "I lie down and let the boat rock me.",
-      "Eyes closed. The hull talks quietly; I stop listening.",
+      "Lay down and listened to the water against the hull.",
+      "Lay down and let the boat rock me.",
+      "Closed my eyes. The hull talked quietly until I stopped listening.",
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -6963,17 +7575,20 @@
   // passed (see updateCrew) -- as have hunger, hydration and hygiene --
   // so this just ends the sleeping state and reports how long it was,
   // measured from the stored start timestamp.
-  function wakeUp(state, baseText, includeDuration) {
+  function sleepEntryText(minutes) {
+    // describeSleepDuration reads "a few minutes" / "under an hour" / "7.5 hours" -- "roughly" only fits the hours form.
+    if (minutes < 20) return 'Slept for a few minutes.';
+    if (minutes < 60) return 'Slept for under an hour.';
+    return 'Slept for roughly ' + describeSleepDuration(minutes) + '.';
+  }
+  function wakeUp(state) {
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
     state.crew.watchState = 'awake';
     state.crew.sleepStartedAt = null;
     if (state.crew.bunkUnmadeSinceMinutes == null) state.crew.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
-    var text = baseText;
-    if (includeDuration !== false && minutesAsleep >= 5) {
-      text += ' Roughly ' + describeSleepDuration(minutesAsleep) + ' below.';
-    }
-    log(state, text);
+    momentNoteWake(state, minutesAsleep);
+    log(state, sleepEntryText(minutesAsleep));
     flushNewLogEntries(state);
   }
 
@@ -11048,7 +11663,7 @@
   function printRoomHeader(name) {
     var last = tempViewEl.lastElementChild;
     if (last && last.classList.contains('echo') && last.textContent === '> ' + name) return;
-    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "Autopilot engaged."): keep the gap that always sat there
+    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "OPEN SAILING BEGINS IN THE PACIFIC."): keep the gap that always sat there
     printEcho(name.toLowerCase());
   }
 
@@ -11857,7 +12472,6 @@
       // is at that future moment — see the driftHeading note in the
       // nav state block.
       state.nav.driftHeading = null;
-      printBlank();
       if (state.nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX) {
         // HEADING HOLD: lock the heading the boat is ON right now and
         // hold exactly that. Nothing is calculated — not the bearing to
@@ -11876,15 +12490,17 @@
         // nav.setCourse) carries on from the same heading instead of
         // swinging toward some older number.
         state.nav.setCourse = Math.round(held);
-        printLine('Autopilot engaged. Holding ' + Math.round(held) + '\u00B0.', 'dim');
+        log(state, 'Set the autopilot to hold ' + Math.round(held) + '\u00B0.');
+        flushNewLogEntries(state);
         // No beginCourseTurn: there is nothing to turn through — the
         // boat is already on the heading it will hold.
       } else {
-        printLine('Autopilot engaged.', 'dim');
+        log(state, 'Set the autopilot to hold ' + Math.round(normalizeDeg(state.nav.heading)) + '\u00B0.'); // the coastal passage: it holds the heading she is on
+        flushNewLogEntries(state);
       }
     } else {
-      printBlank();
-      printLine('Autopilot disengaged.', 'dim');
+      log(state, 'Turned off the autopilot. The course was mine again.');
+      flushNewLogEntries(state);
     }
     render(state);
   }
@@ -12253,6 +12869,14 @@
   }
 
   // RESCUE -- the ending screen (see the RESCUE note above checkNeglectRescue): the existing voyage information, nothing more.
+  // The closing entry after CALL FOR RESCUE, worded for the actual cause (voyageEnd.reason: 'water' after 72 hours without a drink, 'food'
+  // after 168 hours without a meal; anything older / unknown gets the plain form). First person, restrained, no narrator addressing the player.
+  function voyageEndLine(state) {
+    var reason = state.voyageEnd && state.voyageEnd.reason;
+    if (reason === 'water') return 'Too long without water. I called for help, and the voyage ended there.';
+    if (reason === 'food') return 'Too long without food. I called for help, and the voyage ended there.';
+    return 'I called for help. The voyage ended there.';
+  }
   function printVoyageEnded(state) {
     printBlank();
     printLine('VOYAGE ENDED', 'heading-label');
@@ -12473,7 +13097,7 @@
 
   // The helm is drawn once, so when the sails start (or stop) needing trim while it is open -- a course turn crossing into another
   // point of sail, a wind shift on a tick -- the SAIL TRIM row and the TRIM SAILS menu item are brought up to date IN PLACE (no
-  // redraw, so the "Course set to ..." line and the rest of the screen stay put). renderOptions calls this on every render, and
+  // redraw, so the rest of the screen stays put). renderOptions calls this on every render, and
   // the course-turn timer calls it the moment the point of sail changes.
   var helmSailTrimEl = null; // the SAIL TRIM row's value element on the helm / CHANGE COURSE screen currently drawn
   function syncHelmTrim(state) {
@@ -12515,6 +13139,8 @@
         s.nav.sailTrimState = 'good';
         s.nav.lastTrimHeading = s.nav.heading;
         s.nav.trimPointOfSail = null; // re-read from wherever she is pointing on the next check
+        log(s, 'Trimmed the sails.');
+        flushNewLogEntries(s);
         cmdHelm(s);
       },
     });
@@ -12721,31 +13347,11 @@
   // constantly — picked at random each time; small pools are plenty for
   // something this incidental.
   var CHORE_LINES = {
-    dishes: [
-      'Washed the bowl and left it upside down to dry. Rain against the cabin roof.',
-      'Rinsed the dishes and stowed them. Small thing, but it helps.',
-      'Dishes done. The galley looks like itself again.',
-    ],
-    tools: [
-      'Stowed the tools back in their places.',
-      'Wiped down the tools and put them away.',
-      'Cleared the tools off the settee. The cabin feels less like a workshop.',
-    ],
-    bunk: [
-      'Pulled the bunk back together.',
-      'Straightened the berth and folded the blanket.',
-      'Made the bunk. Small order in a small space.',
-    ],
-    air: [
-      'Cracked the hatch and let the cabin breathe for a while.',
-      'Aired the cabin out. The dampness lifts, a little.',
-      'Opened things up below. Fresher air, finally.',
-    ],
-    tidy: [
-      'Put everything back where it belongs.\nThe cabin feels bigger somehow.',
-      'Cleared the clutter off the settee and stowed it properly.',
-      'A few minutes of tidying. Everything has a place again.',
-    ],
+    dishes: ['Did the dishes. The galley looked better afterward.'],
+    tools: ['Put the tools away. Hopefully for a while.'],
+    bunk: ['Made the bunk. Not much, but the cabin felt better.'],
+    air: ['Opened the hatch and aired out the cabin. The damp had gotten into everything.'],
+    tidy: ['Tidied up below. Things had started to collect.'],
   };
   function pickChoreLine(kind) {
     var pool = CHORE_LINES[kind];
@@ -14684,7 +15290,7 @@
         s.crew.hygieneHours = 0; // FRESH again -- see hoursSinceWash
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'A wash. Feeling like myself again.');
+        log(s, 'Washed with fresh water. Felt human again.');
         flushNewLogEntries(s);
         cmdHead(s);
       },
@@ -14923,6 +15529,11 @@
         worn.sunglasses = outfit.sunglasses;
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
         pendingClothing = null;
+        // A diary line only when she really did end up in dry clothes -- the player CAN put a wet garment back on, and the entry must not say otherwise.
+        if (!ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); })) {
+          log(s, 'Changed into dry clothes.');
+          flushNewLogEntries(s);
+        }
         cmdCabin(s);
         // Silent whenever the new outfit is comfortable -- correct
         // choices are never praised or confirmed in text (the CABIN
@@ -14991,7 +15602,7 @@
         // routine conceptually, just restructured; see routineMoraleGain.
         var gain = routineMoraleGain(s, 'dryClothes', 3);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
-        log(s, 'You wring out the wet clothes and hang them to dry.');
+        log(s, 'Hung the wet clothes up to dry.');
         flushNewLogEntries(s);
         cmdCabin(s);
       },
@@ -15078,7 +15689,7 @@
         s.crew.readingBookId = bookId;
         s.crew.readingLastSyncedAt = currentGameMinutes(s); // starts the continuous clock fresh — nothing before this moment counts toward this session
         bumpClutter(s, 1); // the book itself, left out
-        log(s, 'Reading ' + bookDef.title + '.');
+        log(s, 'Started reading ' + bookDef.title + '.');
         flushNewLogEntries(s);
         s.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
       },
@@ -15112,7 +15723,7 @@
       transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
       action: function (s) {
-        log(s, 'A little while lost in a story.');
+        log(s, 'Read for a while. Forgot where I was.');
         flushNewLogEntries(s);
         cmdBookshelf(s);
       },
@@ -15345,7 +15956,7 @@
     if (!held) return null;
     var mealName = FISH_MEAL_BY_SPECIES[held.speciesId];
     if (!mealName) return null;
-    return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true };
+    return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true, fishName: fishSpeciesDisplayName(state, FISH_SPECIES_BY_ID[held.speciesId]) };
   }
 
   function buildMealsOptions(state) {
@@ -15411,18 +16022,54 @@
     state.pendingChoice = { id: 'snacks-menu', options: buildSnacksOptions(state) };
   }
 
-  // The result line after eating. Every proper meal (the cooked meals and a held, cooked fish) gets the meal line; each snack
-  // has its own. (Chocolate has its own function below.)
-  var EAT_RESULT_MEAL = 'A hot meal. Just what I needed.';
-  var EAT_RESULT_SNACK = {
-    'Cup Noodles': 'Nothing fancy. Hits the spot.',
-    'Popcorn': 'Popcorn makes everything a little better.',
-    'Dried Fruit': 'Sweet and chewy. Enough for now.',
-    'Mixed Nuts': 'Not much, but it holds me over.',
-    'Energy Bar': 'Does the job. Tastes like sawdust.',
+  // THE EATING DIARY ENTRIES. A meal's name comes from the GAME clock -- the very instant every log entry is stamped with
+  // (departedAt + voyage minutes), never Date.now() -- so the stamp beside an entry and the meal it names always agree.
+  //   05:00-10:59 breakfast | 11:00-15:59 lunch | 16:00-23:59 dinner | 00:00-04:59 a "late meal" (never called breakfast)
+  function mealPeriodName(state) {
+    var h = new Date(state.meta.departedAt + state.meta.voyageMinutes * 60000).getHours();
+    if (h >= 5 && h < 11) return 'breakfast';
+    if (h >= 11 && h < 16) return 'lunch';
+    if (h >= 16) return 'dinner';
+    return 'late';
+  }
+  var MEAL_ENTRY_POOLS = {
+    breakfast: ['Made [FOOD] for breakfast. Just what I needed.', 'Made [FOOD] for breakfast. Nice to have something hot.', 'Made [FOOD] for breakfast. Better than it had any right to be.', 'Made [FOOD] for breakfast. Nothing fancy.', 'Made [FOOD] for breakfast. Ate every bit.', 'Made [FOOD] for breakfast. A good start.'],
+    lunch: ['Made [FOOD] for lunch. Hit the spot.', 'Made [FOOD] for lunch. Nothing fancy.', 'Made [FOOD] for lunch. Better than I expected.', 'Made [FOOD] for lunch. Nice to have something hot.', 'Made [FOOD] for lunch. Ate every bit.', 'Made [FOOD] for lunch. Good enough.'],
+    dinner: ['Made [FOOD] for dinner. Exactly what I needed.', 'Made [FOOD] for dinner. Nice to have something hot.', 'Made [FOOD] for dinner. Better than I expected.', 'Made [FOOD] for dinner. Ate every bit.', 'Made [FOOD] for dinner. Not bad at all.', 'Made [FOOD] for dinner. Felt almost civilized.'],
+    late: ['Made [FOOD] in the galley. Strange hour for a meal.'],
   };
+  var FISH_MEAL_ENTRIES = ["Made the [FISH] for [MEAL]. Couldn't get much fresher.", 'Cooked the [FISH] for [MEAL]. Worth waiting on the line.', 'Made the [FISH] for [MEAL]. Better than anything from a package.', 'Cooked the [FISH] for [MEAL]. Not bad for something I caught myself.', 'Made the [FISH] for [MEAL]. Felt almost civilized.'];
+  var FISH_MEAL_ENTRY_LATE = 'Cooked the [FISH] in the galley. Strange hour for a meal.';
+  var SNACK_ENTRIES = {
+    'Popcorn': 'Had some popcorn. Better than nothing.',
+    'Dried Fruit': 'Ate some dried fruit. Sweet and chewy.',
+    'Mixed Nuts': 'Ate a handful of mixed nuts. Held me over.',
+    'Energy Bar': 'Ate an energy bar. Still tastes like sawdust.',
+  };
+  var lastMealEntryIndex = {}; // per pool: never the same line twice running (session-only; nothing to save)
+  function pickMealEntry(pool, key) {
+    var i = Math.floor(Math.random() * pool.length);
+    if (pool.length > 1 && i === lastMealEntryIndex[key]) i = (i + 1 + Math.floor(Math.random() * (pool.length - 1))) % pool.length;
+    lastMealEntryIndex[key] = i;
+    return pool[i];
+  }
+  function preparedMealEntry(state, foodName) {
+    var period = mealPeriodName(state);
+    return pickMealEntry(MEAL_ENTRY_POOLS[period], period).replace('[FOOD]', String(foodName).toLowerCase());
+  }
+  function fishMealEntry(state, fishName) {
+    var period = mealPeriodName(state), fish = fishNameForProse(fishName);
+    if (period === 'late') return FISH_MEAL_ENTRY_LATE.replace('[FISH]', fish);
+    return pickMealEntry(FISH_MEAL_ENTRIES, 'fish').replace('[FISH]', fish).replace('[MEAL]', period);
+  }
+  // Prose form of a fish name: lower case, except "Pacific"; and the right article for "Caught a / an ...".
+  function fishNameForProse(name) { return String(name).toLowerCase().replace(/\bpacific\b/g, 'Pacific'); }
+  function fishArticleAndName(name) { var n = fishNameForProse(name); return (/^[aeiou]/i.test(n) ? 'an ' : 'a ') + n; }
+  // Snacks have their own lines and never use meal terms. Cup Noodles is MECHANICALLY a snack (its hunger effect is unchanged) but reads as a prepared meal.
   function eatFlavorLine(state, item) {
-    return item.type === 'snack' ? EAT_RESULT_SNACK[item.name] : EAT_RESULT_MEAL;
+    if (item.key === HELD_FISH_KEY) return fishMealEntry(state, item.fishName || 'fish');
+    if (item.type === 'snack' && item.name !== 'Cup Noodles' && SNACK_ENTRIES[item.name]) return SNACK_ENTRIES[item.name];
+    return preparedMealEntry(state, item.name);
   }
 
   // What eating does to hoursSinceMeal. A full MEAL puts the sailor
@@ -15450,7 +16097,7 @@
   }
   // Chocolate never relieves hunger itself (see performEat) -- it is a lift in mood, and the one line says so.
   function eatChocolateLine(state) {
-    return 'Not much of a meal, but it lifts my mood.';
+    return 'Had some chocolate. Needed that.';
   }
 
   // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
@@ -15644,6 +16291,7 @@
       c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
       c.morale = clamp(c.morale + moraleGain, 0, 100);
       log(s, eatFlavorLine(s, item));
+      momentNoteMeal(s, item);
       flushNewLogEntries(s);
       cmdGalley(s);
     };
@@ -15719,7 +16367,7 @@
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
-        log(s, 'A long drink of cold water.');
+        log(s, 'Drank a long glass of cold water.');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -15755,7 +16403,7 @@
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.lastCoffeeAt = s.meta.voyageMinutes;
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
-        log(s, 'Coffee, strong and hot. The world sharpens a little.');
+        log(s, 'Made coffee. Strong and hot. Everything felt a little sharper afterward.');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -15790,31 +16438,76 @@
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
-        log(s, 'Tea, warm in my hands. I feel more calm already.');
+        log(s, 'Made tea. Held the cup for a while before drinking it.');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
     });
   }
 
-  function pickObservation(state) {
-    var phase = voyagePhase(state);
-    var pool = OBSERVATIONS[phase] || OBSERVATIONS.offshore;
-    var tod = getDaylightPhase(state); // any of the seven phases is available here; the pools below key off the same moments as before
-    var special = [];
-    if (tod === 'night' && pool.awe_night) special = special.concat(pool.awe_night);
-    if (tod !== 'night' && pool.awe_day) special = special.concat(pool.awe_day);
-    if ((tod === 'dawn' || tod === 'sunrise') && pool.sunrise) special = special.concat(pool.sunrise);
-    if ((tod === 'sunset' || tod === 'dusk') && pool.sunset) special = special.concat(pool.sunset);
-    if (pool.awe) special = special.concat(pool.awe);
-    var recent = state.flags.recentAmbientTexts || [];
-    if (special.length && Math.random() < 0.18) {
-      return pickFromPoolAvoidingRecent(special, recent);
-    }
-    var quiet = pool.quiet || [];
-    if (!quiet.length) return 'The sea, the sky, the boat. Nothing more to report.';
-    return pickFromPoolAvoidingRecent(quiet, recent);
+  // AMBIENT GROUNDING. Every library line is classified here by what it CLAIMS; the rule's `when` must be true of the real state before the line
+  // can be picked. `topic` is what the line is about: if a moment / encounter described the same topic in the last AMBIENT_TOPIC_WINDOW_MINUTES the
+  // ambient stream stays silent about it (one underlying event, one entry). A line with no rule is not eligible.
+  var AMBIENT_TOPIC_WINDOW_MINUTES = 360;
+  var AMBIENT_RULES = [
+    { match: 'The shoreline slides by', topic: 'shore', when: function (c) { return (c.phase === 'dusk' || c.phase === 'night') && !c.fog; } },
+    { match: 'Rain moves over the mainland', topic: 'rain', when: function (c) { return c.raining; } },
+    { match: 'The smell of the tide flats', topic: 'shore', when: function (c) { return c.wind >= 4; } },
+    { match: 'The mountains catch the last light', topic: 'sunset', when: function (c) { return (c.phase === 'sunset' || (c.phase === 'dusk' && c.snap.minutesSinceSunset < 10)) && c.cloud <= 60 && !c.fog && !c.raining; } },
+    { match: 'Fog sits in patches', topic: 'fog', when: function (c) { return c.fog; } },
+    { match: 'For a few minutes the strait goes glassy', topic: 'calm', when: function (c) { return c.sea <= 1 && c.wind <= 4 && c.daytime && c.cloud <= 80 && !c.fog && !c.raining; } },
+    { match: 'The coastline is a low grey line', topic: 'land', when: function (c) { return c.encRegion === 'offCoast' && c.dCape >= 20 && c.dCape <= 90 && c.daytime && !c.fog; } },
+    { match: 'Swell starts to build under the hull', topic: 'sea', when: function (c) { return c.encRegion === 'offCoast' && (c.sea >= 3 || (c.waveFt != null && c.waveFt >= 5)); } },
+    { match: 'The water changes color, green to', topic: 'color', when: function (c) { return c.encRegion === 'offCoast' && c.daytime && !c.fog && !c.heavyRain; } },
+    { match: 'Long swells lift and drop', topic: 'sea', when: function (c) { return c.waveFt != null && c.waveFt >= 6 && c.wind <= 18; } },
+    { match: 'Clouds stack on the horizon', topic: 'cloud', when: function (c) { return c.cloud >= 40 && c.cloud <= 90 && c.daytime && !c.fog && !c.raining; } },
+    { match: 'The horizon is empty in every direction', topic: 'empty', when: function (c, m) { return c.daytime && !c.fog && !c.heavyRain && c.landNm != null && c.landNm >= 60 && !(m.enc && m.enc.act) && !(m.enc && m.enc.recent && c.t - m.enc.recent.endT < 120); } },
+    { match: 'The wake trails off pale', topic: 'wake', when: function (c) { return c.boatSpeed >= 2 && c.daytime; } },
+    { match: 'The stars are absurd tonight', topic: 'stars', when: function (c) { return c.tod.night && c.clear && c.landNm != null && c.landNm >= 60; } },
+    { match: 'The sky goes from black to grey', topic: 'dawn', when: function (c) { return (c.phase === 'dawn' || c.phase === 'sunrise') && c.cloud <= 70 && !c.fog && !c.raining; } },
+    { match: 'The sun goes down into the sea', topic: 'sunset', when: function (c) { return (c.phase === 'sunset' || (c.phase === 'dusk' && c.snap.minutesSinceSunset < 15)) && c.cloud <= 25 && !c.fog && !c.raining && c.landNm != null && c.landNm >= 60; } },
+    { match: 'The air has gone warmer, thicker', topic: 'temp', when: function (c) { return c.tempF >= 70; } },
+    { match: 'Trade-wind clouds march by', topic: 'cloud', when: function (c) { return c.cloud >= 20 && c.cloud <= 75 && c.wind >= 8 && c.daytime && !c.raining && !c.fog; } },
+    { match: 'The sea is a color it', topic: 'color', when: function (c) { return c.daytime && c.cloud <= 70 && !c.fog && !c.raining; } },
+    { match: 'The stars are different here', topic: 'stars', when: function (c) { return c.tod.night && c.clear; } },
+    { match: 'The cloud pattern ahead looks different', topic: 'land', when: function (c) { return c.distDest <= 60 && c.cloud >= 40 && c.daytime && !c.fog && !c.raining; } },
+    { match: 'A smudge on the horizon', topic: 'land', when: function (c) { return c.distDest > 20 && c.distDest <= 55 && c.daytime && !c.fog && !c.s.flags.landOnHorizonShown; } },
+  ];
+  function ambientRuleFor(text) {
+    for (var i = 0; i < AMBIENT_RULES.length; i++) if (text.indexOf(AMBIENT_RULES[i].match) !== -1) return AMBIENT_RULES[i];
+    return null;
   }
+
+  // The ambient stream: picks only from lines whose rule is true of the real state right now. Returns null when nothing is eligible (a quiet hour
+  // simply stays quiet -- the old "nothing more to report" filler is no longer needed to cover for lines that could not be true).
+  function pickObservation(state) {
+    var m = momentMemory(state), c = momentContext(state, m);
+    var phase = voyagePhase(state);
+    var pools = [OBSERVATIONS[phase] || OBSERVATIONS.offshore];
+    if (phase === 'offshore' && c.encRegion === 'offCoast') pools.push(OBSERVATIONS.coastal); // just off the coast the 'coastal' lines are true too (that pool is otherwise only reached before Cape Flattery)
+    var tod = c.phase;
+    var eligible = function (text) {
+      var r = ambientRuleFor(text);
+      if (!r) return false;
+      if (m.topicAt[r.topic] != null && c.t - m.topicAt[r.topic] < AMBIENT_TOPIC_WINDOW_MINUTES) return false; // a moment / encounter already described this
+      try { return !!r.when(c, m); } catch (e) { return false; }
+    };
+    var special = [], quiet = [];
+    pools.forEach(function (pool) {
+      if (tod === 'night' && pool.awe_night) special = special.concat(pool.awe_night);
+      if (tod !== 'night' && pool.awe_day) special = special.concat(pool.awe_day);
+      if ((tod === 'dawn' || tod === 'sunrise') && pool.sunrise) special = special.concat(pool.sunrise);
+      if ((tod === 'sunset' || tod === 'dusk') && pool.sunset) special = special.concat(pool.sunset);
+      if (pool.awe) special = special.concat(pool.awe);
+      quiet = quiet.concat(pool.quiet || []);
+    });
+    special = special.filter(eligible); quiet = quiet.filter(eligible);
+    var recent = state.flags.recentAmbientTexts || [];
+    if (special.length && Math.random() < 0.18) return pickFromPoolAvoidingRecent(special, recent);
+    if (quiet.length) return pickFromPoolAvoidingRecent(quiet, recent);
+    return special.length ? pickFromPoolAvoidingRecent(special, recent) : null;
+  }
+
 
 
   // Spares are unlimited (see performSystemRepairAttempt/cmdRepairSystem
@@ -15843,10 +16536,10 @@
   var REPAIR_AUDIO_KEY = { sails: 'sailRepair', steering: 'steeringRepair', engine: 'engineRepair', electrical: 'fuseRepair' };
 
   var REPAIR_SUCCESS_LINES = {
-    sails: ['The patch holds. Sail drawing again.', 'Stitched and taped \u2014 she fills properly again.'],
-    steering: ['The rudder answers again.', 'The rudder bites again, helm answering true.'],
-    engine: ['The engine turns over and settles into its rhythm.', 'She catches, coughs once, then runs clean.'],
-    electrical: ['New fuse in. The panel comes back to life.', 'Power\u2019s back. The panel lights up again.'],
+    sails: ['Repaired the sails. Good enough to keep going.'],
+    steering: ['Got the rudder working again.'],
+    engine: ['Got the engine running again.'],
+    electrical: ['Got the electrical system working again.'],
   };
 
   // Repair quality's own four tiers, worst-first, matching the index
@@ -16192,7 +16885,7 @@
       totalWaitMs: 90000, // max wait per attempt; if a bite is going to happen, it lands at a uniformly random point anywhere in this window
     },
 
-    biteToPromptDelayMs: 1000, // "The line jerks hard." sits alone for exactly this long, then "REEL IN" appears -- no clicks are accepted during this window
+    biteToPromptDelayMs: 1000, // the bite entry ("Something hit the line hard.") sits alone for exactly this long, then "REEL IN" appears -- no clicks are accepted during this window
 
     // Once REEL IN appears, how long the player has to select it -- one
     // flat value regardless of the fish's weight tier. The window is
@@ -17869,12 +18562,25 @@
   var SAIL_CHANGE_WORKING_LABEL = {
     full: 'SETTING FULL SAIL', reefed: 'PUTTING IN A REEF', minimal: 'SETTING MINIMAL SAIL', furled: 'FURLING SAILS',
   };
+  // The diary line describes what actually happened, so it depends on the configuration she is LEAVING as well as the one she is going to:
+  // moving from MINIMAL to REEFED is setting MORE sail, not putting a reef in. Keyed 'from>to'; every move into FURLED reads the same.
   var SAIL_CHANGE_LOG_LINES = {
-    full: "Full sail set. The wind takes hold.",
-    reefed: "Put a reef in.",
-    minimal: "Set to minimal canvas.",
-    furled: "Sails furled. No canvas up at all.",
+    'full>reefed': 'Put a reef in. The boat settled down.',
+    'minimal>reefed': 'Let out some sail. One reef in.',
+    'furled>reefed': 'Raised the sails with one reef in.',
+    'reefed>full': 'Shook out the reef. Full sail again.',
+    'minimal>full': 'Set full sail. The wind took hold.',
+    'furled>full': 'Set full sail. The wind took hold.',
+    'full>minimal': 'Reduced sail. Not much canvas left to the wind.',
+    'reefed>minimal': 'Reduced sail. Not much canvas left to the wind.',
+    'furled>minimal': 'Raised minimal sail.',
   };
+  var SAIL_FURLED_LOG_LINE = 'Furled the sails. The mast stood bare again.';
+  function sailChangeLogLine(fromConfig, toConfig) {
+    if (fromConfig === toConfig) return null; // already set: nothing changed, so nothing is written
+    if (toConfig === 'furled') return SAIL_FURLED_LOG_LINE;
+    return SAIL_CHANGE_LOG_LINES[fromConfig + '>' + toConfig] || null;
+  }
 
   function performSailChange(state, targetConfig) {
     var fromConfig = state.boat.sailConfig;
@@ -17897,9 +18603,10 @@
       label: SAIL_CHANGE_WORKING_LABEL[targetConfig],
       playAudio: function (onEnded) { return playSailsOneShot(audioKey, onEnded, state); },
       action: function (s) {
+        var before = s.boat.sailConfig; // what she actually had set at the moment of the change
         s.boat.sailConfig = targetConfig;
-        log(s, SAIL_CHANGE_LOG_LINES[targetConfig]);
-        flushNewLogEntries(s);
+        var sailLine = sailChangeLogLine(before, targetConfig);
+        if (sailLine) { log(s, sailLine); flushNewLogEntries(s); }
         cmdSails(s);
       },
     });
@@ -17957,6 +18664,8 @@
     fishingSession = { phase: 'waiting', willBite: willBite, resolveTimer: null, dotsTimer: null, dotsLineEl: null };
 
     playFishingOneShot('cast'); // FISHING HOOK -- fire-and-forget, does not delay anything below
+    log(state, 'Put a line out.');
+    flushNewLogEntries(state);
     startFishingDragScheduler(); // FISHING HOOK -- cancelled by clearFishingTimers whenever the wait ends, for any reason
 
     // #temp-view was already cleared by the generic click handler that
@@ -18004,8 +18713,8 @@
     clearFishingTimers();
     stopFishingLandingSound(); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
     fishingSession = null;
-    printBlank();
-    printLine('You bring the line in.', 'dim');
+    log(state, 'Brought the line in.');
+    flushNewLogEntries(state);
     // pendingChoice deliberately left unset -- handleAction's tail
     // clears it (nothing here sets a new one), so the normal Above
     // Deck menu takes over on the next render, exactly like 'cancel'
@@ -18015,8 +18724,8 @@
 
   function resolveFishNoBite(state) {
     clearFishingTimers();
-    printBlank();
-    printLine('Nothing\u2019s biting.', 'dim');
+    log(state, 'Nothing was biting.');
+    flushNewLogEntries(state);
     showFishResultScreen(state);
   }
 
@@ -18037,7 +18746,8 @@
 
     fishingSession = { phase: 'bite-prompt', tier: tier, weightLb: weightLb, isMarlin: isMarlin, species: species, resolveTimer: null };
 
-    printLine('The line jerks hard.');
+    log(state, 'Something hit the line hard.');
+    flushNewLogEntries(state);
     playFishingOneShot('catch'); // FISHING HOOK -- the sudden bite alert; fire-and-forget, does not delay anything below
     // No options at all -- ignores clicks/taps before REEL IN appears,
     // since there's nothing here to click.
@@ -18069,9 +18779,8 @@
 
   function resolveFishReactionMissed(state) {
     clearFishingTimers();
-    printBlank();
-    printLine('The line goes slack.', 'dim');
-    printLine('The fish is lost.', 'dim');
+    log(state, 'The line went slack. Whatever it was, it was gone.');
+    flushNewLogEntries(state);
     showFishResultScreen(state);
   }
 
@@ -18182,11 +18891,12 @@
     // No audio here -- the reel-stop and catch-sound trigger already
     // happened in beginFishLandingSequence, tied directly to the final
     // suspense line's own print step. This is just the text reveal.
-    printBlank();
-    printLine(displayName.toUpperCase() + ' \u2014 ' + session.weightLb.toFixed(1) + ' LB');
+    log(state, 'Caught ' + fishArticleAndName(displayName) + '. ' + session.weightLb.toFixed(1) + ' LB.');
+    flushNewLogEntries(state);
 
     if (fishAlreadyKeptToday(state)) {
-      printLine('I\u2019ve got enough for today.', 'dim');
+      log(state, 'Already had enough for dinner.');
+      flushNewLogEntries(state);
       state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
     } else {
       state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'KEEP', action: 'fish-keep' }, { label: 'RELEASE', action: 'fish-release' }] };
@@ -18205,7 +18915,8 @@
   // pacing of everything else here.
   function revealMarlin(state) {
     var session = fishingSession;
-    printLine('A marlin.');
+    log(state, 'A marlin came alongside. For a moment it was just there.');
+    flushNewLogEntries(state);
     scrollToBottom();
 
     var mySession = session;
@@ -18224,8 +18935,8 @@
         // separate marlin audio logic needed.
         stopFishingReelLoop();
         playFishingLandingAudio(session.weightLb);
-        printBlank();
-        printLine('MARLIN \u2014 ' + session.weightLb.toFixed(1) + ' LB');
+        log(state, 'Marlin. ' + session.weightLb.toFixed(1) + ' LB.');
+        flushNewLogEntries(state);
         session.phase = 'marlin-release';
         state.pendingChoice = { id: 'fish-marlin-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
         renderOptions(state);
@@ -18242,7 +18953,7 @@
     state.fishing.heldFish = { speciesId: speciesId, caughtDay: voyageDayNumber(state) };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
     bumpHygiene(state, 2); // handling a fish
-    log(state, 'That takes care of dinner.');
+    log(state, 'Kept the fish. Dinner taken care of.');
     flushNewLogEntries(state);
     // VESSEL LOG -- whole-pound figure here (the task's own "14 LB
     // MAHI" style), distinct from the narrative log line above, which
@@ -18256,21 +18967,16 @@
     bumpHygiene(state, 1); // handling a fish, even just to let it go
     if (fishingSession.phase === 'marlin-release') {
       playFishingOneShot('release'); // FISHING HOOK
-      // A marlin is memorable enough to be worth a permanent voyage-log
-      // line, unlike an ordinary release (which stays transient/#temp-view
-      // only) -- see the FISHING section comment on why this is the one
-      // deliberate asymmetry here.
-      printBlank();
-      printLine('You let it go.', 'dim');
-      log(state, 'A marlin came alongside \u2014 rare enough to remember \u2014 then went back over the side.');
+      // The release is a diary entry now (the marlin's own line, below); the old transient 'You let it go.' is gone, not duplicated.
+      log(state, 'Let the marlin go. It disappeared as quickly as it had come.');
       flushNewLogEntries(state);
       showFishResultScreen(state);
       return;
     }
     if (fishingSession.phase !== 'keep-release') return;
     playFishingOneShot('release'); // FISHING HOOK
-    printBlank();
-    printLine('You let it go.', 'dim');
+    log(state, 'Let it go. Watched it disappear.');
+    flushNewLogEntries(state);
     showFishResultScreen(state);
   }
 
@@ -19027,7 +19733,7 @@
           runAudioSyncedAction(state, {
             label: 'WAKING UP',
             playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
-            action: function (s) { wakeUp(s, 'You wake and go above.'); },
+            action: function (s) { wakeUp(s); },
           });
           break;
         case 'go-above-below':
@@ -19124,6 +19830,7 @@
               // computeHeading() also rolls a per-tick drift wobble that
               // must only ever happen on an actual simulated tick.
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
+              log(s, 'Started the engine.');
               flushNewLogEntries(s);
               printBlank();
               printLine(propulsionLabel(propulsionState(s, s.nav.heading)) + '.');
@@ -19148,7 +19855,7 @@
             action: function (s) {
               s.boat.engineOn = false;
               s.boat.speed = computeBoatSpeed(s, s.nav.heading);
-              log(s, 'Engine stopped.');
+              log(s, 'Stopped the engine. The quiet came back.');
               flushNewLogEntries(s);
               cmdEngine(s);
             },
@@ -19161,7 +19868,7 @@
             duration: 4,
             action: function (s) {
               s.voyageEnd.phase = 'ended';
-              log(s, 'Your voyage ends here.');
+              log(s, voyageEndLine(s));
               flushNewLogEntries(s);
               printVoyageEnded(s);
               s.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
@@ -19173,7 +19880,7 @@
           runShortAction(state, {
             label: 'FREEING SOLACE',
             duration: 20,
-            action: function (s) { navFreeSolace(s); log(s, 'Solace is free.'); flushNewLogEntries(s); },
+            action: function (s) { navFreeSolace(s); log(s, 'Got Solace free.'); flushNewLogEntries(s); },
           });
           break;
         case 'finale-engine-start':
@@ -19216,8 +19923,8 @@
         state.nav.setCourse = state.nav.courseDraft;
         state.nav.autopilotHeading = state.nav.setCourse; // the player's newest explicit heading — what AUTOPILOT (if on) now holds
         state.nav.courseDraft = null;
-        printBlank();
-        printLine('Course set to ' + Math.round(state.nav.setCourse) + '\u00B0.', 'dim');
+        log(state, 'Changed course to ' + Math.round(state.nav.setCourse) + '\u00B0.');
+        flushNewLogEntries(state);
         beginCourseTurn(state, {
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
@@ -19234,8 +19941,8 @@
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)); // a deliberate PLAYER command — the only place a destination bearing becomes a heading
         state.nav.courseDraft = null; // reached from the CHANGE COURSE screen now -- its half-dialled draft is moot
         state.nav.autopilotHeading = state.nav.setCourse; // ...and, like CHANGE COURSE, what AUTOPILOT (if on) then holds — it just holds it, it never chooses it
-        printBlank();
-        printLine('Course set direct for N\u0101wiliwili: ' + state.nav.setCourse + '\u00B0.', 'dim');
+        log(state, 'Set a course for N\u0101wiliwili. ' + state.nav.setCourse + '\u00B0.');
+        flushNewLogEntries(state);
         beginCourseTurn(state, {
           targetHeading: courseSteeringTarget(state),
           onSettle: function (s) { s.nav.driftHeading = s.nav.heading; },
@@ -19325,7 +20032,7 @@
     // ambience (pnw_birds/marina_sound) keeps playing underneath,
     // completely untouched by this -- board.mp3 is a third, independent
     // one-shot layered on top, not a replacement for it.
-    { label: 'BOARD', workingLabel: 'BOARDING', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); }, text: 'You step aboard.' },
+    { label: 'BOARD', workingLabel: 'BOARDING', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); }, text: 'Stepped aboard Solace.' },
     {
       label: 'START ENGINE',
       workingLabel: 'START ENGINE',
@@ -19341,6 +20048,7 @@
       playAudio: function (onEnded) { return beginEngineStartAudio(GAME ? GAME.crew.location : 'above', onEnded); },
       watchdogMarginSeconds: 2, // same failsafe margin as the ENGINE menu's own engine-start/engine-stop actions
       onEnter: function (s) { s.boat.engineOn = true; },
+      text: 'Started the engine.',
     },
     {
       label: 'CAST OFF',
@@ -19375,7 +20083,7 @@
       // decision. A single, immediate permanent log line -- "do not
       // require another click" -- not the two-beat pause a prior
       // version of this sequence used.
-      text: 'The voyage is underway.',
+      text: 'Cast off from Shilshole. The voyage had begun.',
     },
   ];
 
