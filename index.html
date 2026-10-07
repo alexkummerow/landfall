@@ -10864,23 +10864,10 @@
   // configuration is left off the list (it's already shown above this in
   // cmdSails) rather than offered as a do-nothing button.
   //
-  // COASTAL: a simplified two-state version of the same idea, per the
-  // coastal-tutorial task this implements -- FULL/REEF/MINIMAL aren't
-  // offered yet, only RAISE SAILS (furled -> automatically the right
-  // one of those three for current conditions, see performSailChange's
-  // own 'sail-raise-auto' caller in handleAction) or FURL SAILS (any
-  // canvas up -> furled, via the existing 'sail-furled' action
-  // unchanged). Reuses the exact same OPEN_WATER_WAYPOINT_INDEX
-  // threshold cmdHelm/blockedByCoastalLock already use, not a second,
-  // separate "tutorial phase" flag.
+  // All four settings are available from the very start of the voyage -- in the
+  // Sound and the Strait exactly as in the open Pacific.
   function sailOptions(state) {
     var cfg = state.boat.sailConfig;
-    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) {
-      var coastalOpts = cfg === 'furled'
-        ? [{ label: 'RAISE SAILS', action: 'sail-raise-auto' }]
-        : [{ label: 'FURL SAILS', action: 'sail-furled' }];
-      return pushBack(coastalOpts, 'cancel');
-    }
     var configs = [
       { key: 'full', label: 'FULL', action: 'sail-full' },
       { key: 'reefed', label: 'REEF', action: 'sail-reefed' },
@@ -11444,7 +11431,12 @@
   }
 
   function cmdMarineForecast(state) {
-    if (!marineForecastAvailable(state)) { cmdNavStation(state); return; } // the menu never offers it before Pacific control; this only guards a stale route
+    if (!marineForecastAvailable(state)) { // listed from the start but locked until Pacific control: the same shape as blockedByCoastalLock (a message, then straight back to the screen it came from)
+      printBlank();
+      printLine('MARINE WEATHER STARTS BROADCASTING IN THE PACIFIC.', 'amber');
+      cmdNavStation(state);
+      return;
+    }
     var nowMs = Date.now();
     var rows = marineForecastRows(state, nowMs);
     var id = marineForecastIssuanceId(state);
@@ -13389,12 +13381,12 @@
   // else. Groups are separated by blank vertical spacing ALONE
   // (groupedOptions' plain invisible spacer) -- no horizontal rule of
   // any kind anywhere on this screen.
-  // NAV STATION's tools group, in this exact order: INSTRUMENTS (with its rows while expanded), MARINE FORECAST (only once
-  // SOLACE has full control in the open Pacific -- hidden entirely before that, no locked row), SHIP'S COMPUTER. SOLACE
-  // HANDBOOK and STATUS form the next group (see cmdNavStation).
+  // NAV STATION's tools group, in this exact order: INSTRUMENTS (with its rows while expanded), MARINE FORECAST (always listed; until SOLACE has full
+  // control in the open Pacific it will not open -- cmdMarineForecast says marine weather starts broadcasting there, the way AUTOPILOT says open sailing
+  // begins there), SHIP'S COMPUTER. SOLACE HANDBOOK and STATUS form the next group (see cmdNavStation).
   function navStationToolRows(state) {
     var rows = [].concat(instrumentsStatusRows(state));
-    if (marineForecastAvailable(state)) rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
+    rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
     return rows;
   }
@@ -18347,21 +18339,6 @@
   // minimal).
   var SAIL_AREA_ORDER = { furled: 0, minimal: 1, reefed: 2, full: 3 };
 
-  // COASTAL TUTORIAL -- automatic sail selection for RAISE SAILS (see
-  // sailOptions' own coastal branch and the 'sail-raise-auto' case in
-  // handleAction below), per this feature's own stated thresholds.
-  // Reads the same state.weather.windSpeed/condition every other wind
-  // reading in the game already uses -- no new weather data, no hidden
-  // roll. Squall overrides pure wind speed straight to minimal
-  // regardless of how light the wind itself reads, matching the task's
-  // own "OVER 32 KT OR SQUALL" wording.
-  function coastalAutoSailConfig(state) {
-    var w = state.weather;
-    if (w.condition === 'squall' || w.windSpeed > 32) return 'minimal';
-    if (w.windSpeed > 22) return 'reefed';
-    return 'full';
-  }
-
   // FURLED -> FULL (raising the entire sail from nothing) is the only
   // "long" raise; FULL -> FURLED (lowering everything) is the only
   // "long" lower. Every other increase/decrease -- reefing, shaking out
@@ -19600,9 +19577,6 @@
         case 'sail-furled':
           performSailChange(state, 'furled');
           break;
-        case 'sail-raise-auto':
-          performSailChange(state, coastalAutoSailConfig(state));
-          break;
         case 'engine-start':
           if (systemDamageKnown(state, 'engine')) break; /* a HIDDEN fault is not known to her, so it starts normally */ // shouldn't be reachable — button isn't shown otherwise
           // AUDIO-SYNCED (see runAudioSyncedAction and the ENGINE AUDIO
@@ -19890,7 +19864,7 @@
       // decision. A single, immediate permanent log line -- "do not
       // require another click" -- not the two-beat pause a prior
       // version of this sequence used.
-      text: 'Cast off from Shilshole. The voyage had begun.',
+      text: 'Cast off from Shilshole. The voyage has begun.',
     },
   ];
 
@@ -20461,6 +20435,9 @@
     if (state.pendingChoice && state.pendingChoice.id === 'existing') { // likewise a JUST EXIST session: the player is simply back at the above-deck menu
       state.pendingChoice = null;
       return;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'sails-choice') { // a save made on the old coastal SAILS screen (RAISE SAILS / FURL SAILS): rebuilt with the four settings
+      state.pendingChoice.options = sailOptions(state);
     }
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
