@@ -1166,6 +1166,7 @@
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
+        hatchChangedAt: 0,          // voyageMinutes the hatch last opened or closed -- 0: it has been shut since departure. Read by SIT A WHILE ("closed for an extended period")
         hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears STUFFY immediately (cabinComfort is derived from it), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateSeaAudioForState/updateWindAudioForState/updateRainAudioForState)
       },
       crew: {
@@ -13302,6 +13303,7 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
+      { label: 'SIT A WHILE', action: 'sit-a-while' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
         : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -13329,6 +13331,7 @@
       playAudio: function (onEnded) { return playSaloonOneShot('hatchOpen', onEnded); },
       action: function (s) {
         s.boat.hatchOpen = true;
+        s.boat.hatchChangedAt = s.meta.voyageMinutes;
         cmdSaloon(s);
       },
     });
@@ -13340,8 +13343,428 @@
       playAudio: function (onEnded) { return playSaloonOneShot('hatchClose', onEnded); },
       action: function (s) {
         s.boat.hatchOpen = false;
+        s.boat.hatchChangedAt = s.meta.voyageMinutes;
         cmdSaloon(s);
       },
+    });
+  }
+
+  /* --------------------------------------------------------------
+     SIT A WHILE -- the Saloon's one open-ended, do-nothing activity. She sits until she chooses to GET UP; there is no set length and the voyage keeps
+     running underneath (nothing here pauses or touches the simulation). While she sits the screen holds ONE observation at a time -- a transient
+     moment, never added to the vessel log -- chosen from the 150 supplied lines in SIT_LIBRARY (the sole library; the text is exactly as supplied).
+     WHEN one appears:
+       - the first, SIT_FIRST_MS (10 s) after she sits down: chosen from the world AS IT IS THEN, never decided in advance;
+       - the next, SIT_SECOND_MS (3 min) after that, and then about every SIT_REPEAT_MS (5 min, give or take SIT_REPEAT_JITTER_MS), each replacing the last;
+       - and whenever the authoritative daylight PHASE (getDaylightPhase) or the WEATHER category (skyDisplayLabel, the header's own word) changes. Changes that
+         land close together are coalesced: the first starts a SIT_COALESCE_MS window and ONE observation follows it, picked from the newest complete state.
+       A change during the first 10 seconds does nothing extra: the first observation simply reads whatever is true when it arrives.
+     WHICH line: the phase is the pool; then every condition attached to a line must be true right now (weather, sea, lights, hatch, temperature, recent
+     coffee / cooking / wetness, days at sea, rarity). Among the eligible lines the MOST SPECIFIC (most conditions) are chosen at random; a line already shown
+     this sitting is not repeated while an unseen one exists, so a quiet stretch never produces the same prose again (a timed refresh with nothing new to say
+     simply leaves the current observation). The rare lines are rolled separately and only possible after several days at sea.
+     Only the phase and the weather category TRIGGER anything; sea state, temperature, lights, hatch, activity and day count only decide WHICH line.
+     Nothing here is saved: sitSession lives only in memory and ends with GET UP, a reload, or any other screen taking over.
+     -------------------------------------------------------------- */
+  var SIT_LIBRARY = [
+    // DAWN (20)
+    { id: 1, ph: 'dawn', t: "I sit and watch the cabin slowly return. First the ports, then the table, then everything else." },
+    { id: 2, ph: 'dawn', wx: ['clear', 'partly'], sea: ['calm', 'slight'], t: "Pale light gathers on the table. I leave my hands there and watch it grow." },
+    { id: 3, ph: 'dawn', wx: ['clear', 'partly'], sea: ['moderate'], t: "The first light moves across the wood with each roll. After a while I start waiting for it to come back." },
+    { id: 4, ph: 'dawn', wx: ['clear', 'partly'], sea: ['rough'], t: "Gray light moves through the cabin in pieces. Nothing stays illuminated for long." },
+    { id: 5, ph: 'dawn', wx: ['overcast'], t: "Morning comes without much color. I only notice because the gray keeps getting lighter." },
+    { id: 6, ph: 'dawn', wx: ['fog'], t: "The ports brighten, but nothing appears beyond them. I keep looking anyway." },
+    { id: 7, ph: 'dawn', wx: ['fog'], sea: ['calm'], t: "There should be a horizon somewhere beyond the glass. I can't find it." },
+    { id: 8, ph: 'dawn', wx: ['lightRain'], t: "One drop finds another on the port and they disappear together below the frame." },
+    { id: 9, ph: 'dawn', wx: ['rain'], t: "I sit watching crooked lines of water make their way down the glass." },
+    { id: 10, ph: 'dawn', wx: ['heavyRain'], t: "There isn't much morning beyond the rain. After a while I stop trying to see through it." },
+    { id: 11, ph: 'dawn', sea: ['calm'], t: "Sea and sky are almost the same gray. I try to find the line between them and eventually give up." },
+    { id: 12, ph: 'dawn', sea: ['moderate'], t: "The horizon rises and falls through the port. My eyes follow it without much thought." },
+    { id: 13, ph: 'dawn', sea: ['rough'], t: "I brace one foot against the floor and wait for the cabin to settle. It doesn't." },
+    { id: 14, ph: 'dawn', hatch: 'open', wx: ['clear', 'partly', 'overcast', 'fog', 'lightRain', 'rain'], t: "The open hatch has become a pale rectangle above me." },
+    { id: 15, ph: 'dawn', wx: ['lightRain', 'rain', 'heavyRain'], wet: true, t: "Sitting still, I notice the smell of damp fabric and salt." },
+    { id: 16, ph: 'dawn', cabin: 'lt65', t: "I rest my palms on the table. The wood is cool beneath them." },
+    { id: 17, ph: 'dawn', cabin: 'cold', t: "I tuck my hands into my sleeves and stay where I am." },
+    { id: 18, ph: 'dawn', days: 4, t: "In the pale light I notice a thin crust of salt along the edge of the port." },
+    { id: 19, ph: 'dawn', later: true, rare: true, t: "Morning has begun to feel less like the start of something and more like something the boat simply does." },
+    { id: 20, ph: 'dawn', later: true, rare: true, t: "There's something familiar about sitting in a room while morning slowly finds it." },
+    // SUNRISE (20)
+    { id: 21, ph: 'sunrise', wx: ['clear'], t: "The first sunlight reaches the table. I leave my hand in it for a while." },
+    { id: 22, ph: 'sunrise', wx: ['clear'], sea: ['calm'], t: "A strip of sunlight lies across the settee and barely moves." },
+    { id: 23, ph: 'sunrise', wx: ['clear'], sea: ['slight'], t: "The sunlight shifts a few inches with the boat, then slowly finds its way back." },
+    { id: 24, ph: 'sunrise', wx: ['clear'], sea: ['moderate'], t: "Light climbs the wall with each roll. After a while I know where it will land." },
+    { id: 25, ph: 'sunrise', wx: ['clear'], sea: ['rough'], t: "Sunlight flashes across the cabin in brief pieces. I catch myself waiting for the next one." },
+    { id: 26, ph: 'sunrise', wx: ['partly'], t: "The cabin brightens, dims, then brightens again. I stop looking outside to see why." },
+    { id: 27, ph: 'sunrise', wx: ['overcast'], t: "The sun must be up now. The room is brighter, though nothing has cast a shadow." },
+    { id: 28, ph: 'sunrise', wx: ['fog'], t: "The fog has become almost white. I stare into it until my eyes lose focus." },
+    { id: 29, ph: 'sunrise', wx: ['lightRain'], sun: true, t: "New light catches in the water on the glass. I follow one drop until it disappears." },
+    { id: 30, ph: 'sunrise', wx: ['clear'], horizon: true, t: "Pieces of sunlight appear on the water and vanish before I can settle on one." },
+    { id: 31, ph: 'sunrise', wx: ['clear'], sea: ['calm'], t: "The reflection of the morning sea rests faintly on the ceiling." },
+    { id: 32, ph: 'sunrise', wx: ['clear'], sea: ['moderate'], t: "I watch the reflected water tremble across the ceiling until I lose track of it." },
+    { id: 33, ph: 'sunrise', wx: ['clear'], sea: ['rough'], t: "Bright water fills the port for a moment, then sky, then water again." },
+    { id: 34, ph: 'sunrise', hatch: 'open', wx: ['clear', 'partly'], sun: true, t: "Sunlight reaches through the hatch before it reaches some of the corners below." },
+    { id: 35, ph: 'sunrise', cabin: 'gte65', sun: true, t: "The patch of wood beneath the sunlight feels different from the wood beside it." },
+    { id: 36, ph: 'sunrise', t: "In the growing light I notice scratches in the table I haven't paid attention to before." },
+    { id: 37, ph: 'sunrise', days: 4, t: "My eyes go to the same worn places they seem to find every morning now." },
+    { id: 38, ph: 'sunrise', later: true, rare: true, t: "I run my thumb along the edge of the table without thinking about it." },
+    { id: 39, ph: 'sunrise', rare: true, wx: ['clear', 'partly'], t: "Something about this angle of morning light feels familiar." },
+    { id: 40, ph: 'sunrise', rare: true, wx: ['clear', 'partly'], t: "For a second, the cabin feels like somewhere I've already been." },
+    // DAY (24)
+    { id: 41, ph: 'day', wx: ['clear'], sea: ['calm'], t: "Sunlight lies across the floor. I watch it for a while mostly because it isn't going anywhere." },
+    { id: 42, ph: 'day', wx: ['clear'], sea: ['slight'], t: "A patch of sunlight moves a little with the boat. My eyes keep finding it again." },
+    { id: 43, ph: 'day', wx: ['clear'], sea: ['moderate'], t: "Light slides from the floor to the wall and back with the long roll." },
+    { id: 44, ph: 'day', wx: ['clear'], sea: ['rough'], t: "Sunlight travels from floor to wall to ceiling. Sitting still makes the movement seem larger." },
+    { id: 45, ph: 'day', wx: ['partly'], t: "The room brightens and dims while I sit. Eventually I stop noticing every change." },
+    { id: 46, ph: 'day', wx: ['overcast'], t: "The light is flat enough to show everything equally. My eyes wander around the cabin." },
+    { id: 47, ph: 'day', wx: ['fog'], t: "I look through the port for a while. There isn't much beyond it except white-gray." },
+    { id: 48, ph: 'day', wx: ['lightRain'], t: "A drop gathers another, grows heavier, then slips out of sight." },
+    { id: 49, ph: 'day', wx: ['rain'], t: "I watch water choose the same paths down the glass again and again." },
+    { id: 50, ph: 'day', wx: ['heavyRain'], t: "I try looking through the rain. Eventually the glass itself becomes more interesting." },
+    { id: 51, ph: 'day', sea: ['calm'], t: "I stare at the horizon until I realize I've been looking at almost exactly the same place." },
+    { id: 52, ph: 'day', sea: ['slight'], t: "The sea rises into the bottom of the port and falls away again. I start counting without meaning to." },
+    { id: 53, ph: 'day', sea: ['moderate'], t: "I let my body move with the boat instead of correcting against it." },
+    { id: 54, ph: 'day', sea: ['moderate'], t: "The table tilts beneath my hands and returns. After a while I stop anticipating it." },
+    { id: 55, ph: 'day', sea: ['rough'], t: "Sitting still takes more effort than it should. I keep one foot planted against the floor." },
+    { id: 56, ph: 'day', sea: ['rough'], horizon: true, t: "The horizon disappears from the port and comes back somewhere else." },
+    { id: 57, ph: 'day', hatch: 'open', wx: ['clear', 'partly', 'overcast', 'fog'], t: "Once I'm sitting still, the salt air coming through the hatch is easier to notice." },
+    { id: 58, ph: 'day', hatch: 'closed', hatchLong: true, t: "I notice the closed-up smell of the cabin—wood, fabric, the day's small traces." },
+    { id: 59, ph: 'day', coffee: true, t: "There's still a little coffee in the air. I hadn't noticed it while I was moving around." },
+    { id: 60, ph: 'day', food: true, t: "Something from the galley still hangs faintly in the cabin beneath the salt." },
+    { id: 61, ph: 'day', wet: true, t: "Damp fabric has its own smell in here. I only notice it after sitting for a while." },
+    { id: 62, ph: 'day', days: 4, t: "I run a finger across the table. Even things inside the boat seem to have acquired a little salt." },
+    { id: 63, ph: 'day', later: true, t: "There's a scratch near the edge of the table I recognize now." },
+    { id: 64, ph: 'day', later: true, rare: true, t: "I realize I've stopped looking around the cabin as if it belongs to someone else." },
+    // LATE AFTERNOON (22)
+    { id: 65, ph: 'lateAfternoon', wx: ['clear'], t: "I sit long enough to notice the light stretching farther across the cabin." },
+    { id: 66, ph: 'lateAfternoon', wx: ['clear'], sea: ['calm'], t: "The lowering sun stays on one patch of wood long enough for me to study every mark in it." },
+    { id: 67, ph: 'lateAfternoon', wx: ['clear'], sea: ['slight'], t: "A long strip of light shifts slowly across my hands." },
+    { id: 68, ph: 'lateAfternoon', wx: ['clear'], sea: ['moderate'], t: "Sunlight moves over the table with each roll. I watch it come and go." },
+    { id: 69, ph: 'lateAfternoon', wx: ['clear'], sea: ['rough'], t: "Low sunlight keeps finding different parts of the room. Nothing stays illuminated for long." },
+    { id: 70, ph: 'lateAfternoon', wx: ['partly'], t: "The cabin alternates between light and shadow. After a while neither feels like the interruption." },
+    { id: 71, ph: 'lateAfternoon', wx: ['overcast'], t: "The afternoon is getting darker so gradually I only notice when I look up." },
+    { id: 72, ph: 'lateAfternoon', wx: ['fog'], t: "I realize the fog has been losing light while I've been sitting here." },
+    { id: 73, ph: 'lateAfternoon', wx: ['lightRain'], t: "The remaining daylight moves through the water on the port." },
+    { id: 74, ph: 'lateAfternoon', wx: ['heavyRain'], t: "The afternoon outside has become mostly water and gray light." },
+    { id: 75, ph: 'lateAfternoon', sea: ['calm'], t: "I sit with my hands on the table. For a while almost nothing moves." },
+    { id: 76, ph: 'lateAfternoon', sea: ['moderate'], t: "The darker sea makes a faint moving reflection on the ceiling." },
+    { id: 77, ph: 'lateAfternoon', sea: ['rough'], t: "I settle farther into the settee and let the room move around me." },
+    { id: 78, ph: 'lateAfternoon', cabin: 'gte75', t: "Sitting still, I notice the warmth held in the wood beneath my hand." },
+    { id: 79, ph: 'lateAfternoon', cabin: 'gt73', hatch: 'closed', t: "The closed cabin feels close now. Warm wood, fabric, salt." },
+    { id: 80, ph: 'lateAfternoon', coffee: true, t: "Coffee lingers beneath the smell of the boat. It's fainter than it was earlier." },
+    { id: 81, ph: 'lateAfternoon', food: true, t: "Once I stop moving, I can still pick out what was made in the galley." },
+    { id: 82, ph: 'lateAfternoon', wet: true, t: "Dampness has worked its way into the fabric around me." },
+    { id: 83, ph: 'lateAfternoon', days: 4, t: "The day's salt has dried in pale marks near the port." },
+    { id: 84, ph: 'lateAfternoon', later: true, t: "I find the worn place along the table with my thumb again." },
+    { id: 85, ph: 'lateAfternoon', rare: true, t: "The light falls across the settee in a way that feels familiar. I can't place why." },
+    { id: 86, ph: 'lateAfternoon', rare: true, later: true, t: "For a moment I have the feeling that I've sat here at this hour before." },
+    // SUNSET (22)
+    { id: 87, ph: 'sunset', wx: ['clear'], t: "I watch the low light turn the wood amber." },
+    { id: 88, ph: 'sunset', wx: ['clear'], sea: ['calm'], t: "Evening light lies across the table. I stay with it as it slowly moves away." },
+    { id: 89, ph: 'sunset', wx: ['clear'], sea: ['slight'], t: "The last light shifts gently across the floor with the boat." },
+    { id: 90, ph: 'sunset', wx: ['clear'], sea: ['moderate'], t: "Amber light climbs the wall and disappears with each roll." },
+    { id: 91, ph: 'sunset', wx: ['clear'], sea: ['rough'], t: "The last sunlight arrives in flashes. I wait for each one without meaning to." },
+    { id: 92, ph: 'sunset', wx: ['partly'], sun: true, t: "The sun finds the cabin between clouds. Each time it does, the room changes for a few seconds." },
+    { id: 93, ph: 'sunset', wx: ['overcast'], t: "There isn't really a sunset tonight. I sit and watch the gray outside become a darker gray." },
+    { id: 94, ph: 'sunset', wx: ['fog'], t: "I can't see the sun go down. At some point I realize the fog has simply become darker." },
+    { id: 95, ph: 'sunset', wx: ['lightRain'], sun: true, t: "I follow the last light through the water on the glass until there isn't enough left to follow." },
+    { id: 96, ph: 'sunset', wx: ['lightRain', 'rain', 'heavyRain'], nosun: true, t: "Evening disappears behind the wet glass without much ceremony." },
+    { id: 97, ph: 'sunset', wx: ['clear'], horizon: true, t: "I watch the bright line above the dark sea grow thinner." },
+    { id: 98, ph: 'sunset', wx: ['clear'], sea: ['calm'], t: "A path of light lies across the water. I keep looking at it as it begins to disappear." },
+    { id: 99, ph: 'sunset', wx: ['clear'], sea: ['moderate'], t: "The sunset breaks apart on the moving water. I can't keep my eyes on any one piece." },
+    { id: 100, ph: 'sunset', wx: ['clear'], sea: ['rough'], t: "Bright water appears through the port, vanishes, then appears somewhere else." },
+    { id: 101, ph: 'sunset', lights: 'off', t: "I don't turn the lights on yet. For a while the ports are enough." },
+    { id: 102, ph: 'sunset', lights: 'off', wx: ['clear'], t: "The room darkens around one last patch of sunlight." },
+    { id: 103, ph: 'sunset', hatch: 'open', wx: ['clear', 'partly'], t: "The sky through the hatch holds its color longer than the cabin does." },
+    { id: 104, ph: 'sunset', days: 4, t: "The worn edge of the table catches the last light. My hand finds it almost automatically." },
+    { id: 105, ph: 'sunset', later: true, t: "I sit until the things around me begin to lose their color." },
+    { id: 106, ph: 'sunset', rare: true, t: "The light catches the table and something almost comes back to me." },
+    { id: 107, ph: 'sunset', rare: true, later: true, t: "I know this light. I don't know how I know it." },
+    { id: 108, ph: 'sunset', rare: true, later: true, t: "For a moment the cabin looks less like somewhere I arrived and more like somewhere I returned to." },
+    // DUSK (20)
+    { id: 109, ph: 'dusk', t: "I sit and watch the color slowly leave the room." },
+    { id: 110, ph: 'dusk', wx: ['clear'], t: "The cabin is getting dark, but there's still blue in the ports. I wait to see which disappears first." },
+    { id: 111, ph: 'dusk', wx: ['partly'], t: "The remaining light gathers in the spaces between dark clouds." },
+    { id: 112, ph: 'dusk', wx: ['overcast'], t: "I look from gray sea to gray sky until I can no longer tell exactly where one ends." },
+    { id: 113, ph: 'dusk', wx: ['fog'], t: "The ports remain lighter than the walls. Beyond that, there isn't much to see." },
+    { id: 114, ph: 'dusk', wx: ['lightRain'], t: "The last daylight catches in the water on the glass." },
+    { id: 115, ph: 'dusk', wx: ['rain'], t: "I watch the rain until I realize the room around me has grown dark." },
+    { id: 116, ph: 'dusk', wx: ['heavyRain'], t: "The ports darken while I sit. Eventually the rain is easier to notice than what's behind it." },
+    { id: 117, ph: 'dusk', sea: ['calm'], t: "I keep my eyes on the horizon as it becomes a thinner difference between two dark shades." },
+    { id: 118, ph: 'dusk', sea: ['moderate'], t: "The sea has lost its color. I find myself watching only its movement now." },
+    { id: 119, ph: 'dusk', sea: ['rough'], t: "Dark water rises into the port and disappears. I stop trying to follow the horizon." },
+    { id: 120, ph: 'dusk', hatch: 'open', wx: ['clear', 'partly', 'overcast', 'fog', 'lightRain'], t: "The last light seems to remain in the hatch after it has left the rest of the cabin." },
+    { id: 121, ph: 'dusk', lights: 'off', t: "I notice which things disappear first. The corners. The floor. The grain of the wood." },
+    { id: 122, ph: 'dusk', lights: 'off', t: "The table remains after most of what makes it this particular table has disappeared." },
+    { id: 123, ph: 'dusk', lights: 'off', t: "I can still make out my hands if I hold them near the port." },
+    { id: 124, ph: 'dusk', lights: 'off', lateDusk: true, t: "I know where things are more clearly than I can see them." },
+    { id: 125, ph: 'dusk', days: 4, t: "The cabin changes shape as the light leaves it, but nothing in it feels unfamiliar anymore." },
+    { id: 126, ph: 'dusk', later: true, t: "My hand finds the edge of the table without my looking." },
+    { id: 127, ph: 'dusk', rare: true, t: "I know where everything is even after I can no longer see all of it." },
+    { id: 128, ph: 'dusk', rare: true, later: true, t: "Something about the room becoming dark feels older than this journey." },
+    // NIGHT (22)
+    { id: 129, ph: 'night', lights: 'off', t: "I look through the ports for a while. There's almost nothing to see." },
+    { id: 130, ph: 'night', wx: ['clear'], lights: 'off', t: "I stare into the darkness beyond the glass until distance stops meaning much." },
+    { id: 131, ph: 'night', wx: ['clear'], lights: 'off', horizon: true, t: "A little outside light finds the edge of the table, then slips away." },
+    { id: 132, ph: 'night', wx: ['overcast'], lights: 'off', t: "The ports are barely different from the walls. I find them mostly because I know where they are." },
+    { id: 133, ph: 'night', wx: ['fog'], lights: 'off', t: "Beyond the port is a darkness without any distance to it." },
+    { id: 134, ph: 'night', wx: ['rain'], lights: 'off', t: "Every so often the wet glass catches enough light to appear, then disappears again." },
+    { id: 135, ph: 'night', wx: ['heavyRain'], lights: 'off', t: "There is almost nothing to look at. I sit and let the weather fill the dark around me." },
+    { id: 136, ph: 'night', sea: ['calm'], lights: 'off', t: "I sit in the dark long enough that the cabin seems to stop moving altogether." },
+    { id: 137, ph: 'night', sea: ['moderate'], lights: 'off', t: "Without much to look at, I notice the roll more clearly. After a while my body follows it on its own." },
+    { id: 138, ph: 'night', sea: ['rough'], lights: 'off', t: "I brace my foot before the next roll arrives. I don't remember deciding to." },
+    { id: 139, ph: 'night', days: 4, lights: 'off', t: "Sitting still in the dark, I recognize the boat mostly by smell. Wood, fabric, salt." },
+    { id: 140, ph: 'night', later: true, lights: 'off', rare: true, t: "I know this room differently in the dark. Somehow that feels familiar too." },
+    { id: 141, ph: 'night', lights: 'on', t: "I sit inside the small pool of cabin light and look at the black ports around it." },
+    { id: 142, ph: 'night', sea: ['calm', 'slight'], lights: 'on', t: "The room of light moves so gently through the darkness that I almost forget we're moving at all." },
+    { id: 143, ph: 'night', sea: ['moderate'], lights: 'on', t: "The cabin rolls through the dark, carrying this little room of light with it." },
+    { id: 144, ph: 'night', sea: ['rough'], lights: 'on', t: "Light tilts across the cabin with every roll. Outside the ports, there is nothing to hold onto." },
+    { id: 145, ph: 'night', wx: ['clear'], lights: 'on', t: "The port has become a black mirror. I see the cabin before I see anything beyond it." },
+    { id: 146, ph: 'night', wx: ['overcast'], lights: 'on', t: "The light ends at the glass. Beyond it there is only black." },
+    { id: 147, ph: 'night', wx: ['rain'], lights: 'on', t: "I watch the cabin light catch in the water on the glass. Beyond it, the sea is gone." },
+    { id: 148, ph: 'night', wx: ['heavyRain'], lights: 'on', t: "Water moves through my reflection until, for a moment, I disappear from the glass." },
+    { id: 149, ph: 'night', later: true, lights: 'on', t: "My eyes move over the familiar things in the light—the table, the settee, the worn floor—and stop there." },
+    { id: 150, ph: 'night', rare: true, later: true, lights: 'on', t: "I look at my reflection in the dark port and, for a moment, the room behind it feels more familiar than my face." },
+  ];
+
+  var SIT_FIRST_MS = 10 * 1000;
+  var SIT_SECOND_MS = 3 * 60 * 1000;
+  var SIT_REPEAT_MS = 5 * 60 * 1000;
+  var SIT_REPEAT_JITTER_MS = 30 * 1000; // "about every 5 minutes": 4:30 to 5:30
+  var SIT_COALESCE_MS = 30 * 1000;      // changes noticed inside this window of the first one become a single observation
+  var SIT_POLL_MS = 1000;               // how often the session looks at the clock and the world; it does nothing unless something is due or changed
+  var SIT_COFFEE_RECENT_MIN = 45;       // game minutes: coffee "recently made"
+  var SIT_MEAL_RECENT_MIN = 60;         // game minutes: a cooked meal (not a snack) "recently prepared"
+  var SIT_HATCH_LONG_CLOSED_MIN = 360;  // game minutes shut = "closed for an extended period"
+  var SIT_LATER_VOYAGE_DAY = 10;        // "several days at sea" is day 4 (the library's own days: 4); "later voyage" is day 10
+  var SIT_SUN_VISIBLE_CLOUD_PCT = 60;   // the weather engine's own line between a partly cloudy sky that shows the sun and one that doesn't (see rwLegacyCondition)
+  var SIT_LATE_DUSK_MINUTES = 20;       // the last third of the 30-minute dusk
+  var SIT_RARE_CHANCE_FIRST_DAY = 4, SIT_RARE_CHANCE_FULL_DAY = 28, SIT_RARE_CHANCE_MIN = 0.03, SIT_RARE_CHANCE_MAX = 0.20;
+
+  var sitSession = null;   // the one live session, or null: { state, dueAt, armed, attempts, shown[], shownCount, currentId, worldKey, changeAt, obsEls, entryEl, seated, pollTimer }
+  var sitLastLineId = null; // the last line the previous sitting ended on, so a new sitting does not open with the very same one
+
+  // How specific a line is: how many different kinds of condition it carries (weather, sea, lights, hatch, temperature, ...).
+  function sitKinds(l) {
+    var n = 0;
+    ['wx', 'sea', 'horizon', 'lights', 'hatch', 'cabin', 'wet', 'coffee', 'food', 'lateDusk'].forEach(function (k) { if (l[k] != null) n++; });
+    if (l.sun || l.nosun) n++;
+    if (l.days != null || l.later) n++;
+    return n;
+  }
+  SIT_LIBRARY.forEach(function (l) { l.n = sitKinds(l); });
+
+  // The header's own weather word, folded into the library's seven categories. SHOWERS reads as light rain, THUNDERSTORM / SQUALL as heavy rain; SNOW has no line
+  // of its own so it reads as a covered sky.
+  function sitWeatherCategory(state) {
+    switch (skyDisplayLabel(state)) {
+      case 'CLEAR': return 'clear';
+      case 'PARTLY CLOUDY': return 'partly';
+      case 'OVERCAST': return 'overcast';
+      case 'FOG': return 'fog';
+      case 'LIGHT RAIN': case 'SHOWERS': return 'lightRain';
+      case 'RAIN': return 'rain';
+      case 'HEAVY RAIN': case 'THUNDERSTORM': case 'SQUALL': return 'heavyRain';
+      default: return 'overcast';
+    }
+  }
+  // The game's own sea tiers (SEA_STATE_SHORT_LABELS: CALM, SLIGHT, LIGHT, MODERATE, ROUGH, VERY ROUGH, HIGH) in the library's four words.
+  function sitSeaClass(state) {
+    var t = Math.max(0, Math.min(6, Math.round(state.weather.seaState || 0)));
+    return t === 0 ? 'calm' : (t <= 2 ? 'slight' : (t === 3 ? 'moderate' : 'rough'));
+  }
+  function sitSunVisible(state, phase, wx) {
+    if (phase !== 'sunrise' && phase !== 'day' && phase !== 'lateAfternoon' && phase !== 'sunset') return false;
+    if (wx === 'clear') return true;
+    if (wx !== 'partly' && wx !== 'lightRain') return false;
+    var cp = state.weather.cloudPct;
+    return cp != null ? cp < SIT_SUN_VISIBLE_CLOUD_PCT : wx === 'partly';
+  }
+  // Wet is only ever claimed when the game itself says so: a garment actually wet or drying, or the cabin's own damp (the same test its air-out copy uses).
+  function sitRecentlyWet(state) {
+    var c = state.crew;
+    if (c.cabinStuffySinceMinutes != null || c.dampCabinHours > 0) return true;
+    return Object.keys(CLOTHING_LABEL).some(function (k) { return isGarmentWet(state, k); });
+  }
+  function sitWorldKey(state) { return getDaylightPhase(state) + '|' + sitWeatherCategory(state); } // the two things that can start an observation
+
+  // Everything a line's conditions can ask about, read once from the game's existing state.
+  function sitContext(state) {
+    var phase = getDaylightPhase(state), wx = sitWeatherCategory(state), b = state.boat, c = state.crew, now = state.meta.voyageMinutes;
+    return {
+      phase: phase, wx: wx, sea: sitSeaClass(state), sun: sitSunVisible(state, phase, wx),
+      horizon: wx === 'clear' || wx === 'partly' || wx === 'overcast' || wx === 'lightRain',
+      lightsOn: !!b.cabinLightsOn, hatchOpen: !!b.hatchOpen,
+      hatchLong: !b.hatchOpen && now - (b.hatchChangedAt || 0) >= SIT_HATCH_LONG_CLOSED_MIN,
+      cabinF: b.cabinTemperatureF == null ? null : Math.round(b.cabinTemperatureF), // the whole degree she sees as CABIN TEMP
+      wet: sitRecentlyWet(state),
+      coffee: c.lastCoffeeAt != null && now - c.lastCoffeeAt >= 0 && now - c.lastCoffeeAt <= SIT_COFFEE_RECENT_MIN,
+      food: c.hoursSinceMeal <= 1 && Number.isFinite(c.lastAteAt) && now - c.lastAteAt >= 0 && now - c.lastAteAt <= SIT_MEAL_RECENT_MIN, // a snack can only set hoursSinceMeal to 3, so <= 1 is a real meal
+      day: voyageDayNumber(state),
+      lateDusk: phase === 'dusk' && daylightSnapshot(state).minutesSinceSunset >= SIT_LATE_DUSK_MINUTES,
+    };
+  }
+
+  function sitCabinOk(kind, x) {
+    var f = x.cabinF;
+    if (f == null) return false;
+    if (kind === 'lt65') return f < CABIN_COOL_BELOW_F;
+    if (kind === 'cold') return f < CABIN_COLD_BELOW_F;
+    if (kind === 'gte65') return f >= CABIN_COOL_BELOW_F;
+    if (kind === 'gte75') return f >= CABIN_WARM_FROM_F;
+    if (kind === 'gt73') return f > CABIN_STUFFY_ABOVE_F;
+    return false;
+  }
+  // A line plays only when EVERY condition attached to it is true right now.
+  function sitLineEligible(l, x) {
+    if (l.ph !== x.phase) return false;
+    if (l.wx && l.wx.indexOf(x.wx) < 0) return false;
+    if (l.sea && l.sea.indexOf(x.sea) < 0) return false;
+    if (l.sun && !x.sun) return false;
+    if (l.nosun && x.sun) return false;
+    if (l.horizon && !x.horizon) return false;
+    if (l.lights === 'on' && !x.lightsOn) return false;
+    if (l.lights === 'off' && x.lightsOn) return false;
+    if (l.hatch === 'open' && !x.hatchOpen) return false;
+    if (l.hatch === 'closed' && x.hatchOpen) return false;
+    if (l.hatchLong && !x.hatchLong) return false;
+    if (l.cabin && !sitCabinOk(l.cabin, x)) return false;
+    if (l.wet && !x.wet) return false;
+    if (l.coffee && !x.coffee) return false;
+    if (l.food && !x.food) return false;
+    if (l.lateDusk && !x.lateDusk) return false;
+    if (l.days != null && x.day < l.days) return false;
+    if (l.later && x.day < SIT_LATER_VOYAGE_DAY) return false;
+    return true;
+  }
+  // Rare lines: impossible in the first days, then a little more possible the longer the voyage goes (never more than one time in five).
+  function sitRareChance(day) {
+    if (day < SIT_RARE_CHANCE_FIRST_DAY) return 0;
+    var f = Math.min(1, (day - SIT_RARE_CHANCE_FIRST_DAY) / (SIT_RARE_CHANCE_FULL_DAY - SIT_RARE_CHANCE_FIRST_DAY));
+    return SIT_RARE_CHANCE_MIN + (SIT_RARE_CHANCE_MAX - SIT_RARE_CHANCE_MIN) * f;
+  }
+
+  // Chooses the next observation from the world as it is NOW, or null when there is nothing to say. reason: 'first' | 'change' | 'timed'.
+  function sitPickLine(state, s, reason) {
+    var x = sitContext(state);
+    var eligible = SIT_LIBRARY.filter(function (l) { return sitLineEligible(l, x); });
+    var normal = eligible.filter(function (l) { return !l.rare; }), rare = eligible.filter(function (l) { return l.rare; });
+    var unseenRare = rare.filter(function (l) { return s.shown.indexOf(l.id) < 0; });
+    var useRare = unseenRare.length > 0 && Math.random() < sitRareChance(x.day); // a rare line is a bonus: once the rare ones have all been shown the roll simply falls through to the ordinary lines, it never blocks an observation
+    var cands = useRare ? rare : normal;
+    var unseen = cands.filter(function (l) { return s.shown.indexOf(l.id) < 0; });
+    if (!unseen.length) {
+      if (reason === 'timed') return null; // nothing new to say: the current moment just stays
+      var rest = cands.filter(function (l) { return l.id !== s.currentId; }); // a change of weather or light must still show something: the least recently shown
+      if (!rest.length) return null;
+      rest.sort(function (a, b) { return s.shown.lastIndexOf(a.id) - s.shown.lastIndexOf(b.id); });
+      return rest[0];
+    }
+    var top = unseen;
+    if (!useRare) { // the most specifically eligible lines
+      var best = 0;
+      unseen.forEach(function (l) { if (l.n > best) best = l.n; });
+      top = unseen.filter(function (l) { return l.n === best; });
+    }
+    if (reason === 'first' && sitLastLineId != null && top.length > 1) {
+      var fresh = top.filter(function (l) { return l.id !== sitLastLineId; });
+      if (fresh.length) top = fresh;
+    }
+    return top[Math.floor(Math.random() * top.length)];
+  }
+
+  // Shows `text` as THE observation: any earlier one is removed first (never a growing transcript), and the SITTING A WHILE indicator gives way to it.
+  function sitShowObservation(s, text) {
+    sitRemoveObservation(s);
+    if (activityDotsCurrentLabel === 'SITTING A WHILE') stopActivityDots();
+    var gap = document.createElement('p');
+    gap.className = 'gap';
+    var line = document.createElement('p');
+    line.className = 'line';
+    line.textContent = text;
+    outputEl.insertBefore(gap, tempViewEl);
+    outputEl.insertBefore(line, tempViewEl);
+    s.obsEls = [gap, line];
+    scrollToBottom();
+  }
+  function sitRemoveObservation(s) {
+    if (!s || !s.obsEls) return;
+    s.obsEls.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+    s.obsEls = null;
+  }
+
+  function sitMakeObservation(state, s, reason, now) {
+    var line = sitPickLine(state, s, reason);
+    if (line) {
+      sitShowObservation(s, line.t);
+      s.shown.push(line.id);
+      s.shownCount++;
+      s.currentId = line.id;
+      sitLastLineId = line.id;
+    }
+    s.attempts++;
+    s.worldKey = sitWorldKey(state); // whatever changed is now accounted for
+    s.changeAt = null;
+    s.dueAt = now + (s.attempts === 1 ? SIT_SECOND_MS : SIT_REPEAT_MS + Math.round((Math.random() * 2 - 1) * SIT_REPEAT_JITTER_MS));
+  }
+
+  // Runs once a second while she sits. Cheap: it compares two things and the clock, and does nothing unless an observation is due or the world changed.
+  function sitPoll() {
+    var s = sitSession, state = GAME;
+    if (!s) return;
+    if (!state || state !== s.state || !state.pendingChoice || state.pendingChoice.id !== 'sitting') { sitEndSession(); return; } // another screen took over (or a new game began)
+    var now = Date.now();
+    if (!s.armed) { // the first 10 seconds: nothing else can start an observation; at the end of it the CURRENT world is read
+      if (now < s.dueAt) return;
+      s.armed = true;
+      sitMakeObservation(state, s, 'first', now);
+      return;
+    }
+    var key = sitWorldKey(state);
+    if (key !== s.worldKey) { s.worldKey = key; if (s.changeAt == null) s.changeAt = now + SIT_COALESCE_MS; } // the first change opens the window; later ones just update the picture
+    if (s.changeAt != null && now >= s.changeAt) { sitMakeObservation(state, s, 'change', now); return; }
+    if (now >= s.dueAt) sitMakeObservation(state, s, 'timed', now);
+  }
+
+  // Ends the session completely: the poll, the pending observation, the screen text, the settling-in sound. Idempotent.
+  function sitEndSession() {
+    var s = sitSession;
+    if (!s) return;
+    sitSession = null;
+    if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
+    sitRemoveObservation(s);
+    if (activityDotsCurrentLabel === 'SITTING A WHILE') stopActivityDots();
+    var el = s.entryEl;
+    if (el && !el.paused) { el.onended = null; fadeSaloonVolume(el, 0, 0.12, function () { el.pause(); }); } // getting up straight away: the settling-in sound does not play on over it
+  }
+
+  // handleAction's tail clears pendingChoice when an action left it the SAME object (that is how an ordinary action says "I finished the screen"). An action
+  // that deliberately changes nothing therefore hands back an identical but fresh choice object, so a repeated press can never end the screen it is on.
+  function keepScreen(state) {
+    if (state.pendingChoice) state.pendingChoice = Object.assign({}, state.pendingChoice);
+  }
+
+  // SIT A WHILE: the saloon menu gives way to the seated screen at once (GET UP is there from the first moment), the settling-in sound starts, and the 10 seconds
+  // to the first observation start with it -- independent of the sound's own length. Pressing it again while seated does nothing.
+  function performSitAWhile(state) {
+    if (sitSession) { keepScreen(state); return; } // already seated: a repeat does nothing (no second sound, no second timer) and must not end the screen
+    clearTempView();
+    var now = Date.now();
+    var s = sitSession = { state: state, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, shown: [], shownCount: 0, currentId: null, worldKey: sitWorldKey(state), changeAt: null, obsEls: null, entryEl: null, seated: false, pollTimer: null };
+    state.pendingChoice = { id: 'sitting', options: [{ label: 'GET UP', action: 'get-up' }] }; // handleAction's tail renders it (and the SITTING A WHILE indicator)
+    s.entryEl = playSaloonOneShot('sitAWhile', function () { s.seated = true; }); // the sound's real end; it only marks her as settled -- she keeps sitting
+    s.pollTimer = setInterval(sitPoll, SIT_POLL_MS);
+  }
+
+  // GET UP: the session ends immediately (no timer, observation or trigger survives it), GETTING UP shows for exactly as long as get_up.mp3 plays, and then
+  // the Saloon returns -- the same audio-synced action every other physical action uses, so SOUND OFF or a blocked sound can never trap her here.
+  function performGetUp(state) {
+    if (!sitSession) { keepScreen(state); return; } // not sitting (a stray or repeated press): nothing to do, and the screen stays as it is
+    sitEndSession();
+    state.pendingChoice = null;
+    runAudioSyncedAction(state, {
+      label: 'GETTING UP',
+      playAudio: function (onEnded) { return playSaloonOneShot('getUp', onEnded); },
+      action: function (s) { cmdSaloon(s); },
     });
   }
 
@@ -17421,6 +17844,8 @@
     tidyUp: 'audio/saloon/tidy_up.mp3', // TIDY UP chore -- see CHORE_AUDIO.tidy
     bookOpen: 'audio/saloon/book_open.mp3', // starting a reading session -- see performStartReading
     bookClose: 'audio/saloon/book_close.mp3', // ending one (STOP READING, completion, or darkness) -- see performStopReading/syncReadingProgress
+    sitAWhile: 'audio/saloon/sit_a_while.mp3', // settling in -- see performSitAWhile (it does NOT set how long she sits)
+    getUp: 'audio/saloon/get_up.mp3', // getting up again -- see performGetUp
   };
   var SALOON_AUDIO_VOLUME = {
     hatchOpen: 0.5,
@@ -17428,6 +17853,8 @@
     tidyUp: 0.5,
     bookOpen: 0.5,
     bookClose: 0.5,
+    sitAWhile: 0.5,
+    getUp: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -19155,6 +19582,7 @@
 
   function activityDotsInfo(state) {
     if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
+    if (sitSession && sitSession.shownCount === 0 && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // until the first observation takes its place
     if (state.crew.watchState === 'sleeping') return { active: true, label: null };
     return { active: false, label: null };
   }
@@ -19384,6 +19812,10 @@
       performStartReading(state, action.slice(14));
     } else if (action === 'stop-reading') {
       performStopReading(state);
+    } else if (action === 'sit-a-while') {
+      performSitAWhile(state);
+    } else if (action === 'get-up') {
+      performGetUp(state);
     } else if (action === 'view-ships-plan') {
       cmdShipsPlan(state);
     } else if (action === 'view-vessel-log') {
@@ -20257,6 +20689,7 @@
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = fallbackTemperatureF(state);
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
     if (b.hatchOpen === undefined) b.hatchOpen = false;
+    if (b.hatchChangedAt === undefined) b.hatchChangedAt = currentGameMinutes(state); // an older save: unknown, so count from now rather than guess it was shut for hours
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
     if (state.flags.cleanlinessNarrated === undefined) state.flags.cleanlinessNarrated = false;
     if (state.flags.galleyNarrated === undefined) state.flags.galleyNarrated = false;
@@ -20399,6 +20832,10 @@
   function migrateStalePendingChoiceIfNeeded(state) {
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
+      cmdSaloon(state);
+      return;
     }
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
