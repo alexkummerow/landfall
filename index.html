@@ -12681,16 +12681,15 @@
      really ended does the screen become JUST EXISTING, with BACK TO REALITY as its one control. BACK TO REALITY ends it at once and shows MOVING AFT TO THE COCKPIT for
      exactly as long as moving_aft_to_the_cockpit.mp3 plays, then the above-deck menu returns. The voyage keeps running underneath: nothing here pauses or touches the
      simulation, writes to the vessel log, or is saved except the small shuffle-bag below.
-     WHEN an observation appears (the very cadence of SIT A WHILE, same constants): the first SIT_FIRST_MS (10 s) after she reaches the bow; the next SIT_SECOND_MS
+     WHEN an observation appears (the very cadence of SIT A WHILE, same constants): the first SIT_FIRST_MS (10 s) after the player reaches the bow; the next SIT_SECOND_MS
      (3 min) later and then about every SIT_REPEAT_MS (5 min, give or take 30 s), each replacing the last; and whenever the daylight PHASE, the WEATHER category or the
      ROUTE REGION changes (changes landing close together are coalesced into one, picked from the newest state). One observation is on screen at a time.
-     WHICH line: nothing is decided in advance. The world is read at the moment of choosing (so the first line reads the world as it is at the bow, not as it was when she
-     chose JUST EXIST), the lines of the ROUTE REGION she is in are the pool (Puget Sound / Strait of Juan de Fuca / outer coast / open Pacific / Hawaiian approach, taken
+     WHICH line: nothing is decided in advance. The world is read at the moment of choosing (so the first line reads the world as it is at the bow, not as it was when the player chose JUST EXIST), the lines of the ROUTE REGION the boat is in are the pool (Puget Sound / Strait of Juan de Fuca / outer coast / open Pacific / Hawaiian approach, taken
      from the game's own route position; in the long Hawaiian approach the open-Pacific lines also apply until the island itself is in sight), and a line is eligible only if EVERY attached condition is true right now -- the game's daylight phase, sky, sea state,
      outside-air temperature, wind, sun, cloud, reflection, land / shore lights / stars in view and in range, and any named sighting actually in progress. A condition the
      game cannot honestly confirm (the moon is not simulated) makes its lines never eligible. Words that assume something the tags do not say (a named shore, the marina,
      sunlight, enough light to see by) carry that condition too (OBS_IMPLICIT / the light rule below). The pick is RANDOM among the eligible lines, without replacement
-     until that pool is used up, then reshuffled (the newest few stay out of the next round); an empty pool simply shows nothing. The environment is never changed to
+     until that pool is used up, then reshuffled (the newest few stay out of the next round); an empty pool shows nothing and is looked at again every 15 seconds. The environment is never changed to
      make a line eligible, and the sequence is no longer offered once the harbour capture / final arrival begins. -------------------------------------------------------------- */
   var OBS_LIBRARY = [
     { id: 1, rg: "sound", time: "DAWN", sky: "OVERCAST", sea: "ANY", tags: [], t: "The dark strip of shore and the dark strip of cloud almost touch. I watch for the first place they separate." },
@@ -12851,11 +12850,13 @@
   var OBS_SOUND_SHORE_NM = 2;            // along the authored corridor the nearest shore is always about this near in Puget Sound...
   var OBS_STRAIT_SHORE_NM = 3;           // ...and in the Strait (the route runs close under the south shore; the strait is only 11-12 nm across at its widest)
   var OBS_STRAIT_LIGHTS_WEST_LON = -123.9; // the Strait east of here has Port Angeles / Sequim / Victoria glow; west of it the shore is dark
-  var OBS_VIS_NM = { clear: 25, partly: 25, overcast: 25, lightRain: 12, rain: 6, heavyRain: 3, fog: 0.5 }; // how far she can see in each sky (the game keeps no visibility field of its own)
+  var OBS_VIS_NM = { clear: 25, partly: 25, overcast: 25, lightRain: 12, rain: 6, heavyRain: 3, fog: 0.5 }; // how far can be seen in each sky (the game keeps no visibility field of its own)
+  var OBS_MARINA_GLOW_NM = 1;            // within this of Shilshole Bay Marina the marina's own glow is all there is; beyond it the Sound is as dark as the Sound gets
   var OBS_FIRST_STAR_MIN = 10;           // minutes after sunset before the first star can be picked out (dusk lasts 30)
   var OBS_DARK_SKY_LAND_NM = 60;         // "especially dark": open Pacific at least this far from any land
-  var OBS_FOLLOW_MIN = 20;               // a bird has "followed" the boat once it has been with her this long (the log's own "followed for a while" rule)
+  var OBS_FOLLOW_MIN = 20;               // a bird has "followed" the boat once it has been with the boat this long (the log's own "followed for a while" rule)
   var OBS_FLYFISH_WINDOW_MIN = 30;       // a flying fish found aboard (the game's own event) means more are skipping nearby for this long
+  var OBS_RETRY_MS = 15 * 1000;          // when NOTHING fits the world at the moment an observation is due, look again this soon (the cadence step is not used up)
   var OBS_RECENT_KEEP = 3;               // when a pool is used up and reshuffled, the newest this many lines stay out of the next round (if the pool is big enough)
 
   var OBS_PHASE_NAME = { dawn: 'DAWN', sunrise: 'SUNRISE', day: 'DAY', lateAfternoon: 'LATE AFTERNOON', sunset: 'SUNSET', dusk: 'DUSK', night: 'NIGHT' };
@@ -12919,15 +12920,15 @@
   };
   // What a line's WORDS assume that its tags do not say (by id). Each is a plain fact the game can check.
   var OBS_NEED_TEST = {
-    land: function (x) { return x.landSeen; },                                  // a named shore / hills / islands / coast she can actually see (range, weather and light)
+    land: function (x) { return x.landSeen; },                                  // a named shore / hills / islands / coast can actually be seen (range, weather and light)
     near: function (x) { return x.landNear; },                                  // the land is within sight range but may be hidden (fog): "the coast disappears"
     hawaiiRange: function (x) { return x.hawaiiRange; },
     sun: function (x) { return x.sun; },                                        // sunlight / cloud shadows: the sun is actually out
-    horizon: function (x) { return x.horizon; },                                // a horizon she can see (not fog or heavy rain)
+    horizon: function (x) { return x.horizon; },                                // a horizon that can be seen (not fog or heavy rain)
     calmSea: function (x) { return x.sea === 'calm' || x.sea === 'slight'; },   // "the water looks calm"
     rolling: function (x) { return x.sea !== 'calm'; },                         // "as the boat rolls"
     wind5: function (x) { return x.wind >= 5; },                                // "holds still in the wind", "windward side", "the wind keeps the shaded side cool"
-    marina: function (x) { return x.marina; },                                  // the marina she has just left (Shilshole Bay)
+    marina: function (x) { return x.marina; },                                  // the marina just left (Shilshole Bay)
     whale: function (x) { return x.see.whale; },                                // a spout
     cloudy: function (x) { return x.wx === 'partly'; },                         // "cloud shadow"
   };
@@ -12938,7 +12939,7 @@
     82: ['sun'], 88: ['horizon'], 93: ['calmSea'], 94: ['horizon'], 102: ['whale'], 107: ['horizon'], 120: ['cloudy'],
     132: ['hawaiiRange'], 139: ['sun'], 140: ['near'], 148: ['land'], 149: ['land'], 150: ['land'],
   };
-  // The only TIME=ANY lines that make sense in the dark (the air on her face, the cold in the rail). Every other TIME=ANY line describes something seen, so it needs light to see by.
+  // The only TIME=ANY lines that make sense in the dark (the air on the face, the cold in the rail). Every other TIME=ANY line describes something seen, so it needs light to see by.
   var OBS_NIGHT_OK = { 17: true, 41: true, 65: true, 136: true, 137: true };
 
   // The outer Pacific coast the "coast" zone is measured from: the coastal (non-artificial) edges of the Pacific ring north of 42N.
@@ -12981,7 +12982,7 @@
     feeding: { last: 'lastFeeding', gap: 360, dur: [8, 25],  rate: { sound: 0.06, strait: 0.06, offCoast: 0.05, pacific: 0.02, mid: 0.012, hawaiiFar: 0.03, hawaiiNear: 0.06 } },
   };
   function obsSightActive(s, t) { return !!(s && t >= s.startT && t < s.endT); }
-  // Called once per simulation tick, right after the encounters. Nothing starts during an offline catch-up (she was not on deck to see it).
+  // Called once per simulation tick, right after the encounters. Nothing starts during an offline catch-up (nobody was on deck to see it).
   function obsSightTick(state, c, m) {
     var S = obsSightMemory(m), t = c.t;
     Object.keys(OBS_SIGHTS).forEach(function (k) {
@@ -13014,7 +13015,7 @@
     else if (region === 'hawaii') { near = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.islandEdges); landNm = near ? near.nm : 99999; cap = NAV_SIGHT_NM; }
     else { near = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.landEdges); landNm = anyLandNm = near ? near.nm : 99999; }
     var landNear = landNm <= cap;                       // inside the distance land can be seen from, whatever the weather
-    var range = landNear && landNm <= visNm;            // ...and the weather lets her see that far
+    var range = landNear && landNm <= visNm;            // ...and the weather allows a view that far
     var landSeen = range && light;                      // ...and there is light to see it by
     var hawaiiRange = region === 'hawaii' && range;
     var clearSky = wx === 'clear' && cloud <= 25;
@@ -13028,8 +13029,8 @@
     else if (region === 'coast') lightsPlace = landNm <= Math.min(OBS_SHORE_LIGHT_NM, visNm);
     else if (region === 'hawaii') lightsPlace = landNm <= Math.min(NAV_SIGHT_NM, visNm);
     var shoreLights = (phase === 'dusk' || phase === 'night' || phase === 'dawn') && lightsPlace;
-    // "Low light pollution": no city / shore glow around her -- beyond the marina's glow in the Sound, west of the lit part of the Strait, beyond the reach of a coast light, and so on.
-    var lowLight = region === 'sound' ? distStart >= 3 : region === 'strait' ? !(n.lon > OBS_STRAIT_LIGHTS_WEST_LON) : region === 'coast' ? landNm > OBS_SHORE_LIGHT_NM : region === 'hawaii' ? landNm > NAV_SIGHT_NM : true;
+    // "Low light pollution": no city / shore glow around the boat -- beyond the marina's glow in the Sound, west of the lit part of the Strait, beyond the reach of a coast light, and so on.
+    var lowLight = region === 'sound' ? distStart >= OBS_MARINA_GLOW_NM : region === 'strait' ? !(n.lon > OBS_STRAIT_LIGHTS_WEST_LON) : region === 'coast' ? landNm > OBS_SHORE_LIGHT_NM : region === 'hawaii' ? landNm > NAV_SIGHT_NM : true;
     var cloudVisible = light && (wx === 'partly' || (wx === 'clear' && cloud >= 10));
     var daylit = phase === 'sunrise' || phase === 'day' || phase === 'lateAfternoon' || phase === 'sunset';
     var m = momentMemory(state), E = encMemory(m), S = obsSightMemory(m);
@@ -13065,7 +13066,7 @@
 
   // A line plays only when EVERY condition attached to it is true right now.
   function obsLineEligible(l, x) {
-    if (l.rg !== x.region && !(x.region === 'hawaii' && l.rg === 'pacific' && !x.hawaiiRange)) return false; // the Hawaiian approach runs 860 nm; until the island itself is in sight she is still on the open Pacific, so its lines apply there too
+    if (l.rg !== x.region && !(x.region === 'hawaii' && l.rg === 'pacific' && !x.hawaiiRange)) return false; // the Hawaiian approach runs 860 nm; until the island itself is in sight the boat is still on the open Pacific, so its lines apply there too
     if (l.time !== 'ANY' && OBS_PHASE_NAME[x.phase] !== l.time) return false; // TIME is the game's own phase: DAY is the DAY phase only, so late afternoon draws on the TIME=ANY lines
     if (!OBS_SKY_OK[l.sky] || !OBS_SKY_OK[l.sky](x.wx)) return false;
     if (!OBS_SEA_OK[l.sea] || !OBS_SEA_OK[l.sea](x.sea)) return false;
@@ -13084,6 +13085,7 @@
   function obsPickLine(state, s) {
     var x = obsContext(state), m = momentMemory(state), shown = obsShownList(m);
     var pool = OBS_LIBRARY.filter(function (l) { return obsLineEligible(l, x); });
+    s.poolSize = pool.length; // 0 = nothing at all fits the world right now (as opposed to "only the line already on screen is left")
     if (!pool.length) return null;
     var unseen = pool.filter(function (l) { return shown.indexOf(l.id) < 0; });
     if (!unseen.length) {
@@ -13120,23 +13122,29 @@
       if (shown.indexOf(line.id) < 0) shown.push(line.id);
       s.currentId = line.id;
     }
+    else if (s.poolSize === 0) { // nothing at all fits this world (a night the library has no line for, say): look again shortly instead of waiting out a whole interval -- a sighting, a change of weather or the light may bring something
+      s.worldKey = obsWorldKey(state);
+      s.changeAt = null;
+      s.dueAt = now + OBS_RETRY_MS;
+      return;
+    }
     s.attempts++;
     s.worldKey = obsWorldKey(state); // whatever changed is now accounted for
     s.changeAt = null;
     s.dueAt = now + (s.attempts === 1 ? SIT_SECOND_MS : SIT_REPEAT_MS + Math.round((Math.random() * 2 - 1) * SIT_REPEAT_JITTER_MS));
   }
 
-  // Runs once a second while she is at the bow. Cheap: it compares one key and the clock, and does nothing unless an observation is due or the world changed.
+  // Runs once a second while the player is at the bow. Cheap: it compares one key and the clock, and does nothing unless an observation is due or the world changed.
   function obsPoll() {
     var s = obsSession, state = GAME;
     if (!s) return;
     if (!state || state !== s.state || !state.pendingChoice || state.pendingChoice.id !== 'existing') { // another screen took over (or a new game began)
-      var orphaned = !!state && state === s.state && !state.pendingChoice; // the bow screen was cleared (the final arrival does this) -- make sure whatever she is on now is what is drawn
+      var orphaned = !!state && state === s.state && !state.pendingChoice; // the bow screen was cleared (the final arrival does this) -- make sure whatever screen is current is what is drawn
       obsEndSession();
       if (orphaned && !uiBusy) renderOptions(state);
       return;
     }
-    if (!obsAvailable(state)) { // the final arrival, a grounding, the end of the voyage...: the bow is no longer hers to stand at
+    if (!obsAvailable(state)) { // the final arrival, a grounding, the end of the voyage...: the bow is no longer available
       obsEndSession();
       state.pendingChoice = null;
       if (!uiBusy) { renderOptions(state); saveGameState(state); }
@@ -13165,7 +13173,7 @@
     if (activityDotsCurrentLabel === 'JUST EXISTING') stopActivityDots();
   }
 
-  // The moment she reaches the bow (the walk's sound has really ended): the world is checked NOW, and if the arrival (or anything else) took the screen in the meantime she
+  // The moment the player reaches the bow (the walk's sound has really ended): the world is checked NOW, and if the arrival (or anything else) took the screen in the meantime the player
   // never gets there. Otherwise the screen becomes JUST EXISTING, with BACK TO REALITY, and the 10 seconds to the first observation start.
   function obsBeginExisting(state) {
     if (obsSession || !obsAvailable(state)) return;
@@ -13177,9 +13185,9 @@
   }
 
   // JUST EXIST: MOVING FORWARD TO THE BOW for exactly as long as the walking sound plays (the same audio-synced action every other physical action uses, so SOUND OFF or a
-  // blocked sound can never trap her here), then JUST EXISTING.
+  // blocked sound can never trap the player here), then JUST EXISTING.
   function performJustExist(state) {
-    if (uiBusy || obsSession || !obsAvailable(state)) return; // a repeat while she is already walking forward (or standing there) starts nothing
+    if (uiBusy || obsSession || !obsAvailable(state)) return; // a repeat while the player is already walking forward (or standing there) starts nothing
     runAudioSyncedAction(state, {
       label: 'MOVING FORWARD TO THE BOW',
       playAudio: function (onEnded) { return playCockpitOneShot('movingForward', onEnded); },
@@ -17383,7 +17391,7 @@
      moving_aft_to_the_cockpit.mp3 (the walk back). Each is a busy action's own sound (see performJustExist / performBackToReality): the action's label stays on
      screen for exactly as long as the sound really plays, and what follows (JUST EXISTING, or the above-deck menu) happens only when it has ended. Same architecture
      as the saloon / cabin / galley one-shots: a lazily created HTMLAudioElement per file (never preloaded), a quick fade-in, volume 0.5, and an onEnded that
-     fires once -- immediately if audio is not unlocked yet and on a load or play error -- so a missing or blocked file can never hold her on the screen.
+     fires once -- immediately if audio is not unlocked yet and on a load or play error -- so a missing or blocked file can never hold the player on the screen.
      Muting is a pure audibility switch (createGameAudio honours it), never a different, shorter timing.
      -------------------------------------------------------------- */
   var COCKPIT_AUDIO_FILES = {
