@@ -9552,7 +9552,7 @@
   // loop" requirement throughout. Returns the element (or null if
   // audio is locked) so runAudioSyncedAction's watchdog can size
   // BOARDING off board.mp3's own real duration.
-  function playMarinaOneShot(key, onEnded) {
+  function playMarinaOneShot(key, onEnded, onRefused) {
     onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
     var el = getMarinaAudioEl(key);
@@ -9562,7 +9562,11 @@
     el.currentTime = 0;
     el.volume = 0;
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Marina audio failed to play (' + key + '):', describeError(e)); if (onEnded) onEnded(); });
+    if (p && p.catch) p.catch(function (e) {
+      console.warn('Marina audio failed to play (' + key + '):', describeError(e));
+      if (onRefused && !(e && e.name === 'AbortError')) onRefused(e); // refused by the browser (not merely interrupted by our own pause()): the caller may try again
+      if (onEnded) onEnded();
+    });
     fadeMarinaVolume(el, marinaAudibleVolume(key), key === 'board' ? MARINA_ONE_SHOT_FADE_SECONDS : MARINA_AMBIENCE_FADE_IN_SECONDS);
     if (onEnded) {
       el.onended = function () { el.onended = null; onEnded(); };
@@ -9586,17 +9590,20 @@
   // case the very first attempt landed before any user gesture had
   // unlocked audio) -- marinaAmbienceStarted's own flags mean a second
   // call never restarts or duplicates a layer that's already underway.
+  // A layer is marked started the moment it is asked to play (so a second call can never double it), but if the browser REFUSES the play the mark is taken
+  // back, so the next call -- CONTINUE's click, then BOARD's -- gets another chance to start it. A layer that played and finished stays finished.
   function playMarinaAmbience(nightStart) {
     if (!audioUnlocked) return;
     if (!nightStart && !marinaAmbienceStarted.pnwBirds) {
       marinaAmbienceStarted.pnwBirds = true;
-      playMarinaOneShot('pnwBirds', null);
+      playMarinaOneShot('pnwBirds', null, function () { marinaAmbienceStarted.pnwBirds = false; });
     }
     if (!marinaAmbienceStarted.marinaSound) {
       marinaAmbienceStarted.marinaSound = true;
-      playMarinaOneShot('marinaSound', null);
+      playMarinaOneShot('marinaSound', null, function () { marinaAmbienceStarted.marinaSound = false; });
     }
   }
+  var marinaNightStart = null; // set by this page's opening screen (renderIntroStory): whether the voyage began in the dark. null = no opening here (a reload part-way through the departure): nothing to retry.
 
   // Called once, at the start of CASTING OFF: fades whichever ambience
   // layer(s) are still genuinely playing down to silence over `seconds`
@@ -12078,7 +12085,7 @@
   // every other chore here uses.
   var CHORE_DEFS = {
     dishes: {
-      label: 'CLEANING UP', duration: 3, moraleKey: 'dishes', moraleGain: 3,
+      label: 'WASHING DISHES', duration: 3, moraleKey: 'dishes', moraleGain: 3,
       canDo: function (s) { return hasEnoughWater(s, WATER_DISHES_GAL); },
       consume: function (s) { consumeWater(s, WATER_DISHES_GAL); },
       clear: function (s) { s.crew.dishesDirtySinceMinutes = null; },
@@ -15130,21 +15137,19 @@
       playAudio: function (onEnded) { return playCabinOneShot('changeClothes', onEnded); },
       action: function (s) {
         // Taking a wet garment OFF never dries it: wetness belongs to the garment; only HANG WET CLOTHES starts it drying.
-        var env = s.crew.location === 'above' ? 'above' : 'below';
         var before = { worn: sess.entry };
         before.wet = ALL_GARMENT_KEYS.some(function (k) { return before.worn[k] && isGarmentWet(s, k); });
         before.warmth = outfitWarmth(s, before.worn).total;
-        before.verdict = evaluateOutfit(s, before.worn, env).verdict;
         ALL_GARMENT_KEYS.forEach(function (k) { s.crew.clothing[k] = !!sess.draft[k]; });
         syncClothesWetSinceMinutes(s); // a wet garment just taken off may have become hangable
         clothingSession = null;
-        // A diary line only when nothing worn is wet (as before), and it says only what the change really did.
+        // A diary line only when nothing worn is wet (as before), and it says only what the change really did. "Dry" only when the clothes that came off were wet (and,
+        // with nothing worn wet now, what is on is dry). Otherwise it compares the warmth of the outfit before and after: warmer, cooler, or the same (0.01 is float noise).
         var wearingWet = ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); });
         if (!wearingWet) {
           var dWarmth = outfitWarmth(s, s.crew.clothing).total - before.warmth;
-          var ctx = { improved: before.verdict !== 'appropriate' && evaluateOutfit(s, s.crew.clothing, env).verdict === 'appropriate' };
-          var pool = before.wet ? 'changeDry' : (dWarmth >= 2 ? 'changeWarmer' : (dWarmth <= -2 ? 'changeLighter' : 'changePlain'));
-          log(s, pickVariant(DAILY_COPY[pool], pool, ctx));
+          var pool = before.wet ? 'changeDry' : (dWarmth > 0.01 ? 'changeWarmer' : (dWarmth < -0.01 ? 'changeCooler' : 'changePlain'));
+          log(s, pickVariant(DAILY_COPY[pool], pool, {}));
         }
         syncComfortExposure(s); // the new outfit in the place the player is standing: the 60-second clock starts (or clears) from this moment
         flushNewLogEntries(s);
@@ -15727,11 +15732,11 @@
     readStart: ['Started reading {T}.', 'Picked up {T}.', 'Opened {T} and started reading.', { t: 'Went back to {T}.', when: function (c) { return c.seen; } }],
     readStop: ['Read for a while. Forgot where I was.', "Put the book down. I'd lost track of time.", 'Read for a while. Nice to think about something else.', 'Put the book down. Good place to stop.', 'Read for a while. The boat disappeared for a bit.', "Closed the book. Felt like I'd been somewhere else."],
     hang: ['Hung the wet clothes up to dry.', 'Put the wet clothes up to dry.', 'Got the wet clothes out of the way.', "Hung the wet things up. Hopefully they'll dry.", { t: 'Hung everything wet up.', when: function (c) { return !c.wearingWet; } }],
-    // CHANGE CLOTHES: only what the change really did. A line says "dry" only when nothing worn is wet, "warmer" / "lighter" only when the outfit's warmth moved that way.
-    changeDry: ['Changed into dry clothes.', 'Got into dry clothes. Much better.', 'Changed into dry clothes. Better.'],
-    changeWarmer: ['Changed into something warmer.', 'Put on something warmer.', { t: 'Changed into something warmer. Better.', when: function (c) { return c.improved; } }],
-    changeLighter: ['Changed into something lighter.', 'Put on something lighter.', { t: 'Changed into something lighter. Better.', when: function (c) { return c.improved; } }],
-    changePlain: ['Changed clothes.', 'Changed into something else.', 'Changed into dry clothes.', { t: 'Changed clothes. Felt better.', when: function (c) { return c.improved; } }],
+    // CHANGE CLOTHES: one line per outcome. "Dry" only when the clothes taken off were wet and nothing worn now is; otherwise the outfit's warmth, before against after: warmer, cooler or the same.
+    changeDry: ['Changed into dry clothes.'],
+    changeWarmer: ['Changed into something warmer.'],
+    changeCooler: ['Changed into something cooler.'],
+    changePlain: ['Changed clothes.'],
   };
 
   var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 };
@@ -19799,7 +19804,7 @@
     // ambience (pnw_birds/marina_sound) keeps playing underneath,
     // completely untouched by this -- board.mp3 is a third, independent
     // one-shot layered on top, not a replacement for it.
-    { label: 'BOARD', workingLabel: 'BOARDING', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); }, text: 'Stepped aboard Solace.' },
+    { label: 'BOARD', workingLabel: 'BOARDING', playAudio: function (onEnded) { if (marinaNightStart !== null) playMarinaAmbience(marinaNightStart); return playMarinaOneShot('board', onEnded); }, text: 'Stepped aboard Solace.' },
     {
       label: 'START ENGINE',
       workingLabel: 'START ENGINE',
@@ -19915,6 +19920,7 @@
     // construction rather than re-deriving a second, possibly-later
     // answer from a fresh Date.now() here.
     var nightStart = GAME.boat.navLightsOn;
+    marinaNightStart = nightStart;
 
     resetOutputEl();
     printPersistentLine('Take her home.');
