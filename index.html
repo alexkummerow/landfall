@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#05080a" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<title>SOLACE — Ship's Terminal</title>
+<title>LANDFALL</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -12267,9 +12267,9 @@
          land close together are coalesced: the first starts a SIT_COALESCE_MS window and ONE observation follows it, picked from the newest complete state.
        A change during the first 10 seconds does nothing extra: the first observation simply reads whatever is true when it arrives.
      WHICH line: the phase is the pool; then every condition attached to a line must be true right now (weather, sea, lights, hatch, temperature, recent
-     coffee / cooking / wetness, days at sea, rarity). Among the eligible lines the MOST SPECIFIC (most conditions) are chosen at random; a line already shown
-     this sitting is not repeated while an unseen one exists, so a quiet stretch never produces the same prose again (a timed refresh with nothing new to say
-     simply leaves the current observation). The rare lines are rolled separately and only possible after several days at sea.
+     coffee / cooking / wetness, days at sea, rarity). The pick is RANDOM across every eligible line (not the first in the array, not a fixed order, not only the most
+     specific); a line already shown this sitting is not repeated while an unseen one exists, and the lines shown most recently (any sitting, this page session)
+     are set aside when the pool is big enough (a timed refresh with nothing new to say simply leaves the current observation). The rare lines are rolled separately and only possible after several days at sea.
      Only the phase and the weather category TRIGGER anything; sea state, temperature, lights, hatch, activity and day count only decide WHICH line.
      Nothing here is saved: sitSession lives only in memory and ends with GET UP, a reload, or any other screen taking over.
      -------------------------------------------------------------- */
@@ -12448,17 +12448,8 @@
   var SIT_RARE_CHANCE_FIRST_DAY = 4, SIT_RARE_CHANCE_FULL_DAY = 28, SIT_RARE_CHANCE_MIN = 0.03, SIT_RARE_CHANCE_MAX = 0.20;
 
   var sitSession = null;   // the one live session, or null: { state, dueAt, armed, attempts, shown[], shownCount, currentId, worldKey, changeAt, obsEls, entryEl, seated, pollTimer }
-  var sitLastLineId = null; // the last line the previous sitting ended on, so a new sitting does not open with the very same one
-
-  // How specific a line is: how many different kinds of condition it carries (weather, sea, lights, hatch, temperature, ...).
-  function sitKinds(l) {
-    var n = 0;
-    ['wx', 'sea', 'horizon', 'lights', 'hatch', 'cabin', 'wet', 'coffee', 'food', 'lateDusk'].forEach(function (k) { if (l[k] != null) n++; });
-    if (l.sun || l.nosun) n++;
-    if (l.days != null || l.later) n++;
-    return n;
-  }
-  SIT_LIBRARY.forEach(function (l) { l.n = sitKinds(l); });
+  var SIT_RECENT_MAX = 8;   // how many of the most recently shown lines (across sittings, this page session only) are set aside when choosing, if the pool allows
+  var sitRecentIds = [];    // ids of the lines shown most recently, newest last
 
   // The header's own weather word, folded into the library's seven categories. SHOWERS reads as light rain, THUNDERSTORM / SQUALL as heavy rain; SNOW has no line
   // of its own so it reads as a covered sky.
@@ -12550,7 +12541,21 @@
     return SIT_RARE_CHANCE_MIN + (SIT_RARE_CHANCE_MAX - SIT_RARE_CHANCE_MIN) * f;
   }
 
-  // Chooses the next observation from the world as it is NOW, or null when there is nothing to say. reason: 'first' | 'change' | 'timed'.
+  // Of `pool`, drops the lines shown most recently (across sittings), up to half the pool and at most SIT_RECENT_MAX of them, so something is always left to
+  // choose from and a pool of one or two simply uses what it has. It only ever removes lines from the pool it is given: it can never add one.
+  function sitSetAsideRecent(pool) {
+    var avoid = Math.min(SIT_RECENT_MAX, Math.floor(pool.length / 2)), skip = {}, n = 0, i;
+    for (i = sitRecentIds.length - 1; i >= 0 && n < avoid; i--) {
+      if (!skip[sitRecentIds[i]] && pool.some(function (l) { return l.id === sitRecentIds[i]; })) { skip[sitRecentIds[i]] = true; n++; }
+    }
+    return pool.filter(function (l) { return !skip[l.id]; });
+  }
+
+  // Chooses the next observation from the world as it is RIGHT NOW (the live state is read here, at the moment of choosing), or null when there is nothing to say.
+  // reason: 'first' | 'change' | 'timed'. Every line whose conditions ALL hold is a candidate and the pick among them is uniformly random -- no preference for the
+  // most specific line, no first-in-the-array line, no fixed order. The rare lines are rolled first (impossible in the first days, then rising) and come only from
+  // the rare pool; if the roll fails, or there are none, the choice is among the ordinary lines. A line already shown this sitting is not repeated while an unseen one
+  // exists, and the lines shown most recently (any sitting) are set aside when the pool is big enough.
   function sitPickLine(state, s, reason) {
     var x = sitContext(state);
     var eligible = SIT_LIBRARY.filter(function (l) { return sitLineEligible(l, x); });
@@ -12561,22 +12566,13 @@
     var unseen = cands.filter(function (l) { return s.shown.indexOf(l.id) < 0; });
     if (!unseen.length) {
       if (reason === 'timed') return null; // nothing new to say: the current moment just stays
-      var rest = cands.filter(function (l) { return l.id !== s.currentId; }); // a change of weather or light must still show something: the least recently shown
+      var rest = cands.filter(function (l) { return l.id !== s.currentId; }); // a change of weather or light must still show something: anything eligible but the line on screen
       if (!rest.length) return null;
-      rest.sort(function (a, b) { return s.shown.lastIndexOf(a.id) - s.shown.lastIndexOf(b.id); });
-      return rest[0];
+      var restFresh = sitSetAsideRecent(rest);
+      return restFresh[Math.floor(Math.random() * restFresh.length)];
     }
-    var top = unseen;
-    if (!useRare) { // the most specifically eligible lines
-      var best = 0;
-      unseen.forEach(function (l) { if (l.n > best) best = l.n; });
-      top = unseen.filter(function (l) { return l.n === best; });
-    }
-    if (reason === 'first' && sitLastLineId != null && top.length > 1) {
-      var fresh = top.filter(function (l) { return l.id !== sitLastLineId; });
-      if (fresh.length) top = fresh;
-    }
-    return top[Math.floor(Math.random() * top.length)];
+    var fresh = sitSetAsideRecent(unseen);
+    return fresh[Math.floor(Math.random() * fresh.length)];
   }
 
   // Shows `text` as THE observation, directly beneath the SITTING A WHILE indicator (which stays, dots and all, for the whole sitting). Any earlier observation is
@@ -12608,7 +12604,8 @@
       s.shown.push(line.id);
       s.shownCount++;
       s.currentId = line.id;
-      sitLastLineId = line.id;
+      sitRecentIds.push(line.id);
+      if (sitRecentIds.length > 40) sitRecentIds.splice(0, sitRecentIds.length - 40);
     }
     s.attempts++;
     s.worldKey = sitWorldKey(state); // whatever changed is now accounted for
