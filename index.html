@@ -7184,6 +7184,7 @@
     var m = momentMemory(state), c = momentContext(state, m);
     trackMoments(state, c, m);
     tickEncounters(state, c, m);      // wildlife / traffic: ends one in progress (and writes it), or maybe starts one
+    obsSightTick(state, c, m);        // JUST EXIST's two extra sightings (a ferry in the Sound, seabirds feeding): silent, never logged
     flushKauaiGlimpse(state, c, m);
     if (!c.awake) return; // the diary is only written awake; the trackers above keep running
     var ordinaryOk = m.day.count < MOMENT_MAX_PER_DAY && (m.lastOrdAt == null || c.t - m.lastOrdAt >= MOMENT_MIN_GAP_MINUTES);
@@ -12674,6 +12675,530 @@
     });
   }
 
+  /* --------------------------------------------------------------
+     JUST EXIST -- the above-deck counterpart of SIT A WHILE: the one open-ended, do-nothing activity on deck. It is the last action in the above-deck menu (just ahead of
+     GO BELOW). Choosing it walks forward to the bow (MOVING FORWARD TO THE BOW, for exactly as long as moving_forward_to_the_bow.mp3 plays); only when that sound has
+     really ended does the screen become JUST EXISTING, with BACK TO REALITY as its one control. BACK TO REALITY ends it at once and shows MOVING AFT TO THE COCKPIT for
+     exactly as long as moving_aft_to_the_cockpit.mp3 plays, then the above-deck menu returns. The voyage keeps running underneath: nothing here pauses or touches the
+     simulation, writes to the vessel log, or is saved except the small shuffle-bag below.
+     WHEN an observation appears (the very cadence of SIT A WHILE, same constants): the first SIT_FIRST_MS (10 s) after she reaches the bow; the next SIT_SECOND_MS
+     (3 min) later and then about every SIT_REPEAT_MS (5 min, give or take 30 s), each replacing the last; and whenever the daylight PHASE, the WEATHER category or the
+     ROUTE REGION changes (changes landing close together are coalesced into one, picked from the newest state). One observation is on screen at a time.
+     WHICH line: nothing is decided in advance. The world is read at the moment of choosing (so the first line reads the world as it is at the bow, not as it was when she
+     chose JUST EXIST), the lines of the ROUTE REGION she is in are the pool (Puget Sound / Strait of Juan de Fuca / outer coast / open Pacific / Hawaiian approach, taken
+     from the game's own route position; in the long Hawaiian approach the open-Pacific lines also apply until the island itself is in sight), and a line is eligible only if EVERY attached condition is true right now -- the game's daylight phase, sky, sea state,
+     outside-air temperature, wind, sun, cloud, reflection, land / shore lights / stars in view and in range, and any named sighting actually in progress. A condition the
+     game cannot honestly confirm (the moon is not simulated) makes its lines never eligible. Words that assume something the tags do not say (a named shore, the marina,
+     sunlight, enough light to see by) carry that condition too (OBS_IMPLICIT / the light rule below). The pick is RANDOM among the eligible lines, without replacement
+     until that pool is used up, then reshuffled (the newest few stay out of the next round); an empty pool simply shows nothing. The environment is never changed to
+     make a line eligible, and the sequence is no longer offered once the harbour capture / final arrival begins. -------------------------------------------------------------- */
+  var OBS_LIBRARY = [
+    { id: 1, rg: "sound", time: "DAWN", sky: "OVERCAST", sea: "ANY", tags: [], t: "The dark strip of shore and the dark strip of cloud almost touch. I watch for the first place they separate." },
+    { id: 2, rg: "sound", time: "DAWN", sky: "FOG", sea: "ANY", tags: [], t: "The fog leaves the nearest water visible and takes everything beyond it." },
+    { id: 3, rg: "sound", time: "SUNRISE", sky: "CLEAR", sea: "ANY", tags: [], t: "First light reaches the water before the hills. The reflection appears to arrive from the opposite direction." },
+    { id: 4, rg: "sound", time: "SUNRISE", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE"], t: "Light opens briefly across the islands. I try to follow where it goes when the cloud closes." },
+    { id: 5, rg: "sound", time: "DAY", sky: "CLEAR", sea: "CALM", tags: ["VISIBILITY=GOOD"], t: "The marina's bright shapes repeat in the water, each one stretched a little by the ripples." },
+    { id: 6, rg: "sound", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: [], t: "Cloud shadows move over the islands. Their edges are softer than the islands themselves." },
+    { id: 7, rg: "sound", time: "DAY", sky: "OVERCAST", sea: "ANY", tags: [], t: "A low cloud ceiling hides the tops of the hills. The shoreline seems to end in mid-slope." },
+    { id: 8, rg: "sound", time: "DAY", sky: "FOG", sea: "ANY", tags: [], t: "The channel narrows to the distance I can see. I wonder how far the water continues inside the white." },
+    { id: 9, rg: "sound", time: "ANY", sky: "LIGHT_RAIN", sea: "ANY", tags: [], t: "Rain rings spread across the water and overlap until I can't tell which one started first." },
+    { id: 10, rg: "sound", time: "ANY", sky: "RAIN_OR_HEAVY_RAIN", sea: "ANY", tags: [], t: "Rain threads down the view and gathers the shoreline into one wavering band." },
+    { id: 11, rg: "sound", time: "ANY", sky: "PARTLY_CLOUDY", sea: "CALM", tags: ["REFLECTION=VISIBLE", "CLOUD_VISIBLE"], t: "A cloud's reflection lies on the water almost as clearly as the cloud itself." },
+    { id: 12, rg: "sound", time: "ANY", sky: "ANY", sea: "SLIGHT", tags: ["REFLECTION=VISIBLE"], t: "The islands appear in the water in pieces. Each small wave rearranges them." },
+    { id: 13, rg: "sound", time: "ANY", sky: "ANY", sea: "MODERATE", tags: [], t: "The short waves cross at different angles. I try to follow one line all the way to shore." },
+    { id: 14, rg: "sound", time: "ANY", sky: "ANY", sea: "ROUGH", tags: [], t: "A dark swell hides the far shore, then gives it back." },
+    { id: 15, rg: "sound", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=FERRY_VISIBLE"], t: "A ferry crosses between the shores. Its wake takes longer to reach us than I expect." },
+    { id: 16, rg: "sound", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRD_VISIBLE"], t: "A seabird holds nearly still in the wind, then turns without changing height." },
+    { id: 17, rg: "sound", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COOL"], t: "The air feels cool on the side of my face turned toward the channel." },
+    { id: 18, rg: "sound", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COLD"], t: "I tuck my hands into my sleeves and watch the water change color beneath the cloud." },
+    { id: 19, rg: "sound", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["TEMP_BAND=WARM"], t: "Sun warms the back of my neck. The shaded water stays dark." },
+    { id: 20, rg: "sound", time: "SUNSET", sky: "CLEAR", sea: "ANY", tags: ["VISIBILITY=GOOD"], t: "The last light catches the far hills and leaves the nearer water blue." },
+    { id: 21, rg: "sound", time: "SUNSET", sky: "OVERCAST", sea: "ANY", tags: [], t: "There is no visible sunset, but the water has begun reflecting less of the sky." },
+    { id: 22, rg: "sound", time: "DUSK", sky: "ANY", sea: "CALM_OR_SLIGHT", tags: ["SHORE_LIGHTS_VISIBLE"], t: "Shore lights lengthen in the water, then break apart where the ripples pass." },
+    { id: 23, rg: "sound", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE", "LOCATION=LOW_LIGHT_POLLUTION"], t: "A few stars show above the dark shore. City glow keeps the lower sky pale." },
+    { id: 24, rg: "sound", time: "NIGHT", sky: "OVERCAST", sea: "ANY", tags: ["SHORE_LIGHTS_VISIBLE"], t: "Cloud hides the stars. A shore light makes a small, wavering line on the water." },
+    { id: 25, rg: "sound", time: "NIGHT", sky: "CLEAR", sea: "CALM", tags: ["MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "The moon's reflection breaks into short pieces between the boat and shore." },
+    { id: 26, rg: "strait", time: "DAWN", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD"], t: "Two shorelines emerge on either side. I look for the channel between them before the light makes it obvious." },
+    { id: 27, rg: "strait", time: "SUNRISE", sky: "CLEAR", sea: "ANY", tags: ["LAND_IN_VIEW"], t: "The first sun reaches the high ground beyond the coast. The water below it is still in shadow." },
+    { id: 28, rg: "strait", time: "SUNRISE", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE"], t: "Sunlight moves along the northern shore in a narrow patch, then disappears behind cloud." },
+    { id: 29, rg: "strait", time: "DAY", sky: "OVERCAST", sea: "ANY", tags: ["LAND_IN_VIEW"], t: "Cloud covers the higher slopes but leaves the lower coast visible. I wonder how much mountain is hidden above it." },
+    { id: 30, rg: "strait", time: "DAY", sky: "ANY", sea: "ANY", tags: ["CLOUD_BANK_VISIBLE"], t: "A cloud bank rests against the distant land. From here, it is hard to tell where cloud ends and ridge begins." },
+    { id: 31, rg: "strait", time: "ANY", sky: "FOG", sea: "ANY", tags: [], t: "Fog folds over the water and removes the far shore first." },
+    { id: 32, rg: "strait", time: "ANY", sky: "LIGHT_RAIN", sea: "ANY", tags: ["LAND_IN_VIEW"], t: "The rain softens the coast but doesn't erase it. The dark trees still mark its edge." },
+    { id: 33, rg: "strait", time: "ANY", sky: "PARTLY_CLOUDY", sea: "CALM", tags: ["REFLECTION=VISIBLE", "CLOUD_VISIBLE"], t: "A pale gap in the cloud appears on the water as a bright, shifting patch." },
+    { id: 34, rg: "strait", time: "ANY", sky: "ANY", sea: "SLIGHT", tags: [], t: "Long swell passes beneath the smaller surface chop without changing its direction." },
+    { id: 35, rg: "strait", time: "ANY", sky: "ANY", sea: "MODERATE", tags: [], t: "The swell and current meet in crossing lines. I follow one until it disappears under another." },
+    { id: 36, rg: "strait", time: "ANY", sky: "ANY", sea: "ROUGH", tags: [], t: "The horizon rises and falls behind the near water, like a second moving sea." },
+    { id: 37, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRD_VISIBLE"], t: "A seabird glides along the windward side of the boat, barely moving its wings." },
+    { id: 38, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRD_FEEDING"], t: "Several birds turn toward the same patch of water. I look for what they have seen." },
+    { id: 39, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD", "SIGHTING=VESSEL_VISIBLE"], t: "A cargo ship moves along the lane. Its scale is difficult to judge until I compare it with the shore." },
+    { id: 40, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COOL"], t: "The air off the strait feels cooler than the sunlight looks." },
+    { id: 41, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COLD"], t: "My fingers feel the cold in the rail before I notice it in the air." },
+    { id: 42, rg: "strait", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["TEMP_BAND=MILD_OR_WARM"], t: "Sun reaches the deck, but the wind keeps the shaded side cool." },
+    { id: 43, rg: "strait", time: "SUNSET", sky: "CLEAR", sea: "ANY", tags: ["LAND_IN_VIEW"], t: "The west-facing water holds the light longer than the shore behind us." },
+    { id: 44, rg: "strait", time: "SUNSET", sky: "OVERCAST", sea: "ANY", tags: [], t: "The clouded sky dims evenly. There is no bright edge to mark where the sun went." },
+    { id: 45, rg: "strait", time: "DUSK", sky: "ANY", sea: "CALM_OR_SLIGHT", tags: ["REFLECTION=VISIBLE"], t: "The pale sky remains on the water after the shore has turned dark." },
+    { id: 46, rg: "strait", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE", "SHORE_LIGHTS_NOT_VISIBLE"], t: "Stars appear above the strait where the shore lights no longer reach." },
+    { id: 47, rg: "strait", time: "NIGHT", sky: "OVERCAST", sea: "ANY", tags: ["SHORE_LIGHTS_VISIBLE"], t: "A distant shore light trembles on the water. Cloud hides everything above it." },
+    { id: 48, rg: "strait", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "Moonlight breaks into silver marks on the moving water." },
+    { id: 49, rg: "strait", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE"], t: "I look between the stars and the dark water. The horizon is easier to sense than to see." },
+    { id: 50, rg: "strait", time: "ANY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD", "LAND_IN_VIEW"], t: "The two coasts seem to draw closer as the strait opens toward the ocean." },
+    { id: 51, rg: "coast", time: "DAWN", sky: "ANY", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "The coast is a dark outline under the lighter sky. I watch for the first detail to appear." },
+    { id: 52, rg: "coast", time: "SUNRISE", sky: "CLEAR", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "Sunlight catches the high ground before it reaches the beach." },
+    { id: 53, rg: "coast", time: "SUNRISE", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE", "WITHIN_COASTAL_VISIBILITY"], t: "A bright patch moves over the water toward shore, changing shape as it crosses the swell." },
+    { id: 54, rg: "coast", time: "DAY", sky: "CLEAR", sea: "CALM_OR_SLIGHT", tags: ["WITHIN_COASTAL_VISIBILITY", "REFLECTION=VISIBLE"], t: "The coast's dark shape appears beneath it in the water, stretched by each small wave." },
+    { id: 55, rg: "coast", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "Cloud shadows travel along the headlands. I wonder whether they look as fast from shore." },
+    { id: 56, rg: "coast", time: "DAY", sky: "OVERCAST", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "The low cloud joins the hills to the sky and leaves the beach as the only clear boundary." },
+    { id: 57, rg: "coast", time: "ANY", sky: "FOG", sea: "ANY", tags: [], t: "The coast disappears into fog. The visible water seems to stop at the same place." },
+    { id: 58, rg: "coast", time: "ANY", sky: "PARTLY_CLOUDY", sea: "CALM", tags: ["WITHIN_COASTAL_VISIBILITY", "REFLECTION=VISIBLE", "CLOUD_VISIBLE"], t: "A gap in the cloud appears as a pale oval on the water." },
+    { id: 59, rg: "coast", time: "ANY", sky: "ANY", sea: "SLIGHT", tags: [], t: "The long swell passes under a thin skin of ripples. I try to follow both movements at once." },
+    { id: 60, rg: "coast", time: "ANY", sky: "ANY", sea: "MODERATE", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "Waves steepen nearer the coast, then flatten farther out. The change is gradual until I know where to look." },
+    { id: 61, rg: "coast", time: "ANY", sky: "ANY", sea: "ROUGH", tags: [], t: "A crest hides the coast, and the next one reveals a different stretch of it." },
+    { id: 62, rg: "coast", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRD_VISIBLE"], t: "A seabird follows the edge of a swell without touching the water." },
+    { id: 63, rg: "coast", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRDS_FEEDING"], t: "Birds circle over a patch of water, then drop toward it together." },
+    { id: 64, rg: "coast", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=MARINE_MAMMAL_CONFIRMED"], t: "A dark back surfaces beyond the swell and disappears before I can judge its size." },
+    { id: 65, rg: "coast", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COLD"], t: "Cold air reaches my ears where the hood leaves them uncovered." },
+    { id: 66, rg: "coast", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COOL"], t: "The air feels cool even where the sun reaches the deck." },
+    { id: 67, rg: "coast", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["TEMP_BAND=WARM"], t: "Sun warms one shoulder at a time as the boat rolls." },
+    { id: 68, rg: "coast", time: "ANY", sky: "LIGHT_RAIN", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "The rain leaves the coast visible but takes the detail from it." },
+    { id: 69, rg: "coast", time: "ANY", sky: "RAIN_OR_HEAVY_RAIN", sea: "ANY", tags: [], t: "A curtain of rain crosses the horizon. I watch for the water to reappear behind it." },
+    { id: 70, rg: "coast", time: "ANY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE", "WITHIN_COASTAL_VISIBILITY"], t: "Light breaks through the clouds and turns one headland pale." },
+    { id: 71, rg: "coast", time: "SUNSET", sky: "CLEAR", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "The coast becomes a silhouette while the water still holds color." },
+    { id: 72, rg: "coast", time: "SUNSET", sky: "OVERCAST", sea: "ANY", tags: [], t: "The clouded light fades without a visible sunset." },
+    { id: 73, rg: "coast", time: "DUSK", sky: "ANY", sea: "ANY", tags: ["WITHIN_COASTAL_VISIBILITY"], t: "The headlands are the last land details to disappear." },
+    { id: 74, rg: "coast", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE", "LOW_LIGHT_POLLUTION"], t: "Stars appear over the open water; the coast is no longer bright enough to frame them." },
+    { id: 75, rg: "coast", time: "NIGHT", sky: "ANY", sea: "ANY", tags: ["SHORE_LIGHTS_VISIBLE", "WITHIN_COASTAL_VISIBILITY"], t: "A shore light marks the coast. The dark water between us and it gives no hint of distance." },
+    { id: 76, rg: "pacific", time: "DAWN", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE"], t: "The stars fade one by one as the horizon lightens. I wait to see which one stays longest." },
+    { id: 77, rg: "pacific", time: "DAWN", sky: "OVERCAST", sea: "ANY", tags: [], t: "The sky brightens behind cloud, though the water keeps its night color." },
+    { id: 78, rg: "pacific", time: "SUNRISE", sky: "CLEAR", sea: "CALM_OR_SLIGHT", tags: ["REFLECTION=VISIBLE", "SUN_VISIBLE"], t: "Sunlight draws a narrow path toward the boat. The ripples keep bending it aside." },
+    { id: 79, rg: "pacific", time: "SUNRISE", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE"], t: "The sun touches the edge of a cloud and turns it bright from underneath." },
+    { id: 80, rg: "pacific", time: "DAY", sky: "CLEAR", sea: "CALM", tags: [], t: "The horizon makes a clean circle around the boat. I try to find where it is closest." },
+    { id: 81, rg: "pacific", time: "DAY", sky: "CLEAR", sea: "SLIGHT", tags: ["REFLECTION=VISIBLE"], t: "Sunlight flashes from individual wave faces. None of the flashes lasts long enough to follow." },
+    { id: 82, rg: "pacific", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: [], t: "Cloud shadows drift across the sea without a visible edge." },
+    { id: 83, rg: "pacific", time: "DAY", sky: "OVERCAST", sea: "ANY", tags: [], t: "Sea and sky are nearly the same gray. A darker cloud gives me the only sense of distance." },
+    { id: 84, rg: "pacific", time: "ANY", sky: "FOG", sea: "ANY", tags: [], t: "The horizon has been replaced by a gradual whitening of the air." },
+    { id: 85, rg: "pacific", time: "ANY", sky: "ANY", sea: "CALM", tags: ["REFLECTION=VISIBLE", "CLOUD_VISIBLE"], t: "A cloud appears on the water upside down. I watch the reflection until a ripple breaks it apart." },
+    { id: 86, rg: "pacific", time: "ANY", sky: "ANY", sea: "SLIGHT", tags: ["REFLECTION=VISIBLE", "CLOUD_VISIBLE"], t: "The reflection stretches and contracts with each small wave, though the cloud above barely changes." },
+    { id: 87, rg: "pacific", time: "ANY", sky: "ANY", sea: "MODERATE", tags: [], t: "Two swell lines cross. For a moment, the water between them is almost flat." },
+    { id: 88, rg: "pacific", time: "ANY", sky: "ANY", sea: "ROUGH", tags: [], t: "The far horizon vanishes behind the nearest crest, then returns lower than before." },
+    { id: 89, rg: "pacific", time: "ANY", sky: "LIGHT_RAIN", sea: "ANY", tags: [], t: "Rain makes fine rings across the sea. Larger drops erase them before they finish spreading." },
+    { id: 90, rg: "pacific", time: "ANY", sky: "HEAVY_RAIN", sea: "ANY", tags: [], t: "A rain band travels over the water. I watch its edge approach and then pass beyond us." },
+    { id: 91, rg: "pacific", time: "ANY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "The cloud tops are bright while their undersides stay gray. I wonder what the light is reaching above them." },
+    { id: 92, rg: "pacific", time: "ANY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "A high cloud moves differently from the lower cloud bank. I watch where their edges meet." },
+    { id: 93, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COLD"], t: "Cold air reaches my face even when the water looks calm." },
+    { id: 94, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COOL"], t: "I turn into the wind, then turn back to see how much the horizon has moved." },
+    { id: 95, rg: "pacific", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["TEMP_BAND=WARM"], t: "The sun warms my shoulders. The shaded side of the bow stays cool." },
+    { id: 96, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["WIND=LIGHT"], t: "Wind marks the surface in lines that vanish as quickly as they form." },
+    { id: 97, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["WIND=STRONG"], t: "The wind roughens the water into thousands of brief, bright angles." },
+    { id: 98, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD", "SIGHTING=SEABIRD_VISIBLE"], t: "A seabird passes over the open water, then keeps going beyond sight." },
+    { id: 99, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD", "SIGHTING=SEABIRD_FOLLOWING"], t: "A bird follows the boat for a while. I watch its wings for the moment it chooses to turn." },
+    { id: 100, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=FLYING_FISH_CONFIRMED"], t: "A small fish skips above the water and vanishes into the next wave." },
+    { id: 101, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=DOLPHIN_CONFIRMED"], t: "A dolphin surfaces beside the boat, its back visible for only a second." },
+    { id: 102, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=MARINE_MAMMAL_CONFIRMED"], t: "A distant spout appears against the horizon. I wait to see whether it appears again." },
+    { id: 103, rg: "pacific", time: "SUNSET", sky: "CLEAR", sea: "ANY", tags: [], t: "The sun reaches the horizon. Its reflection breaks into separate pieces before it reaches the boat." },
+    { id: 104, rg: "pacific", time: "SUNSET", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["SUN_VISIBLE"], t: "The underside of the cloud turns orange, then loses the color from its edges inward." },
+    { id: 105, rg: "pacific", time: "SUNSET", sky: "OVERCAST", sea: "ANY", tags: [], t: "The cloud cover hides the sun, but the water still changes from gray to dark blue." },
+    { id: 106, rg: "pacific", time: "DUSK", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE"], t: "The first star appears while a little color remains in the west." },
+    { id: 107, rg: "pacific", time: "DUSK", sky: "ANY", sea: "ANY", tags: [], t: "The horizon is the last boundary to disappear. I watch for the point where it gives way." },
+    { id: 108, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE", "DARK_SKY"], t: "Stars show down to the horizon. I wonder how many are hidden by the thin band of sea haze." },
+    { id: 109, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE", "DARK_SKY", "MILKY_WAY_VISIBLE"], t: "A faint band of stars crosses overhead. I follow it until it disappears into the sea haze." },
+    { id: 110, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "Moonlight makes a broken path on the water. The path never points quite where I expect." },
+    { id: 111, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "CALM", tags: ["MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "The moon holds together in the water for a few seconds at a time." },
+    { id: 112, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "ROUGH", tags: ["MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "Moonlight flashes on the crests, gone again before the next one arrives." },
+    { id: 113, rg: "pacific", time: "NIGHT", sky: "OVERCAST", sea: "ANY", tags: [], t: "Cloud covers the stars. I can still see the cloud's darker edge against the night." },
+    { id: 114, rg: "pacific", time: "NIGHT", sky: "ANY", sea: "ANY", tags: ["SIGHTING=PHOSPHORESCENCE_CONFIRMED"], t: "Small points of light appear in the disturbed water beside the hull and fade behind us." },
+    { id: 115, rg: "pacific", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["STARS_VISIBLE"], t: "The stars seem fixed until I compare them with the mast and look again." },
+    { id: 116, rg: "pacific", time: "DAWN", sky: "ANY", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "A thin cloud catches the earliest light while the rest of the sky remains dark." },
+    { id: 117, rg: "pacific", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "A high cloud changes shape so slowly I only notice by looking away and back." },
+    { id: 118, rg: "pacific", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "One cloud breaks into smaller pieces at its trailing edge. I watch to see whether they rejoin." },
+    { id: 119, rg: "pacific", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["CLOUD_BANK_VISIBLE"], t: "A line of cloud sits low on the horizon. It could be weather ahead, or only distance." },
+    { id: 120, rg: "pacific", time: "DAY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD"], t: "The water changes shade in a broad band. I cannot tell whether it is cloud shadow or depth." },
+    { id: 121, rg: "pacific", time: "DAY", sky: "CLEAR_OR_PARTLY_CLOUDY", sea: "ANY", tags: ["REFLECTION=VISIBLE", "SUN_VISIBLE"], t: "The boat's shadow moves across the water and breaks wherever a wave rises." },
+    { id: 122, rg: "pacific", time: "DAY", sky: "ANY", sea: "CALM_OR_SLIGHT", tags: ["REFLECTION=VISIBLE"], t: "The reflected sky is pale beside the boat and darker farther away." },
+    { id: 123, rg: "pacific", time: "ANY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["CLOUD_DETAIL_VISIBLE"], t: "The cloud bank has changed its outline while I was watching the water." },
+    { id: 124, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=SEABIRDS_FEEDING"], t: "Several birds turn sharply toward the same place on the sea. I try to see what drew them." },
+    { id: 125, rg: "pacific", time: "ANY", sky: "ANY", sea: "ANY", tags: ["SIGHTING=MARINE_MAMMAL_CONFIRMED"], t: "A dark shape rolls beyond the swell. By the time I find the same place again, the water is empty." },
+    { id: 126, rg: "hawaii", time: "DAWN", sky: "ANY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "The island is a darker shape inside the brightening horizon. I watch for its first visible color." },
+    { id: 127, rg: "hawaii", time: "SUNRISE", sky: "CLEAR", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "Sunlight reaches the upper slopes first, leaving the coast below them in shadow." },
+    { id: 128, rg: "hawaii", time: "SUNRISE", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "SUN_VISIBLE"], t: "A gap in the clouds lights one part of the island and leaves the rest dim." },
+    { id: 129, rg: "hawaii", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["VISIBILITY=GOOD", "HAWAII_WITHIN_VISUAL_RANGE"], t: "Ridges become visible behind the coast. I look for the valleys between them." },
+    { id: 130, rg: "hawaii", time: "DAY", sky: "OVERCAST", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "Cloud hides the high ground and leaves the lower island outlined against the water." },
+    { id: 131, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "CLOUD_OVER_LAND", "CLOUD_DETAIL_VISIBLE"], t: "A cloud rests over the island while the sky above the boat stays open." },
+    { id: 132, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["VISIBILITY=GOOD", "SIGHTING=SEABIRD_VISIBLE"], t: "A seabird crosses from the water toward the island. I follow it until it is too small to pick out." },
+    { id: 133, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "SIGHTING=SEABIRDS_FEEDING"], t: "Birds gather above a patch of water and then scatter. I look for the change beneath them." },
+    { id: 134, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "SIGHTING=DOLPHIN_CONFIRMED"], t: "Dolphins surface ahead of the boat, then disappear into the bright water." },
+    { id: 135, rg: "hawaii", time: "ANY", sky: "ANY", sea: "CALM_OR_SLIGHT", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "WATER_COLOR_CHANGE_VISIBLE"], t: "The water near the island changes color in a broad, uneven band. I wonder how far below it the color changes too." },
+    { id: 136, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=WARM"], t: "Warm air reaches the deck. The shaded side of the boat feels different." },
+    { id: 137, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["TEMP_BAND=COOL"], t: "The air is cooler than the island ahead makes me expect." },
+    { id: 138, rg: "hawaii", time: "DAY", sky: "CLEAR", sea: "CALM_OR_SLIGHT", tags: ["LAND_IN_VIEW", "REFLECTION=VISIBLE"], t: "The island appears in the water as a dark, wavering shape." },
+    { id: 139, rg: "hawaii", time: "DAY", sky: "PARTLY_CLOUDY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "Cloud shadows move across the slopes and briefly change the island's shape." },
+    { id: 140, rg: "hawaii", time: "ANY", sky: "FOG", sea: "ANY", tags: [], t: "The island disappears behind fog. I check the chart, then look back at the same blank stretch." },
+    { id: 141, rg: "hawaii", time: "ANY", sky: "ANY", sea: "MODERATE", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "Long swell meets the shallower water near the island and begins to steepen." },
+    { id: 142, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ROUGH", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "The island vanishes behind each rising swell. Its outline returns in a different place." },
+    { id: 143, rg: "hawaii", time: "SUNSET", sky: "CLEAR", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "The island turns dark while a strip of light stays on the water beside it." },
+    { id: 144, rg: "hawaii", time: "SUNSET", sky: "OVERCAST", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "The clouded evening takes the island's detail before it takes the light." },
+    { id: 145, rg: "hawaii", time: "DUSK", sky: "ANY", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE"], t: "The island becomes a silhouette, but cloud still moves across the sky above it." },
+    { id: 146, rg: "hawaii", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["HAWAII_WITHIN_VISUAL_RANGE", "STARS_VISIBLE", "SHORE_LIGHTS_VISIBLE"], t: "Stars appear above the island while shore lights make the lower horizon uneven." },
+    { id: 147, rg: "hawaii", time: "NIGHT", sky: "CLEAR", sea: "ANY", tags: ["DISTANCE_TO_KAUAI_LT_20NM", "MOON_VISIBLE", "REFLECTION=VISIBLE"], t: "Moonlight and shore lights leave separate reflections on the water. I try to keep them apart." },
+    { id: 148, rg: "hawaii", time: "DAY", sky: "CLEAR", sea: "ANY", tags: ["DISTANCE_TO_KAUAI_LT_20NM", "VISIBILITY=GOOD"], t: "The coastline has texture now: ridges, breaks, and small changes in color." },
+    { id: 149, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["DISTANCE_TO_KAUAI_LT_20NM", "VISIBILITY=GOOD"], t: "A headland shifts against the one behind it as our angle changes." },
+    { id: 150, rg: "hawaii", time: "ANY", sky: "ANY", sea: "ANY", tags: ["DISTANCE_TO_KAUAI_LT_20NM"], t: "The coastline gives the horizon a shape. I keep checking how that shape changes as we approach." },
+  ];
+
+  var OBS_COAST_ZONE_NM = 60;            // "Washington-Oregon outer coast" = open water within this of the outer Pacific coast (north of 42N); farther out is the open Pacific
+  var OBS_COAST_VISIBLE_NM = 25;         // how far the outer coast can be seen in good visibility
+  var OBS_SHORE_LIGHT_NM = 12;           // how far a shore light shows on the outer coast
+  var OBS_SOUND_SHORE_NM = 2;            // along the authored corridor the nearest shore is always about this near in Puget Sound...
+  var OBS_STRAIT_SHORE_NM = 3;           // ...and in the Strait (the route runs close under the south shore; the strait is only 11-12 nm across at its widest)
+  var OBS_STRAIT_LIGHTS_WEST_LON = -123.9; // the Strait east of here has Port Angeles / Sequim / Victoria glow; west of it the shore is dark
+  var OBS_VIS_NM = { clear: 25, partly: 25, overcast: 25, lightRain: 12, rain: 6, heavyRain: 3, fog: 0.5 }; // how far she can see in each sky (the game keeps no visibility field of its own)
+  var OBS_FIRST_STAR_MIN = 10;           // minutes after sunset before the first star can be picked out (dusk lasts 30)
+  var OBS_DARK_SKY_LAND_NM = 60;         // "especially dark": open Pacific at least this far from any land
+  var OBS_FOLLOW_MIN = 20;               // a bird has "followed" the boat once it has been with her this long (the log's own "followed for a while" rule)
+  var OBS_FLYFISH_WINDOW_MIN = 30;       // a flying fish found aboard (the game's own event) means more are skipping nearby for this long
+  var OBS_RECENT_KEEP = 3;               // when a pool is used up and reshuffled, the newest this many lines stay out of the next round (if the pool is big enough)
+
+  var OBS_PHASE_NAME = { dawn: 'DAWN', sunrise: 'SUNRISE', day: 'DAY', lateAfternoon: 'LATE AFTERNOON', sunset: 'SUNSET', dusk: 'DUSK', night: 'NIGHT' };
+  var OBS_SKY_OK = {
+    ANY: function () { return true; },
+    CLEAR: function (w) { return w === 'clear'; },
+    PARTLY_CLOUDY: function (w) { return w === 'partly'; },
+    OVERCAST: function (w) { return w === 'overcast'; },
+    FOG: function (w) { return w === 'fog'; },
+    LIGHT_RAIN: function (w) { return w === 'lightRain'; },
+    HEAVY_RAIN: function (w) { return w === 'heavyRain'; },
+    RAIN_OR_HEAVY_RAIN: function (w) { return w === 'rain' || w === 'heavyRain'; },
+    CLEAR_OR_PARTLY_CLOUDY: function (w) { return w === 'clear' || w === 'partly'; },
+  };
+  var OBS_SEA_OK = {
+    ANY: function () { return true; },
+    CALM: function (s) { return s === 'calm'; },
+    SLIGHT: function (s) { return s === 'slight'; },
+    MODERATE: function (s) { return s === 'moderate'; },
+    ROUGH: function (s) { return s === 'rough'; },
+    CALM_OR_SLIGHT: function (s) { return s === 'calm' || s === 'slight'; },
+  };
+  // One test per tag in the supplied library. A tag with no test here is never true, so a line carrying it is never chosen.
+  var OBS_TAG_TEST = {
+    'TEMP_BAND=COLD': function (x) { return x.tempF < CABIN_COLD_BELOW_F; },
+    'TEMP_BAND=COOL': function (x) { return x.tempF >= CABIN_COLD_BELOW_F && x.tempF < CABIN_COOL_BELOW_F; },
+    'TEMP_BAND=WARM': function (x) { return x.tempF >= CABIN_WARM_FROM_F; },
+    'TEMP_BAND=MILD_OR_WARM': function (x) { return x.tempF >= CABIN_COOL_BELOW_F; },
+    'VISIBILITY=GOOD': function (x) { return x.goodVis; },
+    SUN_VISIBLE: function (x) { return x.sun; },
+    CLOUD_VISIBLE: function (x) { return x.cloudVisible; },
+    CLOUD_DETAIL_VISIBLE: function (x) { return x.cloudDetail; },
+    CLOUD_BANK_VISIBLE: function (x) { return x.cloudBank; },
+    CLOUD_OVER_LAND: function (x) { return x.cloudOverLand; },
+    'REFLECTION=VISIBLE': function (x) { return x.refl; },
+    LAND_IN_VIEW: function (x) { return x.landSeen; },
+    WITHIN_COASTAL_VISIBILITY: function (x) { return x.region === 'coast' && x.range; },
+    HAWAII_WITHIN_VISUAL_RANGE: function (x) { return x.hawaiiRange; },
+    DISTANCE_TO_KAUAI_LT_20NM: function (x) { return x.kauai20; },
+    SHORE_LIGHTS_VISIBLE: function (x) { return x.shoreLights; },
+    SHORE_LIGHTS_NOT_VISIBLE: function (x) { return !x.shoreLights; },
+    STARS_VISIBLE: function (x) { return x.starsVisible; },
+    MOON_VISIBLE: function () { return false; },   // the game does not simulate a moon, so nothing may claim one
+    DARK_SKY: function (x) { return x.darkSky; },
+    MILKY_WAY_VISIBLE: function (x) { return x.milkyWay; },
+    'LOCATION=LOW_LIGHT_POLLUTION': function (x) { return x.lowLight; },
+    LOW_LIGHT_POLLUTION: function (x) { return x.lowLight; },
+    WATER_COLOR_CHANGE_VISIBLE: function (x) { return x.colorChange; },
+    'WIND=LIGHT': function (x) { return x.windLight; },
+    'WIND=STRONG': function (x) { return x.windStrong; },
+    'SIGHTING=FERRY_VISIBLE': function (x) { return x.see.ferry; },
+    'SIGHTING=SEABIRD_VISIBLE': function (x) { return x.see.seabird; },
+    'SIGHTING=SEABIRD_FEEDING': function (x) { return x.see.feeding; },
+    'SIGHTING=SEABIRDS_FEEDING': function (x) { return x.see.feeding; },
+    'SIGHTING=SEABIRD_FOLLOWING': function (x) { return x.see.following; },
+    'SIGHTING=VESSEL_VISIBLE': function (x) { return x.see.vessel; },
+    'SIGHTING=MARINE_MAMMAL_CONFIRMED': function (x) { return x.see.mammal; },
+    'SIGHTING=DOLPHIN_CONFIRMED': function (x) { return x.see.dolphin; },
+    'SIGHTING=FLYING_FISH_CONFIRMED': function (x) { return x.see.flyingFish; },
+    'SIGHTING=PHOSPHORESCENCE_CONFIRMED': function (x) { return x.see.biolum; },
+  };
+  // What a line's WORDS assume that its tags do not say (by id). Each is a plain fact the game can check.
+  var OBS_NEED_TEST = {
+    land: function (x) { return x.landSeen; },                                  // a named shore / hills / islands / coast she can actually see (range, weather and light)
+    near: function (x) { return x.landNear; },                                  // the land is within sight range but may be hidden (fog): "the coast disappears"
+    hawaiiRange: function (x) { return x.hawaiiRange; },
+    sun: function (x) { return x.sun; },                                        // sunlight / cloud shadows: the sun is actually out
+    horizon: function (x) { return x.horizon; },                                // a horizon she can see (not fog or heavy rain)
+    calmSea: function (x) { return x.sea === 'calm' || x.sea === 'slight'; },   // "the water looks calm"
+    rolling: function (x) { return x.sea !== 'calm'; },                         // "as the boat rolls"
+    wind5: function (x) { return x.wind >= 5; },                                // "holds still in the wind", "windward side", "the wind keeps the shaded side cool"
+    marina: function (x) { return x.marina; },                                  // the marina she has just left (Shilshole Bay)
+    whale: function (x) { return x.see.whale; },                                // a spout
+    cloudy: function (x) { return x.wx === 'partly'; },                         // "cloud shadow"
+  };
+  var OBS_IMPLICIT = {
+    1: ['land'], 3: ['land'], 4: ['land'], 5: ['marina'], 6: ['land', 'sun'], 7: ['land'], 10: ['land'], 12: ['land'], 13: ['land'], 14: ['land'], 16: ['wind5'], 20: ['land'],
+    26: ['land'], 28: ['land'], 30: ['land'], 37: ['wind5'], 40: ['sun'], 42: ['wind5'], 45: ['land'],
+    55: ['sun'], 57: ['near'], 61: ['land'], 66: ['sun'], 67: ['rolling'],
+    82: ['sun'], 88: ['horizon'], 93: ['calmSea'], 94: ['horizon'], 102: ['whale'], 107: ['horizon'], 120: ['cloudy'],
+    132: ['hawaiiRange'], 139: ['sun'], 140: ['near'], 148: ['land'], 149: ['land'], 150: ['land'],
+  };
+  // The only TIME=ANY lines that make sense in the dark (the air on her face, the cold in the rail). Every other TIME=ANY line describes something seen, so it needs light to see by.
+  var OBS_NIGHT_OK = { 17: true, 41: true, 65: true, 136: true, 137: true };
+
+  // The outer Pacific coast the "coast" zone is measured from: the coastal (non-artificial) edges of the Pacific ring north of 42N.
+  var obsOuterEdges = null;
+  function obsOuterCoastEdges() {
+    if (!obsOuterEdges) { navInit(); obsOuterEdges = NAV.landEdges.filter(function (e) { return e[4] === 'pacific' && e[1] >= 42 && e[3] >= 42; }); }
+    return obsOuterEdges;
+  }
+  function obsCoastNm(state) {
+    var n = state.nav, near = navNearestOnEdges(navGeoLon(n.lon), n.lat, obsOuterCoastEdges());
+    return near ? near.nm : 99999;
+  }
+  // The game's own route position, in the library's five regions: the header's PUGET SOUND / STRAIT OF JUAN DE FUCA / HAWAIIAN WATERS (voyagePhase), the Cape Flattery
+  // approach and open water within reach of the outer coast as the "coast", everything else in open water as the open Pacific.
+  function obsRegion(state) {
+    var ph = voyagePhase(state);
+    if (ph === 'inland') return 'sound';
+    if (ph === 'strait') return 'strait';
+    if (ph === 'coastal') return 'coast';
+    if (ph === 'approach') return 'hawaii';
+    return obsCoastNm(state) <= OBS_COAST_ZONE_NM ? 'coast' : 'pacific';
+  }
+  function obsWorldKey(state) { return getDaylightPhase(state) + '|' + sitWeatherCategory(state) + '|' + obsRegion(state); } // the three things that can start an observation
+
+  // JUST EXIST's own small memory (inside flags.moments, created on first use, tolerated when absent): the lines already shown from the current shuffle, and the two
+  // world sightings the encounter system has no kind for -- a ferry crossing in Puget Sound, and seabirds working a patch of water. They are rare, region-appropriate,
+  // daytime-and-visibility-gated and run for a few minutes of real time, exactly like the existing encounters; they never write to the log and do not use the
+  // encounters' daily budget, so nothing about the existing wildlife / traffic is changed by them.
+  function obsSightMemory(m) {
+    if (!m.obsSight || typeof m.obsSight !== 'object') m.obsSight = {};
+    var S = m.obsSight;
+    if (S.ferry === undefined) S.ferry = null;
+    if (S.feeding === undefined) S.feeding = null;
+    if (S.lastFerry === undefined) S.lastFerry = null;
+    if (S.lastFeeding === undefined) S.lastFeeding = null;
+    return S;
+  }
+  var OBS_SIGHTS = {
+    ferry:   { last: 'lastFerry',   gap: 45,  dur: [8, 22],  rate: { sound: 0.30 } },
+    feeding: { last: 'lastFeeding', gap: 360, dur: [8, 25],  rate: { sound: 0.06, strait: 0.06, offCoast: 0.05, pacific: 0.02, mid: 0.012, hawaiiFar: 0.03, hawaiiNear: 0.06 } },
+  };
+  function obsSightActive(s, t) { return !!(s && t >= s.startT && t < s.endT); }
+  // Called once per simulation tick, right after the encounters. Nothing starts during an offline catch-up (she was not on deck to see it).
+  function obsSightTick(state, c, m) {
+    var S = obsSightMemory(m), t = c.t;
+    Object.keys(OBS_SIGHTS).forEach(function (k) {
+      var d = OBS_SIGHTS[k], cur = S[k];
+      if (cur && (t >= cur.endT || !encSeen(c))) { S[k] = cur = null; } // it ran its course, or the light / the weather closed it
+      if (cur || inCatchUpPass) return;
+      var r = d.rate[c.encRegion];
+      if (!(r > 0) || !encSeen(c) || c.sea > 4 || c.wind >= 30) return;
+      if (S[d.last] != null && t - S[d.last] < d.gap) return;
+      if (Math.random() < r / 60) { S[k] = { startT: t, endT: t + d.dur[0] + Math.floor(Math.random() * (d.dur[1] - d.dur[0] + 1)) }; S[d.last] = t; }
+    });
+  }
+
+  // Everything a line's conditions can ask about, read once from the game's existing state (never a second copy of any of it).
+  function obsContext(state) {
+    var snap = daylightSnapshot(state), phase = snap.phase, w = state.weather, n = state.nav, t = state.meta.voyageMinutes;
+    var wx = sitWeatherCategory(state), sea = sitSeaClass(state), region = obsRegion(state), cond = w.condition;
+    var cloud = w.cloudPct != null ? w.cloudPct : (cond === 'clear' ? 10 : cond === 'overcast' ? 90 : 100);
+    var tempF = Math.round(w.temperatureF), wind = w.windSpeed;
+    var light = phase !== 'night';
+    var visNm = OBS_VIS_NM[wx], goodVis = wx === 'clear' || wx === 'partly' || wx === 'overcast';
+    var sun = sitSunVisible(state, phase, wx);
+    var distStart = distanceBetween(n.lat, n.lon, WAYPOINTS[0].lat, WAYPOINTS[0].lon);
+    var distDest = distanceBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    var landNm, cap = OBS_COAST_VISIBLE_NM, anyLandNm = null, near;
+    navInit();
+    if (region === 'sound') landNm = OBS_SOUND_SHORE_NM;
+    else if (region === 'strait') landNm = OBS_STRAIT_SHORE_NM;
+    else if (region === 'coast') landNm = obsCoastNm(state);
+    else if (region === 'hawaii') { near = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.islandEdges); landNm = near ? near.nm : 99999; cap = NAV_SIGHT_NM; }
+    else { near = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.landEdges); landNm = anyLandNm = near ? near.nm : 99999; }
+    var landNear = landNm <= cap;                       // inside the distance land can be seen from, whatever the weather
+    var range = landNear && landNm <= visNm;            // ...and the weather lets her see that far
+    var landSeen = range && light;                      // ...and there is light to see it by
+    var hawaiiRange = region === 'hawaii' && range;
+    var clearSky = wx === 'clear' && cloud <= 25;
+    var starsVisible = clearSky && (phase === 'night' || phase === 'dawn' || (phase === 'dusk' && snap.minutesSinceSunset >= OBS_FIRST_STAR_MIN));
+    var darkLandNm = region === 'pacific' ? anyLandNm : (region === 'hawaii' ? landNm : null); // nearest land of any kind (the Hawaiian approach is 800+ nm from the mainland)
+    var darkSky = darkLandNm != null && darkLandNm >= OBS_DARK_SKY_LAND_NM && starsVisible && phase === 'night';
+    var milkyWay = darkSky && cloud <= 15 && snap.minutesSinceSunset >= 90 && snap.minutesToSunrise >= 90;
+    var lightsPlace = false;
+    if (region === 'sound') lightsPlace = OBS_SOUND_SHORE_NM <= visNm;
+    else if (region === 'strait') lightsPlace = n.lon > OBS_STRAIT_LIGHTS_WEST_LON && OBS_STRAIT_SHORE_NM <= visNm;
+    else if (region === 'coast') lightsPlace = landNm <= Math.min(OBS_SHORE_LIGHT_NM, visNm);
+    else if (region === 'hawaii') lightsPlace = landNm <= Math.min(NAV_SIGHT_NM, visNm);
+    var shoreLights = (phase === 'dusk' || phase === 'night' || phase === 'dawn') && lightsPlace;
+    // "Low light pollution": no city / shore glow around her -- beyond the marina's glow in the Sound, west of the lit part of the Strait, beyond the reach of a coast light, and so on.
+    var lowLight = region === 'sound' ? distStart >= 3 : region === 'strait' ? !(n.lon > OBS_STRAIT_LIGHTS_WEST_LON) : region === 'coast' ? landNm > OBS_SHORE_LIGHT_NM : region === 'hawaii' ? landNm > NAV_SIGHT_NM : true;
+    var cloudVisible = light && (wx === 'partly' || (wx === 'clear' && cloud >= 10));
+    var daylit = phase === 'sunrise' || phase === 'day' || phase === 'lateAfternoon' || phase === 'sunset';
+    var m = momentMemory(state), E = encMemory(m), S = obsSightMemory(m);
+    var act = (E.act && t < E.act.endT) ? E.act : null;
+    var sightOk = light && wx !== 'fog' && wx !== 'heavyRain'; // anything spotted at a distance needs light and some visibility (the encounters' own rule, re-checked now)
+    var id = act ? act.id : null;
+    var see = {
+      seabird: sightOk && id === 'seabird',
+      following: sightOk && id === 'seabird' && !act.flock && t - act.startT >= OBS_FOLLOW_MIN,
+      feeding: sightOk && obsSightActive(S.feeding, t),
+      ferry: sightOk && obsSightActive(S.ferry, t),
+      vessel: sightOk && id === 'freighter',
+      whale: sightOk && (id === 'whaleFar' || id === 'whaleNear'),
+      dolphin: sightOk && id === 'dolphin',
+      flyingFish: sightOk && E.last && E.last.flyingFish != null && t - E.last.flyingFish >= 0 && t - E.last.flyingFish <= OBS_FLYFISH_WINDOW_MIN,
+      biolum: phase === 'night' && wx !== 'rain' && wx !== 'lightRain' && wx !== 'heavyRain' && id === 'biolum',
+    };
+    see.mammal = see.whale || see.dolphin;
+    return {
+      region: region, phase: phase, wx: wx, sea: sea, tempF: tempF, wind: wind, cloud: cloud, light: light, daylit: daylit, goodVis: goodVis, sun: sun,
+      horizon: wx === 'clear' || wx === 'partly' || wx === 'overcast' || wx === 'lightRain',
+      landNm: landNm, landNear: landNear, range: range, landSeen: landSeen, hawaiiRange: hawaiiRange, kauai20: region === 'hawaii' && distDest < 20,
+      marina: region === 'sound' && distStart < 3, lowLight: lowLight,
+      starsVisible: starsVisible, darkSky: darkSky, milkyWay: milkyWay, shoreLights: shoreLights,
+      cloudVisible: cloudVisible, cloudDetail: cloudVisible && cloud >= 15, cloudBank: light && wx === 'partly' && cloud >= 30,
+      cloudOverLand: hawaiiRange && cloudVisible && cloud >= 15 && (wx === 'clear' || wx === 'partly'),
+      refl: light && goodVis && (sea === 'calm' || sea === 'slight'),
+      colorChange: hawaiiRange && daylit && goodVis,
+      windLight: wind >= 2 && wind <= 6, windStrong: wind >= 22,
+      see: see,
+    };
+  }
+
+  // A line plays only when EVERY condition attached to it is true right now.
+  function obsLineEligible(l, x) {
+    if (l.rg !== x.region && !(x.region === 'hawaii' && l.rg === 'pacific' && !x.hawaiiRange)) return false; // the Hawaiian approach runs 860 nm; until the island itself is in sight she is still on the open Pacific, so its lines apply there too
+    if (l.time !== 'ANY' && OBS_PHASE_NAME[x.phase] !== l.time) return false; // TIME is the game's own phase: DAY is the DAY phase only, so late afternoon draws on the TIME=ANY lines
+    if (!OBS_SKY_OK[l.sky] || !OBS_SKY_OK[l.sky](x.wx)) return false;
+    if (!OBS_SEA_OK[l.sea] || !OBS_SEA_OK[l.sea](x.sea)) return false;
+    var i, test, needs = OBS_IMPLICIT[l.id];
+    for (i = 0; i < l.tags.length; i++) { test = OBS_TAG_TEST[l.tags[i]]; if (!test || !test(x)) return false; }
+    if (needs) for (i = 0; i < needs.length; i++) { test = OBS_NEED_TEST[needs[i]]; if (!test || !test(x)) return false; }
+    if (l.time === 'ANY' && !OBS_NIGHT_OK[l.id] && !x.light) return false;
+    return true;
+  }
+
+  // The lines already shown from the current shuffle (ids, oldest first). Saved with the game (inside flags.moments) so a reload does not start the shuffle over.
+  function obsShownList(m) { if (!Array.isArray(m.obsShown)) m.obsShown = []; return m.obsShown; }
+
+  // Chooses the next observation from the world as it is RIGHT NOW, or null when there is nothing eligible (or nothing but the line already on screen). Random among the
+  // eligible lines not yet shown from this shuffle; when they have all been shown the pool is reshuffled (its lines come back, except the newest few and the one on screen).
+  function obsPickLine(state, s) {
+    var x = obsContext(state), m = momentMemory(state), shown = obsShownList(m);
+    var pool = OBS_LIBRARY.filter(function (l) { return obsLineEligible(l, x); });
+    if (!pool.length) return null;
+    var unseen = pool.filter(function (l) { return shown.indexOf(l.id) < 0; });
+    if (!unseen.length) {
+      var inPool = {};
+      pool.forEach(function (l) { inPool[l.id] = true; });
+      var keep = Math.min(OBS_RECENT_KEEP, Math.floor((pool.length - 1) / 2));
+      var kept = keep > 0 ? shown.filter(function (id) { return inPool[id]; }).slice(-keep) : [];
+      m.obsShown = shown = shown.filter(function (id) { return !inPool[id] || kept.indexOf(id) >= 0; });
+      unseen = pool.filter(function (l) { return shown.indexOf(l.id) < 0; });
+    }
+    var other = unseen.filter(function (l) { return l.id !== s.currentId; });
+    if (!other.length) return null; // the only line left is the one on screen: it stays
+    return other[Math.floor(Math.random() * other.length)];
+  }
+
+  var obsSession = null;   // the one live session, or null: { state, dueAt, armed, attempts, currentId, worldKey, changeAt, obsEls, pollTimer }
+
+  // Whether JUST EXIST can be offered / continued at all. The harbour capture (the start of the final arrival), a voyage that has ended, a grounding, sleep and the
+  // opening sequence all take the screen away from it.
+  function obsAvailable(state) {
+    if (!state || !state.crew || !state.nav) return false;
+    if (state.finale && state.finale.phase !== 'none') return false;
+    if (state.voyageEnd && state.voyageEnd.phase !== 'none') return false;
+    if (state.nav.grounded) return false;
+    if (state.departure && state.departure.stageIndex < DEPARTURE_STEPS.length) return false;
+    return state.crew.watchState === 'awake' && state.crew.location === 'above';
+  }
+
+  function obsMakeObservation(state, s, now) {
+    var line = obsPickLine(state, s);
+    if (line) {
+      sitShowObservation(s, line.t); // the same one-line-under-the-indicator display SIT A WHILE uses
+      var shown = obsShownList(momentMemory(state));
+      if (shown.indexOf(line.id) < 0) shown.push(line.id);
+      s.currentId = line.id;
+    }
+    s.attempts++;
+    s.worldKey = obsWorldKey(state); // whatever changed is now accounted for
+    s.changeAt = null;
+    s.dueAt = now + (s.attempts === 1 ? SIT_SECOND_MS : SIT_REPEAT_MS + Math.round((Math.random() * 2 - 1) * SIT_REPEAT_JITTER_MS));
+  }
+
+  // Runs once a second while she is at the bow. Cheap: it compares one key and the clock, and does nothing unless an observation is due or the world changed.
+  function obsPoll() {
+    var s = obsSession, state = GAME;
+    if (!s) return;
+    if (!state || state !== s.state || !state.pendingChoice || state.pendingChoice.id !== 'existing') { // another screen took over (or a new game began)
+      var orphaned = !!state && state === s.state && !state.pendingChoice; // the bow screen was cleared (the final arrival does this) -- make sure whatever she is on now is what is drawn
+      obsEndSession();
+      if (orphaned && !uiBusy) renderOptions(state);
+      return;
+    }
+    if (!obsAvailable(state)) { // the final arrival, a grounding, the end of the voyage...: the bow is no longer hers to stand at
+      obsEndSession();
+      state.pendingChoice = null;
+      if (!uiBusy) { renderOptions(state); saveGameState(state); }
+      return;
+    }
+    var now = Date.now();
+    if (!s.armed) { // the first 10 seconds: nothing else can start an observation; at the end of it the CURRENT world is read
+      if (now < s.dueAt) return;
+      s.armed = true;
+      obsMakeObservation(state, s, now);
+      return;
+    }
+    var key = obsWorldKey(state);
+    if (key !== s.worldKey) { s.worldKey = key; if (s.changeAt == null) s.changeAt = now + SIT_COALESCE_MS; }
+    if (s.changeAt != null && now >= s.changeAt) { obsMakeObservation(state, s, now); return; }
+    if (now >= s.dueAt) obsMakeObservation(state, s, now);
+  }
+
+  // Ends the session completely: the poll, the observation on screen, the indicator. Idempotent.
+  function obsEndSession() {
+    var s = obsSession;
+    if (!s) return;
+    obsSession = null;
+    if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
+    sitRemoveObservation(s);
+    if (activityDotsCurrentLabel === 'JUST EXISTING') stopActivityDots();
+  }
+
+  // The moment she reaches the bow (the walk's sound has really ended): the world is checked NOW, and if the arrival (or anything else) took the screen in the meantime she
+  // never gets there. Otherwise the screen becomes JUST EXISTING, with BACK TO REALITY, and the 10 seconds to the first observation start.
+  function obsBeginExisting(state) {
+    if (obsSession || !obsAvailable(state)) return;
+    clearTempView();
+    var now = Date.now();
+    var s = obsSession = { state: state, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, currentId: null, worldKey: obsWorldKey(state), changeAt: null, obsEls: null, pollTimer: null };
+    state.pendingChoice = { id: 'existing', options: [{ label: 'BACK TO REALITY', action: 'back-to-reality' }] }; // runAudioSyncedAction's tail renders it (and the JUST EXISTING indicator)
+    s.pollTimer = setInterval(obsPoll, SIT_POLL_MS);
+  }
+
+  // JUST EXIST: MOVING FORWARD TO THE BOW for exactly as long as the walking sound plays (the same audio-synced action every other physical action uses, so SOUND OFF or a
+  // blocked sound can never trap her here), then JUST EXISTING.
+  function performJustExist(state) {
+    if (uiBusy || obsSession || !obsAvailable(state)) return; // a repeat while she is already walking forward (or standing there) starts nothing
+    runAudioSyncedAction(state, {
+      label: 'MOVING FORWARD TO THE BOW',
+      playAudio: function (onEnded) { return playCockpitOneShot('movingForward', onEnded); },
+      action: function (s) { obsBeginExisting(s); },
+    });
+  }
+
+  // BACK TO REALITY: the session ends at once (no timer, observation or indicator survives it); MOVING AFT TO THE COCKPIT stays up for exactly as long as the sound plays;
+  // then the above-deck menu returns.
+  function performBackToReality(state) {
+    if (uiBusy) return; // already walking aft: a repeat starts nothing
+    obsEndSession();
+    state.pendingChoice = null;
+    runAudioSyncedAction(state, {
+      label: 'MOVING AFT TO THE COCKPIT',
+      playAudio: function (onEnded) { return playCockpitOneShot('movingAft', onEnded); },
+    });
+  }
+
   // CABIN — sleep, clothing, and their related chores. COMFORT is a
   // pure read of the existing clothing-comfort system (comfortLabel,
   // defined near HUNGER/THIRST/ENERGY above) — never a second
@@ -16854,6 +17379,89 @@
   }
 
   /* --------------------------------------------------------------
+     COCKPIT AUDIO -- JUST EXIST. The two walking sounds that bracket standing at the bow: moving_forward_to_the_bow.mp3 (the walk forward) and
+     moving_aft_to_the_cockpit.mp3 (the walk back). Each is a busy action's own sound (see performJustExist / performBackToReality): the action's label stays on
+     screen for exactly as long as the sound really plays, and what follows (JUST EXISTING, or the above-deck menu) happens only when it has ended. Same architecture
+     as the saloon / cabin / galley one-shots: a lazily created HTMLAudioElement per file (never preloaded), a quick fade-in, volume 0.5, and an onEnded that
+     fires once -- immediately if audio is not unlocked yet and on a load or play error -- so a missing or blocked file can never hold her on the screen.
+     Muting is a pure audibility switch (createGameAudio honours it), never a different, shorter timing.
+     -------------------------------------------------------------- */
+  var COCKPIT_AUDIO_FILES = {
+    movingForward: 'audio/cockpit/moving_forward_to_the_bow.mp3', // JUST EXIST -- see performJustExist
+    movingAft: 'audio/cockpit/moving_aft_to_the_cockpit.mp3',     // BACK TO REALITY -- see performBackToReality
+  };
+  var COCKPIT_AUDIO_VOLUME = {
+    movingForward: 0.5,
+    movingAft: 0.5,
+  };
+  var COCKPIT_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
+  var cockpitAudioEls = {}; // key -> HTMLAudioElement, created on first use (lazy load, never preloaded)
+
+  function getCockpitAudioEl(key) {
+    var el = cockpitAudioEls[key];
+    if (el) return el;
+    el = createGameAudio(COCKPIT_AUDIO_FILES[key]);
+    el.loop = false;
+    el.preload = 'auto';
+    el.volume = 0;
+    el.addEventListener('error', function () {
+      console.warn('Cockpit audio failed to load (' + key + '): ' + COCKPIT_AUDIO_FILES[key] + (el.error ? ' -- error code ' + el.error.code : ''));
+    });
+    cockpitAudioEls[key] = el;
+    return el;
+  }
+
+  function fadeCockpitVolume(el, target, seconds, onComplete) {
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    var start = el.volume;
+    if (Math.abs(target - start) < 0.001) { el.volume = target; if (onComplete) onComplete(); return; }
+    var stepMs = 20;
+    var steps = Math.max(1, Math.round((seconds * 1000) / stepMs));
+    var stepIndex = 0;
+    el._fadeTimer = setInterval(function () {
+      stepIndex++;
+      if (stepIndex >= steps) {
+        el.volume = target;
+        clearInterval(el._fadeTimer);
+        el._fadeTimer = null;
+        if (onComplete) onComplete();
+      } else {
+        el.volume = start + (target - start) * (stepIndex / steps);
+      }
+    }, stepMs);
+  }
+
+  // Plays a cockpit one-shot once from the beginning and fires onEnded (once) when it naturally finishes -- the exact onEnded wiring runAudioSyncedAction expects
+  // from its config.playAudio -- and returns the element so the action's own duration-derived watchdog sizes itself off the real file.
+  function playCockpitOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
+    if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
+    audioDebugLog('play: ' + key);
+    var el = getCockpitAudioEl(key);
+    el.onended = null;
+    if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+    if (!el.paused) el.pause();
+    el.currentTime = 0;
+    el.volume = 0;
+    var p = el.play();
+    if (p && p.then) {
+      p.then(function () {}, function (e) {
+        console.warn('Cockpit audio failed to play (' + key + '):', describeError(e));
+        audioDebugError(key, e);
+        if (onEnded) onEnded();
+      });
+    }
+    fadeCockpitVolume(el, COCKPIT_AUDIO_VOLUME[key], COCKPIT_CROSSFADE_SECONDS);
+    if (onEnded) {
+      el.onended = function () {
+        el.onended = null;
+        onEnded();
+      };
+    }
+    return el;
+  }
+
+  /* --------------------------------------------------------------
      DOOR AUDIO -- ROOM-NAVIGATION PASS. The physical door sounds for
      entering/leaving CABIN or HEAD from BELOW DECK (open/close; see
      the 'enter-cabin'/'enter-head'/'leave-cabin'/'leave-head' cases in
@@ -18155,14 +18763,17 @@
       ]);
     }
 
-    // ABOVE (the default/starting location).
+    // ABOVE (the default/starting location). JUST EXIST is the last of the above-deck actions, just ahead of GO BELOW; it is only offered while she can actually
+    // walk forward to the bow (awake, above, under way, no grounding, no final arrival -- see obsAvailable).
+    var aboveActions = [
+      { label: 'HELM', action: 'cmd:helm' },
+      { label: 'SAILS', action: 'cmd:sails' },
+      { label: 'ENGINE', action: 'cmd:engine' },
+      { label: 'FISH', action: 'cmd:fish' },
+    ];
+    if (obsAvailable(state)) aboveActions.push({ label: 'JUST EXIST', action: 'just-exist' });
     return groupedOptions([
-      [
-        { label: 'HELM', action: 'cmd:helm' },
-        { label: 'SAILS', action: 'cmd:sails' },
-        { label: 'ENGINE', action: 'cmd:engine' },
-        { label: 'FISH', action: 'cmd:fish' },
-      ],
+      aboveActions,
       [{ label: goLabel, action: 'go-above-below' }],
     ]);
   }
@@ -18508,6 +19119,7 @@
   function activityDotsInfo(state) {
     if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
     if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // for the whole of the sitting; the observations appear beneath it
+    if (obsSession && state.pendingChoice && state.pendingChoice.id === 'existing') return { active: true, label: 'JUST EXISTING' }; // for the whole of her time at the bow; the observations appear beneath it
     if (state.crew.watchState === 'sleeping') return { active: true, label: null };
     return { active: false, label: null };
   }
@@ -18721,6 +19333,10 @@
       performSitAWhile(state);
     } else if (action === 'get-up') {
       performGetUp(state);
+    } else if (action === 'just-exist') {
+      performJustExist(state);
+    } else if (action === 'back-to-reality') {
+      performBackToReality(state);
     } else if (action === 'view-ships-plan') {
       cmdShipsPlan(state);
     } else if (action === 'view-vessel-log') {
@@ -19734,6 +20350,10 @@
     }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
       cmdSaloon(state);
+      return;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'existing') { // likewise a JUST EXIST session: she is simply back at the above-deck menu
+      state.pendingChoice = null;
       return;
     }
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
