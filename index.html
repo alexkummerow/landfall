@@ -1165,6 +1165,7 @@
         navLightsOn: false,         // NAV STATION / ELECTRICAL PANEL — the boat's running lights, one single state (never a separate "exterior lights" duplicate) driving the indicator, the battery draw, and the nighttime Above Deck restriction alike; same BATTERY_DRAIN_LIGHTS_PER_HOUR drain as cabinLightsOn; required after dark (19:00-05:59) for Above Deck activities (HELM/SAILS/ENGINE/FISH) — see needsNavLights/blockedByNavLights and isNavLightsNight's own notes
         accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
+        cabinStartsAtOutside: true, // a brand-new voyage's cabin is seeded from a PLACEHOLDER outside temperature (no real reading exists yet); the first real reading snaps the cabin to the real outside air, once -- see applyRealEnvironmentToLive. Saves without this field are not touched, except a voyage under two hours old (see the boat-field migration)
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
         hatchChangedAt: 0,          // voyageMinutes the hatch last opened or closed -- 0: it has been shut since departure. Read by SIT A WHILE ("closed for an extended period")
         hatchOpen: false,           // SALOON hatch — persistent physical state, independent of crew.location; see cmdOpenHatch/cmdCloseHatch. Changes the cabin-temperature equalization rate (syncCabinTemperature), clears STUFFY immediately (cabinComfort is derived from it), and lets exterior ambience bleed in at HATCH_BLEED_VOLUME_FRACTION while below deck (see updateSeaAudioForState/updateWindAudioForState/updateRainAudioForState)
@@ -1297,7 +1298,7 @@
     // The placeholder above becomes the fallback baseline for this latitude; real data replaces it as soon as it arrives. Must run
     // before the cabin-temperature copy just below, so the cabin starts at the same ambient value.
     state.weather.temperatureF = fallbackTemperatureF(state);
-    state.boat.cabinTemperatureF = state.weather.temperatureF; // starts at ambient — see syncCabinTemperature for the ongoing drift
+    state.boat.cabinTemperatureF = state.weather.temperatureF; // the placeholder ambient, until the first real reading corrects it (cabinStartsAtOutside) — see syncCabinTemperature for the ongoing drift
     state.boat.cabinTemperatureLastSyncedAt = 0; // currentGameMinutes() is 0 here too (voyageMinutes and leftoverMinutes both start at 0)
     // NIGHT / LOW-LIGHT START -- a voyage beginning anywhere the
     // existing natural-light curve would already read below full
@@ -4060,6 +4061,15 @@
   function applyRealEnvironmentToLive(state, env, snap) {
     var w = state.weather, t = env.target;
     var k = snap ? 1 : 1 - Math.pow(1 - REAL_WEATHER_BRIDGE_BLEND_PER_HOUR, TICK_MINUTES / 60);
+    // A FRESH VOYAGE'S CABIN STARTS AT THE OUTSIDE TEMPERATURE. The cabin was seeded from the placeholder (about 47 F at Seattle's latitude,
+    // because no real reading existed at that moment), and from there it would only creep toward the real air at 0.1 F a minute -- a cabin in
+    // the 40s on a 61 F day. So the FIRST real reading of a voyage takes both the live reading and the cabin straight to the real value.
+    // Only in a voyage's first two hours (a reading that arrives much later is not 'the start'), and never over a heater that is already
+    // warming the cabin. The flag is spent either way, so this happens at most once per voyage.
+    if (env.temp && state.boat.cabinStartsAtOutside) {
+      state.boat.cabinStartsAtOutside = false;
+      if (state.meta.voyageMinutes < 120 && !state.boat.heaterOn) { w.temperatureF = t.tempF; state.boat.cabinTemperatureF = t.tempF; }
+    }
     if (env.temp) w.temperatureF = isFinite(w.temperatureF) ? w.temperatureF + (t.tempF - w.temperatureF) * k : t.tempF;
     if (env.sky) {
       w.condition = rwLegacyCondition(t);          // the existing four-word vocabulary
@@ -20207,6 +20217,7 @@
     // either way, regardless of which migration order touches it.
     if (b.cabinTemperatureF === undefined || b.cabinTemperatureF === null) b.cabinTemperatureF = fallbackTemperatureF(state);
     if (b.cabinTemperatureLastSyncedAt === undefined) b.cabinTemperatureLastSyncedAt = currentGameMinutes(state);
+    if (b.cabinStartsAtOutside === undefined) b.cabinStartsAtOutside = currentGameMinutes(state) < 120; // see applyRealEnvironmentToLive: a voyage begun before this existed gets the same start-at-outside correction only if it is still brand new
     if (b.hatchOpen === undefined) b.hatchOpen = false;
     if (b.hatchChangedAt === undefined) b.hatchChangedAt = currentGameMinutes(state); // an older save: unknown, so count from now rather than guess it was shut for hours
     if (state.flags.hungerNarrated === undefined) state.flags.hungerNarrated = false;
