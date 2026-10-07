@@ -1185,7 +1185,7 @@
         coffeeCount: 0,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // physically at the Helm -- a pure presence flag now, independent of AUTOPILOT (see cmdHelm/computeHeading: autopilot still wins the actual steering whenever both are true); ends automatically on GO BELOW, SLEEP, BACK (leave-helm), or STEERING damage -- no longer on autopilot re-engaging
-        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null }, // voyageMinutes of last use, for gentle diminishing returns
+        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null, quiet: null, pong: null }, // voyageMinutes of last use (quiet/pong: of the last PAYOUT), for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
@@ -12663,7 +12663,7 @@
     if (sitSession) { keepScreen(state); return; } // already seated: a repeat does nothing (no second sound, no second timer) and must not end the screen
     clearTempView();
     var now = Date.now();
-    var s = sitSession = { state: state, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, shown: [], shownCount: 0, currentId: null, worldKey: sitWorldKey(state), changeAt: null, obsEls: null, entryEl: null, seated: false, pollTimer: null };
+    var s = sitSession = { state: state, startedAt: now, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, shown: [], shownCount: 0, currentId: null, worldKey: sitWorldKey(state), changeAt: null, obsEls: null, entryEl: null, seated: false, pollTimer: null };
     state.pendingChoice = { id: 'sitting', options: [{ label: 'GET UP', action: 'get-up' }] }; // handleAction's tail renders it (and the SITTING A WHILE indicator)
     s.entryEl = playSaloonOneShot('sitAWhile', function () { s.seated = true; }); // the sound's real end; it only marks her as settled -- she keeps sitting
     s.pollTimer = setInterval(sitPoll, SIT_POLL_MS);
@@ -12673,6 +12673,7 @@
   // the Saloon returns -- the same audio-synced action every other physical action uses, so SOUND OFF or a blocked sound can never trap her here.
   function performGetUp(state) {
     if (!sitSession) { keepScreen(state); return; } // not sitting (a stray or repeated press): nothing to do, and the screen stays as it is
+    awardQuietMorale(state, (Date.now() - sitSession.startedAt) / 60000); // getting up by choice after a while of quiet: a little morale (see awardQuietMorale)
     sitEndSession();
     state.pendingChoice = null;
     runAudioSyncedAction(state, {
@@ -13241,7 +13242,7 @@
     if (obsSession || !obsAvailable(state)) return;
     clearTempView();
     var now = Date.now();
-    var s = obsSession = { state: state, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, currentId: null, worldKey: obsWorldKey(state), changeAt: null, obsEls: null, pollTimer: null };
+    var s = obsSession = { state: state, startedAt: now, dueAt: now + SIT_FIRST_MS, armed: false, attempts: 0, currentId: null, worldKey: obsWorldKey(state), changeAt: null, obsEls: null, pollTimer: null };
     state.pendingChoice = { id: 'existing', options: [{ label: 'BACK TO REALITY', action: 'back-to-reality' }] }; // runAudioSyncedAction's tail renders it (and the JUST EXISTING indicator)
     s.pollTimer = setInterval(obsPoll, SIT_POLL_MS);
   }
@@ -13261,6 +13262,7 @@
   // then the above-deck menu returns.
   function performBackToReality(state) {
     if (uiBusy) return; // already walking aft: a repeat starts nothing
+    if (obsSession && obsSession.state === state) awardQuietMorale(state, (Date.now() - obsSession.startedAt) / 60000); // coming back by choice after a while at the bow: a little morale (shared with SIT A WHILE)
     obsEndSession();
     state.pendingChoice = null;
     runAudioSyncedAction(state, {
@@ -14393,6 +14395,7 @@
     g.phase = 'ended';
     g.winner = winner;
     g.ballVX = 0; g.ballVY = 0;
+    awardPongMorale(winner); // a finished match pays a little morale (a quit mid-match never gets here)
     var key = winner === 'player' ? 'pongPlayerWins' : 'pongComputerWins';
     playNavStationOneShot(key, function () {
       if (!GAME || pongGame !== g) return; // PONG was already closed (e.g. RETURN pressed right as the win landed) -- don't navigate a second time
@@ -14995,6 +14998,38 @@
     if (hoursSince >= 6) return fullGain;
     if (hoursSince >= 2) return Math.round(fullGain * 0.4);
     return Math.max(1, Math.round(fullGain * 0.15));
+  }
+
+  // QUIET TIME (SIT A WHILE and JUST EXIST, one shared pool) and PONG. These are always available and cost nothing, so they get a tighter limit than the comforts
+  // above (which only appear when something needs doing): the same spacing -- full pay if 6+ hours since that kind last PAID, 40% at 2-6 hours -- but NO minimum of 1
+  // below it, and the spacing clock restarts only when something actually pays (a short sit that pays nothing never spoils the next one). crew.lastRoutineAt keeps the clocks.
+  var QUIET_GAIN_BY_MINUTES = [[20, 3], [10, 2], [3, 1]]; // sat at least N minutes -> that much; under 3 minutes pays nothing (3 minutes is also when the second observation appears)
+  var PONG_WIN_MORALE = 3;  // a finished match: a win...
+  var PONG_LOSS_MORALE = 1; // ...or a loss. Quitting mid-match pays nothing.
+  function spacedMoraleGain(state, key, fullGain) {
+    if (!(fullGain > 0)) return 0;
+    var last = state.crew.lastRoutineAt[key];
+    var hoursSince = last == null ? 999 : (state.meta.voyageMinutes - last) / 60;
+    var gain = hoursSince >= 6 ? fullGain : (hoursSince >= 2 ? Math.round(fullGain * 0.4) : 0);
+    if (gain > 0) state.crew.lastRoutineAt[key] = state.meta.voyageMinutes;
+    return gain;
+  }
+  // Called when the player ends a SIT A WHILE (GET UP) or a JUST EXIST (BACK TO REALITY) on their own; a session cut short by anything else never gets here.
+  function awardQuietMorale(state, minutesSat) {
+    var base = 0;
+    for (var i = 0; i < QUIET_GAIN_BY_MINUTES.length; i++) {
+      if (minutesSat >= QUIET_GAIN_BY_MINUTES[i][0]) { base = QUIET_GAIN_BY_MINUTES[i][1]; break; }
+    }
+    var gain = spacedMoraleGain(state, 'quiet', base);
+    if (gain > 0) state.crew.morale = clamp(state.crew.morale + gain, 0, 100);
+    return gain;
+  }
+  // Called once, by pongEndMatch, when a match is really won or lost. Saved promptly because PONG is not an action with a save of its own.
+  function awardPongMorale(winner) {
+    if (!GAME) return 0;
+    var gain = spacedMoraleGain(GAME, 'pong', winner === 'player' ? PONG_WIN_MORALE : PONG_LOSS_MORALE);
+    if (gain > 0) { GAME.crew.morale = clamp(GAME.crew.morale + gain, 0, 100); saveGameState(GAME); }
+    return gain;
   }
 
   function cmdWash(state) {
@@ -20237,6 +20272,8 @@
     if (c.lastRoutineAt.tools === undefined) c.lastRoutineAt.tools = null;
     if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
+    if (c.lastRoutineAt.quiet === undefined) c.lastRoutineAt.quiet = null;
+    if (c.lastRoutineAt.pong === undefined) c.lastRoutineAt.pong = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
     delete c.lastRoutineAt.relax; // RELAX removed entirely -- clears any lingering field from an older save rather than leaving it as dead state
     if (c.location === undefined) c.location = 'above';
