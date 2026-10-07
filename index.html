@@ -841,7 +841,7 @@
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
-        <button id="sound-btn" class="hdr-btn" type="button">SOUND ON</button>
+        <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
         <span id="clock">—</span>
       </div>
     </header>
@@ -2244,17 +2244,19 @@
     if (f.codaAt != null && f.step > finaleStepIndex('ashore')) finaleStartCoda(state, (Date.now() - f.codaAt) / 1000);
   }
   var finaleMarinaOn = false;
+  var finaleMarinaVoice = null; // created on first use: this code is read before the loop engine is initialised
+  function finaleMarina() { return finaleMarinaVoice || (finaleMarinaVoice = makeLoopVoice('FINALE MARINA')); }
   function finaleStartMarina() {
     if (finaleMarinaOn || !audioUnlocked) return;
     finaleMarinaOn = true;
-    var el = playMarinaOneShot('marinaSound', null); // the existing marina ambience, faded in
-    if (el) el.loop = true; // the voyage is over: it simply stays
+    finaleMarina().set(MARINA_AUDIO_FILES.marinaSound, MARINA_AUDIO_VOLUME.marinaSound, MARINA_AMBIENCE_FADE_IN_SECONDS); // the existing marina ambience, faded in; the voyage is over: it simply stays (the loop engine keeps it running)
     marinaAmbienceStarted.marinaSound = true;
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
     if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
     finaleRendering = null; finaleMarinaOn = false; finaleCodaTries = 0;
     if (finaleCodaEl) { try { finaleCodaEl.pause(); } catch (e) {} finaleCodaEl = null; }
+    if (finaleMarinaVoice) finaleMarinaVoice.stop(0.3);
     ['marinaSound', 'pnwBirds'].forEach(function (k) { var el = marinaAudioEls[k]; if (el) { try { el.pause(); } catch (e) {} el.loop = false; } });
     marinaAmbienceStarted = { pnwBirds: false, marinaSound: false };
     var E = finaleEls(); if (!E.ov) return;
@@ -7427,20 +7429,19 @@
   var audioCtx = null;
   var audioUnlocked = false;
   var masterGain = null;
-  var MASTER_GAIN_LEVEL = 0.5; // masterGain's level when sound is ON (0 when muted)
-  var muted = false;
-
+  var MASTER_GAIN_LEVEL = 1; // masterGain's level when sound is ON (0 when muted)
+  var AMBIENCE_BUS_SCALE = 0.5; // the level the sea / wind / rain / creak loops are mixed at (they used to sit behind a master bus fixed at 0.5; the master is now unity so every loop family keeps its own exact loudness)
+  var muted = true;
   // MASTER MUTE -- the one global SOUND ON / SOUND OFF.
-  // `muted` is the master state and nothing else reads it. It starts false on every page load (sound ON -- never restored
-  // from a save or from storage) and only changes through setMasterMuted. It is applied in exactly two places, which
-  // together cover every sound in the game:
-  //   * masterGain -- the Web Audio bus the sea / wind / rain / creak channels run through. Muting sets it to 0; the
-  //     channels keep playing underneath.
-  //   * the `muted` property of every <audio> element. Unlike `volume` it works on iOS, and it only silences output: the
-  //     element keeps playing, its position keeps advancing, loops keep looping and `ended` still fires -- so fades,
-  //     crossfades, action timing and relative levels all carry on underneath, and un-muting just makes it audible
-  //     again mid-stream. (HTML audio is deliberately NOT routed into the AudioContext: the hard audio rebuild closes
-  //     that context, which would permanently silence every element already tied to it.)
+  // `muted` is the master state and nothing else reads it. It starts TRUE on every page load (the game opens with SOUND OFF until the player turns it
+  // on -- never restored from a save or from storage) and only changes through setMasterMuted. It is applied in exactly two places, which together cover
+  // every sound in the game:
+  //   * masterGain -- the Web Audio bus every buffered loop runs through. Muting ramps it to 0 over a few ms (no click); the loops keep playing
+  //     underneath, their position keeps advancing and their schedule is untouched.
+  //   * the `muted` property of every <audio> element (the one-shots, and the plain-element loop fallback). Unlike `volume` it works on iOS, and it only
+  //     silences output: the element keeps playing, its position keeps advancing, loops keep looping and `ended` still fires.
+  // So SOUND OFF never pauses, stops, restarts or re-times anything: a muted game plays exactly the same audio, silently, every sequence that waits for a
+  // sound to end waits for the same real end whether it can be heard or not, and un-muting just lets the already-running sound be heard mid-stream.
   // Every <audio> element in the game is created through createGameAudio, which applies the master state as it is made.
   // The play() guard below catches anything that ever skips it, so no sound can be audible outside the master.
   var playRejectionLoggedAt = {}; // file name -> when its last rejected play() was logged
@@ -7474,9 +7475,25 @@
       return promise;
     };
   })();
+  var masterSettleToken = 0;
   function setMasterMuted(isMuted) {
-    muted = isMuted;
-    if (masterGain) masterGain.gain.value = muted ? 0 : MASTER_GAIN_LEVEL;
+    muted = !!isMuted;
+    masterSettleToken++;
+    if (masterGain && audioCtx) {
+      var target = muted ? 0 : MASTER_GAIN_LEVEL, t = audioCtx.currentTime;
+      try {
+        if (t < 0.1) { // the clock has only just started (this tap created the context): nothing is audible yet, so no ramp is needed -- and an automation event at time ~0 can be left half-evaluated by an idle node
+          masterGain.gain.cancelScheduledValues(0);
+          masterGain.gain.value = target;
+        } else {
+          masterGain.gain.cancelScheduledValues(t);
+          masterGain.gain.setValueAtTime(loopReadGain(masterGain.gain), t);
+          masterGain.gain.linearRampToValueAtTime(target, t + 0.03); // a few ms: no click, nothing paused
+          var token = ++masterSettleToken; // once the ramp has run its course the value is SET outright, so the final state never depends on how an idle (no-input) node treats automation; a newer toggle cancels this
+          setTimeout(function () { if (token === masterSettleToken && masterGain) { try { masterGain.gain.cancelScheduledValues(0); masterGain.gain.value = muted ? 0 : MASTER_GAIN_LEVEL; } catch (e) {} } }, 120);
+        }
+      } catch (e) { masterGain.gain.value = target; }
+    }
     gameAudioRefs = gameAudioRefs.filter(function (ref) {
       var el = ref.deref();
       if (el) el.muted = muted;
@@ -7484,43 +7501,29 @@
     });
     updateSoundLabel();
   }
-
   /* --------------------------------------------------------------
-     AUDIO RECOVERY LAYER -- module-level state for recoverLandfallAudio/
-     rebuildLandfallAudio (see those functions, further down, for the
-     full design). Declared here, alongside audioCtx/masterGain, since
-     it's the same kind of persistent runtime state.
+     AUDIO LIFECYCLE -- how sound gets from "the page loaded" to "the loops are playing", and how it stays that way.
 
-     audioRuntimeGeneration (section 7 of the task this implements) is
-     bumped by EVERY hard rebuild. It exists specifically for the
-     recovery layer's OWN asynchronous operations (health-check
-     timeouts, the watchdog interval) to check against, so a check
-     scheduled against the OLD runtime can recognize a rebuild happened
-     while it was waiting and bail out rather than act on a since-
-     disposed graph. The existing per-channel `generation` counters on
-     seaChannels/windChannels/rainChannels (see makeSeaChannel) already
-     give the self-loop timer/crossfade/commit callbacks their own,
-     independent staleness protection -- a hard rebuild creates entirely
-     FRESH channel objects (see rebuildLandfallAudio) rather than
-     mutating the old ones in place, which orphans every old callback's
-     captured channel reference from the module-level seaChannels/
-     windChannels/rainChannels variables automatically: even if an old
-     timer still fires, it can
-     no longer reach or affect anything the rest of the system uses.
-     audioRuntimeGeneration is the belt to that suspenders, for the
-     recovery layer's own code.
+     Browsers only let a page make sound after the player has interacted with it (a tap, a click, a key). The old code created its AudioContext at load
+     with no interaction, declared audio "unlocked" regardless, and then asked for resume() with no interaction (the pageshow handler). Chrome leaves
+     that call pending forever, and because the recovery layer held an in-progress flag across it, every later attempt -- including the ones made inside
+     real taps -- returned immediately. The context stayed suspended for the whole session and every Web Audio loop was silent. The rules now:
+       * Nothing audio-related is created or resumed without an interaction. Listeners for the gestures a browser accepts are installed once at boot
+         (installAudioGestureListeners) and STAY installed, so a context the browser later suspends or interrupts (iOS, a phone call, another app)
+         is resumed by the very next tap.
+       * `audioUnlocked` means "the player has interacted": elements may now play. It says nothing about the context; the context's own state
+         ('running' or not) is what the loop engine waits on, and its 'statechange' event wakes the loops the instant it runs.
+       * resume() is only requested once the browser has seen an interaction, nothing awaits it while holding any state, and a call left pending costs
+         nothing: the next gesture just asks again.
+       * There is no rebuild / health-poll / escalation ladder. The loops are idempotent (see the LOOP ENGINE): "make sure what is wanted is playing"
+         is cheap and safe to call at any moment, so every trigger (a gesture, SOUND ON, the page becoming visible, window focus, a context state
+         change, the watchdog tick) does exactly that and nothing more.
      -------------------------------------------------------------- */
-  var audioRuntimeGeneration = 0;
-  var audioRecoveryInProgress = false;
-  var audioRecoveryNeedsGesture = false; // section 12 -- set when automatic recovery can't complete due to autoplay/media policy; cleared once a gesture-triggered attempt actually succeeds
-  var lastHardRebuildAtMs = 0;
-  var ambiencePlayBlocked = false;           // an ambience play() was refused for lack of a user gesture (NotAllowedError) -- the next gesture retries; cleared the moment any loop is confirmed playing
-  var AMBIENCE_PENDING_TIMEOUT_MS = 5000;    // a play attempt unconfirmed this long counts as failed, so a play() that never settles can never block every later retry
-  var lastAmbienceSnapshotAt = 0;
-  var AUDIO_RECOVERY_COOLDOWN_MS = 4000;   // section 14 -- minimum real-world gap between two hard rebuilds, so a still-broken environment logs and waits rather than rebuilding in a tight loop
-  var AUDIO_HEALTH_CHECK_WAIT_MS = 850;    // section 3 -- within the suggested 750-1000ms window
-  var AUDIO_WATCHDOG_INTERVAL_MS = 7000;   // section 13 -- within the suggested 5-10s window
+  var AUDIO_WATCHDOG_INTERVAL_MS = 4000;   // how often (page visible) the loops are re-checked and the context re-resumed if it dropped
+  var AUDIO_HEALTH_CHECK_WAIT_MS = 850;    // how long the cassette's progress check watches its element
   var audioWatchdogTimer = null;
+  var audioGestureListenersInstalled = false;
+  var lastGestureWakeAt = 0;
 
   // AUDIO DEBUG -- off by default, never ships enabled. Flip to true
   // only for local troubleshooting of a specific playback issue; every
@@ -7537,52 +7540,31 @@
     if (!AUDIO_DEBUG) return;
     console.log('[AUDIO] ' + msg);
   }
-  // The seven persistent environmental loops, for the diagnostics and the reconciler below.
+  // The seven persistent environmental loops, for the diagnostics.
   function ambienceChannelPairs() {
     return [['sea exterior', seaChannels.exterior], ['sea interior', seaChannels.interior], ['creak interior', creakChannels.interior],
             ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
             ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]];
   }
 
-  // One-shot diagnostics for when environmental audio goes missing: the context, the master, what each loop is supposed to
-  // be, and what each of its two slots is actually doing. Rate-limited so a persistent fault cannot flood the console, and
-  // only ever called when something is already wrong (or by hand: window.landfallAudioSnapshot()).
+  // One-shot diagnostics: the context, the master, and what every loop voice wants and is actually doing. Rate-limited so a persistent fault cannot flood
+  // the console; call it by hand any time: window.landfallAudioSnapshot().
+  var lastAmbienceSnapshotAt = 0;
   function ambienceSnapshot(reason, force) {
     var now = Date.now();
     if (!force && now - lastAmbienceSnapshotAt < 4000) return;
     lastAmbienceSnapshotAt = now;
     var rows = {};
-    ambienceChannelPairs().forEach(function (pair) {
-      var ch = pair[1];
-      rows[pair[0]] = {
-        wanted: ch.desiredPath, confirmed: ch.currentPath, attempting: ch.loadingPath, activeSlot: ch.activeIndex,
-        slots: ch.slots.map(function (sl) {
-          return !sl ? null : { paused: sl.el.paused, ended: sl.el.ended, t: +sl.el.currentTime.toFixed(2), duration: isFinite(sl.el.duration) ? +sl.el.duration.toFixed(1) : null, gain: sl.gainTarget, file: (sl.el.src || '').split('/').pop() };
-        }),
-      };
-    });
+    ambienceChannelPairs().forEach(function (pair) { rows[pair[0]] = pair[1].voice.diag(); });
     console.warn('[AUDIO SNAPSHOT] ' + reason, {
-      audioContext: audioCtx ? audioCtx.state : 'none', soundMuted: muted, masterGain: masterGain ? masterGain.gain.value : null, playBlockedAwaitingGesture: ambiencePlayBlocked,
-      location: GAME ? GAME.crew.location : null,
+      audioContext: audioCtx ? audioCtx.state : 'none', unlocked: audioUnlocked, soundMuted: muted, masterGain: masterGain ? masterGain.gain.value : null,
+      buffers: loopBuffers.stats(), location: GAME ? GAME.crew.location : null,
       weather: GAME ? { condition: GAME.weather.condition, rain: GAME.weather.rainLevel, windKt: GAME.weather.windSpeed, seaState: GAME.weather.seaState } : null,
       engine: { on: !!(GAME && GAME.boat.engineOn), phase: engineAudioPhase, key: engineActiveKey },
-      channels: rows,
+      loops: rows,
     });
   }
   window.landfallAudioSnapshot = function () { ambienceSnapshot('manual', true); };
-
-  // A loop whose element reaches its natural end while it is STILL the channel's active, wanted loop has been outrun by its
-  // own self-loop timer -- timers run late on a throttled background tab or a busy page, and that timer is armed to fire only
-  // LOOP_CROSSFADE_SECONDS before the end. Repeat it from the media's own 'ended' event instead of waiting for the timer (the
-  // late timer, when it does arrive, finds its generation superseded and does nothing). An outgoing slot finishing its
-  // fade-out, or a channel nobody wants any more, is not ours to restart. `perform` is the channel's own crossfade function.
-  function repeatEndedAmbienceLoop(channel, slot, perform) {
-    var active = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-    var path = channel.desiredPath;
-    if (active !== slot || path == null || !slot.el.src || slot.el.src.indexOf(path) === -1) return;
-    ambienceSnapshot('loop ran off its end before its self-loop timer fired: ' + path);
-    perform(channel, path, '(loop ended)', '(loop ended)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
-  }
 
   function audioDebugError(soundId, err) {
     if (!AUDIO_DEBUG) return;
@@ -7590,33 +7572,289 @@
   }
 
   /* --------------------------------------------------------------
-     SEAMLESS CROSSFADE LOOP CONTROLLER -- a small, generic, reusable
-     engine for any plain-HTMLAudioElement system (no Web Audio graph)
-     that needs gapless transitions between connected sounds: a loop
-     that repeats seamlessly, and/or a sequence of DIFFERENT sounds
-     handed off from one to the next (e.g. engine start -> cruise ->
-     stop) with no silence at any seam. Used by the engine and the
-     sails luffing loop below; the sea/wind/rain ambience channels have
-     their own, separate Web-Audio-graph-based crossfade machinery
-     (see makeSeaChannel/setSeaChannelTrack) which this does not
-     replace -- that system is extended in place, further down, to add
-     the same seamless self-loop behavior using its own GainNode ramps
-     rather than this element-volume-based one.
+     SEAMLESS CROSSFADE CONTROLLER -- a small, generic, reusable engine for a sequence of connected sounds on one continuous "voice": one-shots handed
+     off from one to the next (the engine's start -> running -> off) and loops starting, stopping and crossfading in and out of them, with no silence at any
+     seam. Used by the engine and the sails luffing loop below. Its LOOPS are run by the LOOP ENGINE just above (the same one the sea / creak / wind / rain
+     ambience uses): the repeats are scheduled on the audio clock, so nothing here has to hand anything off at a repeat. Its element slots are for the
+     one-shot sounds and their crossfades, which are timed by those sounds' own real ends.
 
-     LOOP_CROSSFADE_SECONDS (0.25s) is the new standard overlap/crossfade
-     duration this whole pass introduces, used everywhere a connected-
-     sound or loop-repeat transition happens: masking small MP3 encoder
-     gaps/padding at a loop's own seam, and connecting engine
-     start->cruise->stop. It is deliberately a NEW, separate constant
-     from SEA_AMBIENCE_CROSSFADE_SECONDS/WIND_AMBIENCE_CROSSFADE_SECONDS/
-     RAIN_AMBIENCE_CROSSFADE_SECONDS
-     (2 seconds each) -- those govern the pre-existing, already gapless,
-     deliberately slower weather/location crossfades between DIFFERENT
-     ambience tracks (calm->chop, exterior->interior, etc.), which
-     aren't the source of any audible gap and are left at their current
-     duration; see this pass's own notes for why.
+     LOOP_CROSSFADE_SECONDS (0.25s) is the default fade for a connected-sound transition or a loop starting / stopping when the caller gives none. The
+     weather / location crossfades between DIFFERENT ambience tracks (SEA_AMBIENCE_CROSSFADE_SECONDS and its siblings, 2 seconds each) are deliberately
+     slower and are passed in explicitly by their own layers.
      -------------------------------------------------------------- */
   var LOOP_CROSSFADE_SECONDS = 0.25;
+
+  /* --------------------------------------------------------------
+     LOOP ENGINE -- the ONE implementation behind every continuous loop in the game: the sea / creak / wind / rain ambience channels, the engine's
+     cruise and interior sounds, and the sails' luffing. (One-shots are a separate thing and are not touched by any of this.)
+
+     WHY IT EXISTS. The loops used to repeat by main-thread timers: a setTimeout near the end of a file rewound a second <audio> element with
+     currentTime = 0 and play()ed it, and an 'ended' listener was the backstop. That is a handoff the page has to perform on time, so any hiccup
+     in the page (a long catch-up after sleep, a slow tick, a throttled background tab) became silence; and because the two copies were crossfaded
+     LINEARLY, every repeat also dipped about 3 dB (two uncorrelated recordings at half level each sum to 71% power). Measured on the old build:
+     a 700 ms stall at a repeat gave a 139 ms hole, and every repeat had a ~30% dip.
+
+     HOW IT WORKS NOW. Where the page can load the files (http/https with Web Audio -- Neocities, a local server, a phone) each loop is DECODED
+     ONCE into an AudioBuffer and its repeats are SCHEDULED ON THE AUDIO CLOCK, far ahead (LOOP_SCHEDULE_HORIZON_SECONDS): every pass is a buffer
+     source started at an exact time, overlapping the next by LOOP_SEAM_SECONDS with an EQUAL-POWER fade (constant loudness, no dip, no doubling
+     pulse). Once scheduled the audio thread plays them with no help from the page, so a stalled or throttled page cannot cause a gap, and a
+     suspended context simply pauses the clock and carries on from the same place when it runs again. Digital-silence encoder padding at either end
+     of a file is trimmed before looping. Where the page cannot (opened from file://, where the browser blocks both fetch and routing an <audio>
+     element into Web Audio), each loop is one plain <audio> element with its NATIVE loop = true: nothing for the page to hand off, so nothing to
+     stall; only crossfades between DIFFERENT tracks are done by the page.
+
+     A VOICE is one continuous sound slot (e.g. "sea, exterior"): voice.set(path, level, fadeSeconds) states what should be audible and is
+     idempotent -- the same wish again is a no-op, a new track is crossfaded in make-before-break (the old one keeps playing until the new one is
+     decoded and ready), and voice.set(null, ..) fades out. Nothing here pauses for SOUND OFF: the master mute only changes audibility (masterGain
+     for the buffer loops, the element's muted flag for the fallback), so loops keep running, keep their position, and un-muting just lets the
+     already-running sound be heard.
+     -------------------------------------------------------------- */
+  var LOOP_SEAM_SECONDS = 0.4;              // the overlap at every repeat (clamped to 12% of a short loop)
+  var LOOP_SCHEDULE_HORIZON_SECONDS = 75;   // repeats are scheduled this far ahead of the audio clock: how long the page can stall without any audible effect
+  var LOOP_PUMP_MS = 500;                   // how often the page tops the schedule up and re-checks that every wanted loop is genuinely playing
+  var LOOP_RETRY_MS = 4000;                 // a failed load or a refused play() is tried again after this
+  var LOOP_BROKEN_BACKOFF_MS = 60000;       // after a network-level (not 404) fetch failure the buffer path is not tried again for this long
+  var LOOP_LEVEL_RAMP_SECONDS = 0.5;        // an in-place level change (e.g. the hatch bleed) glides over this unless the caller says otherwise
+  var LOOP_DECODE_BUDGET_BYTES = (isAppleTouchDevice() ? 90 : 220) * 1024 * 1024; // decoded PCM kept for loops that are not currently wanted, least recently used first
+
+  // A gain ramp from `from` to `to` over `seconds`, shaped quarter-sine (rising) / quarter-cosine (falling) so that two of them crossing keep a constant
+  // total power. Piecewise linear, so it composes with other scheduled events on every browser. Replaces anything already scheduled from t0 onward.
+  function loopFadeParam(param, from, to, t0, seconds) {
+    try { param.cancelScheduledValues(t0); } catch (e) {}
+    param.setValueAtTime(from, t0);
+    if (!(seconds > 0.004)) { param.setValueAtTime(to, t0 + 0.002); return; }
+    var steps = Math.max(2, Math.min(24, Math.round(seconds * 12))), rising = to >= from, k, p, shape;
+    for (k = 1; k <= steps; k++) {
+      p = k / steps;
+      shape = rising ? Math.sin(p * Math.PI / 2) : 1 - Math.cos(p * Math.PI / 2);
+      param.linearRampToValueAtTime(from + (to - from) * shape, t0 + seconds * p);
+    }
+  }
+  function loopReadGain(param) { var v = param.value; return isFinite(v) ? v : 0; }
+
+  // DECODED LOOPS: fetched and decoded at most once each, shared by every voice, evicted least-recently-used when over budget (never one a voice wants).
+  var loopBuffers = (function () {
+    var cache = {}, inflight = {}, failedAt = {}, bytes = 0, brokenUntil = 0;
+    function supported() {
+      return !!(audioCtx && masterGain && typeof fetch === 'function' && (location.protocol === 'http:' || location.protocol === 'https:') && Date.now() >= brokenUntil);
+    }
+    function decode(ab) {
+      return new Promise(function (resolve, reject) { // the callback form as well as the promise form: older Safari only has the first
+        var p = audioCtx.decodeAudioData(ab, resolve, reject);
+        if (p && typeof p.then === 'function') p.then(resolve, reject);
+      });
+    }
+    // Encoder padding shows up as digital silence at the very start / end of a decoded file. Looping it would put a hole at every repeat, so find where
+    // the sound really starts and ends (within the first / last 120 ms only: a file that merely opens or closes quietly is left exactly as it is).
+    function trim(buf) {
+      var n = buf.length, sr = buf.sampleRate, window_ = Math.min(Math.floor(sr * 0.12), Math.floor(n * 0.1)), thr = 0.0005, first = n, last = -1, ch, i, d;
+      for (ch = 0; ch < buf.numberOfChannels; ch++) {
+        d = buf.getChannelData(ch);
+        for (i = 0; i < window_; i++) { if (Math.abs(d[i]) > thr) { if (i < first) first = i; break; } }
+        for (i = 0; i < window_; i++) { if (Math.abs(d[n - 1 - i]) > thr) { if (n - 1 - i > last) last = n - 1 - i; break; } }
+      }
+      var lead = first >= window_ ? 0 : first, end = last < 0 ? n : last + 1;
+      return { lead: lead / sr, len: Math.max(0.5, (end - lead) / sr) };
+    }
+    function inUse(path) { return loopVoices.some(function (v) { return v.want.path === path || (v.cur && v.cur.path === path); }); }
+    function evict(keep) {
+      var paths = Object.keys(cache).filter(function (p) { return p !== keep && !inUse(p); }).sort(function (a, b) { return cache[a].last - cache[b].last; });
+      while (bytes > LOOP_DECODE_BUDGET_BYTES && paths.length) { var p = paths.shift(); bytes -= cache[p].bytes; delete cache[p]; }
+    }
+    function load(path) {
+      var hit = cache[path];
+      if (hit) { hit.last = Date.now(); return Promise.resolve(hit); }
+      if (inflight[path]) return inflight[path];
+      if (failedAt[path] && Date.now() - failedAt[path] < LOOP_RETRY_MS) return Promise.resolve(null);
+      var p = fetch(path).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      }).then(decode).then(function (buf) {
+        var t = trim(buf), rec = { buf: buf, lead: t.lead, len: t.len, bytes: buf.length * buf.numberOfChannels * 4, last: Date.now() };
+        cache[path] = rec; bytes += rec.bytes; delete inflight[path]; evict(path);
+        return rec;
+      }).catch(function (e) {
+        delete inflight[path]; failedAt[path] = Date.now();
+        if (e && e.name === 'TypeError') brokenUntil = Date.now() + LOOP_BROKEN_BACKOFF_MS; // blocked / offline / CORS: use the element path for a while instead
+        console.warn('[LOOP] could not load ' + path + ' for buffered looping (' + (e && e.message ? e.message : e) + ') -- using a plain element');
+        return null;
+      });
+      inflight[path] = p;
+      return p;
+    }
+    function peek(path) { var hit = cache[path]; if (hit) hit.last = Date.now(); return hit || null; }
+    function stats() { return { files: Object.keys(cache).length, mb: +(bytes / 1048576).toFixed(1), loading: Object.keys(inflight).length, brokenForMs: Math.max(0, brokenUntil - Date.now()) }; }
+    return { supported: supported, load: load, peek: peek, stats: stats };
+  })();
+
+  // ONE LOOP, BUFFERED: passes scheduled on the audio clock, overlapping by `seam` with an equal-power fade. `out` is the loop's own level (the track
+  // crossfade); each pass has its own small gain for its seam fades. All of it feeds masterGain, so SOUND OFF silences it without touching it.
+  function makeBufferLoop(path, rec, level, fadeInSeconds) {
+    var seam = Math.max(0.04, Math.min(LOOP_SEAM_SECONDS, rec.len * 0.12)), period = rec.len - seam;
+    var out = audioCtx.createGain();
+    out.gain.value = 0;
+    out.connect(masterGain);
+    var L = { kind: 'buffer', path: path, level: level, dead: false, out: out, live: [], nextT: 0, passes: 0 };
+    function seamIn(param, t) { for (var k = 1; k <= 8; k++) param.linearRampToValueAtTime(Math.sin(k / 8 * Math.PI / 2), t + seam * k / 8); }
+    function seamOut(param, t) { param.setValueAtTime(1, t); for (var k = 1; k <= 8; k++) param.linearRampToValueAtTime(Math.cos(k / 8 * Math.PI / 2), t + seam * k / 8); }
+    function schedule(t, first) {
+      var src = audioCtx.createBufferSource(), g = audioCtx.createGain();
+      src.buffer = rec.buf;
+      if (first) g.gain.setValueAtTime(1, t); else { g.gain.setValueAtTime(0, t); seamIn(g.gain, t); }
+      seamOut(g.gain, t + period);
+      src.connect(g); g.connect(out);
+      src.start(t, rec.lead, rec.len);
+      var pass = { src: src, g: g };
+      src.onended = function () { try { src.disconnect(); g.disconnect(); } catch (e) {} var k = L.live.indexOf(pass); if (k >= 0) L.live.splice(k, 1); };
+      L.live.push(pass); L.passes++; L.nextT = t + period;
+    }
+    L.pump = function () { // top the schedule up; a page that stalls longer than the horizon only loses the repeats after it, and the next pump resumes at once
+      if (L.dead) return;
+      var now = audioCtx.currentTime;
+      if (L.nextT < now) L.nextT = now + 0.02;
+      while (L.nextT < now + LOOP_SCHEDULE_HORIZON_SECONDS) schedule(L.nextT, false);
+    };
+    L.fadeTo = function (lv, seconds) { L.level = lv; loopFadeParam(out.gain, loopReadGain(out.gain), lv, audioCtx.currentTime, seconds); };
+    L.stop = function (seconds) {
+      if (L.dead) return;
+      L.dead = true;
+      var now = audioCtx.currentTime;
+      loopFadeParam(out.gain, loopReadGain(out.gain), 0, now, seconds);
+      L.live.slice().forEach(function (p) { try { p.src.stop(now + seconds + 0.06); } catch (e) {} });
+      setTimeout(function () { try { out.disconnect(); } catch (e) {} }, (seconds + 0.5) * 1000);
+    };
+    L.healthy = function () { return !L.dead && audioCtx.state === 'running' && L.live.length > 0; };
+    L.diag = function () { return 'buffer  passes ' + L.passes + '  live ' + L.live.length + '  level ' + loopReadGain(out.gain).toFixed(3) + '  lead ' + rec.lead.toFixed(3) + 's  len ' + rec.len.toFixed(2) + 's  seam ' + seam.toFixed(2) + 's'; };
+    var start = audioCtx.currentTime + 0.02;
+    L.nextT = start;
+    schedule(start, true);
+    L.pump();
+    loopFadeParam(out.gain, 0, level, start, fadeInSeconds);
+    return L;
+  }
+
+  // ONE LOOP, ELEMENT (file://, or a file the buffer path could not load): a single plain <audio> with native loop = true. No repeat handoff exists, so
+  // there is nothing to stall. Fades are volume steps (a browser that ignores element volume, iOS, just cuts instead -- unreachable in practice, since
+  // iOS is only ever served over http and uses the buffer path).
+  function makeElementLoop(path, level, fadeInSeconds) {
+    var el = createGameAudio();
+    el.preload = 'auto'; el.loop = true; el.volume = 0; el.src = path;
+    var E = { kind: 'element', path: path, level: level, dead: false, el: el, blocked: false, timer: null };
+    function ramp(to, seconds, done) {
+      if (E.timer) { clearInterval(E.timer); E.timer = null; }
+      var from = el.volume;
+      if (!(seconds > 0.02) || elementVolumeIsIgnored()) { el.volume = to; if (done) done(); return; }
+      var steps = Math.max(2, Math.round(seconds * 40)), i = 0, rising = to >= from;
+      E.timer = setInterval(function () {
+        i++;
+        var p = Math.min(1, i / steps), shape = rising ? Math.sin(p * Math.PI / 2) : 1 - Math.cos(p * Math.PI / 2);
+        el.volume = Math.max(0, Math.min(1, from + (to - from) * shape));
+        if (i >= steps) { clearInterval(E.timer); E.timer = null; if (done) done(); }
+      }, 25);
+    }
+    E.play = function () {
+      var p;
+      try { p = el.play(); } catch (e) { E.blocked = true; return; }
+      if (p && typeof p.then === 'function') p.then(function () { E.blocked = false; }, function (err) { if (!(err && err.name === 'AbortError')) E.blocked = true; });
+    };
+    E.pump = function () { if (!E.dead && (el.paused || el.ended)) E.play(); }; // wanted, but the browser paused it or a play() was refused: restart it in place
+    E.fadeTo = function (lv, seconds) { E.level = lv; ramp(lv, seconds); };
+    E.stop = function (seconds) {
+      if (E.dead) return;
+      E.dead = true;
+      ramp(0, seconds, function () { try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {} });
+    };
+    E.healthy = function () { return !E.dead && !el.paused && !el.ended && !el.error; };
+    E.diag = function () { return 'element  ' + (el.paused ? 'PAUSED' : 'playing') + '  t ' + el.currentTime.toFixed(2) + '/' + (isFinite(el.duration) ? el.duration.toFixed(2) : '?') + '  vol ' + Number(el.volume).toFixed(2) + (E.blocked ? '  BLOCKED' : ''); };
+    E.play();
+    ramp(level, fadeInSeconds);
+    return E;
+  }
+
+  // A VOICE: one continuous loop slot. State it wants with set(); the engine makes it true and keeps it true.
+  var loopVoices = [];
+  var loopPumpTimer = null;
+  function loopPumpAll() { loopVoices.forEach(function (v) { v.maintain(); }); }
+  function loopWakeAll() { loopVoices.forEach(function (v) { v.maintain(true); }); } // the context started running / the page returned: look again straight away
+  function makeLoopVoice(label) {
+    var V = { label: label, want: { path: null, level: 0, fade: LOOP_CROSSFADE_SECONDS }, cur: null, token: 0, pendingPath: null, lastTryAt: 0 };
+    function backend() {
+      if (!audioUnlocked) return 'wait';                                   // before the first gesture nothing may play; the first gesture wakes every voice
+      if (loopBuffers.supported()) return audioCtx.state === 'running' ? 'buffer' : 'wait'; // the buffer path needs a running context: wait for it rather than start an element AND a buffer
+      return 'element';
+    }
+    function begin() {
+      var want = V.want, path = want.path, tok = V.token, b = backend();
+      if (path == null || b === 'wait') return;
+      V.lastTryAt = Date.now();
+      if (b === 'element') { adopt(makeElementLoop(path, want.level, want.fade)); return; }
+      var rec = loopBuffers.peek(path);
+      if (rec) { adopt(makeBufferLoop(path, rec, want.level, want.fade)); return; }
+      if (V.pendingPath === path) return; // already loading this one
+      V.pendingPath = path;
+      loopBuffers.load(path).then(function (r) {
+        if (V.pendingPath === path) V.pendingPath = null;
+        if (V.token !== tok || V.want.path !== path || (V.cur && !V.cur.dead && V.cur.path === path)) return; // superseded while loading (or already playing it)
+        if (r && backend() === 'buffer') adopt(makeBufferLoop(path, r, V.want.level, V.want.fade));
+        else if (audioUnlocked) adopt(makeElementLoop(path, V.want.level, V.want.fade)); // could not be buffered: a plain element rather than silence
+      });
+    }
+    function adopt(loop) { // the new loop is audible; whatever was playing fades out underneath it (make-before-break, equal power)
+      var prev = V.cur;
+      V.cur = loop;
+      if (prev) prev.stop(V.want.fade);
+    }
+    V.set = function (path, level, fadeSeconds) {
+      var fade = fadeSeconds == null ? LOOP_CROSSFADE_SECONDS : fadeSeconds;
+      V.want = { path: path, level: level, fade: fade };
+      if (path == null) {
+        V.token++; V.pendingPath = null;
+        if (V.cur) { V.cur.stop(fade); V.cur = null; }
+        return;
+      }
+      if (V.cur && !V.cur.dead && V.cur.path === path) { // already this track: at most the level moves
+        if (Math.abs(V.cur.level - level) > 0.0005) V.cur.fadeTo(level, fade);
+        V.cur.pump();
+        return;
+      }
+      V.token++;
+      V.pendingPath = null;
+      begin();
+    };
+    V.setLevel = function (level, fadeSeconds) { V.want.level = level; if (V.cur && !V.cur.dead) V.cur.fadeTo(level, fadeSeconds == null ? LOOP_LEVEL_RAMP_SECONDS : fadeSeconds); };
+    V.stop = function (fadeSeconds) { V.set(null, 0, fadeSeconds); };
+    V.maintain = function (urgent) { // cheap and idempotent: starts what should be playing and is not, tops up what is
+      if (V.want.path == null) return;
+      if (V.cur && !V.cur.dead) {
+        if (V.cur.kind === 'buffer' && backend() !== 'buffer') return; // context suspended: the scheduled passes simply wait with it
+        V.cur.pump();
+        return;
+      }
+      V.cur = null;
+      if (urgent || Date.now() - V.lastTryAt >= LOOP_RETRY_MS / 4) begin();
+    };
+    V.wanted = function () { return V.want.path; };
+    V.playing = function () { return V.cur && !V.cur.dead ? V.cur.path : null; };
+    V.isHealthy = function () { return V.want.path == null ? !V.cur : !!(V.cur && V.cur.healthy()); };
+    V.diag = function () { return V.label.padEnd(18) + ' want ' + (V.want.path ? V.want.path.split('/').pop() : '-').padEnd(24) + (V.cur ? V.cur.diag() : (V.pendingPath ? 'loading ' + V.pendingPath.split('/').pop() : '-')); };
+    loopVoices.push(V);
+    if (!loopPumpTimer) loopPumpTimer = setInterval(loopPumpAll, LOOP_PUMP_MS);
+    return V;
+  }
+
+  // AMBIENCE CHANNEL: a voice plus the level it is mixed at. The sea / creak / wind / rain layers each own one or two of these (exterior / interior); WHAT each
+  // layer wants playing is theirs to decide (their get...AudioState functions, tiers and hysteresis, untouched), HOW it is played is this and the voice.
+  // AMBIENCE_BUS_SCALE keeps every ambience loop at exactly the loudness it always had (they used to sit behind a master bus fixed at 0.5).
+  function makeAmbienceChannel(name, targetGain, label) {
+    return { name: name, targetGain: targetGain, desiredPath: null, desiredGainMultiplier: 1, voice: makeLoopVoice(label + ' ' + name) };
+  }
+  function setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSeconds) {
+    if (gainMultiplier == null) gainMultiplier = 1;
+    channel.desiredPath = desiredPath;
+    channel.desiredGainMultiplier = gainMultiplier;
+    channel.voice.set(desiredPath, channel.targetGain * gainMultiplier * AMBIENCE_BUS_SCALE, crossfadeSeconds);
+  }
+
 
   // One controller manages one continuous "voice" -- two alternating
   // plain <audio> elements so an outgoing sound can fade out while an
@@ -7671,6 +7909,10 @@
     for (var s = 0; s < slotTotal; s++) slots.push(null);
     var activeIndex = -1;
     var generation = 0;
+    // Every LOOP this controller plays is run by the loop engine (audio-clock scheduled, see LOOP ENGINE); the element slots below carry its one-shots
+    // (the engine's start / off sounds) and their handoffs. loopActive: the loop voice, not a slot, is what is currently sounding.
+    var loopVoice = makeLoopVoice(errorLabel);
+    var loopActive = false;
 
     function ensureSlot(i) {
       var wantGain = gainFallbackForIgnoredVolume && audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice());
@@ -7793,16 +8035,11 @@
       }
     }
 
-    // Crossfades to `path` at `targetVolume` over LOOP_CROSSFADE_SECONDS.
+    // Crossfades to the ONE-SHOT `path` at `targetVolume` over LOOP_CROSSFADE_SECONDS (a repeating sound goes through crossfadeToLoop).
     // `targetVolume` may be a plain number OR a function returning one,
     // which is evaluated fresh every time a crossfade actually begins --
     // pass a function for anything whose audible level can change while
-    // it plays (mute, above/below-deck gating). This matters for loops
-    // in particular: a self-loop repetition re-runs crossfadeTo with
-    // the SAME targetVolume argument, so a number captured when the
-    // loop first started would silently restore that stale level at
-    // every seam, undoing a mute or a move below deck the moment the
-    // file wraps. Starts it in the currently-inactive slot at volume 0 and ramps it
+    // it plays (above/below-deck gating). Starts it in the currently-inactive slot at volume 0 and ramps it
     // up while ramping whatever was previously active down to 0, then
     // pauses that outgoing slot -- never leaving two audible copies
     // playing past the crossfade window, and never leaving the outgoing
@@ -7811,8 +8048,7 @@
     // `onNearEnd`, if given, is called once, roughly LOOP_CROSSFADE_SECONDS
     // before THIS instance's own natural end (derived from its real
     // decoded duration, polling briefly if metadata isn't ready yet) --
-    // pass a callback that calls crossfadeTo again with the SAME path
-    // for a seamless self-loop (see crossfadeToLoop below), or with a
+    // pass a callback that calls crossfadeTo / crossfadeToLoop with a
     // DIFFERENT path for a one-time handoff to the next sound in a
     // sequence (e.g. engine start -> cruise). It is automatically and
     // permanently cancelled the moment this instance is superseded by
@@ -7845,12 +8081,13 @@
     // caller whose UI is waiting on this sound can finish rather than
     // wait on an 'ended' that will never come. Omitted by every pre-
     // existing caller, which keeps its silent-failure behavior.
-    function crossfadeTo(path, targetVolume, onNearEnd, isSelfLoop, fadeSecondsOverride, nearEndLeadSecondsOverride, onPlayFailed) {
+    function crossfadeTo(path, targetVolume, onNearEnd, fadeSecondsOverride, nearEndLeadSecondsOverride, onPlayFailed) {
       if (!audioUnlocked) return; // matches every other domain's own play function -- silently no-op rather than attempt playback that autoplay policy would reject anyway; whatever called this (engineActiveKey, etc.) may still record its own intent, but nothing here starts until unlocked. buildAudioGraph's own resume-mid-run catchup (and the equivalent for any other domain) is what correctly picks this back up once audio actually becomes available.
       var fadeSeconds = fadeSecondsOverride == null ? LOOP_CROSSFADE_SECONDS : fadeSecondsOverride;
       var nearEndLead = nearEndLeadSecondsOverride == null ? fadeSeconds : nearEndLeadSecondsOverride;
       generation++;
       var myGeneration = generation;
+      if (loopActive) { loopVoice.set(null, 0, fadeSeconds); loopActive = false; } // a one-shot is taking over from a running loop: the loop fades out underneath it
       var outgoingIndex = activeIndex;
       var incomingIndex = (outgoingIndex + 1) % slotTotal; // -1 -> 0, then 0 -> 1 -> ... -> back around; for the default two slots this is exactly the old "other slot" choice
       var incoming = ensureSlot(incomingIndex);
@@ -7858,34 +8095,21 @@
       clearFadeTimer(incoming);
       incoming.myGeneration = myGeneration;
       if (!incoming.el.paused) incoming.el.pause();
-      // Same "already loaded" reuse the boat-ambience channels' own
-      // self-loop seams use: a slot that already holds THIS file (fully
-      // loaded, no error) just rewinds instead of re-assigning src,
-      // which would restart the browser's whole load/decode cycle at
-      // every single loop seam -- exactly the kind of late start a seam
-      // crossfade then has to hide. A slot holding anything else, or one
-      // that errored/never finished loading, still gets a fresh src
-      // (so a transient load failure is retried, never stuck).
+      // A slot that already holds THIS file (fully loaded, no error) just rewinds instead of re-assigning src, which would restart the browser's whole
+      // load/decode cycle. A slot holding anything else, or one that errored / never finished loading, gets a fresh src (so a transient load failure is
+      // retried, never stuck).
       var alreadyLoaded = !!incoming.el.src && incoming.el.src.indexOf(path) !== -1 && !incoming.el.error && incoming.el.readyState >= 2;
       if (!alreadyLoaded) incoming.el.src = path;
       incoming.el.currentTime = 0;
       incoming.el.playbackRate = 1.0;
       incoming.el.defaultPlaybackRate = 1.0;
       incoming.el.volume = 0;
-      // Late-timer safety nets (a backgrounded tab can throttle the
-      // near-end timer below so it fires after the file has already
-      // reached its end): a SELF-LOOP gets the element's own native
-      // loop as a fallback, so a late timer costs at most a cold
-      // restart instead of silence (the late crossfade then still runs
-      // and pauses this slot, so it never keeps looping past that); a
-      // one-shot HANDOFF (e.g. start -> cruise) instead gets an
-      // 'ended' fallback that fires the handoff immediately if the
-      // timer hasn't yet. Both are single-assignment properties, not
-      // addEventListener calls, so nothing accumulates across reuse.
-      incoming.el.loop = !!isSelfLoop;
+      // A one-shot HANDOFF (e.g. start -> cruise) gets an 'ended' fallback that fires the handoff immediately if its near-end timer has not (a backgrounded
+      // tab can throttle the timer past the file's end). Single-assignment properties, not addEventListener calls, so nothing accumulates across reuse.
+      incoming.el.loop = false;
       incoming.el.onended = null;
       incoming.el.ontimeupdate = null; // a previous use of this slot's own timer re-derivation (see below) must never carry over
-      if (onNearEnd && !isSelfLoop) {
+      if (onNearEnd) {
         incoming.el.onended = function () {
           incoming.el.onended = null;
           if (incoming.myGeneration !== myGeneration || activeIndex !== incomingIndex) return; // superseded -- stale, do nothing
@@ -7917,8 +8141,8 @@
         // fade completes); anything that wasn't looping (a one-shot
         // like start.mp3, which is built to end with its own fade)
         // stays non-looping either way.
-        outgoing.el.loop = outgoing.el.loop && fadeSeconds > LOOP_CROSSFADE_SECONDS;
-        clearNearEndTimer(outgoing); // this slot's own pending handoff/self-loop, if any, is superseded the instant it stops being active
+        outgoing.el.loop = false;
+        clearNearEndTimer(outgoing); // this slot's own pending handoff, if any, is superseded the instant it stops being active
         fadeSlotVolume(outgoing, 0, fadeSeconds, function () {
           if (!outgoing.el.paused) outgoing.el.pause();
         });
@@ -7960,25 +8184,22 @@
       }
     }
 
-    // Convenience wrapper for the common "same file, loop forever until
-    // told otherwise" case -- section 1/6's seamless self-loop.
-    // fadeSecondsOverride (optional) applies ONLY to this initial call --
-    // every subsequent seam repetition always uses the short, default
-    // LOOP_CROSSFADE_SECONDS regardless, since a seam is a click-
-    // prevention handoff between two copies of the SAME file and was
-    // never meant to be a slow, audible fade; only the very first
-    // transition INTO the loop (e.g. engine starting from silence, or
-    // relocating to a different track entirely) should ever take longer.
+    // "This file, repeating, until told otherwise" -- run by the loop engine: repeats are scheduled on the audio clock, so nothing here (or in the page)
+    // has to hand anything off at a repeat. Whatever one-shot slot is sounding (e.g. the engine's start sound) fades out over the same fade.
+    // targetVolume may be a number or a function returning one.
     function crossfadeToLoop(path, targetVolume, fadeSecondsOverride) {
-      function self() { crossfadeTo(path, targetVolume, self, true); }
-      // The lead is pinned to LOOP_CROSSFADE_SECONDS explicitly: without
-      // it the FIRST seam would fire fadeSecondsOverride seconds before
-      // the file's end (e.g. 2-3s early after a slow initial fade-in),
-      // skipping the tail of the file once, while every later seam fires
-      // LOOP_CROSSFADE_SECONDS early. With no override (every pre-existing
-      // caller) fade and lead are both LOOP_CROSSFADE_SECONDS anyway, so
-      // nothing changes for them.
-      crossfadeTo(path, targetVolume, self, true, fadeSecondsOverride, LOOP_CROSSFADE_SECONDS);
+      if (!audioUnlocked) return; // same gate as crossfadeTo: no sound before the first interaction; whoever asked asks again (the reconcilers do)
+      generation++;
+      var fadeSeconds = fadeSecondsOverride == null ? LOOP_CROSSFADE_SECONDS : fadeSecondsOverride;
+      if (activeIndex !== -1 && slots[activeIndex]) {
+        var outgoing = slots[activeIndex];
+        outgoing.el.onended = null; outgoing.el.ontimeupdate = null; outgoing.el.loop = false;
+        clearNearEndTimer(outgoing);
+        fadeSlotVolume(outgoing, 0, fadeSeconds, function () { if (!outgoing.el.paused) outgoing.el.pause(); });
+      }
+      activeIndex = -1;
+      loopActive = true;
+      loopVoice.set(path, typeof targetVolume === 'function' ? targetVolume() : targetVolume, fadeSeconds);
     }
 
     // Plays `path` ONCE (never looping) and crossfades into it exactly
@@ -8006,7 +8227,7 @@
       var generationBefore = generation;
       var index = -1;
       var myGeneration = -1;
-      crossfadeTo(path, targetVolume, null, false, fadeSecondsOverride, null, onFailed ? function () {
+      crossfadeTo(path, targetVolume, null, fadeSecondsOverride, null, onFailed ? function () {
         if (generation === myGeneration && activeIndex === index) activeIndex = -1;
         // The dead element is left silent and paused rather than parked
         // mid-"play" at a rising volume with nothing loaded behind it.
@@ -8053,6 +8274,7 @@
     // abruptly silence unless gameplay explicitly requires it."
     function stop(fadeSeconds) {
       generation++;
+      if (loopActive) { loopVoice.set(null, 0, fadeSeconds || 0); loopActive = false; }
       for (var i = 0; i < slotTotal; i++) {
         var slot = slots[i];
         if (!slot) continue;
@@ -8075,6 +8297,7 @@
     // audibility changes, which are always immediate elsewhere in this
     // file, never faded. A no-op if nothing is currently active.
     function applyVolumeInstantly(targetVolume) {
+      if (loopActive) { loopVoice.setLevel(targetVolume, 0.03); return; }
       if (activeIndex === -1 || !slots[activeIndex]) return;
       var slot = slots[activeIndex];
       clearFadeTimer(slot);
@@ -8086,7 +8309,7 @@
     }
 
     function isActive() {
-      return activeIndex !== -1;
+      return activeIndex !== -1 || (loopActive && loopVoice.wanted() != null);
     }
 
     // Resumes the currently active slot IN PLACE if the browser has
@@ -8095,6 +8318,7 @@
     // duplicate voice; a safe no-op if nothing is active or it's
     // already playing.
     function resumeIfSuspended() {
+      if (loopActive) loopVoice.maintain(true);
       if (activeIndex === -1 || !slots[activeIndex]) return;
       var el = slots[activeIndex].el;
       if (el.paused) safePlay(el);
@@ -8102,12 +8326,13 @@
 
     // Read-only snapshot of every slot, for the ?audiodiag readout.
     function diagLines() {
-      return slots.map(function (slot, i) {
+      var loopLine = loopActive ? [' loop ' + loopVoice.diag()] : [];
+      return loopLine.concat(slots.map(function (slot, i) {
         if (!slot) return ' s' + i + '  -';
         var el = slot.el;
         var name = (el.getAttribute('src') || '').split('/').pop() || '(none)';
         return ' s' + i + (i === activeIndex ? '*' : ' ') + ' ' + name + '  ' + (slot.gainParam ? 'routed' : 'plain') + '  vol ' + Number(el.volume).toFixed(2) + '  ' + (el.paused ? 'PAUSED' : 'playing') + '  t ' + (el.currentTime || 0).toFixed(1);
-      });
+      }));
     }
 
     return {
@@ -8124,30 +8349,72 @@
     };
   }
 
+  var GESTURE_EVENTS = ['pointerdown', 'touchend', 'mousedown', 'keydown', 'click'];
+  function installAudioGestureListeners() {
+    if (audioGestureListenersInstalled) return;
+    audioGestureListenersInstalled = true;
+    GESTURE_EVENTS.forEach(function (name) { document.addEventListener(name, onAudioGestureEvent, { capture: true, passive: true }); });
+  }
+  // Only a genuine user event counts: a script-dispatched click is not a user activation (the browser would refuse the sound), so it must not mark audio unlocked.
+  function onAudioGestureEvent(event) {
+    if (event && event.isTrusted === false) return;
+    unlockAudio();
+  }
+  function hasUserInteracted() { return !navigator.userActivation || navigator.userActivation.hasBeenActive; }
+
+  // Asks the browser to run the context -- only once it has seen an interaction (without one the request would be left pending), and nothing waits on it.
+  function resumeAudioContext(reason) {
+    if (!audioCtx || audioCtx.state === 'running' || audioCtx.state === 'closed' || !hasUserInteracted()) return;
+    var p;
+    try { p = audioCtx.resume(); } catch (e) { return; }
+    if (p && typeof p.then === 'function') p.then(function () { audioDebugLog('AudioContext resumed (' + reason + ')'); }, function (e) { audioDebugLog('AudioContext resume refused (' + reason + '): ' + describeError(e)); });
+  }
+
+  // Called by every gesture listener (and by the SOUND button, CONTINUE, repair audio): the player has interacted. The first time, the context and its master
+  // bus are created; every time, a context that is not running is asked to run and everything that was waiting for audio is woken.
   function unlockAudio() {
-    if (audioUnlocked) return;
+    var first = !audioUnlocked;
     audioUnlocked = true;
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      buildAudioGraph();
-      startAudioWatchdog(); // section 13 -- one persistent watchdog for the life of this page, started once alongside the AudioContext itself
-    } catch (e) {
-      console.warn('Audio unavailable:', describeError(e));
+    if (first) {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        buildAudioGraph();
+        startAudioWatchdog();
+      } catch (e) {
+        console.warn('Audio unavailable:', describeError(e));
+        audioCtx = null; masterGain = null; // the loops fall back to plain elements
+      }
     }
+    var now = Date.now();
+    if (!first && audioCtx && audioCtx.state === 'running') return; // the common case: one tap fires several gesture events, and nothing is wrong
+    if (!first && now - lastGestureWakeAt < 300) return;
+    lastGestureWakeAt = now;
+    resumeAudioContext('gesture');
+    wakeAudio(first);
+  }
+  function wakeAudio(first) {
+    loopWakeAll();
+    if (!GAME) return;
+    updateAudioForState(GAME);
+    // Catches up a resumed save where the engine was already running before sound was ever unlocked -- straight into the correct running loop for the
+    // current deck, never a start.mp3 replay.
+    if (first) catchUpEngineAudioIfRunning(GAME);
+  }
+  function onAudioContextStateChange() {
+    if (audioCtx && audioCtx.state === 'running') wakeAudio(false); // the instant the context runs, every wanted loop starts (or carries on)
   }
 
   function buildAudioGraph() {
     masterGain = audioCtx.createGain();
     masterGain.gain.value = muted ? 0 : MASTER_GAIN_LEVEL;
     masterGain.connect(audioCtx.destination);
-
-    if (GAME) updateAudioForState(GAME);
-    // Catches up a resumed save where the engine was already running
-    // before sound was ever unlocked (or restores it after a hard audio
-    // rebuild) -- see catchUpEngineAudioIfRunning's own notes. Straight
-    // into the correct running loop for the current deck, never a
-    // start.mp3 replay.
-    catchUpEngineAudioIfRunning(GAME);
+    audioCtx.onstatechange = onAudioContextStateChange;
+    try { // a one-sample silent buffer started inside the gesture unlocks the output path on iOS
+      var unlockSource = audioCtx.createBufferSource();
+      unlockSource.buffer = audioCtx.createBuffer(1, 1, 22050);
+      unlockSource.connect(masterGain); // through the master like everything else: nothing reaches the speakers except via masterGain
+      unlockSource.start(0);
+    } catch (e) {}
   }
 
   // The single top-level "sync all ambient audio to current state" entry
@@ -8187,8 +8454,8 @@
     if (GAME.boat.engineOn || engineAudioPhase !== 'idle') resumeEngineAudioIfSuspended(); // also mid-start/mid-stop, when the gameplay flag is on the other side of the transition
   }
   function syncEnvironmentalAudio(reason) {
-    if (!audioUnlocked || !audioCtx || !GAME) return;
-    if (audioCtx.state !== 'running') { recoverLandfallAudio(reason); return; } // resumes this same context, then reconciles
+    if (!audioUnlocked || !GAME) return;
+    resumeAudioContext(reason); // nothing is awaited: the loops wait for the context themselves and start the moment it runs
     reconcileEnvironmentalAudio();
   }
 
@@ -8217,14 +8484,8 @@
      (below) are separate, independently-crossfading layers on top of
      it; nothing here mixes wind or rain in.
 
-     Crossfade architecture (two alternating slots per channel, real
-     GainNode ramps, generation counters for staleness, self-loop
-     scheduling) is untouched from its original design -- see
-     makeSeaChannel/ensureSeaChannelSlot/performSeaChannelCrossfade's
-     own comments for the full mechanics, identical to how this
-     worked before this pass, just renamed and re-pointed at the new
-     file set and the new (sea-state-based, not wind-speed-based)
-     categorization below.
+     Playback (the crossfades between tracks, the seamless repeats, starting after the first tap, staying alive) is the shared LOOP ENGINE, used
+     identically by the sea, creak, wind and rain layers: each layer only decides WHICH track each of its channels should be playing.
      -------------------------------------------------------------- */
   var SEA_AUDIO_FILES = {
     exteriorCalm: 'audio/environment/calm_sea_ext.mp3',
@@ -8353,354 +8614,16 @@
     return getSeaAudioStateFor(location, state.weather.seaState || 0, state.boat.hatchOpen);
   }
 
-  function makeSeaChannel(name, targetGain) {
-    return {
-      name: name,
-      targetGain: targetGain,
-      slots: [null, null],    // each becomes { el, gain, pendingPath, pendingGeneration } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
-      activeIndex: -1,        // which slot we're currently pointing at (loading OR confirmed-playing), or -1 if silent
-      desiredPath: null,      // the LATEST path this channel has been asked for -- recorded synchronously on every call, regardless of anything else; async callbacks compare against this (plus generation) to detect staleness
-      loadingPath: null,      // path an in-flight play() attempt is currently for, or null if nothing in flight
-      currentPath: null,      // CONFIRMED actually playing, or null. ONLY ever set once playback is confirmed -- the play() Promise resolves and/or the element's 'playing' event fires -- AND that path is still desired at that moment. Never set merely because play() was called without throwing.
-      generation: 0,          // bumped every time a genuinely new attempt begins; closures/slots capture their own generation so a slow or stale async result can recognize it's been superseded and refuse to resurrect old state
-    };
-  }
+  function makeSeaChannel(name, targetGain) { return makeAmbienceChannel(name, targetGain, 'SEA'); }
   var seaChannels = {
     exterior: makeSeaChannel('exterior', 0.6),
     interior: makeSeaChannel('interior', 0.5),
   };
 
-  function ensureSeaChannelSlot(channel, index) {
-    if (channel.slots[index] || !audioCtx) return;
-    try {
-      var el = createGameAudio();
-      // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
-      // "defensive fallback" true: the custom self-loop system below
-      // (scheduleSeaChannelSelfLoop/performSeaChannelCrossfade) is now
-      // the ONE authoritative source of repetition for this element.
-      // Native looping firing independently of that system was never
-      // actually harmless -- if a backgrounded tab throttled the self-
-      // loop timer below and the element reached its own natural end
-      // first, native loop would silently restart the SAME element from
-      // 0 with none of this system's own bookkeeping (generation,
-      // selfLoopTimer, the already-scheduled crossfade) aware it had
-      // happened; the self-loop timer, still armed for the ORIGINAL
-      // play-through's own duration, would then fire against audio that
-      // had already re-started and was no longer where it expected --
-      // exactly the kind of desync that produced the reported ~0.5s
-      // glitch loop. One authoritative repetition system, not two
-      // racing each other, is what section 2 of this fix requires.
-      el.loop = false;
-      el.preload = 'auto';
-      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
-      el.addEventListener('error', function () {
-        // el.currentSrc reflects the resolved URL that actually failed
-        // (this element is reused for different paths over time, so
-        // reading it fresh here -- not capturing a path in a closure --
-        // is what makes this correct for whichever load just failed).
-        var path = el.currentSrc || el.src;
-        console.error('SEA AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
-      });
-      el.addEventListener('loadeddata', function () {
-        var path = el.currentSrc || el.src;
-        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
-      });
-      el.addEventListener('playing', function () {
-        // Confirmation path #2 (alongside the play() Promise below) --
-        // commitSeaChannelPlayback itself re-checks staleness before
-        // doing anything, so it's safe to call from here even though
-        // the Promise path may already have committed (or may yet).
-        commitSeaChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
-      });
-      el.addEventListener('ended', function () {
-        repeatEndedAmbienceLoop(channel, slot, performSeaChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
-      });
-      var source = audioCtx.createMediaElementSource(el);
-      var gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(masterGain);
-      slot.gain = gain;
-      channel.slots[index] = slot;
-    } catch (e) {
-      console.warn('Sea ambience unavailable:', describeError(e));
-    }
-  }
-
-  // "Healthy" means currentPath isn't just a remembered string -- the
-  // element it names is actually, verifiably the one loaded, running,
-  // AND audible (or on its way there). A stale currentPath alone must
-  // never suppress a genuine restart attempt -- and neither must a path
-  // match by itself: a slot can be the correct track, unpaused and
-  // unended, yet still be the OUTGOING half of some earlier crossfade,
-  // gain ramping toward (or already sitting at) 0. gainTarget records
-  // the most recently scheduled destination for this slot's ramp --
-  // checking it (rather than the ramp's current, mid-flight, instant
-  // value) means an in-progress legitimate fade-in still reads healthy.
-  function seaChannelIsHealthy(channel) {
-    if (channel.currentPath === null) return channel.activeIndex === -1;
-    if (channel.activeIndex === -1) return false;
-    var slot = channel.slots[channel.activeIndex];
-    if (!slot) return false;
-    var el = slot.el;
-    if (el.paused && !el.ended) audioDebugLog('sea ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
-    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
-    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
-  }
-
-  // Called from BOTH confirmation paths (the play() Promise resolving,
-  // and the element's own 'playing' event) the instant a slot's
-  // playback is actually verified -- deliberately idempotent, since
-  // either path can fire first, or both can fire for the same attempt.
-  // Beyond committing currentPath (the pre-existing behavior), this is
-  // now also what schedules the slot's own SEAMLESS SELF-LOOP: once
-  // this file's real decoded duration is known, a timer is set for
-  // LOOP_CROSSFADE_SECONDS before its natural end, which re-crossfades
-  // this SAME path into the other slot -- masking the file's own loop
-  // seam the same way any other connected-sound transition in this
-  // pass does, instead of relying on the element's native loop=true
-  // (which does not crossfade, and does not hide any encoder gap/
-  // padding at the seam). selfLoopScheduledForGeneration guards
-  // against scheduling it twice if both confirmation paths fire for
-  // the same attempt.
-  function commitSeaChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (sea commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
-    channel.currentPath = path;
-    channel.loadingPath = null;
-    ambiencePlayBlocked = false; // a loop is genuinely playing again
-    audioDebugLog('started: ' + path + ' (sea)');
-    if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
-    slot.selfLoopScheduledForGeneration = myGeneration;
-    scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration);
-  }
-
-  // Polls briefly for real decoded duration if metadata isn't ready
-  // yet (rather than never scheduling at all), then sets a timer for
-  // LOOP_CROSSFADE_SECONDS before this slot's own natural end. When it
-  // fires, re-verifies this exact slot is STILL the channel's active
-  // one for this SAME path and generation -- a newer crossfade (a
-  // weather/location change, a stop, or a different self-loop attempt
-  // entirely) always supersedes this cleanly, so a stale timer can
-  // never resurrect audio or restart a track that's no longer wanted.
-  function scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration) {
-    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
-    var duration = slot.el.duration;
-    if (!isFinite(duration) || duration <= 0) {
-      slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
-          audioDebugLog('stale generation callback ignored (sea self-loop duration poll, ' + channel.name + ')');
-          return;
-        }
-        scheduleSeaChannelSelfLoop(channel, slot, path, myGeneration);
-      }, 100);
-      return;
-    }
-    // RELIABILITY FIX -- subtract the element's own currentTime, not just
-    // duration. Without this, the delay is computed as if "now" were
-    // always position 0 in the file, which is only true if this function
-    // runs at the EXACT instant playback begins. Any elapsed time before
-    // scheduling actually succeeds -- most commonly however long the
-    // isFinite(duration) poll above had to retry, but even the normal,
-    // small gap between el.play() being called and commitSeaChannelPlayback
-    // actually running -- means currentTime is already > 0 by the time
-    // this runs, so the OLD delay overshot the true remaining time by
-    // exactly that much: the self-loop crossfade fired that much too
-    // late relative to the file's real playback position, late enough on
-    // a slow decode/poll to land at or after the file's own natural end
-    // -- silence until the late callback finally restarts it. This is
-    // exactly the intermittent ("sometimes") dead-gap behavior reported;
-    // anchoring to currentTime makes the schedule correct regardless of
-    // how much time passed before it was actually set.
-    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS - slot.el.currentTime) * 1000);
-    slot.selfLoopTimer = setTimeout(function () {
-      slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (sea self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
-      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (sea self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
-      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
-      // isSelfLoop=true -- see performSeaChannelCrossfade's own notes
-      // on why this specific call must always force currentTime=0 in
-      // the incoming slot, even when that slot already has this exact
-      // path loaded (which, once a track has looped even once before,
-      // it very likely does -- the two slots keep trading this same
-      // src back and forth).
-      performSeaChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
-    }, delayMs);
-  }
-
-  // The actual crossfade execution, extracted from setSeaChannelTrack
-  // so it can be invoked two ways: normally, through setSeaChannelTrack's
-  // own "is this genuinely a new ask" guards below, OR directly from a
-  // self-loop timer above, which deliberately BYPASSES those guards --
-  // a self-loop repeat asks for the exact SAME desiredPath the channel
-  // already (correctly, healthily) considers itself playing, which is
-  // precisely the case setSeaChannelTrack's own skip-if-already-there
-  // check exists to short-circuit. `crossfadeSeconds` is parameterized
-  // (rather than hardcoded to SEA_AMBIENCE_CROSSFADE_SECONDS) so a
-  // self-loop repeat can use the new, shorter LOOP_CROSSFADE_SECONDS
-  // instead -- see the section comment above SEA_AMBIENCE_CROSSFADE_SECONDS
-  // for why these two durations are deliberately different constants.
-  //
-  // isSelfLoop (AUDIO STABILITY FIX) -- explicit, not inferred from
-  // locationForLog or any other heuristic: true only when this call
-  // came from scheduleSeaChannelSelfLoop above, i.e. this is an
-  // intentional repetition of the SAME track, never an ordinary
-  // location/weather transition. This is the one thing that must
-  // override the "same src already loaded in this slot -> resume in
-  // place" optimization just below: for an ordinary transition, the
-  // incoming slot having the same src already loaded means it's being
-  // reused mid-fade-out (e.g. a quick back-and-forth between two
-  // states) and really should resume from wherever it still is. For a
-  // self-loop, the incoming slot having the same src loaded is the
-  // NORMAL case once a track has looped even once before (the two
-  // slots keep trading the same file back and forth), and that
-  // "wherever it still is" position is wherever THIS SAME element was
-  // paused at the end of its own previous play-through -- i.e. right
-  // near the very end of the file. Resuming there instead of
-  // restarting is exactly the reported bug: the self-loop timer (armed
-  // for a fresh full play-through) then fires again almost immediately,
-  // producing a rapid, glitched ~0.5s repeat. A self-loop repetition is
-  // always a NEW play-through of the file and must always start at 0,
-  // regardless of what this slot was doing before.
-  function performSeaChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
-    channel.generation++;
-    var myGeneration = channel.generation;
-    var now = audioCtx.currentTime;
-    var outgoingIndex = channel.activeIndex;
-
-    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
-      var outgoing = channel.slots[outgoingIndex];
-      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; } // this slot may already have a pause pending from an EARLIER fade-out -- if so it's stale as of this new fade-out and must not fire mid-way through (or after) this one
-      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; } // this slot's own pending self-loop repeat, if any, is superseded the instant it stops being the channel's active slot
-      outgoing.gainTarget = 0;
-      outgoing.gain.gain.cancelScheduledValues(now);
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
-      outgoing.pauseTimer = setTimeout(function () {
-        outgoing.pauseTimer = null;
-        outgoing.el.pause();
-      }, crossfadeSeconds * 1000 + 100);
-    }
-
-    if (desiredPath == null) {
-      channel.activeIndex = -1;
-      channel.currentPath = null;
-      channel.loadingPath = null;
-      return;
-    }
-
-    channel.loadingPath = desiredPath;
-    channel.loadingSince = Date.now();
-    audioDebugLog('play: ' + desiredPath + ' (sea, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
-
-    try {
-      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-      ensureSeaChannelSlot(channel, incomingIndex);
-      var incoming = channel.slots[incomingIndex];
-      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
-
-      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; } // this slot may still be carrying a pause scheduled from when IT was the outgoing track of an earlier crossfade -- now that it's wanted again, that pause must never be allowed to fire
-      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; } // likewise any self-loop repeat left over from whatever this slot was carrying before being reused
-      incoming.selfLoopScheduledForGeneration = -1; // this is a fresh attempt -- needs its own fresh scheduling once (re-)confirmed, even if this slot previously held the same path
-      incoming.pendingPath = desiredPath;
-      incoming.pendingGeneration = myGeneration;
-      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
-      if (!alreadyLoaded) {
-        incoming.el.src = desiredPath;
-        incoming.el.currentTime = 0;
-      } else if (isSelfLoop) {
-        // Explicit self-loop restart -- see this function's own notes
-        // above. Same file already loaded in this slot, but this is a
-        // NEW repetition, not a resume of an interrupted earlier one.
-        incoming.el.currentTime = 0;
-        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
-      } // else: ordinary transition, same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
-      var effectiveGain = channel.targetGain * gainMultiplier;
-      incoming.gainTarget = effectiveGain;
-      incoming.gain.gain.cancelScheduledValues(now);
-      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
-      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
-      channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
-
-      var playPromise = incoming.el.play();
-      if (playPromise && typeof playPromise.then === 'function') {
-        playPromise.then(function () {
-          // Confirmation path #1. commitSeaChannelPlayback itself
-          // re-checks staleness before committing anything.
-          commitSeaChannelPlayback(channel, incoming, desiredPath, myGeneration);
-        }, function (error) {
-          console.error('SEA AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
-          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
-          // currentPath was never set for this attempt -- nothing to
-          // undo. Only clear loadingPath if this is still the most
-          // recent attempt (a newer one may already be in flight).
-          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
-        });
-      }
-      // If no Promise is returned at all (very old browsers), the
-      // 'playing' listener above is the sole confirmation path.
-    } catch (e) {
-      console.error('Sea audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
-      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
-    }
-  }
-
-  // Crossfades `channel` toward `desiredPath` (or silence if null), at
-  // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
-  // only the exterior channel below deck with the hatch open ever
-  // passes anything else, see applySeaAudioDesiredState/
-  // HATCH_BLEED_VOLUME_FRACTION). currentPath is ONLY ever committed
-  // once playback is actually confirmed (see commitSeaChannelPlayback)
-  // -- never merely because play() didn't throw synchronously, since
-  // that proves nothing about whether audio is actually coming out. A
-  // generation counter, checked at commit time, means a slow or stale
-  // async result from an attempt that's since been superseded by a
-  // newer request can never resurrect old state. The skip-if-unchanged
-  // optimization only fires when the channel is genuinely, verifiably
-  // already there (seaChannelIsHealthy, which now also verifies the
-  // GAIN matches) -- a bare currentPath string match is never
-  // sufficient on its own. This is deliberately the ONLY caller that
-  // can skip the crossfade entirely -- the self-loop timer above calls
-  // performSeaChannelCrossfade directly, bypassing these guards on
-  // purpose, since a self-loop repeat's whole point is to restart
-  // despite the channel already being "healthy" on this exact path.
+  // What this channel should be playing and how loudly. The loop engine makes it so and keeps it so: the same wish again is a no-op, a new track is
+  // crossfaded in (equal power, make-before-break), null fades out -- see makeLoopVoice.
   function setSeaChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSecondsOverride) {
-    if (gainMultiplier == null) gainMultiplier = 1;
-    // Defaults to the normal weather/location crossfade duration; the
-    // companionway transition (see transitionSeaAudioThroughCompanionway)
-    // is the one caller that passes its own shorter value here, so it
-    // never has to duplicate this function's guards to get a custom
-    // crossfade length.
-    var crossfadeSeconds = crossfadeSecondsOverride == null ? SEA_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
-    channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
-    channel.desiredGainMultiplier = gainMultiplier;
-
-    if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
-    if (channel.currentPath === desiredPath && seaChannelIsHealthy(channel)) return; // genuinely already there, at the right gain
-
-    // SAME track, only the GAIN target has changed -- e.g. above deck
-    // (full level) -> below deck with the hatch open (bleed level), or
-    // vice versa, while the sea tier itself hasn't moved. Just re-ramp
-    // the currently active slot's gain in place; no new attempt, no
-    // slot switch, no restart -- the track keeps playing exactly where
-    // it was the whole time, including its own already-scheduled
-    // self-loop timer, which is untouched by a bare gain change.
-    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
-      var activeSlot = channel.slots[channel.activeIndex];
-      if (activeSlot && !activeSlot.el.paused) {
-        var nowRegain = audioCtx.currentTime;
-        var effectiveRegain = channel.targetGain * gainMultiplier;
-        activeSlot.gainTarget = effectiveRegain;
-        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
-        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
-        return;
-      }
-    }
-
-    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
-
-    performSeaChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
+    setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSecondsOverride == null ? SEA_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride);
   }
 
   // Hands a {location, seaState, exteriorTrack, exteriorGainMultiplier,
@@ -8750,13 +8673,8 @@
      ENHANCEMENT PASS. An ADDITIVE layer, interior-only, that sits ON
      TOP of the existing interior sea ambience above: hull/wood/joinery
      movement, strongest the more the sea is actually moving the boat
-     around below. Same two-slot-per-channel, generation-counter,
-     self-loop-crossfade architecture as SEA just above -- this is a
-     deliberate, independent COPY of that machinery (not a shared/
-     generic version of it), matching how WIND and RAIN below each keep
-     their own copy too rather than parameterizing one shared
-     implementation; see fadeCabinVolume's own notes elsewhere in this
-     file for why that's this codebase's consistent choice throughout.
+     around below. Played by the same shared LOOP ENGINE as the sea, wind and rain layers; this layer only decides WHICH track its one channel
+     should be playing.
      The ONE piece that is NOT copied, and must not be: seaAudioTierFor
      itself, just above -- this reads the SAME already-committed tier
      (calm/moderate/rough/heavy) SEA's own channel just derived from
@@ -8767,14 +8685,12 @@
      creak file, and none should ever be invented; CALM has no file
      either (the task's own "CALM SEAS -> no creak loop"), so
      getCreakAudioStateFor's own interiorTrack is simply null for that
-     tier, the same shape setSeaChannelTrack/performSeaChannelCrossfade
+     tier, the same shape setSeaChannelTrack
      already use everywhere else in this file to mean "fade to
      silence", not a special case.
 
-     Muting: this channel connects straight to masterGain (built in
-     ensureCreakChannelSlot below), exactly like every sea/wind/rain
-     slot already does, so the master mute (see MASTER MUTE next to
-     masterGain's declaration) covers it with nothing to add here.
+     Muting: like every loop it plays through the loop engine, so the master mute (see MASTER MUTE next to masterGain's declaration) covers it with
+     nothing to add here.
      -------------------------------------------------------------- */
   var CREAK_AUDIO_FILES = {
     interiorModerate: 'audio/environment/creaks_moderate_int.mp3',
@@ -8792,199 +8708,15 @@
   // else in this section hardcodes a volume.
   var CREAK_CHANNEL_GAIN = 0.3;
 
-  function makeCreakChannel(name, targetGain) {
-    return {
-      name: name,
-      targetGain: targetGain,
-      slots: [null, null],
-      activeIndex: -1,
-      desiredPath: null,
-      loadingPath: null,
-      currentPath: null,
-      generation: 0,
-    };
-  }
+  function makeCreakChannel(name, targetGain) { return makeAmbienceChannel(name, targetGain, 'CREAK'); }
   var creakChannels = {
     interior: makeCreakChannel('interior', CREAK_CHANNEL_GAIN),
   };
 
-  function ensureCreakChannelSlot(channel, index) {
-    if (channel.slots[index] || !audioCtx) return;
-    try {
-      var el = createGameAudio();
-      el.loop = false; // see SEA's own identical line above for why -- one authoritative repetition system (the self-loop scheduler below), never native loop=true racing it
-      el.preload = 'auto';
-      el.volume = 1;
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
-      el.addEventListener('error', function () {
-        var path = el.currentSrc || el.src;
-        console.error('CREAK AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
-      });
-      el.addEventListener('loadeddata', function () {
-        var path = el.currentSrc || el.src;
-        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
-      });
-      el.addEventListener('playing', function () {
-        commitCreakChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
-      });
-      el.addEventListener('ended', function () {
-        repeatEndedAmbienceLoop(channel, slot, performCreakChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
-      });
-      var source = audioCtx.createMediaElementSource(el);
-      var gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(masterGain);
-      slot.gain = gain;
-      channel.slots[index] = slot;
-    } catch (e) {
-      console.warn('Creak ambience unavailable:', describeError(e));
-    }
-  }
-
-  function creakChannelIsHealthy(channel) {
-    if (channel.currentPath === null) return channel.activeIndex === -1;
-    if (channel.activeIndex === -1) return false;
-    var slot = channel.slots[channel.activeIndex];
-    if (!slot) return false;
-    var el = slot.el;
-    if (el.paused && !el.ended) audioDebugLog('creak ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
-    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
-    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
-  }
-
-  function commitCreakChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (creak commit, ' + channel.name + '): ' + path); return; }
-    channel.currentPath = path;
-    channel.loadingPath = null;
-    ambiencePlayBlocked = false; // a loop is genuinely playing again
-    audioDebugLog('started: ' + path + ' (creak)');
-    if (slot.selfLoopScheduledForGeneration === myGeneration) return;
-    slot.selfLoopScheduledForGeneration = myGeneration;
-    scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration);
-  }
-
-  function scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration) {
-    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
-    var duration = slot.el.duration;
-    if (!isFinite(duration) || duration <= 0) {
-      slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
-          audioDebugLog('stale generation callback ignored (creak self-loop duration poll, ' + channel.name + ')');
-          return;
-        }
-        scheduleCreakChannelSelfLoop(channel, slot, path, myGeneration);
-      }, 100);
-      return;
-    }
-    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS - slot.el.currentTime) * 1000);
-    slot.selfLoopTimer = setTimeout(function () {
-      slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (creak self-loop fire, ' + channel.name + ')'); return; }
-      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (creak self-loop, slot no longer active, ' + channel.name + ')'); return; }
-      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
-      performCreakChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
-    }, delayMs);
-  }
-
-  function performCreakChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
-    channel.generation++;
-    var myGeneration = channel.generation;
-    var now = audioCtx.currentTime;
-    var outgoingIndex = channel.activeIndex;
-
-    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
-      var outgoing = channel.slots[outgoingIndex];
-      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; }
-      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; }
-      outgoing.gainTarget = 0;
-      outgoing.gain.gain.cancelScheduledValues(now);
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
-      outgoing.pauseTimer = setTimeout(function () {
-        outgoing.pauseTimer = null;
-        outgoing.el.pause();
-      }, crossfadeSeconds * 1000 + 100);
-    }
-
-    if (desiredPath == null) {
-      channel.activeIndex = -1;
-      channel.currentPath = null;
-      channel.loadingPath = null;
-      return;
-    }
-
-    channel.loadingPath = desiredPath;
-    channel.loadingSince = Date.now();
-    audioDebugLog('play: ' + desiredPath + ' (creak, ' + locationForLog + ', sea state ' + seaStateForLog + ')');
-
-    try {
-      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-      ensureCreakChannelSlot(channel, incomingIndex);
-      var incoming = channel.slots[incomingIndex];
-      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; }
-
-      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; }
-      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; }
-      incoming.selfLoopScheduledForGeneration = -1;
-      incoming.pendingPath = desiredPath;
-      incoming.pendingGeneration = myGeneration;
-      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
-      if (!alreadyLoaded) {
-        incoming.el.src = desiredPath;
-        incoming.el.currentTime = 0;
-      } else if (isSelfLoop) {
-        incoming.el.currentTime = 0;
-        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
-      }
-      var effectiveGain = channel.targetGain * gainMultiplier;
-      incoming.gainTarget = effectiveGain;
-      incoming.gain.gain.cancelScheduledValues(now);
-      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
-      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
-      channel.activeIndex = incomingIndex;
-
-      var playPromise = incoming.el.play();
-      if (playPromise && typeof playPromise.then === 'function') {
-        playPromise.then(function () {
-          commitCreakChannelPlayback(channel, incoming, desiredPath, myGeneration);
-        }, function (error) {
-          console.error('CREAK AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
-          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
-          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
-        });
-      }
-    } catch (e) {
-      console.error('Creak audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
-      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
-    }
-  }
-
+  // What this channel should be playing and how loudly. The loop engine makes it so and keeps it so: the same wish again is a no-op, a new track is
+  // crossfaded in (equal power, make-before-break), null fades out -- see makeLoopVoice.
   function setCreakChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSecondsOverride) {
-    if (gainMultiplier == null) gainMultiplier = 1;
-    var crossfadeSeconds = crossfadeSecondsOverride == null ? CREAK_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
-    channel.desiredPath = desiredPath;
-    channel.desiredGainMultiplier = gainMultiplier;
-
-    if (!audioCtx) return;
-    if (channel.currentPath === desiredPath && creakChannelIsHealthy(channel)) return; // DO NOT RESTART HEALTHY LOOPS (section 8 of this task) -- already there, at the right gain
-
-    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
-      var activeSlot = channel.slots[channel.activeIndex];
-      if (activeSlot && !activeSlot.el.paused) {
-        var nowRegain = audioCtx.currentTime;
-        var effectiveRegain = channel.targetGain * gainMultiplier;
-        activeSlot.gainTarget = effectiveRegain;
-        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
-        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
-        return;
-      }
-    }
-
-    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return;
-
-    performCreakChannelCrossfade(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSeconds);
+    setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSecondsOverride == null ? CREAK_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride);
   }
 
   // location/seaState -> which file (if any) the one creak channel
@@ -9138,338 +8870,16 @@
     return getWindAudioStateFor(location, state.weather.windSpeed || 0, state.boat.hatchOpen);
   }
 
-  function makeWindChannel(name, targetGain) {
-    return {
-      name: name,
-      targetGain: targetGain,
-      slots: [null, null],
-      activeIndex: -1,
-      desiredPath: null,
-      loadingPath: null,
-      currentPath: null,
-      generation: 0,
-    };
-  }
+  function makeWindChannel(name, targetGain) { return makeAmbienceChannel(name, targetGain, 'WIND'); }
   var windChannels = {
     exterior: makeWindChannel('exterior', 0.6),
     interior: makeWindChannel('interior', 0.5),
   };
 
-  function ensureWindChannelSlot(channel, index) {
-    if (channel.slots[index] || !audioCtx) return;
-    try {
-      var el = createGameAudio();
-      // AUDIO STABILITY FIX -- deliberately loop=false, NOT the earlier
-      // "defensive fallback" true: the custom self-loop system below
-      // (scheduleWindChannelSelfLoop/performWindChannelCrossfade) is now
-      // the ONE authoritative source of repetition for this element.
-      // Native looping firing independently of that system was never
-      // actually harmless -- if a backgrounded tab throttled the self-
-      // loop timer below and the element reached its own natural end
-      // first, native loop would silently restart the SAME element from
-      // 0 with none of this system's own bookkeeping (generation,
-      // selfLoopTimer, the already-scheduled crossfade) aware it had
-      // happened; the self-loop timer, still armed for the ORIGINAL
-      // play-through's own duration, would then fire against audio that
-      // had already re-started and was no longer where it expected --
-      // exactly the kind of desync that produced the reported ~0.5s
-      // glitch loop. One authoritative repetition system, not two
-      // racing each other, is what section 2 of this fix requires.
-      el.loop = false;
-      el.preload = 'auto';
-      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
-      el.addEventListener('error', function () {
-        // el.currentSrc reflects the resolved URL that actually failed
-        // (this element is reused for different paths over time, so
-        // reading it fresh here -- not capturing a path in a closure --
-        // is what makes this correct for whichever load just failed).
-        var path = el.currentSrc || el.src;
-        console.error('WIND AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
-      });
-      el.addEventListener('loadeddata', function () {
-        var path = el.currentSrc || el.src;
-        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
-      });
-      el.addEventListener('playing', function () {
-        // Confirmation path #2 (alongside the play() Promise below) --
-        // commitWindChannelPlayback itself re-checks staleness before
-        // doing anything, so it's safe to call from here even though
-        // the Promise path may already have committed (or may yet).
-        commitWindChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
-      });
-      el.addEventListener('ended', function () {
-        repeatEndedAmbienceLoop(channel, slot, performWindChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
-      });
-      var source = audioCtx.createMediaElementSource(el);
-      var gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(masterGain);
-      slot.gain = gain;
-      channel.slots[index] = slot;
-    } catch (e) {
-      console.warn('Wind ambience unavailable:', describeError(e));
-    }
-  }
-
-  // "Healthy" means currentPath isn't just a remembered string -- the
-  // element it names is actually, verifiably the one loaded, running,
-  // AND audible (or on its way there). A stale currentPath alone must
-  // never suppress a genuine restart attempt -- and neither must a path
-  // match by itself: a slot can be the correct track, unpaused and
-  // unended, yet still be the OUTGOING half of some earlier crossfade,
-  // gain ramping toward (or already sitting at) 0. gainTarget records
-  // the most recently scheduled destination for this slot's ramp --
-  // checking it (rather than the ramp's current, mid-flight, instant
-  // value) means an in-progress legitimate fade-in still reads healthy.
-  function windChannelIsHealthy(channel) {
-    if (channel.currentPath === null) return channel.activeIndex === -1;
-    if (channel.activeIndex === -1) return false;
-    var slot = channel.slots[channel.activeIndex];
-    if (!slot) return false;
-    var el = slot.el;
-    if (el.paused && !el.ended) audioDebugLog('wind ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
-    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
-    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
-  }
-
-  // Called from BOTH confirmation paths (the play() Promise resolving,
-  // and the element's own 'playing' event) the instant a slot's
-  // playback is actually verified -- deliberately idempotent, since
-  // either path can fire first, or both can fire for the same attempt.
-  // Beyond committing currentPath (the pre-existing behavior), this is
-  // now also what schedules the slot's own SEAMLESS SELF-LOOP: once
-  // this file's real decoded duration is known, a timer is set for
-  // LOOP_CROSSFADE_SECONDS before its natural end, which re-crossfades
-  // this SAME path into the other slot -- masking the file's own loop
-  // seam the same way any other connected-sound transition in this
-  // pass does, instead of relying on the element's native loop=true
-  // (which does not crossfade, and does not hide any encoder gap/
-  // padding at the seam). selfLoopScheduledForGeneration guards
-  // against scheduling it twice if both confirmation paths fire for
-  // the same attempt.
-  function commitWindChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (wind commit, ' + channel.name + '): ' + path); return; } // stale -- superseded before this could commit
-    channel.currentPath = path;
-    channel.loadingPath = null;
-    ambiencePlayBlocked = false; // a loop is genuinely playing again
-    audioDebugLog('started: ' + path + ' (wind)');
-    if (slot.selfLoopScheduledForGeneration === myGeneration) return; // already scheduled by the other confirmation path
-    slot.selfLoopScheduledForGeneration = myGeneration;
-    scheduleWindChannelSelfLoop(channel, slot, path, myGeneration);
-  }
-
-  // Polls briefly for real decoded duration if metadata isn't ready
-  // yet (rather than never scheduling at all), then sets a timer for
-  // LOOP_CROSSFADE_SECONDS before this slot's own natural end. When it
-  // fires, re-verifies this exact slot is STILL the channel's active
-  // one for this SAME path and generation -- a newer crossfade (a
-  // weather/location change, a stop, or a different self-loop attempt
-  // entirely) always supersedes this cleanly, so a stale timer can
-  // never resurrect audio or restart a track that's no longer wanted.
-  function scheduleWindChannelSelfLoop(channel, slot, path, myGeneration) {
-    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
-    var duration = slot.el.duration;
-    if (!isFinite(duration) || duration <= 0) {
-      slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
-          audioDebugLog('stale generation callback ignored (wind self-loop duration poll, ' + channel.name + ')');
-          return;
-        }
-        scheduleWindChannelSelfLoop(channel, slot, path, myGeneration);
-      }, 100);
-      return;
-    }
-    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
-    slot.selfLoopTimer = setTimeout(function () {
-      slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (wind self-loop fire, ' + channel.name + ')'); return; } // a newer attempt (any kind) has already superseded this one
-      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (wind self-loop, slot no longer active, ' + channel.name + ')'); return; } // this slot is no longer the channel's active, wanted track
-      audioDebugLog('self-loop firing (' + channel.name + '): ' + path);
-      // isSelfLoop=true -- see performWindChannelCrossfade's own notes
-      // on why this specific call must always force currentTime=0 in
-      // the incoming slot, even when that slot already has this exact
-      // path loaded (which, once a track has looped even once before,
-      // it very likely does -- the two slots keep trading this same
-      // src back and forth).
-      performWindChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
-    }, delayMs);
-  }
-
-  // The actual crossfade execution, extracted from setWindChannelTrack
-  // so it can be invoked two ways: normally, through setWindChannelTrack's
-  // own "is this genuinely a new ask" guards below, OR directly from a
-  // self-loop timer above, which deliberately BYPASSES those guards --
-  // a self-loop repeat asks for the exact SAME desiredPath the channel
-  // already (correctly, healthily) considers itself playing, which is
-  // precisely the case setWindChannelTrack's own skip-if-already-there
-  // check exists to short-circuit. `crossfadeSeconds` is parameterized
-  // (rather than hardcoded to WIND_AMBIENCE_CROSSFADE_SECONDS) so a
-  // self-loop repeat can use the new, shorter LOOP_CROSSFADE_SECONDS
-  // instead -- see the section comment above WIND_AMBIENCE_CROSSFADE_SECONDS
-  // for why these two durations are deliberately different constants.
-  //
-  // isSelfLoop (AUDIO STABILITY FIX) -- explicit, not inferred from
-  // locationForLog or any other heuristic: true only when this call
-  // came from scheduleWindChannelSelfLoop above, i.e. this is an
-  // intentional repetition of the SAME track, never an ordinary
-  // location/weather transition. This is the one thing that must
-  // override the "same src already loaded in this slot -> resume in
-  // place" optimization just below: for an ordinary transition, the
-  // incoming slot having the same src already loaded means it's being
-  // reused mid-fade-out (e.g. a quick back-and-forth between two
-  // states) and really should resume from wherever it still is. For a
-  // self-loop, the incoming slot having the same src loaded is the
-  // NORMAL case once a track has looped even once before (the two
-  // slots keep trading the same file back and forth), and that
-  // "wherever it still is" position is wherever THIS SAME element was
-  // paused at the end of its own previous play-through -- i.e. right
-  // near the very end of the file. Resuming there instead of
-  // restarting is exactly the reported bug: the self-loop timer (armed
-  // for a fresh full play-through) then fires again almost immediately,
-  // producing a rapid, glitched ~0.5s repeat. A self-loop repetition is
-  // always a NEW play-through of the file and must always start at 0,
-  // regardless of what this slot was doing before.
-  function performWindChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
-    channel.generation++;
-    var myGeneration = channel.generation;
-    var now = audioCtx.currentTime;
-    var outgoingIndex = channel.activeIndex;
-
-    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
-      var outgoing = channel.slots[outgoingIndex];
-      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; } // this slot may already have a pause pending from an EARLIER fade-out -- if so it's stale as of this new fade-out and must not fire mid-way through (or after) this one
-      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; } // this slot's own pending self-loop repeat, if any, is superseded the instant it stops being the channel's active slot
-      outgoing.gainTarget = 0;
-      outgoing.gain.gain.cancelScheduledValues(now);
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
-      outgoing.pauseTimer = setTimeout(function () {
-        outgoing.pauseTimer = null;
-        outgoing.el.pause();
-      }, crossfadeSeconds * 1000 + 100);
-    }
-
-    if (desiredPath == null) {
-      channel.activeIndex = -1;
-      channel.currentPath = null;
-      channel.loadingPath = null;
-      return;
-    }
-
-    channel.loadingPath = desiredPath;
-    channel.loadingSince = Date.now();
-    audioDebugLog('play: ' + desiredPath + ' (wind, ' + locationForLog + ', wind ' + windSpeedForLog + ')');
-
-    try {
-      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-      ensureWindChannelSlot(channel, incomingIndex);
-      var incoming = channel.slots[incomingIndex];
-      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; } // couldn't build -- currentPath/loadingPath left clear, so the next render retries
-
-      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; } // this slot may still be carrying a pause scheduled from when IT was the outgoing track of an earlier crossfade -- now that it's wanted again, that pause must never be allowed to fire
-      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; } // likewise any self-loop repeat left over from whatever this slot was carrying before being reused
-      incoming.selfLoopScheduledForGeneration = -1; // this is a fresh attempt -- needs its own fresh scheduling once (re-)confirmed, even if this slot previously held the same path
-      incoming.pendingPath = desiredPath;
-      incoming.pendingGeneration = myGeneration;
-      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
-      if (!alreadyLoaded) {
-        incoming.el.src = desiredPath;
-        incoming.el.currentTime = 0;
-      } else if (isSelfLoop) {
-        // Explicit self-loop restart -- see this function's own notes
-        // above. Same file already loaded in this slot, but this is a
-        // NEW repetition, not a resume of an interrupted earlier one.
-        incoming.el.currentTime = 0;
-        audioDebugLog('self-loop incoming slot restart (' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
-      } // else: ordinary transition, same track this slot already had (e.g. reused mid-fade-out before returning to it) -- resume in place rather than restarting the loop from zero
-      var effectiveGain = channel.targetGain * gainMultiplier;
-      incoming.gainTarget = effectiveGain;
-      incoming.gain.gain.cancelScheduledValues(now);
-      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
-      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
-      channel.activeIndex = incomingIndex; // pointing at it now, but NOT yet confirmed -- currentPath stays whatever it was
-
-      var playPromise = incoming.el.play();
-      if (playPromise && typeof playPromise.then === 'function') {
-        playPromise.then(function () {
-          // Confirmation path #1. commitWindChannelPlayback itself
-          // re-checks staleness before committing anything.
-          commitWindChannelPlayback(channel, incoming, desiredPath, myGeneration);
-        }, function (error) {
-          console.error('WIND AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
-          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
-          // currentPath was never set for this attempt -- nothing to
-          // undo. Only clear loadingPath if this is still the most
-          // recent attempt (a newer one may already be in flight).
-          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
-        });
-      }
-      // If no Promise is returned at all (very old browsers), the
-      // 'playing' listener above is the sole confirmation path.
-    } catch (e) {
-      console.error('Wind audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
-      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
-    }
-  }
-
-  // Crossfades `channel` toward `desiredPath` (or silence if null), at
-  // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
-  // only the exterior channel below deck with the hatch open ever
-  // passes anything else, see applyWindAudioDesiredState/
-  // HATCH_BLEED_VOLUME_FRACTION). currentPath is ONLY ever committed
-  // once playback is actually confirmed (see commitWindChannelPlayback)
-  // -- never merely because play() didn't throw synchronously, since
-  // that proves nothing about whether audio is actually coming out. A
-  // generation counter, checked at commit time, means a slow or stale
-  // async result from an attempt that's since been superseded by a
-  // newer request can never resurrect old state. The skip-if-unchanged
-  // optimization only fires when the channel is genuinely, verifiably
-  // already there (windChannelIsHealthy, which now also verifies the
-  // GAIN matches) -- a bare currentPath string match is never
-  // sufficient on its own. This is deliberately the ONLY caller that
-  // can skip the crossfade entirely -- the self-loop timer above calls
-  // performWindChannelCrossfade directly, bypassing these guards on
-  // purpose, since a self-loop repeat's whole point is to restart
-  // despite the channel already being "healthy" on this exact path.
+  // What this channel should be playing and how loudly. The loop engine makes it so and keeps it so: the same wish again is a no-op, a new track is
+  // crossfaded in (equal power, make-before-break), null fades out -- see makeLoopVoice.
   function setWindChannelTrack(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSecondsOverride) {
-    if (gainMultiplier == null) gainMultiplier = 1;
-    // Defaults to the normal weather/location crossfade duration; the
-    // companionway transition (see transitionWindAudioThroughCompanionway)
-    // is the one caller that passes its own shorter value here, so it
-    // never has to duplicate this function's guards to get a custom
-    // crossfade length.
-    var crossfadeSeconds = crossfadeSecondsOverride == null ? WIND_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
-    channel.desiredPath = desiredPath; // record the latest ask immediately and unconditionally -- this is what staleness checks compare against
-    channel.desiredGainMultiplier = gainMultiplier;
-
-    if (!audioCtx) return; // not unlocked yet -- desiredPath is recorded so the first real attempt, once it exists, isn't blocked by anything here
-    if (channel.currentPath === desiredPath && windChannelIsHealthy(channel)) return; // genuinely already there, at the right gain
-
-    // SAME track, only the GAIN target has changed -- e.g. above deck
-    // (full level) -> below deck with the hatch open (bleed level), or
-    // vice versa, while the wind tier itself hasn't moved. Just re-ramp
-    // the currently active slot's gain in place; no new attempt, no
-    // slot switch, no restart -- the track keeps playing exactly where
-    // it was the whole time, including its own already-scheduled
-    // self-loop timer, which is untouched by a bare gain change.
-    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
-      var activeSlot = channel.slots[channel.activeIndex];
-      if (activeSlot && !activeSlot.el.paused) {
-        var nowRegain = audioCtx.currentTime;
-        var effectiveRegain = channel.targetGain * gainMultiplier;
-        activeSlot.gainTarget = effectiveRegain;
-        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
-        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
-        return;
-      }
-    }
-
-    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return; // already mid-attempt for this exact (non-silent) path -- don't stack a duplicate. Must not apply when desiredPath is null: loadingPath sits at null at rest, so without this guard "go silent" would match loadingPath===null on nearly every call and skip the fade-out below entirely
-
-    performWindChannelCrossfade(channel, desiredPath, locationForLog, windSpeedForLog, gainMultiplier, crossfadeSeconds);
+    setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSecondsOverride == null ? WIND_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride);
   }
 
   // Hands a {location, windSpeed, exteriorTrack, exteriorGainMultiplier,
@@ -9518,11 +8928,7 @@
      RAIN AUDIO (recorded, from audio/environment/) -- the third
      independent environmental layer alongside SEA and WIND just
      above, its own pair of crossfading exterior/interior channels,
-     exactly the same architecture (independently duplicated rather
-     than shared, matching how every other audio subsystem in this
-     file -- engine, sails, galley, cabin, fishing -- each keeps its
-     own copy of this kind of machinery rather than a single generic
-     version several systems reach into). Driven by
+     played by the same shared LOOP ENGINE. Driven by
      state.weather.condition via rainLevelForCondition below -- no
      second weather/rain simulation, no independent rain randomness:
      'rain' reads as LIGHT (drizzle/rain/showers in Landfall's
@@ -9609,232 +9015,16 @@
     return getRainAudioStateFor(location, currentRainLevel(state), state.boat.hatchOpen);
   }
 
-  function makeRainChannel(name, targetGain) {
-    return {
-      name: name,
-      targetGain: targetGain,
-      slots: [null, null],    // each becomes { el, gain, pendingPath, pendingGeneration } once built -- two so an outgoing loop can fade out while an incoming one fades in, never a click/pop or dead silence between
-      activeIndex: -1,        // which slot we're currently pointing at (loading OR confirmed-playing), or -1 if silent
-      desiredPath: null,      // the LATEST path this channel has been asked for -- recorded synchronously on every call, regardless of anything else; async callbacks compare against this (plus generation) to detect staleness
-      loadingPath: null,      // path an in-flight play() attempt is currently for, or null if nothing in flight
-      currentPath: null,      // CONFIRMED actually playing, or null. ONLY ever set once playback is confirmed -- the play() Promise resolves and/or the element's 'playing' event fires -- AND that path is still desired at that moment. Never set merely because play() was called without throwing.
-      generation: 0,          // bumped every time a genuinely new attempt begins; closures/slots capture their own generation so a slow or stale async result can recognize it's been superseded and refuse to resurrect old state
-    };
-  }
+  function makeRainChannel(name, targetGain) { return makeAmbienceChannel(name, targetGain, 'RAIN'); }
   var rainChannels = {
     exterior: makeRainChannel('exterior', RAIN_LAYER_VOLUME),
     interior: makeRainChannel('interior', RAIN_LAYER_VOLUME),
   };
 
-  function ensureRainChannelSlot(channel, index) {
-    if (channel.slots[index] || !audioCtx) return;
-    try {
-      var el = createGameAudio();
-      el.loop = false; // AUDIO STABILITY FIX -- see the note above ensureSeaChannelSlot; the custom self-loop below is the one authoritative repetition system for this element too
-      el.preload = 'auto';
-      el.volume = 1; // explicit, defensive -- this element's own volume multiplier must never be anything but full; the GainNode is what actually controls level
-      var slot = { el: el, gain: null, pendingPath: null, pendingGeneration: -1, pauseTimer: null, gainTarget: 0, selfLoopTimer: null, selfLoopScheduledForGeneration: -1 };
-      el.addEventListener('error', function () {
-        var path = el.currentSrc || el.src;
-        console.error('RAIN AUDIO FILE ERROR', 'path:', path, 'audio.error.code:', el.error ? el.error.code : null);
-      });
-      el.addEventListener('loadeddata', function () {
-        var path = el.currentSrc || el.src;
-        audioDebugLog('started: ' + path + ' (loaded, duration ' + el.duration + ')');
-      });
-      el.addEventListener('playing', function () {
-        // Confirmation path #2 -- commitRainChannelPlayback re-checks
-        // staleness before doing anything, so it's safe to call here
-        // even though the Promise path may already have committed.
-        commitRainChannelPlayback(channel, slot, slot.pendingPath, slot.pendingGeneration);
-      });
-      el.addEventListener('ended', function () {
-        repeatEndedAmbienceLoop(channel, slot, performRainChannelCrossfade); // the loop ran off its end before its self-loop timer fired -- repeat it now
-      });
-      var source = audioCtx.createMediaElementSource(el);
-      var gain = audioCtx.createGain();
-      gain.gain.value = 0;
-      source.connect(gain).connect(masterGain);
-      slot.gain = gain;
-      channel.slots[index] = slot;
-    } catch (e) {
-      console.warn('Rain ambience unavailable:', describeError(e));
-    }
-  }
-
-  // "Healthy" -- same meaning and same reasoning as seaChannelIsHealthy.
-  function rainChannelIsHealthy(channel) {
-    if (channel.currentPath === null) return channel.activeIndex === -1;
-    if (channel.activeIndex === -1) return false;
-    var slot = channel.slots[channel.activeIndex];
-    if (!slot) return false;
-    var el = slot.el;
-    if (el.paused && !el.ended) audioDebugLog('rain ambience active slot unexpectedly paused (' + channel.name + '): ' + channel.currentPath);
-    var effectiveGain = channel.targetGain * (channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier);
-    return !!(el.src && el.src.indexOf(channel.currentPath) !== -1 && !el.paused && !el.ended && slot.gainTarget === effectiveGain);
-  }
-
-  // Same shape and reasoning as commitSeaChannelPlayback -- see its
-  // own comment for the full explanation of the idempotent double-
-  // confirmation-path handling and the seamless self-loop scheduling.
-  function commitRainChannelPlayback(channel, slot, path, myGeneration) {
-    if (myGeneration !== channel.generation || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (rain commit, ' + channel.name + '): ' + path); return; }
-    channel.currentPath = path;
-    channel.loadingPath = null;
-    ambiencePlayBlocked = false; // a loop is genuinely playing again
-    audioDebugLog('started: ' + path + ' (rain)');
-    if (slot.selfLoopScheduledForGeneration === myGeneration) return;
-    slot.selfLoopScheduledForGeneration = myGeneration;
-    scheduleRainChannelSelfLoop(channel, slot, path, myGeneration);
-  }
-
-  // Same shape and reasoning as scheduleSeaChannelSelfLoop.
-  function scheduleRainChannelSelfLoop(channel, slot, path, myGeneration) {
-    if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
-    var duration = slot.el.duration;
-    if (!isFinite(duration) || duration <= 0) {
-      slot.selfLoopTimer = setTimeout(function () {
-        if (myGeneration !== channel.generation || channel.activeIndex === -1 || channel.slots[channel.activeIndex] !== slot) {
-          audioDebugLog('stale generation callback ignored (rain self-loop duration poll, ' + channel.name + ')');
-          return;
-        }
-        scheduleRainChannelSelfLoop(channel, slot, path, myGeneration);
-      }, 100);
-      return;
-    }
-    var delayMs = Math.max(0, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
-    slot.selfLoopTimer = setTimeout(function () {
-      slot.selfLoopTimer = null;
-      if (myGeneration !== channel.generation) { audioDebugLog('stale generation callback ignored (rain self-loop fire, ' + channel.name + ')'); return; }
-      var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-      if (activeSlot !== slot || channel.currentPath !== path || channel.desiredPath !== path) { audioDebugLog('stale generation callback ignored (rain self-loop, slot no longer active, ' + channel.name + ')'); return; }
-      audioDebugLog('self-loop firing (rain ' + channel.name + '): ' + path);
-      performRainChannelCrossfade(channel, path, '(self-loop)', '(self-loop)', channel.desiredGainMultiplier == null ? 1 : channel.desiredGainMultiplier, LOOP_CROSSFADE_SECONDS, true);
-    }, delayMs);
-  }
-
-  // The actual crossfade execution, extracted from setRainChannelTrack
-  // exactly as performSeaChannelCrossfade was extracted from
-  // setSeaChannelTrack -- see that function's own comment for the
-  // full reasoning, including why a self-loop repeat deliberately
-  // bypasses setRainChannelTrack's own guards by calling this directly,
-  // and why isSelfLoop (AUDIO STABILITY FIX) must be explicit rather
-  // than inferred -- same reasoning, same fix, applied here too.
-  function performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds, isSelfLoop) {
-    channel.generation++;
-    var myGeneration = channel.generation;
-    var now = audioCtx.currentTime;
-    var outgoingIndex = channel.activeIndex;
-
-    if (outgoingIndex !== -1 && channel.slots[outgoingIndex]) {
-      var outgoing = channel.slots[outgoingIndex];
-      if (outgoing.pauseTimer) { clearTimeout(outgoing.pauseTimer); outgoing.pauseTimer = null; }
-      if (outgoing.selfLoopTimer) { clearTimeout(outgoing.selfLoopTimer); outgoing.selfLoopTimer = null; }
-      outgoing.gainTarget = 0;
-      outgoing.gain.gain.cancelScheduledValues(now);
-      outgoing.gain.gain.setValueAtTime(outgoing.gain.gain.value, now);
-      outgoing.gain.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
-      outgoing.pauseTimer = setTimeout(function () {
-        outgoing.pauseTimer = null;
-        outgoing.el.pause();
-      }, crossfadeSeconds * 1000 + 100);
-    }
-
-    if (desiredPath == null) {
-      channel.activeIndex = -1;
-      channel.currentPath = null;
-      channel.loadingPath = null;
-      return;
-    }
-
-    channel.loadingPath = desiredPath;
-    channel.loadingSince = Date.now();
-    audioDebugLog('play: ' + desiredPath + ' (rain, ' + locationForLog + ', level ' + rainLevelForLog + ')');
-
-    try {
-      var incomingIndex = outgoingIndex === 0 ? 1 : 0;
-      ensureRainChannelSlot(channel, incomingIndex);
-      var incoming = channel.slots[incomingIndex];
-      if (!incoming) { if (channel.loadingPath === desiredPath) channel.loadingPath = null; return; }
-
-      if (incoming.pauseTimer) { clearTimeout(incoming.pauseTimer); incoming.pauseTimer = null; }
-      if (incoming.selfLoopTimer) { clearTimeout(incoming.selfLoopTimer); incoming.selfLoopTimer = null; }
-      incoming.selfLoopScheduledForGeneration = -1;
-      incoming.pendingPath = desiredPath;
-      incoming.pendingGeneration = myGeneration;
-      var alreadyLoaded = incoming.el.src && incoming.el.src.indexOf(desiredPath) !== -1;
-      if (!alreadyLoaded) {
-        incoming.el.src = desiredPath;
-        incoming.el.currentTime = 0;
-      } else if (isSelfLoop) {
-        // Explicit self-loop restart -- see performSeaChannelCrossfade's
-        // own notes for the full reasoning; identical fix applied here.
-        incoming.el.currentTime = 0;
-        audioDebugLog('self-loop incoming slot restart (rain ' + channel.name + '): ' + desiredPath + ' forced to currentTime=0');
-      } // else: ordinary transition -- resume in place
-      var effectiveGain = channel.targetGain * gainMultiplier;
-      incoming.gainTarget = effectiveGain;
-      incoming.gain.gain.cancelScheduledValues(now);
-      incoming.gain.gain.setValueAtTime(incoming.gain.gain.value, now);
-      incoming.gain.gain.linearRampToValueAtTime(effectiveGain, now + crossfadeSeconds);
-      channel.activeIndex = incomingIndex;
-
-      var playPromise = incoming.el.play();
-      if (playPromise && typeof playPromise.then === 'function') {
-        playPromise.then(function () {
-          commitRainChannelPlayback(channel, incoming, desiredPath, myGeneration);
-        }, function (error) {
-          console.error('RAIN AUDIO PLAY FAILED', 'path:', desiredPath, 'error name:', error && error.name, 'error message:', error && error.message);
-          if (error && error.name === 'NotAllowedError') ambiencePlayBlocked = true; // the browser wants a user gesture first -- the next one retries; no rebuilding in the meantime
-          if (channel.generation === myGeneration && channel.loadingPath === desiredPath) channel.loadingPath = null;
-        });
-      }
-    } catch (e) {
-      console.error('Rain audio failed to start (' + channel.name + ' channel, ' + desiredPath + '):', describeError(e));
-      if (channel.loadingPath === desiredPath) channel.loadingPath = null;
-    }
-  }
-
-  // Crossfades `channel` toward `desiredPath` (or silence if null), at
-  // channel.targetGain * gainMultiplier (gainMultiplier defaults to 1 --
-  // identical shape and reasoning to setSeaChannelTrack, including the
-  // hatch-bleed gain handling; see its own comments for the full
-  // explanation of the generation/confirmation logic, the same-track-
-  // different-gain in-place re-ramp case, and why a self-loop repeat
-  // (performRainChannelCrossfade called directly from
-  // scheduleRainChannelSelfLoop) deliberately bypasses the guards below.
-  // When desiredPath is null (rain has stopped), the outgoing slot
-  // fades to silence and is paused via the same pauseTimer mechanism,
-  // which is exactly "pause/reset the rain audio so it's ready for the
-  // next rain event" -- no separate reset step needed.
+  // What this channel should be playing and how loudly. The loop engine makes it so and keeps it so: the same wish again is a no-op, a new track is
+  // crossfaded in (equal power, make-before-break), null fades out -- see makeLoopVoice.
   function setRainChannelTrack(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSecondsOverride) {
-    if (gainMultiplier == null) gainMultiplier = 1;
-    // Same override reasoning as setSeaChannelTrack -- see its own
-    // comment; the companionway transition is the one caller that
-    // passes a shorter value here.
-    var crossfadeSeconds = crossfadeSecondsOverride == null ? RAIN_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride;
-    channel.desiredPath = desiredPath;
-    channel.desiredGainMultiplier = gainMultiplier;
-
-    if (!audioCtx) return;
-    if (channel.currentPath === desiredPath && rainChannelIsHealthy(channel)) return;
-
-    if (desiredPath != null && channel.currentPath === desiredPath && channel.activeIndex !== -1) {
-      var activeSlot = channel.slots[channel.activeIndex];
-      if (activeSlot && !activeSlot.el.paused) {
-        var nowRegain = audioCtx.currentTime;
-        var effectiveRegain = channel.targetGain * gainMultiplier;
-        activeSlot.gainTarget = effectiveRegain;
-        activeSlot.gain.gain.cancelScheduledValues(nowRegain);
-        activeSlot.gain.gain.setValueAtTime(activeSlot.gain.gain.value, nowRegain);
-        activeSlot.gain.gain.linearRampToValueAtTime(effectiveRegain, nowRegain + crossfadeSeconds);
-        return;
-      }
-    }
-
-    if (desiredPath != null && channel.loadingPath === desiredPath && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS) return;
-
-    performRainChannelCrossfade(channel, desiredPath, locationForLog, rainLevelForLog, gainMultiplier, crossfadeSeconds);
+    setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSecondsOverride == null ? RAIN_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride);
   }
 
   // Hands a {location, rainLevel, exteriorTrack, exteriorGainMultiplier,
@@ -9901,8 +9091,8 @@
                             fades 100% -> 0% while cruise.mp3 fades
                             0% -> running level over those same 3
                             seconds -- then cruise.mp3 loops forever
-                            (pre-scheduled self-loop seam, never an
-                            `ended` event). The STARTING ENGINE action
+                            (repeats scheduled on the audio clock by
+                            the loop engine). The STARTING ENGINE action
                             stays on screen until start.mp3 reaches its
                             end.
        RUNNING              cruise.mp3 (above) or interior.mp3 (below),
@@ -10019,8 +9209,7 @@
   // The engine's target volume for `key`, as a function so it's
   // re-evaluated at the moment each crossfade actually begins (see
   // crossfadeTo's notes on function-valued targetVolume) -- this is
-  // what makes starting the engine while muted silent, and what stops
-  // a self-loop seam from restoring a level the player has since muted.
+  // (the engine's own levels can change between crossfades). Muting is the master's job, not this level's: a muted engine plays on, silently.
   function engineTargetVolume(key) {
     return function () { return ENGINE_VOLUME[key]; };
   }
@@ -10135,7 +9324,6 @@
       ENGINE_AUDIO_FILES.start,
       engineTargetVolume('start'),
       function () { handoffEngineStartToRunning(epoch, complete); },
-      false,
       ENGINE_START_FADE_IN_SECONDS,
       ENGINE_START_HANDOFF_SECONDS,
       function () {
@@ -10296,8 +9484,7 @@
      until they either finish on their own or are faded out together
      during CASTING OFF; board.mp3 is a third, short one-shot used
      only to time the BOARDING step. None of the three is ever part of
-     collectExpectedPlayingAudio/the recovery-and-watchdog system
-     further up -- same reasoning as the SAILS one-shots (raiseLong,
+     the recovery layer (recoverLandfallAudio) -- same reasoning as the SAILS one-shots (raiseLong,
      fill, etc.) never being part of it either: a one-shot that has
      already genuinely finished must STAY finished, and the surest way
      to guarantee that is to never give any recovery path a reason to
@@ -10365,6 +9552,7 @@
   // audio is locked) so runAudioSyncedAction's watchdog can size
   // BOARDING off board.mp3's own real duration.
   function playMarinaOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { if (onEnded) onEnded(); return null; }
     var el = getMarinaAudioEl(key);
     el.onended = null;
@@ -10489,6 +9677,7 @@
       tapeAudioEl.preload = 'auto';
       tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
       tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
+      tapeAudioEl.addEventListener('error', onTapeAudioError);
       return true;
     } catch (e) {
       console.warn('Tape player audio unavailable:', describeError(e));
@@ -10577,6 +9766,7 @@
   }
 
   function onTapeTimeUpdate() {
+    tapeProgressAt = Date.now();
     if (tapePhase === 'track' && !tapeSessionQualified && tapeAudioEl.currentTime >= TAPE_QUALIFYING_SECONDS) {
       awardTapeListenMorale();
     }
@@ -10622,6 +9812,27 @@
   // listen, clear the active-tape state, and begin the mechanical
   // tape_stop.mp3 (section 5). 'stopping' ending: tape_stop.mp3
   // finished naturally -- fully stopped, nothing further happens.
+  // THE TAPE'S CHAIN MUST NEVER STICK. start sound -> track -> stop sound advances on each one's real 'ended'; if a link cannot play (play() refused, the
+  // file will not load, or it stops progressing) the chain moves on without it: a failed start or stop sound is skipped, and a failed TRACK ends the session
+  // quietly with no listening credit (no music was heard, so none is awarded).
+  var tapeProgressAt = 0;
+  function advanceTapeAfterSoundFailure() {
+    if (tapePhase === 'starting' || tapePhase === 'stopping') onTapeAudioEnded();
+    else if (tapePhase === 'track') { activeTapeTitle = null; beginTapeStopSequence(); refreshTapePlayerIfOpen(); }
+  }
+  function onTapeAudioError() {
+    if (!tapePhase) return;
+    console.warn('[AUDIO] a tape sound failed to load; the player carries on without it (' + tapePhase + ')');
+    advanceTapeAfterSoundFailure();
+  }
+  function tapeSequenceStallCheck() { // called by the watchdog: a start/stop sound that has stopped moving is skipped
+    if (!tapeAudioEl || (tapePhase !== 'starting' && tapePhase !== 'stopping')) return;
+    if (Date.now() - tapeProgressAt < AUDIO_STALL_SECONDS * 1000) return;
+    console.warn('[AUDIO] the tape ' + tapePhase + ' sound stopped progressing; moving on without it');
+    tapeProgressAt = Date.now();
+    advanceTapeAfterSoundFailure();
+  }
+
   function onTapeAudioEnded() {
     if (tapePhase === 'starting') {
       tapePhase = 'track';
@@ -10674,12 +9885,12 @@
   // one already in progress that the browser silently paused out from
   // under it -- see that function's own notes for why the two are kept
   // apart rather than sharing one call site.
-  function safePlayTapeAudio() {
+  function safePlayTapeAudio(onFail) {
     try {
       var p = tapeAudioEl.play();
-      if (p && typeof p.catch === 'function') p.catch(function () {});
+      if (p && typeof p.catch === 'function') p.catch(function (e) { if (onFail && !(e && e.name === 'AbortError')) onFail(); });
     } catch (e) {
-      // fail gracefully -- e.g. file genuinely missing, autoplay blocked without a promise, or play() itself throwing
+      if (onFail) onFail(); // play() itself threw: the caller's fallback runs
     }
   }
 
@@ -10738,33 +9949,9 @@
     }
   }
 
-  // AUDIO DEBUG SNAPSHOT -- a manually-invoked, one-shot health dump,
-  // never called automatically from anywhere in this file (so it can
-  // never spam the console on its own); exposed as
-  // window.debugLandfallAudio so it can be run directly from the
-  // browser console as debugLandfallAudio() when troubleshooting a
-  // reported playback issue. Deliberately reads every field fresh at
-  // call time rather than tracking any history -- a snapshot of exactly
-  // what's true right now, matching this feature's own "compact debug
-  // helper" brief rather than a running log. Each channel/slot section
-  // below tolerates a channel not existing yet at all (audio never
-  // unlocked, or the specific slot never built) by printing 'none'
-  // rather than throwing.
   function environmentChannelSnapshot(channel) {
     if (!channel) return null;
-    var activeSlot = channel.activeIndex === -1 ? null : channel.slots[channel.activeIndex];
-    return {
-      desiredPath: channel.desiredPath,
-      currentPath: channel.currentPath,
-      loadingPath: channel.loadingPath,
-      activeIndex: channel.activeIndex,
-      generation: channel.generation,
-      activeSlotPaused: activeSlot ? activeSlot.el.paused : null,
-      activeSlotEnded: activeSlot ? activeSlot.el.ended : null,
-      activeSlotCurrentTime: activeSlot ? activeSlot.el.currentTime : null,
-      activeSlotDuration: activeSlot ? activeSlot.el.duration : null,
-      activeSlotGainTarget: activeSlot ? activeSlot.gainTarget : null,
-    };
+    return { wanted: channel.voice.wanted(), playing: channel.voice.playing(), healthy: channel.voice.isHealthy(), detail: channel.voice.diag() };
   }
   function debugAudioState() {
     console.log('[AUDIO DEBUG] ---- Landfall audio snapshot ----');
@@ -10832,85 +10019,14 @@
     });
   }
 
-  // Every persistent (non-one-shot) audio channel the CURRENT game
-  // state says should actually be playing right now -- never a channel
-  // that's correctly silent (nothing currently desired, engine off,
-  // cassette stopped/between phases). Deliberately independent of mute:
-  // muting only ever silences final output in this codebase (masterGain
-  // for sea/wind/rain/creak, the element's own muted property for
-  // everything else -- see MASTER MUTE), never pauses anything, so an element SHOULD
-  // still be genuinely advancing while muted, and a stall caught then
-  // is exactly as real (and exactly as worth fixing before the player
-  // unmutes) as one caught while audible. 'environment' entries are the
-  // ones a confirmed stall can escalate to a hard rebuild for (section
-  // 4/5 -- a stalled sea/wind/rain channel is what indicates the
-  // AudioContext graph itself is wedged); 'engine'/'cassette' entries
-  // are reported the same way but their own recovery stays the
-  // existing, separate soft paths (resumeEngineAudioIfSuspended/
-  // resumeTapeAudioIfSuspended) -- engine and cassette are plain
-  // HTMLAudioElements with no AudioContext involvement at all, so
-  // rebuilding the Web Audio graph could never be what fixes them.
-  function collectExpectedPlayingAudio() {
-    var expected = [];
-    [['sea exterior', seaChannels.exterior], ['sea interior', seaChannels.interior],
-     ['creak interior', creakChannels.interior], // AMBIENT-AUDIO ENHANCEMENT PASS -- no exterior counterpart, see this layer's own section notes
-     ['wind exterior', windChannels.exterior], ['wind interior', windChannels.interior],
-     ['rain exterior', rainChannels.exterior], ['rain interior', rainChannels.interior]].forEach(function (pair) {
-      var label = pair[0], channel = pair[1];
-      var attemptPending = channel.loadingPath != null && Date.now() - (channel.loadingSince || 0) < AMBIENCE_PENDING_TIMEOUT_MS;
-      if (channel.desiredPath != null && channel.activeIndex !== -1 && channel.slots[channel.activeIndex] && !attemptPending) {
-        expected.push({ label: label, el: channel.slots[channel.activeIndex].el, group: 'environment' });
-      }
-    });
-    if (tapeAudioEl && tapePhase === 'track') {
-      expected.push({ label: 'cassette', el: tapeAudioEl, group: 'cassette' });
-    }
-    if (GAME && (GAME.boat.engineOn || engineAudioPhase !== 'idle')) {
-      var engineEl = engineAudio.getActiveEl();
-      if (engineEl) expected.push({ label: 'engine', el: engineEl, group: 'engine' });
-    }
-    return expected;
-  }
 
-  // Awaits measureElementProgress for every currently-expected channel
-  // in parallel (one shared ~850ms wait, not one per channel) and logs
-  // a HEALTH CHECK line for each when AUDIO_DEBUG is on. Returns the
-  // list of entries that failed to advance.
-  async function findStalledPersistentAudio() {
-    var expected = collectExpectedPlayingAudio();
-    if (expected.length === 0) return [];
-    var results = await Promise.all(expected.map(function (entry) {
-      return measureElementProgress(entry.el, AUDIO_HEALTH_CHECK_WAIT_MS).then(function (result) {
-        audioDebugLog('HEALTH CHECK (' + entry.label + '): before=' + (result.before != null ? result.before.toFixed(2) : '?') + ' after=' + (result.after != null ? result.after.toFixed(2) : '?') + ' advancing=' + result.advancing);
-        return { entry: entry, result: result };
-      });
-    }));
-    return results.filter(function (r) { return !r.result.advancing; }).map(function (r) { return r.entry; });
-  }
 
-  // DISPOSE (section 6) -- every timer/automation/reference tied to one
-  // ambience channel's two slots, cleared before the channel object
-  // itself is discarded. Wrapped in try/catch throughout: this runs
-  // specifically because the audio runtime may already be in a broken
-  // state, so even a normally-safe call like el.pause() is not assumed
-  // safe here.
-  function disposeAmbienceChannel(channel) {
-    channel.slots.forEach(function (slot) {
-      if (!slot) return;
-      if (slot.pauseTimer) { clearTimeout(slot.pauseTimer); slot.pauseTimer = null; }
-      if (slot.selfLoopTimer) { clearTimeout(slot.selfLoopTimer); slot.selfLoopTimer = null; }
-      try { if (slot.gain) slot.gain.gain.cancelScheduledValues(0); } catch (e) { /* the old AudioContext may already be unusable -- nothing more to do */ }
-      try { if (slot.gain) slot.gain.disconnect(); } catch (e) {} // off the master bus, so a reset on the same context leaves nothing dangling
-      try { slot.el.pause(); } catch (e) {}
-      try { slot.el.src = ''; } catch (e) {}
-    });
-  }
 
   // CASSETTE HARD RECOVERY (section 9) -- separate from the Web Audio
   // graph entirely (the cassette has never used AudioContext at all;
   // see the TAPE PLAYER module's own notes), so it is never touched by
-  // rebuildLandfallAudio's own dispose/reconstruct steps and has to be
-  // checked and, if needed, recovered in its own right. Tries the
+  // the loop engine and has to be checked and, if needed, recovered in
+  // its own right. Tries the
   // existing SOFT path first (resumeTapeAudioIfSuspended -- same
   // element, same position); only replaces the element outright if
   // that alone doesn't leave it genuinely advancing a moment later.
@@ -10934,6 +10050,7 @@
     freshEl.preload = 'auto';
     freshEl.addEventListener('ended', onTapeAudioEnded);
     freshEl.addEventListener('timeupdate', onTapeTimeUpdate);
+    freshEl.addEventListener('error', onTapeAudioError);
     freshEl.playbackRate = 1.0;
     freshEl.defaultPlaybackRate = 1.0;
     freshEl.src = preservedSrc;
@@ -10958,243 +10075,33 @@
     }
   }
 
-  // HARD AUDIO REBUILD (sections 5-8) -- the last resort, used only
-  // when soft recovery (resume + reassert + a confirmed real stall;
-  // see recoverLandfallAudio) shows the boat/rain ambience graph is
-  // genuinely wedged, not merely paused. Rebuilds ONLY the audio
-  // runtime: the game object, save data, and everything else in this
-  // file are completely untouched, and this never reloads the page.
-  //
-  // Order matters: dispose everything tied to the OLD AudioContext
-  // first (timers, gain automation, the elements themselves) so no
-  // stale callback can act on it once discarded; only THEN close() it
-  // and build a genuinely fresh one. seaChannels/windChannels/
-  // rainChannels are replaced with entirely NEW channel objects (via
-  // makeSeaChannel/makeWindChannel/makeRainChannel, reusing each
-  // channel's own existing targetGain -- never a new hardcoded value,
-  // per this task's own "do not change volume levels") rather than
-  // the old ones mutated in place -- this is what makes every
-  // in-flight callback from the old graph (a self-loop timer, a
-  // play() promise, a 'playing' listener already queued when the
-  // rebuild began) harmless even if one still fires late: it can only
-  // ever touch an object the rest of the system no longer references
-  // at all. audioRuntimeGeneration is bumped before any of this
-  // starts, so a SECOND rebuild firing while this one is still
-  // awaiting close()/construction can supersede it cleanly (the
-  // generation check right before buildAudioGraph below).
-  //
-  // Reconstruction (section 8) reuses buildAudioGraph exactly as
-  // unlockAudio's own first call does: masterGain, then
-  // updateAudioForState(GAME) (sea/wind/rain/luffing/mute, all
-  // freshly derived from current state -- never a one-shot), then --
-  // only if the engine is actually on -- the same "resumed save"
-  // engine-loop logic that starts straight into the correct
-  // cruise/interior loop with no engine-start.mp3 replay. Cassette
-  // recovery is handled separately afterward (see recoverCassetteHard)
-  // since it was never part of this graph to begin with.
-  async function rebuildLandfallAudio(triggerSource) {
-    var now = Date.now();
-    if (now - lastHardRebuildAtMs < AUDIO_RECOVERY_COOLDOWN_MS) {
-      audioDebugLog('HARD AUDIO REBUILD skipped -- within cooldown (' + (now - lastHardRebuildAtMs) + 'ms since the last one)');
-      return;
+  // THE ONE RECOVERY ENTRY POINT. Cheap, idempotent and never waits on anything: make sure the context is running (when the browser has seen an interaction),
+  // make sure every wanted loop is playing, and keep the tape alive. Called by every trigger that can disturb audio -- the page becoming visible, a
+  // pageshow, window focus, the watchdog tick, a failed repair sound -- and returns a promise only for the callers that chain on it.
+  var cassetteRecoveryBusy = false;
+  function recoverLandfallAudio(triggerSource) {
+    if (!audioUnlocked) return Promise.resolve();
+    resumeAudioContext(triggerSource);
+    reconcileEnvironmentalAudio();
+    resumeTapeAudioIfSuspended();
+    if (tapeAudioEl && tapePhase === 'track' && !cassetteRecoveryBusy) { // the tape is a separate, non-looping element with its own stall check
+      cassetteRecoveryBusy = true;
+      var release = function () { cassetteRecoveryBusy = false; };
+      return recoverCassetteHard().then(release, release);
     }
-    lastHardRebuildAtMs = now;
-    var oldGeneration = audioRuntimeGeneration;
-    audioRuntimeGeneration++;
-    var newGeneration = audioRuntimeGeneration;
-    console.warn('AUDIO CHANNEL RESET START (trigger: ' + triggerSource + ', generation ' + oldGeneration + ' -> ' + newGeneration + ') -- the AudioContext is kept unless it is closed');
-
-    if (seaChannels.exterior) disposeAmbienceChannel(seaChannels.exterior);
-    if (seaChannels.interior) disposeAmbienceChannel(seaChannels.interior);
-    if (creakChannels.interior) disposeAmbienceChannel(creakChannels.interior); // AMBIENT-AUDIO ENHANCEMENT PASS -- no exterior counterpart, see this layer's own section notes
-    if (windChannels.exterior) disposeAmbienceChannel(windChannels.exterior);
-    if (windChannels.interior) disposeAmbienceChannel(windChannels.interior);
-    if (rainChannels.exterior) disposeAmbienceChannel(rainChannels.exterior);
-    if (rainChannels.interior) disposeAmbienceChannel(rainChannels.interior);
-    disposeNavStationAudioEls(); // see that function's own notes -- plain elements, never dependent on the AudioContext being rebuilt below, but worth a fresh start here too
-
-    var oldCtx = audioCtx;
-    // The SAME AudioContext (and its master gain, with the SOUND state on it) is kept whenever it is still usable: only the
-    // ambience channels -- their elements and gain nodes -- are rebuilt. A new context is created only if the old one is closed.
-    var keepContext = !!oldCtx && oldCtx.state !== 'closed';
-    if (!keepContext) {
-      audioCtx = null;
-      masterGain = null;
-    }
-    seaChannels = { exterior: makeSeaChannel('exterior', seaChannels.exterior.targetGain), interior: makeSeaChannel('interior', seaChannels.interior.targetGain) };
-    creakChannels = { interior: makeCreakChannel('interior', creakChannels.interior.targetGain) }; // AMBIENT-AUDIO ENHANCEMENT PASS -- reuses its own existing targetGain, never a new hardcoded value, same as every other layer here
-    windChannels = { exterior: makeWindChannel('exterior', windChannels.exterior.targetGain), interior: makeWindChannel('interior', windChannels.interior.targetGain) };
-    rainChannels = { exterior: makeRainChannel('exterior', rainChannels.exterior.targetGain), interior: makeRainChannel('interior', rainChannels.interior.targetGain) };
-
-    if (keepContext) {
-      try {
-        if (oldCtx.state !== 'running') await oldCtx.resume();
-      } catch (e) {
-        console.warn('AudioContext resume failed:', describeError(e));
-        audioRecoveryNeedsGesture = true;
-      }
-      if (newGeneration !== audioRuntimeGeneration) return;
-      if (GAME) updateAudioForState(GAME);
-      catchUpEngineAudioIfRunning(GAME);
-      audioDebugLog('AUDIO CHANNEL RESET complete -- same AudioContext kept (state ' + oldCtx.state + ')');
-      await recoverCassetteHard();
-      return;
-    }
-    if (oldCtx) {
-      try {
-        await oldCtx.close();
-      } catch (e) {
-        console.warn('AudioContext close failed:', describeError(e));
-      }
-    }
-    if (newGeneration !== audioRuntimeGeneration) { audioDebugLog('HARD AUDIO REBUILD aborted -- superseded by a newer rebuild while closing the old context'); return; }
-
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch (e) {
-      console.warn('Audio unavailable (rebuild):', describeError(e));
-      return;
-    }
-    if (newGeneration !== audioRuntimeGeneration) return; // superseded while constructing the new context
-
-    buildAudioGraph();
-    audioDebugLog('HARD AUDIO REBUILD complete -- restored sea exterior=' + seaChannels.exterior.desiredPath + ' interior=' + seaChannels.interior.desiredPath + ', creak interior=' + creakChannels.interior.desiredPath + ', wind exterior=' + windChannels.exterior.desiredPath + ' interior=' + windChannels.interior.desiredPath + ', rain exterior=' + rainChannels.exterior.desiredPath + ' interior=' + rainChannels.interior.desiredPath + ', engine=' + engineActiveKey);
-
-    await recoverCassetteHard();
-  }
-  window.rebuildLandfallAudio = rebuildLandfallAudio;
-
-  // THE CENTRAL RECOVERY FUNCTION (section 1) -- the one entry point
-  // every automatic trigger (visibilitychange, pageshow, focus, the
-  // user-gesture fallback) and the watchdog all funnel through. Two
-  // levels, run in sequence, never independently:
-  //   LEVEL 1, SOFT (section 2): resume audioCtx if it isn't running,
-  //     then reassert expected state in place via the EXISTING,
-  //     already-idempotent entry points (updateAudioForState for boat/
-  //     rain/luffing/mute, resumeEngineAudioIfSuspended,
-  //     resumeTapeAudioIfSuspended) -- none of these restart anything
-  //     already healthy by their own existing paused/ended/path checks,
-  //     so if everything really is fine this whole level is a safe,
-  //     cheap no-op.
-  //   LEVEL 2, HARD (sections 4-5): only reached if, after a short real
-  //     wait, a REAL progress check (section 3 -- see
-  //     findStalledPersistentAudio) shows a boat or rain channel that
-  //     SHOULD be playing has not actually advanced. A stalled engine
-  //     or cassette entry does NOT trigger a hard rebuild on its own --
-  //     neither one depends on the AudioContext at all, so rebuilding
-  //     it could never be what fixes them; their own recovery already
-  //     happened via the soft calls above (cassette also gets its own
-  //     dedicated hard path, recoverCassetteHard, but only as part of
-  //     rebuildLandfallAudio itself, and only because a genuinely wedged
-  //     AudioContext and a genuinely wedged cassette element are likely
-  //     symptoms of the very same underlying interruption).
-  //
-  // audioRecoveryInProgress is a plain boolean guard against two
-  // recovery attempts overlapping (section 11's own "do not create
-  // multiple simultaneous recovery attempts") -- a trigger that fires
-  // while one is already running just logs and returns rather than
-  // queuing or stacking a second one.
-  async function recoverLandfallAudio(triggerSource) {
-    if (audioRecoveryInProgress) {
-      audioDebugLog('RECOVERY skipped -- one already in progress (trigger: ' + triggerSource + ')');
-      return;
-    }
-    if (!audioUnlocked || !audioCtx) return; // nothing has ever been unlocked -- nothing to recover yet
-    audioRecoveryInProgress = true;
-    var myRuntimeGeneration = audioRuntimeGeneration;
-    audioDebugLog('RECOVERY START (trigger: ' + triggerSource + ')');
-    try {
-      var ctxStateBefore = audioCtx.state;
-      if (audioCtx.state !== 'running') {
-        try {
-          await audioCtx.resume();
-          audioDebugLog('AUDIO CONTEXT state before=' + ctxStateBefore + ' after=' + audioCtx.state);
-        } catch (e) {
-          console.warn('AudioContext resume failed:', describeError(e));
-          audioRecoveryNeedsGesture = true;
-          audioDebugLog('recovery requires a user gesture to proceed -- will retry on the next player action (see the handleAction fallback)');
-        }
-      }
-      if (myRuntimeGeneration !== audioRuntimeGeneration) return; // a rebuild already happened elsewhere while this awaited resume()
-
-      // SOFT REASSERT -- in place, idempotent, never restarts anything
-      // already healthy; see each function's own guards.
-      reconcileEnvironmentalAudio(); // in place and idempotent -- see its notes
-      resumeTapeAudioIfSuspended();
-
-      var stalled = await findStalledPersistentAudio();
-      if (myRuntimeGeneration !== audioRuntimeGeneration) return;
-
-      var stalledEnvironment = stalled.filter(function (e) { return e.group === 'environment'; });
-      audioDebugLog('SOFT RECOVERY RESULT: ' + stalled.length + ' stalled (' + stalled.map(function (e) { return e.label; }).join(', ') + ')');
-
-      if (stalledEnvironment.length > 0 && ambiencePlayBlocked) {
-        // The browser is refusing playback until the player next interacts -- rebuilding anything now could not help, and
-        // repeated rebuilds would only churn. The next gesture (see handleAction) retries.
-        audioDebugLog('stalled environment audio is waiting for a user gesture -- no rebuild');
-        ambienceSnapshot('environment audio stalled, waiting for a user gesture');
-      } else if (stalledEnvironment.length > 0) {
-        // The AudioContext graph itself is wedged and resume() alone
-        // did not bring it back -- section 4's "do not continue
-        // trusting it forever". Escalate.
-        await rebuildLandfallAudio(triggerSource + '+stalled:' + stalledEnvironment.map(function (e) { return e.label; }).join(','));
-      } else if (stalled.some(function (e) { return e.group === 'cassette'; })) {
-        // Sea/wind/rain are fine (so the AudioContext itself isn't the
-        // problem), but the cassette -- a completely separate plain
-        // element -- is still stalled after the soft resume above.
-        // Its own hard path doesn't need the Web Audio graph rebuilt
-        // around it.
-        await recoverCassetteHard();
-      }
-
-      if (audioRecoveryNeedsGesture && audioCtx.state === 'running') {
-        audioRecoveryNeedsGesture = false; // resume actually succeeded this time, despite an earlier failed attempt
-      }
-    } finally {
-      audioRecoveryInProgress = false;
-    }
+    return Promise.resolve();
   }
   window.recoverLandfallAudio = recoverLandfallAudio;
 
-  // LIGHTWEIGHT WATCHDOG (section 13) -- a conservative periodic safety
-  // net for the case nothing else (visibilitychange/pageshow/focus)
-  // happened to fire even though playback quietly died anyway (e.g. an
-  // interruption iOS itself resolves without ever toggling document
-  // visibility or window focus). Runs only every
-  // AUDIO_WATCHDOG_INTERVAL_MS (7s, within the suggested 5-10s window),
-  // only while the page is actually visible (no point polling while
-  // backgrounded -- the visibility/pageshow/focus triggers already
-  // cover the return from that), and only when nothing else is already
-  // checking. Deliberately does a CHEAP pre-check first -- is the
-  // AudioContext not running, or is anything that should currently be
-  // playing outright paused -- rather than running the full ~850ms
-  // real-progress confirmation unconditionally on every tick; only
-  // when that cheap check already looks suspicious does it hand off to
-  // recoverLandfallAudio, which is what actually confirms a real stall
-  // (not just one anomalous sample) before ever considering a hard
-  // rebuild. This is what keeps the watchdog itself lightweight while
-  // still relying on the one, single, rigorous recovery path for the
-  // actual decision.
+  // A conservative periodic safety net: while the page is visible, re-run the recovery entry point. It is cheap enough to run every few seconds, and it is
+  // what resumes a context the browser dropped without a visibility or focus event (iOS does this).
   function audioWatchdogTick() {
-    if (!GAME || !audioUnlocked || !audioCtx) return;
-    if (document.visibilityState !== 'visible') return;
-    if (audioRecoveryInProgress) return;
-    var suspicious = audioCtx.state !== 'running';
-    if (!suspicious) {
-      suspicious = collectExpectedPlayingAudio().some(function (entry) {
-        // An environmental loop that has ENDED is as dead as a paused one (it repeats by timer, and a late timer lets it run off
-        // its end); only the cassette/engine legitimately sit ended between sounds.
-        return entry.group === 'environment' ? (entry.el.paused || entry.el.ended) : (entry.el.paused && !entry.el.ended);
-      });
-    }
-    if (suspicious) {
-      audioDebugLog('WATCHDOG: suspicious state detected, invoking recovery');
-      ambienceSnapshot('watchdog: an expected environmental loop is not playing');
-      recoverLandfallAudio('watchdog');
-    }
+    if (!GAME || !audioUnlocked || document.visibilityState !== 'visible') return;
+    tapeSequenceStallCheck();
+    recoverLandfallAudio('watchdog');
   }
   function startAudioWatchdog() {
-    if (audioWatchdogTimer) return; // already running -- never a second, overlapping interval
+    if (audioWatchdogTimer) return; // one persistent watchdog for the life of this page
     audioWatchdogTimer = setInterval(audioWatchdogTick, AUDIO_WATCHDOG_INTERVAL_MS);
   }
 
@@ -11213,7 +10120,9 @@
     tapeAudioEl.currentTime = 0;
     tapeAudioEl.playbackRate = 1.0;
     tapeAudioEl.defaultPlaybackRate = 1.0;
-    safePlayTapeAudio();
+    tapeProgressAt = Date.now();
+    var el = tapeAudioEl, phase = tapePhase;
+    safePlayTapeAudio(function () { if (tapeAudioEl === el && tapePhase === phase) { console.warn('[AUDIO] a tape sound could not play; the player carries on without it (' + phase + ')'); advanceTapeAfterSoundFailure(); } });
   }
 
   // Begins the mechanical tape_stop.mp3 -- used by BOTH a track ending
@@ -12451,21 +11360,18 @@
     if (el && !el.paused) fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) {} });
   }
 
-  // WEATHER FAX -- the nav-station pool's own element (never a second copy), started the moment a NEW forecast is selected
+  // WEATHER FAX -- a loop-engine voice, started the moment a NEW forecast is selected
   // (see cmdMarineForecast) and kept going -- repeating, because the file is only a few seconds -- until the LAST character appears. The typing
   // decides when it stops (see runMarineForecastTransmission); nothing here knows or estimates how long the forecast is.
   var WEATHER_FAX_FADE_SECONDS = 0.3;   // the short natural fade-out when the last character lands (or the screen is left)
   var activeMarineTransmission = null;  // the transmission now running, or null; clearTempView() marks it as left
+  var weatherFaxVoice = makeLoopVoice('WEATHER FAX');
   function startWeatherFax() {
-    var el = playNavStationOneShot('weatherFax'); // restarts that one element in place; master-muted like every nav-station sound
-    if (el) { el._faxStopping = false; el.loop = true; } // repeat for as long as the typing lasts
+    weatherFaxVoice.set(NAV_STATION_AUDIO_FILES.weatherFax, NAV_STATION_AUDIO_VOLUME.weatherFax, 0.05); // repeats on the audio clock for as long as the typing lasts
   }
   function stopWeatherFax() {
-    var el = navStationAudioEls.weatherFax;
-    if (!el || el._faxStopping || el.paused) return; // idempotent: the last character, finish() and a screen change may all ask
-    el._faxStopping = true;
-    el.loop = false;
-    fadeNavStationVolume(el, 0, WEATHER_FAX_FADE_SECONDS, function () { try { el.pause(); } catch (e) {} });
+    if (weatherFaxVoice.wanted() == null) return; // idempotent: the last character, finish() and a screen change may all ask
+    weatherFaxVoice.set(null, 0, WEATHER_FAX_FADE_SECONDS);
   }
 
   var marineForecastBackOptions = function () { return [{ label: 'BACK', action: 'cmd:nav-station' }]; };
@@ -17319,6 +16225,7 @@
   // fade-in to avoid a click at the start -- and fires onEnded (once)
   // when it naturally finishes, same wiring as playSailsOneShot.
   function playFishingOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getFishingAudioEl(key);
@@ -17590,6 +16497,7 @@
   // runAudioSyncedAction's watchdog can size itself off the real file's
   // own duration rather than a fixed number.
   function playGalleyOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getGalleyAudioEl(key);
@@ -17689,6 +16597,7 @@
   // so its own duration-derived watchdog can size itself off the real
   // file rather than a fixed number, same as galley/sails.
   function playCabinOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getCabinAudioEl(key);
@@ -17793,6 +16702,7 @@
   // site, not this function -- see the file's own investigation notes
   // above) is confirmed fixed.
   function playHeadOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getHeadAudioEl(key);
@@ -17900,6 +16810,18 @@
     }, stepMs);
   }
 
+  // A completion callback that can run only once, however many routes (the real 'ended', a rejected play(), a load error, a watchdog) reach it.
+  // Every one-shot player below wraps its onEnded in this first thing, so a sequence waiting on a sound is never advanced twice.
+  function onceCallback(fn) {
+    if (!fn) return fn;
+    var done = false;
+    return function () {
+      if (done) return;
+      done = true;
+      return fn.apply(this, arguments);
+    };
+  }
+
   // Plays a saloon one-shot (hatchOpen or hatchClose) once from the
   // beginning, with a quick fade-in, and fires onEnded (once) when it
   // naturally finishes -- the exact onEnded wiring runAudioSyncedAction
@@ -17907,6 +16829,7 @@
   // so its own duration-derived watchdog can size itself off the real
   // file rather than a fixed number, same as head/cabin/galley/sails.
   function playSaloonOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getSaloonAudioEl(key);
@@ -18015,6 +16938,7 @@
   // own duration-derived watchdog can size itself off the real file
   // rather than a fixed number, same as every other domain's one-shot.
   function playDoorOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getDoorAudioEl(key);
@@ -18107,31 +17031,6 @@
     return el;
   }
 
-  // Called from rebuildLandfallAudio (hard audio rebuild) -- these
-  // elements are plain HTMLAudioElements with no AudioContext
-  // involvement at all, so a rebuild never NEEDS to touch them the way
-  // it needs to touch the boat/rain graph; they survive one untouched
-  // by default. But they CAN independently become wedged by the exact
-  // same browser interruption behavior that motivated the rebuild in
-  // the first place (same underlying cause as the cassette element;
-  // see recoverCassetteHard's own notes), and a hard rebuild is meant
-  // to be a genuinely fresh start for the audio runtime -- so any one
-  // of them still carrying a stale _fadeTimer or onended handler from
-  // whatever it was doing when the interruption hit is cleared out
-  // here too, and the whole pool is discarded so the next repair (or
-  // mouse click, or pong sound) lazily creates a brand new element
-  // exactly the way getNavStationAudioEl already does on first use --
-  // never replaying whatever any of them were mid-playing.
-  function disposeNavStationAudioEls() {
-    Object.keys(navStationAudioEls).forEach(function (key) {
-      var el = navStationAudioEls[key];
-      if (!el) return;
-      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
-      el.onended = null;
-      try { el.pause(); } catch (e) {}
-    });
-    navStationAudioEls = {};
-  }
 
   // Identical in shape to fadeSaloonVolume/fadeHeadVolume/etc. -- see
   // those functions' own comments for why each audio system keeps its
@@ -18165,6 +17064,7 @@
   // real file. mouse.mp3 is always called with no onEnded at all (a
   // pure fire-and-forget click, never gating an action).
   function playNavStationOneShot(key, onEnded) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getNavStationAudioEl(key);
@@ -18226,6 +17126,7 @@
   // runAudioSyncedAction's own notes) already exists to complete the
   // action from, with no duplicate mechanism needed here.
   function playRepairAudio(systemKey, onEnded) {
+    onEnded = onceCallback(onEnded);
     var audioKey = REPAIR_AUDIO_KEY[systemKey];
     var el = getNavStationAudioEl(audioKey);
 
@@ -18532,6 +17433,7 @@
   // runAudioSyncedAction's watchdog can size itself off the real
   // file's own duration rather than a fixed number.
   function playSailsOneShot(key, onEnded, state) {
+    onEnded = onceCallback(onEnded);
     if (!audioUnlocked) { audioDebugLog('play: ' + key + ' -- blocked (audio not unlocked)'); if (onEnded) onEnded(); return null; }
     audioDebugLog('play: ' + key);
     var el = getSailsAudioEl(key);
@@ -18666,6 +17568,7 @@
     }, DOT_FRAME_MS);
 
     var settled = false;
+    var playingEl = null, stallTimer = null, errorHandler = null;
     // Last-resort ceiling while we don't yet know anything about the
     // audio (see the function-level notes) -- replaced the moment a
     // real duration is known, below.
@@ -18687,15 +17590,30 @@
       el.addEventListener('durationchange', arm);
     }
 
+    // PROGRESS WATCHDOG -- a sound that has stopped moving (the browser suspended it, a stream stalled) must not hold the action until its full length plus the
+    // margin has run out: if the element's position has not advanced for AUDIO_STALL_SECONDS the action completes, and a load error completes it at once.
+    function armProgressWatchdog(el) {
+      if (settled || !el) return;
+      var lastT = el.currentTime, lastAt = Date.now();
+      errorHandler = function () { console.warn('[AUDIO] a sound failed to load; completing the action without it:', (el.currentSrc || el.src || '').split('/').pop()); onAudioDone(); };
+      el.addEventListener('error', errorHandler);
+      stallTimer = setInterval(function () {
+        if (settled || el.ended) return;
+        if (el.currentTime !== lastT) { lastT = el.currentTime; lastAt = Date.now(); return; }
+        if (Date.now() - lastAt >= AUDIO_STALL_SECONDS * 1000) { console.warn('[AUDIO] a sound stopped progressing; completing the action:', (el.currentSrc || el.src || '').split('/').pop()); onAudioDone(); }
+      }, 500);
+    }
     function onAudioDone() {
-      if (settled) return; // guards against the real 'ended' event and the watchdog both eventually firing
+      if (settled) return; // guards against the real 'ended' event and the watchdogs all eventually firing
       settled = true;
       clearTimeout(watchdogTimer);
       clearInterval(dotTimer);
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      if (errorHandler && playingEl) { playingEl.removeEventListener('error', errorHandler); errorHandler = null; }
       if (dotsLine.parentNode) dotsLine.parentNode.removeChild(dotsLine);
       if (labelEl && labelEl.parentNode) labelEl.parentNode.removeChild(labelEl); // transientLabel: gone once resolved, same as runShortAction's own
       if (blankEl && blankEl.parentNode) blankEl.parentNode.removeChild(blankEl); // the blank line above it goes with it -- see this function's own comment above for why
-      if (config.action) config.action(state);
+      try { if (config.action) config.action(state); } catch (e) { console.error('Audio-synced action: its result threw (the screen is released regardless):', describeError(e)); }
       if (state.pendingChoice === choiceAtStart) state.pendingChoice = null;
       uiBusy = false;
       renderOptions(state);
@@ -18703,9 +17621,15 @@
       updateAudioForState(state);
       scrollToBottom();
     }
-
-    var playingEl = config.playAudio(onAudioDone);
+    try {
+      playingEl = config.playAudio(onAudioDone);
+    } catch (e) { // the player itself failed: the action simply carries on without its sound
+      console.warn('Audio-synced action: its sound could not start (' + describeError(e) + '); completing it without the sound');
+      onAudioDone();
+      return;
+    }
     armDurationWatchdog(playingEl);
+    armProgressWatchdog(playingEl);
   }
 
   // Sail area ordering, used only to classify a change as a raise or a
@@ -19546,6 +18470,7 @@
      -------------------------------------------------------------- */
   var uiBusy = false; // true while a short action's dots are animating — options are hidden, other actions wait
   var DOT_FRAME_MS = 700;
+  var AUDIO_STALL_SECONDS = 4; // an audio-synced action whose sound has not advanced for this long carries on without it
 
   // Shared indefinite-duration activity indicator — same single-element,
   // same-frames-and-timing approach as animateDots below, but indefinite
@@ -19706,13 +18631,13 @@
     }
 
     animateDots(config.duration || 3, function () {
-      if (config.action) config.action(state);
+      try { if (config.action) config.action(state); } catch (e) { console.error('Short action: its result threw (the screen is released regardless):', describeError(e)); }
       if (config.thenBeat) {
         // A second silent beat — no new heading, just more dots — before a
         // final action. Used where a moment needs two results in sequence
         // (e.g., "you ease away from the dock." ... "the voyage has begun.").
         animateDots(config.thenBeat.duration || 3, function () {
-          if (config.thenBeat.action) config.thenBeat.action(state);
+          try { if (config.thenBeat.action) config.thenBeat.action(state); } catch (e) { console.error('Short action: its result threw (the screen is released regardless):', describeError(e)); }
           finish();
         });
       } else {
@@ -19745,26 +18670,6 @@
     // meaningful cost to ordinary play; it only ever does real work in
     // the rare case there's something to recover.
     resumeTapeAudioIfSuspended();
-
-    // USER-GESTURE RECOVERY FALLBACK (section 12) -- the broader
-    // version of the cassette-only check just above: audioRecoveryNeedsGesture
-    // is only ever set (by recoverLandfallAudio) when a PRIOR automatic
-    // recovery attempt (visibility/pageshow/focus/the watchdog) tried
-    // audioCtx.resume() and it was rejected outright -- exactly the
-    // "browser is refusing to resume anything until a genuine user
-    // gesture happens" case section 12 describes. When that's true, the
-    // player's own next real action IS that genuine gesture, so a full
-    // recovery attempt (not just the cassette-only one above) is worth
-    // retrying here. recoverLandfallAudio's own audioRecoveryInProgress
-    // guard already prevents this from overlapping with an automatic
-    // attempt that happens to be running at the same moment, and it
-    // clears the flag itself once resume() actually succeeds -- this
-    // never clears it unconditionally, so a genuinely still-broken
-    // environment keeps retrying on each subsequent action rather than
-    // silently giving up after one failed attempt.
-    if (audioRecoveryNeedsGesture || ambiencePlayBlocked) {
-      recoverLandfallAudio('user-gesture');
-    }
 
     // performEat() (and in principle other handlers) can legitimately
     // re-open a pendingChoice itself — e.g. re-showing the food list after
@@ -20347,14 +19252,8 @@
     printPersistentBlank();
     printPersistentLine('I never understood why.');
 
-    // Best-effort: succeeds immediately if the browser's autoplay
-    // policy allows it (e.g. this page already had some earlier
-    // interaction), so the ambience can genuinely "begin with the
-    // opening" as this feature asks. If it's blocked (the common case
-    // on a truly fresh load, with no gesture yet), both unlockAudio and
-    // playMarinaAmbience below are safe no-ops -- CONTINUE's own click
-    // handler retries both, a guaranteed real gesture, moments later.
-    unlockAudio();
+    // No audio is created or resumed here: nothing may play before the player's first interaction (see AUDIO LIFECYCLE). The gesture listeners installed at
+    // boot unlock it on the first tap; CONTINUE's own click handler starts the opening ambience a moment later, exactly as before.
     playMarinaAmbience(nightStart);
 
     optionsEl.innerHTML = '';
@@ -21159,10 +20058,13 @@
     diagEl.style.cssText = 'position:fixed;left:0;right:0;top:env(safe-area-inset-top,0);margin:0;padding:4px 6px;z-index:99999;pointer-events:none;font:10px/1.25 monospace;color:#9f9;background:rgba(0,0,0,0.78);white-space:pre';
     document.body.appendChild(diagEl);
     setInterval(function () {
-      var head = 'ENGINE AUDIO  ctx:' + (audioCtx ? audioCtx.state : 'none') + '  volIgnored:' + (elementVolumeIsIgnored() ? 'Y' : 'N') + '  iOS:' + (isAppleTouchDevice() ? 'Y' : 'N') + '  phase:' + engineAudioPhase + '  key:' + engineActiveKey + '  loc:' + (GAME ? GAME.crew.location : '?');
-      diagEl.textContent = head + '\n' + engineAudio.diagLines().join('\n');
+      var head = 'LOOPS  ctx:' + (audioCtx ? audioCtx.state : 'none') + '  volIgnored:' + (elementVolumeIsIgnored() ? 'Y' : 'N') + '  iOS:' + (isAppleTouchDevice() ? 'Y' : 'N') + '  phase:' + engineAudioPhase + '  key:' + engineActiveKey + '  loc:' + (GAME ? GAME.crew.location : '?');
+      diagEl.textContent = head + '\n' + ambienceChannelPairs().map(function (pair) { return pair[1].voice.diag(); }).concat(['ENGINE'], engineAudio.diagLines()).join('\n');
     }, 250);
   }
+
+  installAudioGestureListeners(); // sound unlocks on the player's first tap, click or key -- never before
+  updateSoundLabel();             // the game opens with SOUND OFF
 
   var devResetRequested = new URLSearchParams(window.location.search).get('reset') === '1';
   if (!devResetRequested || !performDevReset()) {
