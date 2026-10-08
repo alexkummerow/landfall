@@ -19965,6 +19965,7 @@
               log(s, typeof step.text === 'function' ? step.text(s) : step.text);
               flushNewLogEntries(s);
             }
+            if (step.show) { printBlank(); printLine(step.show); scrollToBottom(); } // on the screen, not in the log: the next CONTINUE clears it
             s.departure.stageIndex++;
             if (step.afterLog) step.afterLog(s);
           };
@@ -20010,6 +20011,8 @@
   // normal gameplay opens up. Each step is a plain state change (like EAT or
   // REPAIR) — it does not touch the clock; real time is passing throughout
   // exactly as it always does (see PROJECT.md).
+  var DEPARTURE_LINE_CLEAR = 'The breakwater slips behind me. We’re clear of the marina now.';
+  var DEPARTURE_LINE_WIND = 'There’s enough wind to sail. I should hoist the sails and shut down the engine to conserve fuel.';
   var DEPARTURE_STEPS = [
     // Audio-synced (see playAudio/runAudioSyncedAction, wired in the
     // 'departure-step' case above): UNTYING LINES. .. … lasts exactly as
@@ -20044,21 +20047,21 @@
       label: 'LEAVING THE MARINA',
       workingLabel: 'Leaving the marina…',
       auto: true, // no button: it begins on its own the moment the engine is running (see departureAutoKick)
-      duration: 10,
+      duration: 15,
       // onStart fires immediately: (A) lifts ambienceSuppressed and
       // starts the exterior SEA and WIND fade-ins, explicitly over 2
-      // seconds (the FIRST 2 of this step's own 10-second duration --
+      // seconds (the FIRST 2 of this step's own 15-second duration --
       // applySeaAudioDesiredState's/applyWindAudioDesiredState's own
       // crossfadeSecondsOverride is exactly this mechanism, already
       // used by the companionway transition for its own shorter
       // override); they then naturally keep playing at full volume for
-      // the remaining 8 seconds with no further code needed, same as
+      // the remaining 13 seconds with no further code needed, same as
       // any other healthy channel. (RAIN is untouched here -- it's
       // already correctly silent in clear departure conditions, and
       // updateRainAudioForState's own normal per-render sync picks it
       // up like any other state-driven change if conditions ever
       // call for it.) (B) fades the marina ambience out over the FULL
-      // 10 seconds -- fadeMarinaAmbienceOut's own notes cover why an
+      // 15 seconds -- fadeMarinaAmbienceOut's own notes cover why an
       // already-ended layer (e.g. a short marina_sound.mp3 that
       // finished on its own during the earlier steps) is correctly
       // left alone rather than restarted. (C) the engine is untouched
@@ -20067,14 +20070,18 @@
         s.departure.ambienceSuppressed = false;
         applySeaAudioDesiredState(getSeaAudioState(s), 2);
         applyWindAudioDesiredState(getWindAudioState(s), 2);
-        fadeMarinaAmbienceOut(10);
+        fadeMarinaAmbienceOut(15); // the full length of this step (its duration, above)
       },
-      text: 'The breakwater slips behind me. We’re clear of the marina now.',
+      show: DEPARTURE_LINE_CLEAR, // shown on the screen (not logged) until CONTINUE is chosen
     },
-    // Two more lines, each behind its own CONTINUE (instant: no beat). Every line is logged and stays on the screen; after the last one the normal
-    // controls appear -- the scripted sequence ends here: sails stay furled, the engine stays running, and everything from this point on is a player decision.
-    { label: 'CONTINUE', instant: true, text: 'The voyage has begun.' },
-    { label: 'CONTINUE', instant: true, text: 'There’s enough wind to sail. I should hoist the sails and shut down the engine to conserve fuel.' },
+    // The closing beats, each behind a CONTINUE (instant: no beat). `show` is a line put on the screen that is NOT logged: it disappears when CONTINUE is chosen
+    // (every choice clears the screen's temporary text). `text` is the logged moment. `reshow` is the line that is on the screen while the step's CONTINUE waits,
+    // put back after a reload (renderReturn). After the last CONTINUE the normal controls appear -- the scripted sequence ends here: sails stay furled, the
+    // engine stays running, and everything from this point on is a player decision.
+    //   "The breakwater..." (shown) -> CONTINUE -> it disappears; "The voyage has begun." is logged, and the next line is shown ->
+    //   "There's enough wind..." (shown) -> CONTINUE -> it disappears (never logged); the normal controls.
+    { label: 'CONTINUE', instant: true, reshow: DEPARTURE_LINE_CLEAR, text: 'The voyage has begun.', show: DEPARTURE_LINE_WIND },
+    { label: 'CONTINUE', instant: true, reshow: DEPARTURE_LINE_WIND },
   ];
 
   // The automatic step ("Leaving the marina...") has no button: it starts by itself once the step before it has finished -- as soon as the options panel is
@@ -20235,6 +20242,8 @@
     }
     state.log.forEach(printLogEntry);
     printedCount = state.log.length;
+    var depNow = state.departure && DEPARTURE_STEPS[state.departure.stageIndex];
+    if (depNow && depNow.reshow) { printBlank(); printLine(depNow.reshow); } // a reload while a closing departure line is waiting for its CONTINUE: it is put back (it was never in the log)
     if (state.voyageEnd && state.voyageEnd.phase === 'ended') printVoyageEnded(state); // reloaded after the ending: the same VOYAGE ENDED screen
     renderOptions(state);
     scrollToBottom();
