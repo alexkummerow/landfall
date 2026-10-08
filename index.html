@@ -1053,7 +1053,17 @@
   /* ============================================================
      1. CONFIG & CONSTANTS
      ============================================================ */
-  var STORAGE_KEY = 'kauaiVoyage_v1';
+  // TEST SCENARIOS (see that section, above boot): with ?scenario=... in the address this tab uses a different save key, so the real
+  // voyage's save is never read, written or cleared. SCENARIO_NAME is null in a normal load; ?scenario with no name means 'list'.
+  var SCENARIO_NAME = (function () {
+    try {
+      var v = new URLSearchParams(window.location.search).get('scenario');
+      if (v === null) return null;
+      v = String(v).toLowerCase().replace(/[^a-z0-9-]/g, '');
+      return v || 'list';
+    } catch (e) { return null; }
+  })();
+  var STORAGE_KEY = SCENARIO_NAME ? 'kauaiVoyage_TEST_' + SCENARIO_NAME : 'kauaiVoyage_v1';
   var TICK_MINUTES = 1;               // simulation resolution, in simulated minutes -- was 10; every per-tick rate/probability elsewhere is expressed as an hourly rate times (TICK_MINUTES/60), or converted via tickProbability() below, so it scales correctly with this value. A few things (driftWeather's random-walk magnitudes, computeHeading's wobble/drift-wander) are scaled by TICK_MINUTES/10 directly since they were tuned by feel for the old 10-minute step, not derived from a stated hourly rate.
   var MAX_CATCHUP_TICKS = 200000;     // safety cap (~139 days) for offline catch-up -- scaled 10x alongside TICK_MINUTES to preserve the same real-world catch-up window per advanceSimulation call
   var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
@@ -20421,8 +20431,136 @@
     }
   }
 
+  /* ============================================================
+     TEST SCENARIOS (?scenario=NAME)
+     ------------------------------------------------------------
+     A developer tool for trying one specific moment of the voyage -- the harbor capture, say -- without sailing there first, and
+     WITHOUT ever touching the real save. When the page address contains ?scenario=..., STORAGE_KEY (see CONFIG, top of this file)
+     is a different key ('kauaiVoyage_TEST_<name>'), so everything that loads, saves, or restarts in that tab reads and writes only
+     that test copy: the real voyage's key is never read, written, or cleared. ?reset=1 is ignored in this mode (see the very end of
+     the file), because its clean-up wipes ALL browser storage for the site, the real save included.
+       ?scenario=list               a tappable list of the scenarios (also what a mistyped name shows)
+       ?scenario=harbor             starts that scenario FRESH every time the page is opened
+       ?scenario=harbor&resume=1    carries on from the test copy instead (e.g. to try reloading part-way through)
+     To add a scenario: add one entry to SCENARIOS below. Build on scenarioBase(), place the boat, and change only what that moment
+     needs; the real game rules do everything else. The numbers a scenario invents (days aboard, miles sailed) are placeholders.
+     ============================================================ */
+  function scenarioBase(days) {
+    var s = newGameState(), now = Date.now(), V = Math.round(days * 1440);
+    s.meta.departedAt = now - V * 60000;           // the game clock is the real clock: departedAt + voyageMinutes == now
+    s.meta.lastTick = now;
+    s.meta.voyageMinutes = V;
+    s.meta.leftoverMinutes = 0;
+    s.departure.stageIndex = DEPARTURE_STEPS.length; // the opening sequence is over
+    s.departure.ambienceSuppressed = false;
+    s.crew.lastDrankAt = V - 90;                    // (newGameState's -120 would read as 'no drink for days' this late in a voyage)
+    s.crew.lastAteAt = V - 90;
+    s.boat.nextFailureAt = V + 4320;                // no random breakdown for the first three days of a scenario
+    s.vesselLog.currentDay = newVesselLogDay(1, vesselLogMonthDayLabel(s.meta.departedAt), 0);
+    return s;
+  }
+  // The chart's track: the route's waypoints up to `lastWaypoint`, then wherever the boat is.
+  function scenarioTrack(s, lastWaypoint) {
+    var t = [];
+    for (var i = 0; i <= lastWaypoint; i++) t.push([WAYPOINTS[i].lon, WAYPOINTS[i].lat]);
+    t.push([s.nav.lon, s.nav.lat]);
+    s.nav.track = t;
+    s.nav.trackLastSampleDistanceTraveled = s.nav.distanceTraveled;
+  }
+  function scenarioPoint(s, lat, lon, aimLat, aimLon) {
+    var n = s.nav, b = bearingBetween(lat, lon, aimLat, aimLon);
+    n.lat = lat; n.lon = lon; n.heading = b; n.lastTrimHeading = b;
+    n.intendedCourse = bearingBetween(lat, lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    s.weather.temperatureF = fallbackTemperatureF(s);  // (newGameState set this for Seattle)
+    s.boat.cabinTemperatureF = s.weather.temperatureF;
+    return b;
+  }
+  // Open Pacific, autopilot holding the heading toward (aimLat, aimLon).
+  function scenarioOpenWater(s, lat, lon, aimLat, aimLon, nmSailed, lastWaypoint) {
+    var n = s.nav, b = scenarioPoint(s, lat, lon, aimLat, aimLon);
+    n.waypointIndex = OPEN_WATER_WAYPOINT_INDEX;
+    n.setCourse = Math.round(b); n.autopilotHeading = n.setCourse;
+    n.distanceTraveled = nmSailed;
+    s.flags.lastMilestone = Math.floor(nmSailed / 300);
+    s.flags.breakwaterObservationShown = true; s.flags.pacificObservationShown = true;
+    s.flags.realWindUnlocked = true; s.flags.weatherSoftwareUpdated = true;
+    s.weather.windDirection = 70; s.weather.windSpeed = 14; s.weather.seaState = 3; s.weather.condition = 'clear';
+    s.boat.autopilotOn = true;
+    scenarioTrack(s, lastWaypoint);
+  }
+  function scenarioHarbor(engineRunning) {
+    var s = scenarioBase(13.5);
+    var r = NAV_GEO.capture.ring, A = r[0], B = r[1], C = r[2]; // the funnel is the triangle A-B-C; its east edge runs C -> A
+    var mid = { lat: A[1] + 0.68 * (C[1] - A[1]), lon: A[0] + 0.68 * (C[0] - A[0]) };
+    var out = destinationPoint(mid.lat, mid.lon, 90, 0.12);       // a little way due east of that edge, i.e. out to sea
+    scenarioOpenWater(s, out.lat, out.lon, (A[1] + B[1] + C[1]) / 3, (A[0] + B[0] + C[0]) / 3, 2480, 13);
+    s.flags.landOnHorizonShown = true;
+    s.boat.sailConfig = engineRunning ? 'furled' : 'full';
+    s.boat.engineOn = !!engineRunning;
+    s.boat.engineRunningMinutes = engineRunning ? 40 : 0;
+    s.boat.fuelGallons = 12;
+    return s;
+  }
+  function scenarioCape() {
+    var s = scenarioBase(1.4), wp = WAYPOINTS[11];
+    var p = destinationPoint(wp.lat, wp.lon, bearingBetween(wp.lat, wp.lon, WAYPOINTS[10].lat, WAYPOINTS[10].lon), 0.2); // 0.2 nm short of Cape Flattery
+    var b = scenarioPoint(s, p.lat, p.lon, wp.lat, wp.lon);
+    s.nav.waypointIndex = 11;
+    s.nav.intendedCourse = b;
+    s.nav.distanceTraveled = 150;
+    s.flags.breakwaterObservationShown = true;
+    s.boat.engineOn = true; s.boat.sailConfig = 'furled'; s.boat.engineRunningMinutes = 60; s.boat.fuelGallons = 16;
+    scenarioTrack(s, 10);
+    return s;
+  }
+  function scenarioRescue() {
+    var s = scenarioBase(7), w = WAYPOINTS[13];
+    scenarioOpenWater(s, w.lat, w.lon, FINAL_DEST.lat, FINAL_DEST.lon, 1500, 13);
+    s.crew.lastDrankAt = s.meta.voyageMinutes - RESCUE_WATER_HOURS * 60 + 3; // three minutes short of the rescue
+    s.crew.hoursSinceWater = RESCUE_WATER_HOURS - 0.05;
+    s.boat.sailConfig = 'full';
+    return s;
+  }
+  var SCENARIOS = {
+    'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, including START ENGINE.', build: function () { return scenarioHarbor(false); } },
+    'harbor-engine': { about: 'The same, with the engine already running, so the arrival skips START ENGINE.', build: function () { return scenarioHarbor(true); } },
+    'cape': { about: 'Just short of Cape Flattery, engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
+    'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests CALL FOR RESCUE and the ending.', build: scenarioRescue },
+  };
+  function scenarioShowMenu(requested) {
+    var ov = document.createElement('div');
+    ov.id = 'scenario-menu';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:200;overflow-y:auto;background:var(--bg);color:var(--phosphor);font-family:var(--font-mono);font-size:0.95rem;line-height:1.55;padding:calc(1.2rem + env(safe-area-inset-top)) 1.2rem calc(1.2rem + env(safe-area-inset-bottom));';
+    var box = document.createElement('div');
+    box.style.cssText = 'max-width:640px;margin:0 auto;';
+    function add(text, css) { var p = document.createElement('p'); p.textContent = text; p.style.cssText = 'margin:0 0 0.6rem;' + (css || ''); box.appendChild(p); return p; }
+    function link(text, href) { var a = document.createElement('a'); a.textContent = text; a.href = href; a.style.cssText = 'display:block;margin:1rem 0 0.1rem;color:var(--phosphor-bright);letter-spacing:0.06em;'; box.appendChild(a); }
+    add('TEST SCENARIOS', 'letter-spacing:0.08em;margin-bottom:0.9rem;');
+    if (requested && requested !== 'list') add('THERE IS NO SCENARIO CALLED “' + requested.toUpperCase() + '”.', 'color:var(--amber);');
+    Object.keys(SCENARIOS).forEach(function (key) { link(key.toUpperCase(), '?scenario=' + key); add(SCENARIOS[key].about); });
+    add('Each one starts fresh every time you open it, on its own separate save. Your real voyage is never touched.', 'margin-top:1.4rem;color:var(--phosphor-dim);');
+    link('RETURN TO MY VOYAGE', window.location.pathname);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    document.title = 'TEST SCENARIOS';
+  }
+  function scenarioBanner(name) {
+    var b = document.createElement('div');
+    b.id = 'scenario-banner';
+    b.textContent = 'TEST SCENARIO · ' + name.toUpperCase() + ' · NOT YOUR REAL VOYAGE';
+    b.style.cssText = 'flex-shrink:0;text-align:center;font-size:0.62rem;letter-spacing:0.1em;padding:0.18rem 0.5rem;background:var(--amber);color:var(--bg);';
+    var crt = document.getElementById('crt');
+    crt.insertBefore(b, document.getElementById('topbar'));
+    document.title = 'TEST · ' + name.toUpperCase();
+  }
+
   function boot() {
     var saved = loadGameState();
+    if (SCENARIO_NAME) { // a test scenario: seeded fresh on every open (this key only), unless &resume=1 asks to carry on from the test copy
+      scenarioBanner(SCENARIO_NAME);
+      var resume = new URLSearchParams(window.location.search).get('resume') === '1';
+      if (!(resume && saved)) { saved = SCENARIOS[SCENARIO_NAME].build(); saveGameState(saved); }
+    }
     if (!saved) {
       renderIntroStory();
       updateClock();
@@ -20701,8 +20839,10 @@
   installAudioGestureListeners(); // sound unlocks on the player's first tap, click or key -- never before
   updateSoundLabel();             // the game opens with SOUND OFF
 
-  var devResetRequested = new URLSearchParams(window.location.search).get('reset') === '1';
-  if (!devResetRequested || !performDevReset()) {
+  var devResetRequested = !SCENARIO_NAME && new URLSearchParams(window.location.search).get('reset') === '1'; // never in scenario mode: it wipes ALL site storage, the real save included
+  if (SCENARIO_NAME && !SCENARIOS[SCENARIO_NAME]) {
+    scenarioShowMenu(SCENARIO_NAME); // the list (or a mistyped name): no game state is created or saved at all
+  } else if (!devResetRequested || !performDevReset()) {
     boot();
     setInterval(updateClock, 30000);
   }
