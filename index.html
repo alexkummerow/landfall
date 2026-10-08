@@ -1310,7 +1310,7 @@
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL FOR RESCUE is all that is offered) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
-      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 6, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 7, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -2127,20 +2127,22 @@
      The arrival, in order (every message is a working label with animated dots; every event is also written to the log, stamped with the
      moment it really happens -- the world has stopped, so log() takes the real clock for as long as the finale runs):
        ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> FURL SAILS (only when sails are up; the game's own lower-sails sequence and audio) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (25 s)
-       -> LINE UP WITH SLIP -> ENGINE OFF -> COASTING IN (10 s; CODA begins, from its start, and over the whole 10 s the
-       sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE -> four lines, each with CONTINUE (each shown with the earlier ones still above it)
-       -> the screen fades out to the game's charcoal (3 s) and the ashes scene fades in (3 s): centered dots, then SCATTER ASHES, then the ashes (the length of the sound, at
-       least 10 s), the ashes text fading out (3 s) -> the screen rests on the game's charcoal (3 s) -> LANDFALL fades in (5 s) and holds (10 s) -> the
+       -> LINE UP WITH SLIP -> ENGINE OFF (which goes straight into COASTING IN, 15 s: the engine's shut-down sound plays at its start; CODA begins, from its start, and over the whole 15 s the
+       sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE -> five lines in four blocks, each block with CONTINUE (the first block is two lines with a beat between them; each block is shown with the earlier ones still above it)
+       -> the screen fades out to the game's charcoal (3 s) and the ashes scene fades in (3 s): centered dots, then SCATTER ASHES, then the ashes (exactly the length of the sound), the ashes text
+       fading out over the last 3 s of it -> the screen rests on the game's charcoal (3 s) -> LANDFALL fades in (5 s) and holds (10 s) -> the
        summary. CODA plays all the way through, never faded, and goes round again; with the marina, the birds and the wind it keeps sounding through the fade,
        the title and the summary until NEW VOYAGE.
      ====================================================================== */
   var FINALE_BREAKWATER = 'The breakwater slips past. After so much open water, the harbor feels close around me.';
   var FINALE_REFLECTIONS = [
-    'Strange to stand here and imagine her here too. To imagine all of us here together, in a life that feels almost familiar.',
+    'Strange to stand here and imagine her here too.',                                      // (the first block's first line ... a beat ...)
+    'To imagine all of us here together, in a life that feels almost familiar now.',        // (... and its second line, with CONTINUE)
     'I remember so little of her. But I’ve never felt closer.',
     'Dad left me one last thing to do.',
     'Take her home.',
   ];
+  var FINALE_BEAT_SECS = 2.5; // the pause between the first block's two lines
   var FINALE_STEPS = [
     { id: 'enter',    kind: 'auto',   label: 'ENTERING NĀWILIWILI HARBOR', secs: 10, done: function (s) { finaleLog(s, 'Entered Nāwiliwili Harbor.'); } },
     { id: 'above',    kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },              // only while the player is below deck; the usual GOING ABOVE does the work
@@ -2149,39 +2151,40 @@
     { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 25, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
     { id: 'lineup',   kind: 'action', option: { label: 'LINE UP WITH SLIP', action: 'finale-lineup' } },
     { id: 'stop',     kind: 'action', option: { label: 'ENGINE OFF', action: 'finale-engine-stop' } },
-    { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 10, coda: true, handoff: true, done: function (s) { finaleEndHandoff(s); } }, // CODA begins, and the sea fades out as the marina (and, by day, the birds) fade in, over the whole 10 s
+    { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 15, coda: true, handoff: true, done: function (s) { finaleEndHandoff(s); } }, // begins the moment ENGINE OFF is tapped: the engine's shut-down sound, CODA from its start, and the sea fading out as the marina (and, by day, the birds) fade in, over the whole 15 s
     { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
     { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
-    { id: 'reflect1', kind: 'action', read: 1, option: { label: 'CONTINUE', action: 'finale-continue' } },
-    { id: 'reflect2', kind: 'action', read: 2, option: { label: 'CONTINUE', action: 'finale-continue' } },
-    { id: 'reflect3', kind: 'action', read: 3, option: { label: 'CONTINUE', action: 'finale-continue' } },
-    { id: 'reflect4', kind: 'action', read: 4, option: { label: 'CONTINUE', action: 'finale-continue' } },
-    { id: 'stage',      kind: 'ui', read: 4, keep: true },   // the four lines stay while the screen fades out to charcoal (3 s); then the ashes scene fades in (3 s): centered animated dots
+    { id: 'beat',     kind: 'beat',   secs: FINALE_BEAT_SECS, read: 1 },  // the first line alone, and a beat ...
+    { id: 'reflect1', kind: 'action', read: 2, option: { label: 'CONTINUE', action: 'finale-continue' } },  // ... then the second joins it, with CONTINUE
+    { id: 'reflect2', kind: 'action', read: 3, option: { label: 'CONTINUE', action: 'finale-continue' } },
+    { id: 'reflect3', kind: 'action', read: 4, option: { label: 'CONTINUE', action: 'finale-continue' } },
+    { id: 'reflect4', kind: 'action', read: 5, option: { label: 'CONTINUE', action: 'finale-continue' } },
+    { id: 'stage',      kind: 'ui', read: 5, keep: true },   // the four lines stay while the screen fades out to charcoal (3 s); then the ashes scene fades in (3 s): centered animated dots
     { id: 'scatter',    kind: 'ui' },   // ... then SCATTER ASHES, centered
-    { id: 'scattering', kind: 'ui' },   // ... the ashes (sound + at least 10 s)
-    { id: 'ashesout',   kind: 'ui' },   // ... the ashes text fading out (3 s)
+    { id: 'scattering', kind: 'ui' },   // ... the ashes: exactly as long as the sound; the text fades out over its last 3 s
     { id: 'title',      kind: 'ui' },   // black, LANDFALL
     { id: 'summary',    kind: 'ui' },
   ];
-  var FINALE_VERSION = 6; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
+  var FINALE_VERSION = 7; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
   var FINALE_OLD_IDS = {
     1: ['enter', 'start', 'making', 'approach', 'slowing', 'lining', 'stop', 'secure', 'ashore', 'ashes', 'fade', 'title', 'summary'],
     2: ['enter', 'above', 'start', 'lining', 'stop', 'coast', 'secure', 'ashore', 'ashes', 'wind', 'home', 'title', 'summary'],
     3: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'stage', 'scatter', 'scattering', 'home', 'title', 'summary'],
     4: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'stage', 'scatter', 'scattering', 'home', 'title', 'summary'],
     5: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
+    6: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
   };
-  var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title' }; // ('home' was "She's home.", now gone)
+  var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title', ashesout: 'title' }; // ('home' was "She's home.", now gone; 'ashesout', the text fading out after the ashes, is now the last 3 s of the ashes themselves)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
   var FINALE_FADE_SECS = 3, FINALE_TITLE_FADE_SECS = 5, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions (black over FADE secs, then LANDFALL up over TITLE_FADE secs)
-  var FINALE_STAGE_OUT_SECS = 3, FINALE_STAGE_IN_SECS = 3, FINALE_ASHES_MIN_SECS = 10, FINALE_TEXT_FADE_SECS = 3; // (the screen fades out over STAGE_OUT, the ashes scene fades in over STAGE_IN; the ashes text fades out over TEXT_FADE)
+  var FINALE_STAGE_OUT_SECS = 3, FINALE_STAGE_IN_SECS = 3, FINALE_ASHES_FALLBACK_SECS = 10, FINALE_TEXT_FADE_SECS = 3; // (the screen fades out over STAGE_OUT, the ashes scene fades in over STAGE_IN; the ashes last as long as their sound -- FALLBACK_SECS if it cannot play -- and their text fades out over the last TEXT_FADE)
   var FINALE_CODA_LOOPS = true; // CODA plays all the way through and then goes round again until NEW VOYAGE (false: it simply stops at its end)
   // The arrival's own sounds. Each action lasts as long as its sound really plays; if the sound is missing or cannot play, the action takes
   // `fallback` seconds instead, so the sequence never waits on a file that is not there. (Reused: board.mp3, the boarding sound of the departure.)
   var FINALE_SOUNDS = {
     secure: { path: 'audio/marina/lines.mp3',            volume: 0.6, fallback: 4 },
     ashore: { path: 'audio/marina/board.mp3',            volume: 0.6, fallback: 5 },
-    ashes:  { path: 'audio/marina/scattering_ashes.mp3', volume: 0.6, fallback: FINALE_ASHES_MIN_SECS },
+    ashes:  { path: 'audio/marina/scattering_ashes.mp3', volume: 0.6, fallback: FINALE_ASHES_FALLBACK_SECS },
   };
   var FINALE_BIRDS_PATH = 'audio/marina/hawaii_birds.mp3', FINALE_BIRDS_LEVEL = 0.35; // the same level the opening's Pacific Northwest birds play at
   var FINALE_CODA_PATH = 'audio/saloon/Coda.mp3';
@@ -2240,7 +2243,7 @@
     if (prev === 'lineup') finalePlaceAtDock(state);
     if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'summary') f.phase = 'done';
     var next = FINALE_STEPS[f.step];
-    if (next && next.read) { if (next.keep) finaleReadCount = 0; finaleShowReading(next.read); } // shown in the same frame as its CONTINUE (and, with `keep`, set down again so they are still there while the screen fades out over them)
+    if (next && next.read) { if (next.keep) finaleReadCount = 0; finaleShowReading(next.read, prev === 'beat'); } // shown in the same frame as its CONTINUE (and, with `keep`, set down again so they are still there while the screen fades out over them)
     saveGameState(state);
     setTimeout(function () { finaleRender(state); }, 40);
   }
@@ -2272,10 +2275,11 @@
   }
   // The reflections are displayed on the terminal screen (not logged): the first, and then the second with the first still above it. Choosing CONTINUE
   // clears the screen's last text, as every choice does, so the earlier statements are set down again in the same frame; after a reload the same is shown.
-  function finaleShowReading(n) {
+  function finaleShowReading(n, appendOnly) { // appendOnly: the screen was NOT cleared since line n-1 was set down (the beat), so only the new line is added
     if (finaleReadCount === n) return;
+    var from = appendOnly && finaleReadCount === n - 1 ? n : 1;
     finaleReadCount = n;
-    for (var i = 1; i <= n; i++) { printBlank(); printLine(FINALE_REFLECTIONS[i - 1]); } // the second is shown with the first still above it (choosing CONTINUE cleared the screen, so the earlier ones are set down again)
+    for (var i = from; i <= n; i++) { printBlank(); printLine(FINALE_REFLECTIONS[i - 1]); } // the second is shown with the first still above it (choosing CONTINUE cleared the screen, so the earlier ones are set down again)
     scrollToBottom();
   }
   function finaleRender(state) {
@@ -2292,23 +2296,32 @@
       if (st.coda) finaleBeginCoda(state); // CODA begins with the coasting, from its start
       if (st.handoff) finaleBeginHandoff(state, remaining); // ... and so does the crossfade from the sea to the marina
       runShortAction(state, { label: st.label, duration: remaining, action: function (s) { finaleRendering = null; if (st.done) st.done(s); finaleAdvance(s); } });
+    } else if (st.kind === 'beat') { // a pause with something on the screen and nothing to press
+      if (st.read) finaleShowReading(st.read);
+      var beatLeft = st.secs - (Date.now() - f.stepAt) / 1000;
+      if (beatLeft <= 0.05) { finaleAdvance(state); return; }
+      finaleSchedule(state, beatLeft + 0.02);
     } else if (st.kind === 'action') {
       if (st.read) finaleShowReading(st.read);
       if (!uiBusy) renderOptions(state);
+      if (st.read) scrollToBottom(); // (the CONTINUE bar may have just appeared under the text: keep the last line clear of it)
     } else finaleUi(state, st.id);
   }
   // Plays one of the arrival sounds and calls onEnded exactly once: when it ends, or -- if it cannot play at all -- once its fallback time has
   // passed. Always returns null (a caller's own file-error watchdog would end the step the instant a missing file errors; this handles that itself).
   function finalePlaySound(key, onEnded) {
     var S = FINALE_SOUNDS[key], t0 = Date.now(), done = false, guard = null;
+    S.t0 = t0; S.el = null; S.fb = false; // (S.el / S.fb / S.t0: what finaleAshesLeft reads to know how much of the sound is left)
     function finish() { if (done) return; done = true; if (guard) clearTimeout(guard); onEnded(); }
-    function finishAfterFallback() { var left = S.fallback * 1000 - (Date.now() - t0); if (left > 50) setTimeout(finish, left); else finish(); }
+    function finishAfterFallback() { S.fb = true; var left = S.fallback * 1000 - (Date.now() - t0); if (left > 50) setTimeout(finish, left); else finish(); }
     guard = setTimeout(finish, Math.max(45, S.fallback + 40) * 1000); // whatever happens, the sequence moves on
-    if (!audioUnlocked) { setTimeout(finish, S.fallback * 1000); return null; }
+    if (!audioUnlocked) { S.fb = true; setTimeout(finish, S.fallback * 1000); return null; }
     try {
       var el = createGameAudio(S.path);
+      S.el = el;
       finaleSoundEls.push(el);
       el.volume = S.volume;
+      el.addEventListener('loadedmetadata', function () { if (isFinite(el.duration) && el.duration > 0 && !done) { clearTimeout(guard); guard = setTimeout(finish, (Math.max(el.duration, S.fallback) + 20) * 1000); } }); // a long sound is never cut off by the safety net
       el.addEventListener('ended', finish);
       el.addEventListener('error', finishAfterFallback);
       var p = el.play();
@@ -2328,37 +2341,41 @@
     var frames = ['.', '..', '...'], i = 0; E.sd.textContent = frames[0];
     finaleDotsTimer = setInterval(function () { i = (i + 1) % frames.length; E.sd.textContent = frames[i]; }, DOT_FRAME_MS);
   }
+  // How many seconds of the ashes sound are left (null while its length is not yet known). If it could not play, the fallback length counts down instead.
+  function finaleAshesLeft() {
+    var S = FINALE_SOUNDS.ashes, el = S.el;
+    if (el && !S.fb && isFinite(el.duration) && el.duration > 0) return Math.max(0, el.duration - el.currentTime);
+    if (S.fb || !el) return Math.max(0, S.fallback - (Date.now() - (S.t0 || Date.now())) / 1000);
+    return null;
+  }
   function finaleStageUi(state, id, E, el) {
     E.stage.hidden = false;
-    finaleShow(E.stage, 'show', id !== 'stage' || el > 1); // the screen fades out to the game's charcoal (the stage is charcoal and fades in over it, the four lines still under it)
+    finaleShow(E.stage, 'show', id !== 'stage' || el > 1); // the screen fades out to the game's charcoal (the stage is charcoal and fades in over it, the lines still under it)
     // ... and then the ashes scene fades in: the centered dots, over FINALE_STAGE_IN_SECS (a reload partway shows it as it would be).
     if (id !== 'stage' || el >= FINALE_STAGE_OUT_SECS) finaleShow(E.stage, 'in', id !== 'stage' || el > FINALE_STAGE_OUT_SECS + 1);
-    // 'ashesout' is the ashes text (the label and its dots) fading out, and nothing after it: the screen is charcoal until LANDFALL.
-    var fadingOut = id === 'ashesout';
-    var label = id === 'scattering' || fadingOut, dots = id === 'stage' || id === 'scattering' || fadingOut, btn = id === 'scatter';
+    var label = id === 'scattering', dots = id === 'stage' || id === 'scattering', btn = id === 'scatter';
     E.sl.textContent = label ? actionLabelText('SCATTERING ASHES') : ''; E.sl.hidden = !label;
     E.sb.hidden = !btn;
-    if (!fadingOut) { E.sl.classList.remove('fadeout'); E.sd.classList.remove('fadeout'); }
+    var left = null, fading = false;
+    if (id === 'scattering') left = finaleAshesLeft();
+    fading = left != null && left <= FINALE_TEXT_FADE_SECS + 0.05;
+    if (!fading) { E.sl.classList.remove('fadeout'); E.sd.classList.remove('fadeout'); }
     finaleStageDots(dots, E);
-    if (fadingOut) { finaleShow(E.sl, 'fadeout', el > 1); finaleShow(E.sd, 'fadeout', el > 1); }
+    if (fading) { finaleShow(E.sl, 'fadeout', left < FINALE_TEXT_FADE_SECS - 1); finaleShow(E.sd, 'fadeout', left < FINALE_TEXT_FADE_SECS - 1); } // the ashes text going out over the last FINALE_TEXT_FADE_SECS of the sound
     if (id === 'stage') {
       var stageEnd = FINALE_STAGE_OUT_SECS + FINALE_STAGE_IN_SECS; // out (3 s), in (3 s)
       if (el >= stageEnd) { finaleAdvance(state); return; }
       finaleSchedule(state, (el < FINALE_STAGE_OUT_SECS ? FINALE_STAGE_OUT_SECS - el : stageEnd - el) + 0.05);
-    } else if (id === 'scattering') { // the sound has to finish AND at least FINALE_ASHES_MIN_SECS must have passed
+    } else if (id === 'scattering') { // exactly as long as the sound (its end is what advances); the text fades out over its last 3 s
       var f = state.finale, tok = f.step + ':' + f.stepAt;
       if (finaleAshesToken !== tok) { finaleAshesToken = tok; finaleAshesDone = false; finalePlaySound('ashes', function () { finaleAshesDone = true; if (GAME && GAME.finale && GAME.finale.phase !== 'none') finaleRender(GAME); }); } // (a reload: no tap, the sound may be refused -- then the fallback time applies)
-      var left = FINALE_ASHES_MIN_SECS - el;
-      if (finaleAshesDone && left <= 0) { finaleAdvance(state); return; }
-      finaleSchedule(state, left > 0 ? left + 0.05 : 1);
-    } else if (id === 'ashesout') {
-      if (el >= FINALE_TEXT_FADE_SECS) { finaleAdvance(state); return; }
-      finaleSchedule(state, FINALE_TEXT_FADE_SECS - el + 0.05);
+      if (finaleAshesDone) { finaleAdvance(state); return; }
+      finaleSchedule(state, left == null ? 0.5 : (fading ? Math.max(0.2, left) : left - FINALE_TEXT_FADE_SECS) + 0.03);
     } // 'scatter' waits for the tap
   }
   function finaleUi(state, id) {
     var f = state.finale, E = finaleEls(), el = (Date.now() - f.stepAt) / 1000;
-    if (id === 'stage' || id === 'scatter' || id === 'scattering' || id === 'ashesout') { finaleStageUi(state, id, E, el); return; }
+    if (id === 'stage' || id === 'scatter' || id === 'scattering') { finaleStageUi(state, id, E, el); return; }
     E.ov.hidden = false;
     if (id === 'title') { // the screen fades to black (3 s), LANDFALL fades in (5 s) and holds (10 s); CODA plays on, untouched
       finaleShow(E.ov, 'show', el > 1);
@@ -2497,7 +2514,7 @@
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
     if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
-    finaleRendering = null; finaleAmbienceFadeSecs = null; finaleSeaOff = false; finaleMarinaOn = false; finaleBirdsOn = false; finaleCodaTries = 0; finaleReadCount = 0; finaleAshesToken = null; finaleAshesDone = false;
+    finaleRendering = null; finaleAmbienceFadeSecs = null; finaleSeaOff = false; finaleMarinaOn = false; finaleBirdsOn = false; finaleCodaTries = 0; finaleReadCount = 0; finaleAshesToken = null; finaleAshesDone = false; FINALE_SOUNDS.ashes.el = null; FINALE_SOUNDS.ashes.fb = false;
     if (finaleDotsTimer) { clearInterval(finaleDotsTimer); finaleDotsTimer = null; }
     if (finaleCoda) { finaleCoda.stop(); finaleCoda = null; }
     finaleSoundEls.forEach(function (el) { try { el.pause(); } catch (e) {} }); finaleSoundEls = [];
@@ -19884,17 +19901,12 @@
           break;
         case 'finale-engine-stop':
           if (!finaleAtStep(state, 'stop')) break;
-          runAudioSyncedAction(state, {
-            label: 'STOPPING ENGINE',
-            watchdogMarginSeconds: 2,
-            playAudio: function (onEnded) { return beginEngineStopAudio(state.crew.location, onEnded); },
-            action: function (s) {
-              s.boat.engineOn = false; s.boat.speed = 0;
-              updateAudioForState(s);
-              finaleLog(s, 'Stopped the engine.');
-              finaleAdvance(s); // the coasting follows: CODA begins, and the sea fades out as the marina fades in (the wind goes on)
-            },
-          });
+          // ENGINE OFF goes straight into COASTING IN (no STOPPING ENGINE label): the engine's own shut-down sequence -- off.mp3, the running sound crossfading into it --
+          // starts inside this tap and plays at the beginning of the coasting; nothing waits for it. The coasting (15 s) brings CODA, and the sea fading out as the marina fades in.
+          state.boat.engineOn = false; state.boat.speed = 0;
+          beginEngineStopAudio(state.crew.location, null);
+          finaleLog(state, 'Stopped the engine.');
+          finaleAdvance(state);
           break;
         case 'finale-secure':
           if (!finaleAtStep(state, 'secure')) break;
