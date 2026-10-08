@@ -2128,13 +2128,13 @@
      real time that step began -- so a reload resumes the step with exactly the time that is left, never replays or skips one.
      The arrival, in order (every message is a working label with animated dots; every event is also written to the log, stamped with the
      moment it really happens -- the world has stopped, so log() takes the real clock for as long as the finale runs):
-       ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (20 s)
-       -> LINE UP WITH SLIP -> ENGINE OFF -> COASTING IN (5 s; CODA begins, from its start) -> [the underway loops stop, the marina and, unless it
-       is night, the Hawaii birds begin] -> SECURE LINES -> STEP ASHORE -> three lines, each with CONTINUE (each shown with the earlier ones still above it)
+       ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (25 s)
+       -> LINE UP WITH SLIP -> ENGINE OFF -> COASTING IN (10 s; CODA begins, from its start, and over the whole 10 s the
+       sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE -> three lines, each with CONTINUE (each shown with the earlier ones still above it)
        -> a full-screen view: centered dots, then SCATTER ASHES, then the ashes (the length of the sound, at least 10 s), the ashes text fading out (3 s),
        "She's home..." fading in (3 s) and held (10 s) -> the screen fades to the game's charcoal (3 s) -> LANDFALL fades in (5 s) and holds (10 s) -> the
-       summary. CODA plays all the way through, never faded, and goes round again; with the marina and the birds it keeps sounding through the fade, the
-       title and the summary until NEW VOYAGE.
+       summary. CODA plays all the way through, never faded, and goes round again; with the marina, the birds and the wind it keeps sounding through the fade,
+       the title and the summary until NEW VOYAGE.
      ====================================================================== */
   var FINALE_BREAKWATER = 'The breakwater slips past. After so much open water, the harbor feels close around me.';
   var FINALE_REFLECTIONS = [
@@ -2146,10 +2146,10 @@
     { id: 'enter',    kind: 'auto',   label: 'ENTERING NĀWILIWILI HARBOR', secs: 10, done: function (s) { finaleLog(s, 'Entered Nāwiliwili Harbor.'); } },
     { id: 'above',    kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },              // only while the player is below deck; the usual GOING ABOVE does the work
     { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } },    // skipped if the engine is already running
-    { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 20, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
+    { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 25, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
     { id: 'lineup',   kind: 'action', option: { label: 'LINE UP WITH SLIP', action: 'finale-lineup' } },
     { id: 'stop',     kind: 'action', option: { label: 'ENGINE OFF', action: 'finale-engine-stop' } },
-    { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 5, coda: true, done: function (s) { finaleHandoffToMarina(s); } },
+    { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 10, coda: true, handoff: true, done: function (s) { finaleEndHandoff(s); } }, // CODA begins, and the sea fades out as the marina (and, by day, the birds) fade in, over the whole 10 s
     { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
     { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
     { id: 'reflect1', kind: 'action', read: 1, option: { label: 'CONTINUE', action: 'finale-continue' } },
@@ -2284,6 +2284,7 @@
       if (remaining < 0.4) { if (st.done) st.done(state); finaleAdvance(state); return; }
       finaleRendering = token;
       if (st.coda) finaleBeginCoda(state); // CODA begins with the coasting, from its start
+      if (st.handoff) finaleBeginHandoff(state, remaining); // ... and so does the crossfade from the sea to the marina
       runShortAction(state, { label: st.label, duration: remaining, action: function (s) { finaleRendering = null; if (st.done) st.done(s); finaleAdvance(s); } });
     } else if (st.kind === 'action') {
       if (st.read) finaleShowReading(st.read);
@@ -2447,8 +2448,20 @@
     var f = state.finale;
     if (f.birds == null) { f.birds = getDaylightPhase(state) !== 'night'; saveGameState(state); }
   }
-  function finaleHandoffToMarina(state) { // the end of the coasting
-    state.departure.ambienceSuppressed = true; // the underway loops (sea, wind, rain, creaks) stop on their own crossfade
+  // The start of the coasting: the SEA fades out and the marina (and, unless it is night, the Hawaii birds) fade in, together, over the length of the coasting.
+  // The WIND (and any rain) is left exactly as it is and keeps going, layered under the marina and the birds, until NEW VOYAGE. While finaleAmbienceFadeSecs is
+  // set, the sea channels use it as their fade-out (setSeaChannelTrack); from the coasting on the sea stays off (finaleSeaSilenced, read by getSeaAudioState).
+  var finaleAmbienceFadeSecs = null, finaleSeaOff = false; // (finaleSeaOff: the coasting's handoff has begun -- set by it, not by the step alone, so the long fade is what starts the sea going)
+  function finaleSeaSilenced(state) { return !!(state && state.finale && state.finale.phase !== 'none' && (finaleSeaOff || state.finale.step > finaleStepIndex('coast'))); }
+  function finaleBeginHandoff(state, secs) {
+    secs = Math.max(0.5, secs);
+    finaleAmbienceFadeSecs = secs; finaleSeaOff = true;
+    finaleSampleBirds(state);
+    updateAudioForState(state); // the sea is now wanted off: it fades out over `secs`
+    finaleStartMarina(state, secs);
+  }
+  function finaleEndHandoff(state) { // the end of the coasting: the crossfade is complete; the sea stays off, the wind goes on
+    finaleAmbienceFadeSecs = null;
     finaleSampleBirds(state);
     updateAudioForState(state);
     finaleStartMarina(state);
@@ -2466,21 +2479,22 @@
   var finaleMarinaVoice = null, finaleBirdsVoice = null; // created on first use: this code is read before the loop engine is initialised
   function finaleMarina() { return finaleMarinaVoice || (finaleMarinaVoice = makeLoopVoice('FINALE MARINA')); }
   function finaleBirds() { return finaleBirdsVoice || (finaleBirdsVoice = makeLoopVoice('FINALE BIRDS')); }
-  function finaleStartMarina(state) {
+  function finaleStartMarina(state, fadeSecs) {
     if (!audioUnlocked) return;
+    var fade = fadeSecs == null ? MARINA_AMBIENCE_FADE_IN_SECONDS : fadeSecs;
     if (!finaleMarinaOn) {
       finaleMarinaOn = true;
-      finaleMarina().set(MARINA_AUDIO_FILES.marinaSound, MARINA_AUDIO_VOLUME.marinaSound, MARINA_AMBIENCE_FADE_IN_SECONDS); // the existing marina ambience, faded in; the voyage is over: it simply stays (the loop engine keeps it running)
+      finaleMarina().set(MARINA_AUDIO_FILES.marinaSound, MARINA_AUDIO_VOLUME.marinaSound, fade); // the existing marina ambience, faded in; the voyage is over: it simply stays (the loop engine keeps it running)
       marinaAmbienceStarted.marinaSound = true;
     }
     if (state.finale.birds && !finaleBirdsOn) {
       finaleBirdsOn = true;
-      finaleBirds().set(FINALE_BIRDS_PATH, FINALE_BIRDS_LEVEL, MARINA_AMBIENCE_FADE_IN_SECONDS);
+      finaleBirds().set(FINALE_BIRDS_PATH, FINALE_BIRDS_LEVEL, fade);
     }
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
     if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
-    finaleRendering = null; finaleMarinaOn = false; finaleBirdsOn = false; finaleCodaTries = 0; finaleReadCount = 0; finaleAshesToken = null; finaleAshesDone = false;
+    finaleRendering = null; finaleAmbienceFadeSecs = null; finaleSeaOff = false; finaleMarinaOn = false; finaleBirdsOn = false; finaleCodaTries = 0; finaleReadCount = 0; finaleAshesToken = null; finaleAshesDone = false;
     if (finaleDotsTimer) { clearInterval(finaleDotsTimer); finaleDotsTimer = null; }
     if (finaleCoda) { finaleCoda.stop(); finaleCoda = null; }
     finaleSoundEls.forEach(function (el) { try { el.pause(); } catch (e) {} }); finaleSoundEls = [];
@@ -8852,7 +8866,7 @@
     // See state.departure.ambienceSuppressed's own declaration comment
     // -- silent on all three environment layers, regardless of
     // location/weather, until CAST OFF explicitly lifts this.
-    if (state.departure.ambienceSuppressed) {
+    if (state.departure.ambienceSuppressed || finaleSeaSilenced(state)) { // (THE FINAL ARRIVAL: from the coasting on, the sea is off -- the wind is not)
       return { location: state.crew.location, seaState: state.weather.seaState || 0, exteriorTrack: null, exteriorGainMultiplier: 1, interiorTrack: null };
     }
     var location = companionwayHoldLocation != null ? companionwayHoldLocation : state.crew.location;
@@ -8868,6 +8882,7 @@
   // What this channel should be playing and how loudly. The loop engine makes it so and keeps it so: the same wish again is a no-op, a new track is
   // crossfaded in (equal power, make-before-break), null fades out -- see makeLoopVoice.
   function setSeaChannelTrack(channel, desiredPath, locationForLog, seaStateForLog, gainMultiplier, crossfadeSecondsOverride) {
+    if (desiredPath == null && finaleAmbienceFadeSecs != null) crossfadeSecondsOverride = finaleAmbienceFadeSecs; // THE FINAL ARRIVAL: the long fade out while the marina fades in
     setAmbienceChannelTrack(channel, desiredPath, gainMultiplier, crossfadeSecondsOverride == null ? SEA_AMBIENCE_CROSSFADE_SECONDS : crossfadeSecondsOverride);
   }
 
@@ -19861,7 +19876,7 @@
               s.boat.engineOn = false; s.boat.speed = 0;
               updateAudioForState(s);
               finaleLog(s, 'Stopped the engine.');
-              finaleAdvance(s); // the coasting follows: CODA begins, the sea and wind still sound, and when it ends the marina takes over
+              finaleAdvance(s); // the coasting follows: CODA begins, and the sea fades out as the marina fades in (the wind goes on)
             },
           });
           break;
