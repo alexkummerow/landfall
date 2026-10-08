@@ -1310,7 +1310,7 @@
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL FOR RESCUE is all that is offered) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
-      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 5, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 6, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -2126,7 +2126,7 @@
      real time that step began -- so a reload resumes the step with exactly the time that is left, never replays or skips one.
      The arrival, in order (every message is a working label with animated dots; every event is also written to the log, stamped with the
      moment it really happens -- the world has stopped, so log() takes the real clock for as long as the finale runs):
-       ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (25 s)
+       ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> FURL SAILS (only when sails are up; the game's own lower-sails sequence and audio) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (25 s)
        -> LINE UP WITH SLIP -> ENGINE OFF -> COASTING IN (10 s; CODA begins, from its start, and over the whole 10 s the
        sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE -> four lines, each with CONTINUE (each shown with the earlier ones still above it)
        -> the screen fades out to the game's charcoal (3 s) and the ashes scene fades in (3 s): centered dots, then SCATTER ASHES, then the ashes (the length of the sound, at
@@ -2144,6 +2144,7 @@
   var FINALE_STEPS = [
     { id: 'enter',    kind: 'auto',   label: 'ENTERING NĀWILIWILI HARBOR', secs: 10, done: function (s) { finaleLog(s, 'Entered Nāwiliwili Harbor.'); } },
     { id: 'above',    kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },              // only while the player is below deck; the usual GOING ABOVE does the work
+    { id: 'furl',     kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl' } },              // skipped if the sails are already furled (motor-sailing: it is the one action on entering the harbor)
     { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } },    // skipped if the engine is already running
     { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 25, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
     { id: 'lineup',   kind: 'action', option: { label: 'LINE UP WITH SLIP', action: 'finale-lineup' } },
@@ -2162,14 +2163,15 @@
     { id: 'title',      kind: 'ui' },   // black, LANDFALL
     { id: 'summary',    kind: 'ui' },
   ];
-  var FINALE_VERSION = 5; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
+  var FINALE_VERSION = 6; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
   var FINALE_OLD_IDS = {
     1: ['enter', 'start', 'making', 'approach', 'slowing', 'lining', 'stop', 'secure', 'ashore', 'ashes', 'fade', 'title', 'summary'],
     2: ['enter', 'above', 'start', 'lining', 'stop', 'coast', 'secure', 'ashore', 'ashes', 'wind', 'home', 'title', 'summary'],
     3: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'stage', 'scatter', 'scattering', 'home', 'title', 'summary'],
     4: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'stage', 'scatter', 'scattering', 'home', 'title', 'summary'],
+    5: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
   };
-  var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title', reflect3: 'reflect4' }; // ('home' was "She's home.", now gone; the old third line, "Take her home.", is now the fourth)
+  var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title' }; // ('home' was "She's home.", now gone)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
   var FINALE_FADE_SECS = 3, FINALE_TITLE_FADE_SECS = 5, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions (black over FADE secs, then LANDFALL up over TITLE_FADE secs)
   var FINALE_STAGE_OUT_SECS = 3, FINALE_STAGE_IN_SECS = 3, FINALE_ASHES_MIN_SECS = 10, FINALE_TEXT_FADE_SECS = 3; // (the screen fades out over STAGE_OUT, the ashes scene fades in over STAGE_IN; the ashes text fades out over TEXT_FADE)
@@ -2205,10 +2207,11 @@
   }
   // The arrival's log lines carry the moment they happen (see log()).
   function finaleLog(state, text) { log(state, text); flushNewLogEntries(state); }
-  // A step that does not apply is passed over: GO ABOVE when the player is already on deck, START ENGINE when the engine is already running.
+  // A step that does not apply is passed over: GO ABOVE when the player is already on deck, FURL SAILS when the sails are already furled, START ENGINE when the engine is already running.
   // Returns true when START ENGINE was passed over (its "Started the engine." never happened, but the breakwater moment still does).
   function finaleSkips(state, id) {
     if (id === 'above') return state.crew.location !== 'below';
+    if (id === 'furl') return state.boat.sailConfig === 'furled';
     if (id === 'start') return !!state.boat.engineOn;
     return false;
   }
@@ -2222,7 +2225,9 @@
     var ids = FINALE_OLD_IDS[f.v] || FINALE_OLD_IDS[1];
     if (!ids || f.step >= ids.length) return;
     var id = ids[f.step]; id = FINALE_OLD_TO_NEW[id] || id;
+    if (f.v === 4 && id === 'reflect3') id = 'reflect4'; // (a v4 save's third line was "Take her home.", which is now the fourth)
     var i = finaleStepIndex(id);
+    if (id === 'start' && state.boat.sailConfig !== 'furled') i = finaleStepIndex('furl'); // a save from before FURL SAILS existed, with the sails still up
     if (id === 'start' && state.crew.location === 'below') i = finaleStepIndex('above'); // the engine is started from the cockpit
     if (i >= 0) f.step = i;
     f.v = FINALE_VERSION;
@@ -19849,6 +19854,16 @@
             action: function (s) { navFreeSolace(s); log(s, 'Got Solace free.'); flushNewLogEntries(s); },
           });
           break;
+        case 'finale-furl': { // THE FINAL ARRIVAL: the game's own lowering of the sails -- the same FURLING SAILS action, sound (lowerLong for full sail, lowerShort otherwise) and log line as the SAILS menu's FURL
+          if (!finaleAtStep(state, 'furl')) break;
+          var furlAudioKey = sailChangeAudioKey(state.boat.sailConfig, 'furled');
+          runAudioSyncedAction(state, {
+            label: SAIL_CHANGE_WORKING_LABEL.furled,
+            playAudio: function (onEnded) { return playSailsOneShot(furlAudioKey, onEnded, state); },
+            action: function (s) { s.boat.sailConfig = 'furled'; finaleLog(s, SAIL_FURLED_LOG_LINE); finaleAdvance(s); },
+          });
+          break;
+        }
         case 'finale-engine-start':
           if (!finaleAtStep(state, 'start')) break;
           runAudioSyncedAction(state, {
@@ -20781,14 +20796,14 @@
     s.boat.autopilotOn = true;
     scenarioTrack(s, lastWaypoint);
   }
-  function scenarioHarbor(engineRunning, below) {
+  function scenarioHarbor(engineRunning, below, motorsail) {
     var s = scenarioBase(13.5);
     var r = NAV_GEO.capture.ring, A = r[0], B = r[1], C = r[2]; // the funnel is the triangle A-B-C; its east edge runs C -> A
     var mid = { lat: A[1] + 0.68 * (C[1] - A[1]), lon: A[0] + 0.68 * (C[0] - A[0]) };
     var out = destinationPoint(mid.lat, mid.lon, 90, 0.12);       // a little way due east of that edge, i.e. out to sea
     scenarioOpenWater(s, out.lat, out.lon, (A[1] + B[1] + C[1]) / 3, (A[0] + B[0] + C[0]) / 3, 2480, 13);
     s.flags.landOnHorizonShown = true;
-    s.boat.sailConfig = engineRunning ? 'furled' : 'full';
+    s.boat.sailConfig = engineRunning && !motorsail ? 'furled' : 'full'; // (motorsail: the engine is running AND the sails are still up)
     s.boat.engineOn = !!engineRunning;
     s.boat.engineRunningMinutes = engineRunning ? 40 : 0;
     s.boat.fuelGallons = 12;
@@ -20816,9 +20831,10 @@
     return s;
   }
   var SCENARIOS = {
-    'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, from START ENGINE to the final summary.', build: function () { return scenarioHarbor(false); } },
-    'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
-    'harbor-engine': { about: 'The same, with the engine already running, so the arrival skips START ENGINE.', build: function () { return scenarioHarbor(true); } },
+    'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, from FURL SAILS and START ENGINE to the final summary.', build: function () { return scenarioHarbor(false); } },
+    'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
+    'harbor-motorsail': { about: 'Motor-sailing: the engine is running and the sails are still up, so the arrival offers FURL SAILS and skips START ENGINE.', build: function () { return scenarioHarbor(true, false, true); } },
+    'harbor-engine': { about: 'The same, with the engine already running and the sails already furled, so the arrival skips FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(true); } },
     'cape': { about: 'Just short of Cape Flattery, engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests CALL FOR RESCUE and the ending.', build: scenarioRescue },
   };
