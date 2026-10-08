@@ -821,12 +821,13 @@
   }
   /* THE ENDING (see FINALE_STEPS): a full-screen black layer that fades in over everything, then the title, then the summary.
      The *_SECS constants in the script mirror these transition times. */
-  .ending-overlay { position: fixed; inset: 0; z-index: 99999; background: #000; opacity: 0; transition: opacity 4s linear; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
+  .ending-overlay { position: fixed; inset: 0; z-index: 99999; background: #000; opacity: 0; transition: opacity 2.5s linear; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
   .ending-overlay[hidden] { display: none; }
   .ending-overlay.show { opacity: 1; }
   .ending-inner { display: flex; flex-direction: column; align-items: center; width: min(94vw, 34rem); margin: auto; padding: 2rem 0; }
-  .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.4em; padding-left: 0.4em; font-size: clamp(1.5rem, 6vw, 2.3rem); text-shadow: var(--output-glow); opacity: 0; transition: opacity 3s ease-in; }
+  .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.05em; font-size: 0.95rem; line-height: 1.55; text-shadow: var(--output-glow); opacity: 0; transition: opacity 5s linear; } /* the same face, size and spacing as every other line of the game */
   .ending-title.show { opacity: 1; }
+  @media (max-width: 480px) { .ending-title { font-size: 0.98rem; } } /* the same small-screen size as .line */
   .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
   .ending-summary.show { max-height: 44rem; opacity: 1; margin-top: 2rem; }
   .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
@@ -1291,7 +1292,7 @@
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL FOR RESCUE is all that is offered) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
-      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 2 }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -2092,8 +2093,9 @@
     if (nav.groundBearing === undefined) nav.groundBearing = null;
     if (state.flags && state.flags.landOnHorizonShown === undefined) state.flags.landOnHorizonShown = false;
     var f = state.finale;
-    if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null };
-    else { if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.codaAt === undefined) f.codaAt = null; if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
+    if (f && typeof f === 'object' && f.phase !== 'none' && f.v !== FINALE_VERSION && Number.isInteger(f.step) && f.step >= 0 && f.step < FINALE_V1_IDS.length) finaleRemapSave(state, f); // a finale begun before the step list changed
+    if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: FINALE_VERSION };
+    else { if (f.v === undefined) f.v = FINALE_VERSION; if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.codaAt === undefined) f.codaAt = null; if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
     if (state.finale.phase === 'none' && nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX && Number.isFinite(nav.lat) && Number.isFinite(nav.lon)) navSnapToWater(state);
   }
 
@@ -2104,27 +2106,40 @@
      clock can interfere, and nothing is consumed), the Helm / GPS / menus are replaced by the finale's own, and the autopilot takes her
      in. state.finale is the whole persisted state: phase 'none' | 'arrival' | 'done', and `step` into FINALE_STEPS with `stepAt`, the
      real time that step began -- so a reload resumes the step with exactly the time that is left, never replays or skips one.
-     The five 'auto' legs add up to 75 s (engine start, only if it was off, takes its own few seconds on top).
+     The arrival, in order: ENTERING (10 s) -> GO ABOVE (only if you are below deck) -> START ENGINE (only if it is off) -> LINING UP WITH THE SLIP
+     (13 s) -> STOP ENGINE -> COASTING INTO THE SLIP (the length of its sound, 5 s) -> SECURE LINES -> STEP ASHORE (each lasts as long as its
+     sound) -> SCATTER ASHES (8 s) -> two lines of text, a beat after each -> LANDFALL fades up over 5 s and holds 10 s -> the summary.
      ====================================================================== */
+  var FINALE_BEAT_SECS = 2.5; // the pause after each closing line of text
   var FINALE_STEPS = [
-    { id: 'enter',    kind: 'auto',   label: 'ENTERING N\u0100WILIWILI HARBOR', secs: 10 },
-    { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } }, // skipped if the engine is already running
-    { id: 'making',   kind: 'auto',   label: 'MAKING FOR THE MARINA', secs: 22 },
-    { id: 'approach', kind: 'auto',   label: 'APPROACHING THE SLIP', secs: 20 },
-    { id: 'slowing',  kind: 'auto',   label: 'SLOWING', secs: 10 },
-    { id: 'lining',   kind: 'auto',   label: 'LINING UP WITH THE SLIP', secs: 13 },
-    { id: 'stop',     kind: 'action', option: { label: 'STOP ENGINE', action: 'finale-engine-stop' } },
-    { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
-    { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
-    { id: 'ashes',    kind: 'action', option: { label: 'SCATTER ASHES', action: 'finale-ashes' } },
-    { id: 'fade',     kind: 'ui' },
-    { id: 'title',    kind: 'ui' },
-    { id: 'summary',  kind: 'ui' },
+    { id: 'enter',   kind: 'auto',   label: 'ENTERING N\u0100WILIWILI HARBOR', secs: 10 },
+    { id: 'above',   kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },           // only while the player is below deck: the engine is started from the cockpit
+    { id: 'start',   kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } }, // skipped if the engine is already running
+    { id: 'lining',  kind: 'auto',   label: 'LINING UP WITH THE SLIP', secs: 13 },
+    { id: 'stop',    kind: 'action', option: { label: 'STOP ENGINE', action: 'finale-engine-stop' } },
+    { id: 'coast',   kind: 'sound',  label: 'COASTING INTO THE SLIP', sound: 'coast' },                   // lasts as long as its sound; the outside ambience keeps playing under it
+    { id: 'secure',  kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
+    { id: 'ashore',  kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
+    { id: 'ashes',   kind: 'action', option: { label: 'SCATTER ASHES', action: 'finale-ashes' } },
+    { id: 'wind',    kind: 'text',   text: 'Some blow into the wind, the rest to the sea.', secs: FINALE_BEAT_SECS },
+    { id: 'home',    kind: 'text',   text: 'She\u2019s home.', secs: FINALE_BEAT_SECS },
+    { id: 'title',   kind: 'ui' },
+    { id: 'summary', kind: 'ui' },
   ];
+  var FINALE_VERSION = 2; // the step list above is version 2; a save from the first version is mapped across by finaleRemapSave
+  var FINALE_V1_IDS = ['enter', 'start', 'making', 'approach', 'slowing', 'lining', 'stop', 'secure', 'ashore', 'ashes', 'fade', 'title', 'summary'];
+  var FINALE_V1_TO_V2 = { making: 'lining', approach: 'lining', slowing: 'lining', fade: 'title' }; // the legs that no longer exist land on the step that now covers them
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
-  var FINALE_FADE_SECS = 4, FINALE_TITLE_FADE_SECS = 3, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions
+  var FINALE_FADE_SECS = 2.5, FINALE_TITLE_FADE_SECS = 5, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions (the screen goes dark in FADE secs while LANDFALL comes up over TITLE_FADE secs)
+  // The three arrival sounds (all in audio/marina/, silent until the files are uploaded). Each step lasts as long as its sound really plays; if the
+  // sound is missing, or audio is not unlocked, the step simply takes `fallback` seconds, so the sequence never waits on a file that is not there.
+  var FINALE_SOUNDS = {
+    coast:  { path: 'audio/marina/coasting.mp3',     volume: 0.6, fallback: 5 },
+    secure: { path: 'audio/marina/secure_lines.mp3', volume: 0.6, fallback: 4 },
+    ashore: { path: 'audio/marina/step_ashore.mp3',  volume: 0.6, fallback: 5 },
+  };
   var FINALE_CODA_PATH = 'audio/saloon/Coda.mp3';
-  var finaleTimer = null, finaleRendering = null, finaleCodaEl = null, finaleWired = false, finaleCodaTries = 0;
+  var finaleTimer = null, finaleRendering = null, finaleCodaEl = null, finaleWired = false, finaleCodaTries = 0, finaleTextShown = null, finaleSoundEl = null;
 
   function finaleAtStep(state, id) {
     var f = state.finale;
@@ -2135,7 +2150,7 @@
     return (st && st.kind === 'action') ? [st.option] : [];
   }
   function navBeginFinale(state) {
-    state.finale = { phase: 'arrival', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: state.meta.voyageMinutes }; // stepAt 0 = not yet SHOWN: its clock starts when the UI first renders the step (finaleRender)
+    state.finale = { phase: 'arrival', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: state.meta.voyageMinutes, v: FINALE_VERSION }; // stepAt 0 = not yet SHOWN: its clock starts when the UI first renders the step (finaleRender)
     state.nav.grounded = false;
     state.flags.arrivedAtDestination = true;
     state.pendingChoice = null; state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
@@ -2144,10 +2159,29 @@
     var d = NAV_GEO.dock, f = NAV_GEO.funnel, h = bearingBetween(f[1], f[0], d[1], d[0]); // she lies as she came in: from the funnel's point toward the slip
     state.nav.lat = d[1]; state.nav.lon = d[0]; state.nav.heading = h; state.nav.setCourse = Math.round(h); state.nav.autopilotHeading = state.nav.setCourse; state.nav.driftHeading = h; state.boat.speed = 0;
   }
+  // A step that does not apply is passed over: GO ABOVE when the player is already on deck, START ENGINE when the engine is already running.
+  function finaleSkips(state, id) {
+    if (id === 'above') return state.crew.location !== 'below';
+    if (id === 'start') return !!state.boat.engineOn;
+    return false;
+  }
+  function finaleSkipForward(state) {
+    var f = state.finale;
+    while (FINALE_STEPS[f.step] && finaleSkips(state, FINALE_STEPS[f.step].id)) f.step++;
+  }
+  // A save from the first version of the step list: find the same moment in the new list.
+  function finaleRemapSave(state, f) {
+    var id = FINALE_V1_IDS[f.step] || 'enter';
+    id = FINALE_V1_TO_V2[id] || id;
+    var i = finaleStepIndex(id);
+    if (id === 'start' && state.crew.location === 'below') i = finaleStepIndex('above'); // the engine is started from the cockpit
+    f.step = i < 0 ? 0 : i;
+    f.v = FINALE_VERSION;
+  }
   function finaleAdvance(state) {
     var f = state.finale, prev = FINALE_STEPS[f.step] ? FINALE_STEPS[f.step].id : null;
     f.step++;
-    if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'start' && state.boat.engineOn) f.step++; // already running: no needless stop / restart
+    finaleSkipForward(state);
     f.stepAt = Date.now();
     if (prev === 'lining') finalePlaceAtDock(state);
     if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'summary') f.phase = 'done';
@@ -2182,19 +2216,56 @@
       if (remaining < 0.4) { finaleAdvance(state); return; }
       finaleRendering = token;
       runShortAction(state, { label: st.label, duration: remaining, action: function (s) { finaleRendering = null; finaleAdvance(s); } });
+    } else if (st.kind === 'sound') { // runs by itself for as long as its sound plays
+      var stoken = f.step + ':' + f.stepAt;
+      if (uiBusy || finaleRendering === stoken) return;
+      finaleRendering = stoken;
+      runAudioSyncedAction(state, {
+        label: st.label,
+        startupFallbackSeconds: 45,
+        playAudio: function (onEnded) { return finalePlaySound(st.sound, onEnded); },
+        action: function (s) {
+          finaleRendering = null;
+          if (st.id === 'coast') { s.departure.ambienceSuppressed = true; updateAudioForState(s); } // the open-ocean ambience has carried on through the coasting; now it fades out and only the marina is left
+          finaleAdvance(s);
+        },
+      });
+    } else if (st.kind === 'text') { // a line of the closing text, printed once, then a beat
+      if (uiBusy) return;
+      var ttoken = f.step + ':' + f.stepAt;
+      if (finaleTextShown !== ttoken) { finaleTextShown = ttoken; printBlank(); printLine(st.text); scrollToBottom(); }
+      renderOptions(state);
+      var left = st.secs - (Date.now() - f.stepAt) / 1000;
+      if (left <= 0.05) { finaleAdvance(state); return; }
+      finaleSchedule(state, left);
     } else if (st.kind === 'action') {
       if (!uiBusy) renderOptions(state);
     } else finaleUi(state, st.id);
   }
+  // Plays one of the arrival sounds and calls onEnded exactly once: when it ends, or -- if it cannot play at all -- once its fallback time has
+  // passed. Always returns null (the caller's own file-error watchdog would end the step the instant a missing file errors; this handles that itself).
+  function finalePlaySound(key, onEnded) {
+    var S = FINALE_SOUNDS[key], t0 = Date.now(), done = false, guard = null;
+    function finish() { if (done) return; done = true; if (guard) clearTimeout(guard); onEnded(); }
+    function finishAfterFallback() { var left = S.fallback * 1000 - (Date.now() - t0); if (left > 50) setTimeout(finish, left); else finish(); }
+    guard = setTimeout(finish, 45000); // whatever happens, the sequence moves on
+    if (!audioUnlocked) { setTimeout(finish, S.fallback * 1000); return null; }
+    try {
+      var el = createGameAudio(S.path);
+      finaleSoundEl = el;
+      el.volume = S.volume;
+      el.addEventListener('ended', finish);
+      el.addEventListener('error', finishAfterFallback);
+      var p = el.play();
+      if (p && p.catch) p.catch(finishAfterFallback);
+    } catch (e) { finishAfterFallback(); }
+    return null;
+  }
   function finaleUi(state, id) {
     var f = state.finale, E = finaleEls(), el = (Date.now() - f.stepAt) / 1000;
     E.ov.hidden = false;
-    if (id === 'fade') { // the whole presentation fades to black; CODA carries on underneath
-      finaleShow(E.ov, 'show', el > 1);
-      if (el >= FINALE_FADE_SECS) { finaleAdvance(state); return; }
-      finaleSchedule(state, FINALE_FADE_SECS - el + 0.1);
-    } else if (id === 'title') { // LANDFALL, alone: nothing else is on screen, no controls of any kind
-      finaleShow(E.ov, 'show', true); finaleShow(E.title, 'show', el > 1);
+    if (id === 'title') { // the screen goes dark while LANDFALL comes up out of it (5 s), holds (10 s), then the summary takes over beneath it
+      finaleShow(E.ov, 'show', el > 1); finaleShow(E.title, 'show', el > 1);
       var end = FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS;
       if (el >= end) { finaleAdvance(state); return; }
       finaleSchedule(state, end - el);
@@ -2265,7 +2336,8 @@
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
     if (finaleTimer) { clearTimeout(finaleTimer); finaleTimer = null; }
-    finaleRendering = null; finaleMarinaOn = false; finaleCodaTries = 0;
+    finaleRendering = null; finaleMarinaOn = false; finaleCodaTries = 0; finaleTextShown = null;
+    if (finaleSoundEl) { try { finaleSoundEl.pause(); } catch (e) {} finaleSoundEl = null; }
     if (finaleCodaEl) { try { finaleCodaEl.pause(); } catch (e) {} finaleCodaEl = null; }
     if (finaleMarinaVoice) finaleMarinaVoice.stop(0.3);
     ['marinaSound', 'pnwBirds'].forEach(function (k) { var el = marinaAudioEls[k]; if (el) { try { el.pause(); } catch (e) {} el.loop = false; } });
@@ -19506,6 +19578,7 @@
             syncComfortExposure(s); // the new place: the 60-second clocks start over, nothing is carried between above and below
             flushNewLogEntries(s);
               if (goingBelow) s.crew.atHelm = false; // can't stay at the helm while below -- see cmdSleep for the same pattern
+              if (finaleAtStep(s, 'above')) finaleAdvance(s); // THE FINAL ARRIVAL: the player must be on deck to start the engine
             },
           });
           break;
@@ -19625,24 +19698,33 @@
             playAudio: function (onEnded) { return beginEngineStopAudio(state.crew.location, onEnded); },
             action: function (s) {
               s.boat.engineOn = false; s.boat.speed = 0;
-              s.departure.ambienceSuppressed = true; // the open-ocean ambience fades out on its own crossfade...
               updateAudioForState(s);
-              finaleStartMarina();                   // ...and the marina fades in: the voyage is over
+              finaleStartMarina();                   // the marina fades in under the ocean ambience, which carries on through the coasting (see the 'coast' step)
               finaleAdvance(s);
             },
           });
           break;
         case 'finale-secure':
           if (!finaleAtStep(state, 'secure')) break;
-          runShortAction(state, { label: 'SECURING LINES', duration: 4, action: function (s) { finaleAdvance(s); } });
+          runAudioSyncedAction(state, {
+            label: 'SECURING LINES',
+            startupFallbackSeconds: 45,
+            playAudio: function (onEnded) { return finalePlaySound('secure', onEnded); },
+            action: function (s) { finaleAdvance(s); },
+          });
           break;
         case 'finale-ashore':
           if (!finaleAtStep(state, 'ashore')) break;
-          runShortAction(state, { label: 'STEPPING ASHORE', duration: 5, action: function (s) { s.finale.codaAt = Date.now(); finaleStartCoda(s, 0); finaleAdvance(s); } });
+          runAudioSyncedAction(state, {
+            label: 'STEPPING ASHORE',
+            startupFallbackSeconds: 45,
+            playAudio: function (onEnded) { return finalePlaySound('ashore', onEnded); },
+            action: function (s) { s.finale.codaAt = Date.now(); finaleStartCoda(s, 0); finaleAdvance(s); },
+          });
           break;
         case 'finale-ashes':
           if (!finaleAtStep(state, 'ashes')) break;
-          runShortAction(state, { label: 'SCATTERING ASHES', duration: 6, action: function (s) { finaleAdvance(s); } });
+          runShortAction(state, { label: 'SCATTERING ASHES', duration: 8, action: function (s) { finaleAdvance(s); } });
           break;
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
@@ -20488,7 +20570,7 @@
     s.boat.autopilotOn = true;
     scenarioTrack(s, lastWaypoint);
   }
-  function scenarioHarbor(engineRunning) {
+  function scenarioHarbor(engineRunning, below) {
     var s = scenarioBase(13.5);
     var r = NAV_GEO.capture.ring, A = r[0], B = r[1], C = r[2]; // the funnel is the triangle A-B-C; its east edge runs C -> A
     var mid = { lat: A[1] + 0.68 * (C[1] - A[1]), lon: A[0] + 0.68 * (C[0] - A[0]) };
@@ -20499,6 +20581,7 @@
     s.boat.engineOn = !!engineRunning;
     s.boat.engineRunningMinutes = engineRunning ? 40 : 0;
     s.boat.fuelGallons = 12;
+    if (below) s.crew.location = 'below';
     return s;
   }
   function scenarioCape() {
@@ -20522,7 +20605,8 @@
     return s;
   }
   var SCENARIOS = {
-    'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, including START ENGINE.', build: function () { return scenarioHarbor(false); } },
+    'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, from START ENGINE to the final summary.', build: function () { return scenarioHarbor(false); } },
+    'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
     'harbor-engine': { about: 'The same, with the engine already running, so the arrival skips START ENGINE.', build: function () { return scenarioHarbor(true); } },
     'cape': { about: 'Just short of Cape Flattery, engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests CALL FOR RESCUE and the ending.', build: scenarioRescue },
