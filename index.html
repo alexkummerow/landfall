@@ -1784,6 +1784,17 @@
     { name: 'Kauaʻi',                    lat: 21.954, lon: -159.356 },
   ];
   var FINAL_DEST = WAYPOINTS[WAYPOINTS.length - 1];
+  // WHERE OPEN SAILING BEGINS. A line across the mouth of the Strait of Juan de Fuca at the longitude of Cape Flattery itself: due north-south at lon -124.740935, from the cape's
+  // tip (lat 48.37827) up to the Vancouver Island shore (lat 48.610228). The moment SOLACE crosses it heading west, the coastal corridor is over -- the course is the player's, MARINE
+  // FORECAST opens and the real wind takes over (see beginOpenPacific). It used to begin on reaching the Cape Flattery WAYPOINT, which is an offshore point ~3.4 nm further west.
+  var OPEN_PACIFIC_LINE = { lon: -124.740935, latMin: 48.37827, latMax: 48.610228 };
+  // Does the straight step (lat0, lon0) -> (lat1, lon1) cross that line heading west? Returns the point where it does, else null.
+  function openPacificCrossing(lat0, lon0, lat1, lon1) {
+    var L = OPEN_PACIFIC_LINE;
+    if (!(lon0 > L.lon && lon1 <= L.lon)) return null;
+    var lat = lat0 + (lat1 - lat0) * ((lon0 - L.lon) / (lon0 - lon1));
+    return (lat >= L.latMin && lat <= L.latMax) ? { lat: lat, lon: L.lon } : null;
+  }
   var OPEN_WATER_WAYPOINT_INDEX = 12; // targeting waypoint 12 ("open water, well offshore") or later = clear of Cape Flattery and coastal hazards; below that, course changes are geographically constrained
 
   /* --------------------------------------------------------------
@@ -1815,7 +1826,7 @@
      ====================================================================== */
   var NAV_GEO = {
     pacific: { dropLast: true, artificialEdges: [80, 81, 82, 83, 88], ring: [
-      [-124.750727, 48.394524], [-124.72283, 48.354814], [-124.687957, 48.331636], [-124.676997, 48.324349], [-124.679987, 48.307784],
+      [-124.7385, 48.377119], [-124.72283, 48.354814], [-124.687957, 48.331636], [-124.676997, 48.324349], [-124.679987, 48.307784],
       [-124.698917, 48.293865], [-124.692939, 48.268006], [-124.723826, 48.244789], [-124.714832, 48.220824], [-124.717831, 48.197848],
       [-124.776293, 48.172861], [-124.758819, 48.147311], [-124.728578, 48.116084], [-124.700182, 48.10312], [-124.704065, 48.077182],
       [-124.722267, 48.038088], [-124.733579, 47.986285], [-124.687247, 47.927717], [-124.646232, 47.876302], [-124.586042, 47.861523],
@@ -1832,7 +1843,7 @@
       [-117.079479, 32.094347], [-116.462605, 30.896543], [-115.985914, 29.91489], [-115.338978, 29.322892], [-115.703791, 28.13715],
       [-114.250181, 26.776209], [-112.825635, 25.921518], [-112.386579, 24.575769], [-111.151076, 23.874913], [-110.51387, 23.393644],
       [-110.129599, 22.740257], [-110.658612, 8.890144], [-174.296825, 5.711056], [-181.136123, 50.315312], [-128.321656, 50.315312],
-      [-128.007024, 50.060745], [-126.907316, 49.48971], [-125.477405, 48.827586], [-124.758292, 48.585849], [-124.751321, 48.394118],
+      [-128.007024, 50.060745], [-126.907316, 49.48971], [-125.477405, 48.827586], [-124.7385, 48.579196], [-124.7385, 48.377219],
       [-124.751581, 48.394131],
     ] },
     islands: [
@@ -5917,6 +5928,7 @@
     //
     // Applies identically whether this tick is live or part of a
     // multi-tick offline catch-up, since both just call simTick.
+    if (state.nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX && state.nav.lon <= OPEN_PACIFIC_LINE.lon) beginOpenPacific(state); // already west of the line (a voyage saved in the stretch between the line and the old Cape Flattery waypoint)
     var heading = computeHeading(state);
     var boatSpeed = computeBoatSpeed(state, heading);
     if (state.nav.grounded) boatSpeed = 0; // RUN AGROUND: 0.0 kt until FREE SOLACE (everything else -- weather, needs, power -- carries on as normal)
@@ -5931,6 +5943,24 @@
         crossingGuard++;
         var wp = WAYPOINTS[state.nav.waypointIndex];
         var distToWp = distanceBetween(state.nav.lat, state.nav.lon, wp.lat, wp.lon);
+        // THE OPEN-PACIFIC LINE: if this step -- whether it ends AT the waypoint or short of it -- crosses the line, the boat is stopped exactly on it, open sailing begins there, and
+        // whatever is left of the tick's distance is sailed as open ocean below (a long offline catch-up switches at the same spot, never later).
+        var stepEnd = distToWp <= nmRemaining ? wp : destinationPoint(state.nav.lat, state.nav.lon, heading, nmRemaining);
+        var openCross = openPacificCrossing(state.nav.lat, state.nav.lon, stepEnd.lat, stepEnd.lon);
+        if (openCross) {
+          var dCross = distanceBetween(state.nav.lat, state.nav.lon, openCross.lat, openCross.lon);
+          state.nav.lat = openCross.lat;
+          state.nav.lon = openCross.lon;
+          state.nav.distanceTraveled += dCross;
+          if (state.nav.tack) state.nav.tackDistanceNm += dCross;
+          nmRemaining -= dCross;
+          beginOpenPacific(state);
+          heading = computeHeading(state); // the initial open-ocean course toward Nāwiliwili
+          boatSpeed = computeBoatSpeed(state, heading);
+          state.nav.heading = heading;
+          state.boat.speed = boatSpeed;
+          break;
+        }
         if (distToWp <= nmRemaining) {
           state.nav.lat = wp.lat;
           state.nav.lon = wp.lon;
@@ -7579,6 +7609,18 @@
     }
   }
 
+  // Open sailing begins (the boat has just crossed OPEN_PACIFIC_LINE): the two lines Cape Flattery's arrival always wrote -- the arrival line, then the one-time "course is mine now"
+  // observation -- the waypoint index moves on to open water, and the real-wind handoff starts on this very tick (blend weight 0, so the wind -- and the boat speed computed from it -- is
+  // unchanged until it begins to blend).
+  function beginOpenPacific(state) {
+    log(state, waypointArrivalLine(WAYPOINTS[OPEN_WATER_WAYPOINT_INDEX - 1]));
+    if (!state.flags.pacificObservationShown) {
+      state.flags.pacificObservationShown = true;
+      log(state, 'Cape Flattery falls away astern. Ahead, nothing but Pacific. The course is mine now.');
+    }
+    state.nav.waypointIndex = OPEN_WATER_WAYPOINT_INDEX;
+    beginRealWindHandoff(state, Date.now());
+  }
   function waypointArrivalLine(wp) {
     var lines = {
       'Shilshole Exit': 'Clear of the marina, into open Puget Sound.',
@@ -20896,8 +20938,9 @@
     return s;
   }
   function scenarioCape() {
-    var s = scenarioBase(1.4), wp = WAYPOINTS[11];
-    var p = destinationPoint(wp.lat, wp.lon, bearingBetween(wp.lat, wp.lon, WAYPOINTS[10].lat, WAYPOINTS[10].lon), 0.2); // 0.2 nm short of Cape Flattery
+    var s = scenarioBase(1.4), a = WAYPOINTS[10], wp = WAYPOINTS[11];
+    var x = openPacificCrossing(a.lat, a.lon, wp.lat, wp.lon); // where the Cape Approach -> Cape Flattery leg crosses the open-Pacific line
+    var p = destinationPoint(x.lat, x.lon, bearingBetween(x.lat, x.lon, a.lat, a.lon), 0.2); // 0.2 nm short of the line
     var b = scenarioPoint(s, p.lat, p.lon, wp.lat, wp.lon);
     s.nav.waypointIndex = 11;
     s.nav.intendedCourse = b;
@@ -20920,7 +20963,7 @@
     'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
     'harbor-motorsail': { about: 'Motor-sailing: the engine is running and the sails are still up, so the arrival offers FURL SAILS and skips START ENGINE.', build: function () { return scenarioHarbor(true, false, true); } },
     'harbor-engine': { about: 'The same, with the engine already running and the sails already furled, so the arrival skips FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(true); } },
-    'cape': { about: 'Just short of Cape Flattery, engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
+    'cape': { about: 'Just short of the open-Pacific line (the longitude of Cape Flattery), engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests CALL FOR RESCUE and the ending.', build: scenarioRescue },
   };
   function scenarioShowMenu(requested) {
