@@ -841,6 +841,8 @@
   .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
   .ending-summary.show { max-height: 44rem; opacity: 1; margin-top: 2rem; }
   .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
+  .ending-overlay.rescue #ending-title { display: none; } /* a rescue has no LANDFALL title: straight to the summary */
+  .ending-overlay.rescue .ending-summary.show { margin-top: 0; }
   .ending-newvoyage { margin-top: 2rem; opacity: 0; transition: opacity 1.5s ease; }
   .ending-newvoyage.show { opacity: 1; }
 </style>
@@ -1312,7 +1314,7 @@
         pacificObservationShown: false,    // guards the coastal-tutorial "course is mine now" observation (Cape Flattery arrival, open-water threshold) so it fires exactly once per voyage
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
-      voyageEnd: { phase: 'none', reason: null, at: null, called: false }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: CALL COAST GUARD, then SHARE COORDINATES, is all that is offered; called = the call has been made and SHARE COORDINATES is next) | 'ended' (VOYAGE ENDED: RESTART). One-way, never reversed -- see checkNeglectRescue.
+      voyageEnd: { phase: 'none', reason: null, at: null, step: 0 }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: step 0 is the first line + CONTINUE, step 1 the second line + CALL FOR HELP) | 'ended' (the end-of-game summary is up: NEW VOYAGE). One-way, never reversed -- see checkNeglectRescue.
       finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 8, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
@@ -2410,10 +2412,13 @@
     var mins = state.meta.voyageMinutes, hrs = mins / 60, nm = state.nav.distanceTraveled;
     var dd = Math.floor(mins / 1440), hh = Math.floor((mins % 1440) / 60), mm = Math.floor(mins % 60);
     var underway = dd > 0 ? dd + (dd === 1 ? ' DAY ' : ' DAYS ') + hh + ' HRS' : hh + ' HRS ' + mm + ' MIN';
-    var arrived = state.meta.departedAt + (state.finale.arrivedMinutes != null ? state.finale.arrivedMinutes : mins) * 60000;
+    var notCompleted = !!(state.voyageEnd && state.voyageEnd.phase === 'ended'); // a rescue: the voyage did not reach Nāwiliwili
+    var endedMin = notCompleted ? (Number.isFinite(state.voyageEnd.at) ? state.voyageEnd.at : mins) : (state.finale.arrivedMinutes != null ? state.finale.arrivedMinutes : mins);
+    var arrived = state.meta.departedAt + endedMin * 60000;
     return [
       { text: 'S/V ' + VESSEL_NAME }, { text: 'SHILSHOLE BAY \u2192 N\u0100WILIWILI', gap: true },
-      { label: 'DEPARTED', value: formatShipTime(state.meta.departedAt) }, { label: 'ARRIVED', value: formatShipTime(arrived) },
+      { label: 'VOYAGE', value: notCompleted ? 'NOT COMPLETED' : 'COMPLETED' },
+      { label: 'DEPARTED', value: formatShipTime(state.meta.departedAt) }, { label: notCompleted ? 'ENDED' : 'ARRIVED', value: formatShipTime(arrived) },
       { label: 'TIME UNDERWAY', value: underway }, { label: 'DISTANCE SAILED', value: Math.round(nm).toLocaleString() + ' NM' },
       { label: 'AVERAGE SPEED', value: (hrs > 0 ? nm / hrs : 0).toFixed(1) + ' KT' }, { label: 'TIME UNDER ENGINE', value: engineHrs.toFixed(1) + ' HRS' },
       { label: 'REPAIRS MADE', value: String(repairs) }, { label: 'TIMES RUN AGROUND', value: String(state.nav.timesAground || 0) },
@@ -2885,7 +2890,7 @@
   // "return to HELM" call sites already do in this file).
   function blockedByCoastalLock(state) {
     printBlank();
-    printLine('OPEN SAILING BEGINS IN THE PACIFIC.', 'amber');
+    printLine('I\u2019ll follow Dad\u2019s course until we reach the Pacific.'); // an observation in the ordinary text (not amber, not caps)
     cmdHelm(state);
   }
 
@@ -6794,7 +6799,7 @@
      a reload (catchUpFromRealTime replays the away time as ordinary ticks) lands on exactly the same minute as if the game had stayed
      open. Nothing here is ever shown -- no countdown, no hours remaining, no bar; hunger and thirst already say it.
 
-     state.voyageEnd.phase is one-way: 'none' -> 'pending' (a threshold was reached; CALL COAST GUARD, then SHARE COORDINATES, is all that is offered) -> 'ended'
+     state.voyageEnd.phase is one-way: 'none' -> 'pending' (a threshold was reached; CONTINUE, then CALL FOR HELP, is all that is offered) -> 'ended'
      (VOYAGE ENDED; RESTART). Nothing moves it backward and only 'none' can trigger it, so exactly one ending can ever happen. Once it
      leaves 'none' the world stops (see simTick): nothing more can happen, and the day and distance shown stay exactly as they were.
      -------------------------------------------------------------- */
@@ -6802,11 +6807,12 @@
   var RESCUE_FOOD_HOURS = 168;
   var RESCUE_MIGRATION_GRACE_MINUTES = 60; // old saves only: never load straight into a rescue (see migrateRescueIfNeeded)
 
-  // Two steps, in order: CALL COAST GUARD (the SOS clip plays), then SHARE COORDINATES (the position is shown, then the ending). voyageEnd.called is what
-  // moves it from the first to the second, and it is saved, so a reload between the two steps carries on at SHARE COORDINATES rather than calling again.
+  // Two screens, in order, each the player's own tap: "It's been over 72 hours without water." (CONTINUE), then "I'm too weak to continue." with the first still
+  // above it (CALL FOR HELP). voyageEnd.step is which of the two is up; it is saved, so a reload lands on the same one. CALL FOR HELP plays the SOS clip, the
+  // screen fades to charcoal over its last 3 seconds, and the end-of-game summary opens (see RESCUE ENDING below).
   function rescueCallChoice(state) {
-    var called = !!(state && state.voyageEnd && state.voyageEnd.called);
-    return { id: 'rescue-call', options: [called ? { label: 'SHARE COORDINATES', action: 'share-coordinates' } : { label: 'CALL COAST GUARD', action: 'call-coast-guard' }] };
+    var step = (state && state.voyageEnd && state.voyageEnd.step) || 0;
+    return { id: 'rescue-call', options: [step >= 1 ? { label: 'CALL FOR HELP', action: 'call-for-help' } : { label: 'CONTINUE', action: 'rescue-continue' }] };
   }
 
   function checkNeglectRescue(state) {
@@ -6816,10 +6822,9 @@
     if (Number.isFinite(c.lastDrankAt) && now - c.lastDrankAt >= RESCUE_WATER_HOURS * 60) reason = 'water';
     else if (Number.isFinite(c.lastAteAt) && now - c.lastAteAt >= RESCUE_FOOD_HOURS * 60) reason = 'food';
     if (!reason) return;
-    ve.phase = 'pending'; ve.reason = reason; ve.at = now; ve.called = false;
+    ve.phase = 'pending'; ve.reason = reason; ve.at = now; ve.step = 0;
     c.watchState = 'awake'; c.sleepStartedAt = null; // whatever he was in the middle of (asleep, reading, a menu) ends here
-    log(state, "I can't continue like this.");
-    state.pendingChoice = rescueCallChoice(state);
+    state.pendingChoice = rescueCallChoice(state); // nothing is logged here: the two lines are shown on the screen (see rescueKick) and the one closing entry is written when help has been called
   }
 
   // OLD SAVES -- brings ANY older save to the neglect-only rescue system. The retired mechanics (flares, the life raft, the old EPIRB /
@@ -6835,8 +6840,11 @@
     delete state.rescue;
     var ve = state.voyageEnd;
     if (!ve || typeof ve !== 'object' || ['none', 'pending', 'ended'].indexOf(ve.phase) < 0) {
-      state.voyageEnd = { phase: wasEnded ? 'ended' : 'none', reason: wasEnded ? 'legacy' : null, at: wasEnded ? now : null };
+      state.voyageEnd = { phase: wasEnded ? 'ended' : 'none', reason: wasEnded ? 'legacy' : null, at: wasEnded ? now : null, step: 0 };
     }
+    ve = state.voyageEnd;
+    if (!Number.isInteger(ve.step) || ve.step < 0 || ve.step > 1) ve.step = ve.called ? 1 : 0; // (a save from the brief CALL COAST GUARD build: already called -> the second screen)
+    delete ve.called;
     var since = function (hours, thresholdHours) {
       var mins = (Number.isFinite(hours) && hours > 0) ? hours * 60 : 0;
       return now - Math.min(mins, thresholdHours * 60 - RESCUE_MIGRATION_GRACE_MINUTES);
@@ -10685,7 +10693,7 @@
   function printRoomHeader(name) {
     var last = tempViewEl.lastElementChild;
     if (last && last.classList.contains('echo') && last.textContent === '> ' + name) return;
-    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "OPEN SAILING BEGINS IN THE PACIFIC."): keep the gap that always sat there
+    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "I\u2019ll follow Dad\u2019s course until we reach the Pacific."): keep the gap that always sat there
     printEcho(name.toLowerCase());
   }
 
@@ -11455,7 +11463,7 @@
       // already returns through, sending the player back to whichever
       // screen they actually toggled this from.
       printBlank();
-      printLine('OPEN SAILING BEGINS IN THE PACIFIC.', 'amber');
+      printLine('I\u2019ll let the autopilot hold our course until we reach the Pacific.'); // an observation in the ordinary text (not amber, not caps)
       render(state);
       return;
     }
@@ -11755,7 +11763,7 @@
   function cmdMarineForecast(state) {
     if (!marineForecastAvailable(state)) { // listed from the start but locked until Pacific control: the same shape as blockedByCoastalLock (a message, then straight back to the screen it came from)
       printBlank();
-      printLine('I still have service. I can check the marine weather once I reach open water.'); // an observation, in the ordinary text (not amber, not caps), and not logged
+      printLine("I still have cell service. I'll check the marine forecast once I'm offshore."); // an observation, in the ordinary text (not amber, not caps), and not logged
       cmdNavStation(state);
       return;
     }
@@ -11892,8 +11900,7 @@
     };
   }
 
-  // RESCUE -- the ending screen (see the RESCUE note above checkNeglectRescue): the existing voyage information, nothing more.
-  // The closing entry after SHARE COORDINATES, worded for the actual cause (voyageEnd.reason: 'water' after 72 hours without a drink, 'food'
+  // RESCUE -- the ending (see RESCUE ENDING below). The closing diary entry once help has been called, worded for the actual cause (voyageEnd.reason: 'water' after 72 hours without a drink, 'food'
   // after 168 hours without a meal; anything older / unknown gets the plain form). First person, restrained, no narrator addressing the player.
   function voyageEndLine(state) {
     var reason = state.voyageEnd && state.voyageEnd.reason;
@@ -11901,24 +11908,118 @@
     if (reason === 'food') return 'Too long without food. I called for help, and the voyage ended there.';
     return 'I called for help. The voyage ended there.';
   }
-  // SHARE COORDINATES -- the position as it pops up on the screen: the same two-row grid VOYAGE ENDED uses, so the values line up with DAY and
-  // DISTANCE TRAVELED below. Printed above the temp view (like a log entry) so it stays on screen while the ending is written under it.
-  function printSharedCoordinates(state) {
-    var ll = currentLatLon(state);
-    var parts = formatLatLon(ll.lat, ll.lon).split(', '); // "48° 22.7' N" , "124° 44.4' W"
-    printBlank();
-    printDataRow('LATITUDE', parts[0], 'data-row-lg');
-    printDataRow('LONGITUDE', parts[1], 'data-row-lg');
-    printBlank();
-    while (tempViewEl.firstChild) outputEl.insertBefore(tempViewEl.firstChild, tempViewEl);
+  /* --------------------------------------------------------------
+     RESCUE ENDING -- what the player sees once a neglect threshold (see checkNeglectRescue) has been reached. The world has stopped; nothing else is offered.
+       1. "It's been over 72 hours without water." (or "... 7 days without food.")             -> CONTINUE
+       2. the same line, and under it "I'm too weak to continue."                               -> CALL FOR HELP
+       3. CALLING FOR HELP: the SOS clip plays once (never looped); over its last RESCUE_FADE_SECS seconds the screen fades to the game's charcoal
+       4. the end-of-game summary opens (the same one the arrival ends with, saying the voyage was NOT COMPLETED); no LANDFALL title, no music; NEW VOYAGE.
+     The environmental audio (sea, wind, rain, the engine if it is running) is never touched: it goes on under all four, and under the summary.
+     The two lines are shown on the screen only (like the arrival's reflections); the diary gets the one closing entry (voyageEndLine) when help has been called.
+     -------------------------------------------------------------- */
+  var RESCUE_FADE_SECS = 3; // mirrored by the .ending-overlay opacity transition (3s)
+  var rescueShownStep = -1, rescueCalling = false, rescuePoll = null, rescueFadeAt = null, rescueOpenTimers = [], rescueKickTimer = null, rescueSummaryUp = false, rescueWired = false;
+
+  function rescueLines(state) {
+    var reason = state.voyageEnd && state.voyageEnd.reason;
+    return [reason === 'food' ? "It's been over 7 days without food." : "It's been over 72 hours without water.", "I'm too weak to continue."];
+  }
+  function rescuePrintLines(state) { // the lines for the current step, each with a blank above it (the first stays up when the second joins it)
+    var lines = rescueLines(state), step = state.voyageEnd.step || 0;
+    for (var i = 0; i <= step && i < lines.length; i++) { printBlank(); printLine(lines[i]).classList.add('rescue-line'); }
+    rescueShownStep = step;
     scrollToBottom();
   }
-  function printVoyageEnded(state) {
-    printBlank();
-    printLine('VOYAGE ENDED', 'heading-label');
-    printBlank();
-    printDataRow('DAY', String(voyageDayNumber(state)), 'data-row-lg');
-    printDataRow('DISTANCE TRAVELED', Math.round(state.nav.distanceTraveled).toLocaleString() + ' NM', 'data-row-lg');
+  // Idempotent. Called from the live loop and at boot, and wherever a threshold may just have been crossed. 'pending': puts the current step's lines on the
+  // screen (once, and again if the screen was cleared) and its button; 'ended': puts the summary up (instantly -- this is a reload, or the page came back).
+  function rescueKick(state) {
+    var ve = state && state.voyageEnd;
+    if (!ve || ve.phase === 'none') return;
+    if (ve.phase === 'pending') {
+      if (rescueCalling) return;
+      if (state.pendingChoice && state.pendingChoice.id === 'restart-choice') return; // NEW VOYAGE: YES / NO is being answered
+      if (uiBusy) { if (!rescueKickTimer) rescueKickTimer = setTimeout(function () { rescueKickTimer = null; if (GAME) rescueKick(GAME); }, 500); return; } // an action's dots own the screen: the lines wait for them
+      if (rescueShownStep !== (ve.step || 0) || tempViewEl.querySelectorAll('.rescue-line').length !== (ve.step || 0) + 1) { // (not on the screen: the first time, or something cleared it)
+        clearTempView();
+        rescuePrintLines(state);
+        state.pendingChoice = rescueCallChoice(state);
+        renderOptions(state);
+      }
+    } else if (ve.phase === 'ended') {
+      if (!rescueSummaryUp && !rescueOpenTimers.length) rescueOpenSummary(state, true);
+    }
+  }
+  function rescueEls() { return finaleEls(); }
+  function rescueWire() {
+    if (rescueWired) return; rescueWired = true;
+    document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.voyageEnd && GAME.voyageEnd.phase === 'ended' && rescueSummaryUp) confirmRestart(); });
+  }
+  // CALL FOR HELP: CALLING FOR HELP for exactly as long as the SOS clip plays; the screen starts fading to charcoal RESCUE_FADE_SECS before the clip ends.
+  function rescueBeginCall(state) {
+    rescueCalling = true; rescueFadeAt = null;
+    runAudioSyncedAction(state, {
+      label: 'CALLING FOR HELP',
+      startupFallbackSeconds: 20,
+      watchdogMarginSeconds: 3,
+      playAudio: function (onEnded) {
+        var el = playNavStationOneShot('sos', onEnded);
+        if (el) {
+          el.loop = false; // the SOS plays once
+          if (rescuePoll) clearInterval(rescuePoll);
+          rescuePoll = setInterval(function () { // its length is known once it has loaded: when 3 s of it remain the fade begins
+            if (rescueFadeAt != null) { clearInterval(rescuePoll); rescuePoll = null; return; }
+            var d = el.duration, t = el.currentTime;
+            if (isFinite(d) && d > 0 && d - t <= RESCUE_FADE_SECS + 0.1) rescueStartFade();
+          }, 100);
+        }
+        return el;
+      },
+      action: function (s) { rescueFinishCall(s); },
+    });
+  }
+  function rescueStartFade() { // idempotent: the overlay (the game's charcoal) fades in over the terminal
+    if (rescueFadeAt != null) return;
+    rescueFadeAt = Date.now();
+    var E = rescueEls(); rescueWire();
+    E.ov.classList.add('rescue'); E.ov.hidden = false;
+    finaleShow(E.ov, 'show', false);
+  }
+  function rescueFinishCall(state) { // the SOS clip has ended (or could not play)
+    if (rescuePoll) { clearInterval(rescuePoll); rescuePoll = null; }
+    rescueCalling = false;
+    var ve = state.voyageEnd;
+    if (!ve || ve.phase !== 'pending') return;
+    ve.phase = 'ended';
+    log(state, voyageEndLine(state));
+    flushNewLogEntries(state);
+    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+    rescueOpenSummary(state, false);
+  }
+  // Opens the end-of-game summary over the charcoal. instant: a reload / return -- everything is simply there. Otherwise it waits for the fade to finish.
+  function rescueOpenSummary(state, instant) {
+    var E = rescueEls(); rescueWire();
+    E.ov.classList.add('rescue'); E.ov.hidden = false;
+    function open(inst) {
+      rescueOpenTimers = [];
+      finaleShow(E.ov, 'show', true);
+      finaleBuildSummary(state, E);
+      finaleShow(E.sum, 'show', inst);
+      rescueSummaryUp = true;
+      if (inst) { E.btn.hidden = false; finaleShow(E.btn, 'show', true); }
+      else rescueOpenTimers.push(setTimeout(function () { rescueOpenTimers = []; E.btn.hidden = false; finaleShow(E.btn, 'show', false); }, FINALE_SUMMARY_FADE_SECS * 1000 + 100));
+    }
+    if (instant) { open(true); return; }
+    rescueStartFade();
+    var wait = Math.max(0, RESCUE_FADE_SECS * 1000 - (Date.now() - rescueFadeAt)) + 60;
+    rescueOpenTimers.push(setTimeout(function () { open(false); }, wait));
+  }
+  function rescueResetUi() { // a new voyage: nothing of the ending may leak into it
+    if (rescuePoll) { clearInterval(rescuePoll); rescuePoll = null; }
+    if (rescueKickTimer) { clearTimeout(rescueKickTimer); rescueKickTimer = null; }
+    rescueOpenTimers.forEach(clearTimeout); rescueOpenTimers = [];
+    rescueShownStep = -1; rescueCalling = false; rescueFadeAt = null; rescueSummaryUp = false;
+    var el = navStationAudioEls.sos; if (el) { try { el.pause(); el.currentTime = 0; } catch (e) {} }
+    var E = rescueEls(); if (E.ov) E.ov.classList.remove('rescue');
   }
 
   // The three conditions cmdEngine itself refuses START ENGINE on --
@@ -14002,7 +14103,7 @@
         { term: 'RUN AGROUND', body: 'Use FREE SOLACE to get underway again.' },
         { term: 'TOO DARK TO SEE', body: 'Turn on cabin lights below deck or navigation lights above deck.' },
         { term: 'NO SAILING SPEED', body: 'Check wind, point of sail, sail area, trim, and damage.' },
-        { p: 'Do not go without food or water. After three days without a drink or seven days without food, you must call the Coast Guard and the passage cannot continue.' },
+        { p: 'Do not go without food or water. After three days without a drink or seven days without food, you must call for help and the passage cannot continue.' },
       ],
     },
     {
@@ -17942,7 +18043,7 @@
     fuseRepair: 'audio/nav_station/fuse_repair.mp3',
     engineRepair: 'audio/nav_station/engine_repair.mp3',
     putAwayTools: 'audio/nav_station/put_away_tools.mp3',
-    sos: 'audio/nav_station/SOS.mp3', // RESCUE: plays for the whole of CALLING COAST GUARD (the action lasts exactly as long as the clip) -- see 'call-coast-guard'
+    sos: 'audio/nav_station/SOS.mp3', // RESCUE: plays once, for the whole of CALLING FOR HELP (the action lasts exactly as long as the clip) -- see rescueBeginCall
     // PONG -- see the PONG section below (search "PONG"). Same domain/
     // element-pool as every sound above (playNavStationOneShot), not a
     // separate audio system of its own.
@@ -19111,8 +19212,8 @@
 
 
   function getContextualOptions(state) {
-    // THE VOYAGE IS OVER (see RESCUE, near checkNeglectRescue): once a neglect threshold has been reached the only thing left is CALL COAST
-    // GUARD, SHARE COORDINATES and then RESTART -- whatever menu, short action or sleep was in progress. The one exception is the header's own restart
+    // THE VOYAGE IS OVER (see RESCUE, near checkNeglectRescue): once a neglect threshold has been reached the only thing left is CONTINUE, CALL
+    // FOR HELP and then the summary's NEW VOYAGE -- whatever menu, short action or sleep was in progress. The one exception is the header's own restart
     // request (NEW VOYAGE: YES / NO), which stays answerable.
     var ve = state.voyageEnd;
     if (ve && ve.phase !== 'none') {
@@ -19976,39 +20077,15 @@
             },
           });
           break;
-        case 'call-coast-guard':
-        case 'call-for-rescue': // the retired name of the first step (a save made before the SOS clip existed): same step
-          if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || state.voyageEnd.called) break; // exactly one call: never replayed, never reachable twice
-          runAudioSyncedAction(state, {
-            label: 'CALLING COAST GUARD',
-            startupFallbackSeconds: 15,
-            watchdogMarginSeconds: 3,
-            playAudio: function (onEnded) { return playNavStationOneShot('sos', onEnded); },
-            action: function (s) {
-              if (!s.voyageEnd || s.voyageEnd.phase !== 'pending') return;
-              s.voyageEnd.called = true; // nothing is logged for the call itself: the one closing entry is written when the coordinates have been shared
-              s.pendingChoice = rescueCallChoice(s);
-            },
-          });
+        case 'rescue-continue': // the first screen's CONTINUE: the second line joins the first, and CALL FOR HELP is next
+          if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || state.voyageEnd.step !== 0) break;
+          state.voyageEnd.step = 1;
+          state.pendingChoice = rescueCallChoice(state);
+          rescuePrintLines(state);
           break;
-        case 'share-coordinates':
-          if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || !state.voyageEnd.called) break; // exactly one ending: never replayed, never reachable twice
-          runShortAction(state, {
-            label: 'SHARING COORDINATES',
-            duration: 3,
-            action: function (s) { printSharedCoordinates(s); },
-            thenBeat: {
-              duration: 4, // the coordinates stay up for a few seconds, then the ending -- exactly as it was before the call had two steps
-              action: function (s) {
-                if (!s.voyageEnd || s.voyageEnd.phase !== 'pending') return;
-                s.voyageEnd.phase = 'ended';
-                log(s, voyageEndLine(s));
-                flushNewLogEntries(s);
-                printVoyageEnded(s);
-                s.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
-              },
-            },
-          });
+        case 'call-for-help': // CALLING FOR HELP -- see RESCUE ENDING
+          if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || state.voyageEnd.step !== 1 || rescueCalling) break; // exactly one call, never replayed
+          rescueBeginCall(state);
           break;
         case 'free-solace':
           if (!state.nav.grounded) break;
@@ -20172,6 +20249,7 @@
       state.pendingChoice = null;
     }
     renderOptions(state);
+    rescueKick(state); // a rescue's screen comes straight back if something cleared it (e.g. NEW VOYAGE opened and cancelled); a no-op otherwise
     saveGameState(state);
     updateAudioForState(state);
     scrollToBottom();
@@ -20296,6 +20374,7 @@
       }
       syncEnvironmentalAudio('live loop'); // every interval, not just on a simulation tick (about one a minute)
       finaleKick(GAME); // the final arrival: starts / resumes its current step (idempotent)
+      rescueKick(GAME); // a rescue: puts its current screen up (idempotent)
       departureAutoKick(GAME); // "Leaving the marina...", should a reload have left it waiting (idempotent)
       saveGameState(GAME);
     }, LIVE_TICK_SECONDS * 1000);
@@ -20385,6 +20464,7 @@
     // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
     // an in-progress voyage, it just starts over exactly like a first visit.
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save:', describeError(e)); }
+    rescueResetUi();
     finaleResetUi(); // nothing of a finished voyage's ending (overlay, CODA, marina) may leak into the next one
     stopAllEngineLoops(); // the discarded voyage's engine (if it was running) must not keep sounding over the fresh one -- and the fresh voyage's own START ENGINE must begin from a clean engine-audio state
     GAME = null;
@@ -20417,7 +20497,6 @@
     printedCount = state.log.length;
     var depNow = state.departure && DEPARTURE_STEPS[state.departure.stageIndex];
     if (depNow && depNow.reshow) { printBlank(); printLine(depNow.reshow); } // a reload while a closing departure line is waiting for its CONTINUE: it is put back (it was never in the log)
-    if (state.voyageEnd && state.voyageEnd.phase === 'ended') printVoyageEnded(state); // reloaded after the ending: the same VOYAGE ENDED screen
     renderOptions(state);
     scrollToBottom();
   }
@@ -20995,7 +21074,7 @@
     'harbor-motorsail': { about: 'Motor-sailing: the engine is running and the sails are still up, so the arrival offers FURL SAILS and skips START ENGINE.', build: function () { return scenarioHarbor(true, false, true); } },
     'harbor-engine': { about: 'The same, with the engine already running and the sails already furled, so the arrival skips FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(true); } },
     'cape': { about: 'Just short of the open-Pacific line (the longitude of Cape Flattery), engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
-    'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests CALL COAST GUARD, SHARE COORDINATES and the ending.', build: scenarioRescue },
+    'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests the rescue: the two lines, CALL FOR HELP, the SOS and the end-of-game summary.', build: scenarioRescue },
   };
   function scenarioShowMenu(requested) {
     var ov = document.createElement('div');
@@ -21063,6 +21142,7 @@
     renderReturn(GAME, ticks);
     navAnnounceGroundingIfNeeded(GAME, false);
     finaleKick(GAME); // a reload during / after the final arrival resumes it where it was
+    rescueKick(GAME); // a reload during / after a rescue: the same screen again (the summary, if it had ended)
     finaleSyncChrome(GAME);
     startLiveLoop();
     setTimeout(function () { departureAutoKick(GAME); }, 300); // a reload on "Leaving the marina...": it begins again by itself
