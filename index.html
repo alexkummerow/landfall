@@ -5339,6 +5339,15 @@
         { pct: 100, text: "Nothing lasts on its own.\nMaybe that's what makes taking care of something matter." },
       ],
     },
+    // A DISCOVERED book (see bookOnShelf): it is meant to be found during the voyage. Five minutes to read; three beats.
+    {
+      id: 'runawayBunny', title: 'The Runaway Bunny', author: 'Margaret Wise Brown', requiredMinutes: 5,
+      milestones: [
+        { pct: 10, text: 'Inside the cover, a handwritten note: \u201cWherever you go, I will find you.\u201d\nBeneath it: \u201cMom\u201d' },
+        { pct: 50, text: 'I know these pictures. The words come back slowly, but the pictures feel as though they never left.' },
+        { pct: 100, text: 'The little bunny becomes a sailboat. His mother becomes the wind that carries him home.' },
+      ],
+    },
   ];
   var BOOKS_BY_ID = {};
   BOOKS.forEach(function (b) { BOOKS_BY_ID[b.id] = b; });
@@ -15670,8 +15679,14 @@
     return bookProgressPct(bookDef, bookState) + '%';
   }
 
+  // Whether a book is on the shelf (and can be picked up). Every book is, for now. THE RUNAWAY BUNNY is meant to be a DISCOVERED item, unlocked during the
+  // voyage -- the condition for that goes here (e.g. `if (bookDef.id === 'runawayBunny') return <found yet?>;`) and the shelf and the reading both follow it.
+  function bookOnShelf(state, bookDef) {
+    return true;
+  }
+
   function buildBookshelfOptions(state) {
-    var opts = BOOKS.map(function (b) {
+    var opts = BOOKS.filter(function (b) { return bookOnShelf(state, b); }).map(function (b) {
       var bs = state.books[b.id];
       return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
     });
@@ -15731,17 +15746,19 @@
     var bookDef = BOOKS_BY_ID[bookId];
     if (!bookDef) return;
     var bookState = state.books[bookId];
-    if (bookState.completed) { cmdBookshelf(state); return; } // no rereading system yet -- just stay on the shelf
+    if (!bookOnShelf(state, bookDef)) { cmdBookshelf(state); return; } // not found yet
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
     runAudioSyncedAction(state, {
       label: 'SETTLING IN',
       transientLabel: true, // gone once the real "Reading [title]." log line takes over, same as GOING ABOVE/REPAIRING X
       playAudio: function (onEnded) { return playSaloonOneShot('bookOpen', onEnded); },
       action: function (s) {
+        var wasFinished = bookState.completed;
+        if (wasFinished) { bookState.completed = false; bookState.minutesRead = 0; bookState.triggeredMilestones = []; } // READING A FINISHED BOOK AGAIN: it starts over from the first page, and its observations come again
         s.crew.readingBookId = bookId;
         s.crew.readingLastSyncedAt = currentGameMinutes(s); // starts the continuous clock fresh — nothing before this moment counts toward this session
         bumpClutter(s, 1); // the book itself, left out
-        log(s, pickVariant(DAILY_COPY.readStart, 'readStart', { seen: bookState.minutesRead > 0 }).split('{T}').join(bookDef.title)); // "went back to" only for a book that really has been read before
+        log(s, pickVariant(DAILY_COPY.readStart, 'readStart', { seen: wasFinished || bookState.minutesRead > 0 }).split('{T}').join(bookDef.title)); // "went back to" only for a book that really has been read before
         flushNewLogEntries(s);
         s.pendingChoice = { id: 'reading', options: [{ label: 'STOP READING', action: 'stop-reading' }] };
       },
@@ -15960,6 +15977,7 @@
 
       if (completing) {
         bookState.completed = true;
+        bookState.timesRead = (bookState.timesRead || 0) + 1;
         c.readingBookId = null;
         stopActivityDots(); // the continuous "READING . .. ..." indicator won't otherwise disappear until CLOSING BOOK's own runAudioSyncedAction resolves -- see performStopReading's comment for why this can't rely on syncActivityDots's own declarative check alone
         flushNewLogEntries(state); // any milestone text just triggered above is shown before the closing dots (if any) take over
