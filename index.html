@@ -2454,6 +2454,11 @@
     api.stop = function () { api.ended = true; try { el.pause(); } catch (e) {} };
     return api;
   }
+  function finaleRestartCoda() { // SOUND OFF -> ON (toggleMute): the arrival music, which loops, starts over from its beginning
+    if (!finaleCoda || finaleCoda.ended || !finaleCoda.el.loop) return;
+    try { finaleCoda.el.currentTime = 0; } catch (e) {}
+    if (finaleCoda.el.paused) { var pr = finaleCoda.el.play(); if (pr && pr.catch) pr.catch(function () {}); }
+  }
   function finaleStartCoda(state, offsetSec) {
     if (finaleCoda || !audioUnlocked || finaleCodaTries >= 4) return; // (a missing / refused file is retried a few times, never in a loop)
     finaleCodaTries++;
@@ -7770,7 +7775,7 @@
   //   * the `muted` property of every <audio> element (the one-shots, and the plain-element loop fallback). Unlike `volume` it works on iOS, and it only
   //     silences output: the element keeps playing, its position keeps advancing, loops keep looping and `ended` still fires.
   // So SOUND OFF never pauses, stops, restarts or re-times anything: a muted game plays exactly the same audio, silently, every sequence that waits for a
-  // sound to end waits for the same real end whether it can be heard or not, and un-muting just lets the already-running sound be heard mid-stream.
+  // sound to end waits for the same real end whether it can be heard or not, and un-muting (SOUND OFF -> ON) starts every looping sound again from its beginning (restartAllLoopingAudio, run while the master is still silent), and everything else -- one-shots, the cassette -- is simply let be heard mid-stream.
   // Every <audio> element in the game is created through createGameAudio, which applies the master state as it is made.
   // The play() guard below catches anything that ever skips it, so no sound can be audible outside the master.
   var playRejectionLoggedAt = {}; // file name -> when its last rejected play() was logged
@@ -7912,6 +7917,7 @@
      slower and are passed in explicitly by their own layers.
      -------------------------------------------------------------- */
   var LOOP_CROSSFADE_SECONDS = 0.25;
+  var LOOP_RESTART_FADE_SECONDS = 0.05;   // SOUND OFF -> ON: a loop that starts over fades in over this (click prevention only -- it is heard from its very beginning)
 
   /* --------------------------------------------------------------
      LOOP ENGINE -- the ONE implementation behind every continuous loop in the game: the sea / creak / wind / rain ambience channels, the engine's
@@ -7935,8 +7941,7 @@
      A VOICE is one continuous sound slot (e.g. "sea, exterior"): voice.set(path, level, fadeSeconds) states what should be audible and is
      idempotent -- the same wish again is a no-op, a new track is crossfaded in make-before-break (the old one keeps playing until the new one is
      decoded and ready), and voice.set(null, ..) fades out. Nothing here pauses for SOUND OFF: the master mute only changes audibility (masterGain
-     for the buffer loops, the element's muted flag for the fallback), so loops keep running, keep their position, and un-muting just lets the
-     already-running sound be heard.
+     for the buffer loops, the element's muted flag for the fallback), so loops keep running and keep their position while it is OFF; turning SOUND back ON restarts each loop from its beginning (voice.restart).
      -------------------------------------------------------------- */
   var LOOP_SEAM_SECONDS = 0.4;              // the overlap at every repeat (clamped to 12% of a short loop)
   var LOOP_SCHEDULE_HORIZON_SECONDS = 75;   // repeats are scheduled this far ahead of the audio clock: how long the page can stall without any audible effect
@@ -8055,6 +8060,7 @@
     L.healthy = function () { return !L.dead && audioCtx.state === 'running' && L.live.length > 0; };
     L.diag = function () { return 'buffer  passes ' + L.passes + '  live ' + L.live.length + '  level ' + loopReadGain(out.gain).toFixed(3) + '  lead ' + rec.lead.toFixed(3) + 's  len ' + rec.len.toFixed(2) + 's  seam ' + seam.toFixed(2) + 's'; };
     var start = audioCtx.currentTime + 0.02;
+    L.t0 = start; // (when this loop's first pass begins on the audio clock)
     L.nextT = start;
     schedule(start, true);
     L.pump();
@@ -8152,6 +8158,23 @@
     };
     V.setLevel = function (level, fadeSeconds) { V.want.level = level; if (V.cur && !V.cur.dead) V.cur.fadeTo(level, fadeSeconds == null ? LOOP_LEVEL_RAMP_SECONDS : fadeSeconds); };
     V.stop = function (fadeSeconds) { V.set(null, 0, fadeSeconds); };
+    // SOUND OFF -> ON: this loop starts again from its beginning. The old pass is cut rather than faded -- the master is still silent when this runs, so
+    // nothing is heard to stop; the new one is already playing from its first sample by the time the master comes up.
+    V.restart = function () {
+      var path = V.want.path;
+      if (path == null) return;
+      var prev = V.cur;
+      if (!prev || prev.dead) { V.cur = null; V.maintain(true); return; }          // nothing running: maintain starts it, and a new loop always starts at its beginning
+      if (prev.kind === 'element') {
+        if (prev.path !== path) return;                                               // a different track is on its way in, and it starts at its beginning anyway
+        try { prev.el.currentTime = 0; } catch (e) {}
+        prev.pump();
+        return;
+      }
+      var b = backend(), rec = b === 'buffer' ? loopBuffers.peek(path) : null;
+      if (rec) { V.cur = makeBufferLoop(path, rec, V.want.level, LOOP_RESTART_FADE_SECONDS); prev.stop(0); return; }
+      if (b === 'wait') { V.cur = null; prev.stop(0); V.maintain(true); }           // the context is not running: begin again from the start the moment it does
+    };
     V.maintain = function (urgent) { // cheap and idempotent: starts what should be playing and is not, tops up what is
       if (V.want.path == null) return;
       if (V.cur && !V.cur.dead) {
@@ -8788,9 +8811,22 @@
     reconcileEnvironmentalAudio();
   }
 
+  // SOUND OFF -> ON restarts every looping sound from its beginning (SOUND OFF itself still pauses/restarts nothing -- see MASTER MUTE). It runs while the
+  // master is still silent, so what the player hears coming on is the start of each loop: the voices of the loop engine (sea, wind, rain, creak, the engine,
+  // luffing, marina, birds, weather fax), the fishing reel, and the arrival music. One-shots and the cassette are not loops and are left alone.
+  function restartAllLoopingAudio() {
+    loopVoices.forEach(function (v) { try { v.restart(); } catch (e) { console.warn('[LOOP] restart failed for ' + v.label + ': ' + (e && e.message)); } });
+    try {
+      var reel = typeof fishingAudioEls !== 'undefined' ? fishingAudioEls.reel : null;
+      if (reel && reel.loop && !reel.paused && !reel.ended) reel.currentTime = 0;
+    } catch (e) {}
+    if (typeof finaleRestartCoda === 'function') { try { finaleRestartCoda(); } catch (e) {} }
+  }
   function toggleMute() {
-    setMasterMuted(!muted); // the master only -- nothing else in the game reads or applies the mute state
-    if (!muted) syncEnvironmentalAudio('sound on'); // SOUND ON: confirm the right loops are there to be heard -- idempotent, nothing is restarted
+    var turningOn = muted;
+    if (turningOn) restartAllLoopingAudio(); // SOUND ON (from OFF): every loop begins again from its start, still silent...
+    setMasterMuted(!muted);                  // ...and then the master comes up -- the master only; nothing else in the game reads or applies the mute state
+    if (!muted) syncEnvironmentalAudio('sound on'); // confirm the right loops are there to be heard -- idempotent
   }
 
   function updateSoundLabel() {
