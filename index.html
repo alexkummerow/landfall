@@ -7852,6 +7852,8 @@
   var AUDIO_HEALTH_CHECK_WAIT_MS = 850;    // how long the cassette's progress check watches its element
   var audioWatchdogTimer = null;
   var audioGestureListenersInstalled = false;
+  var audioCtxHasRun = false;        // the current context has been 'running' at least once (so a later 'suspended' / 'interrupted' means the system took the audio away)
+  var audioInterrupted = false;      // the audio was taken away (app left, screen locked, call): the next SOUND ON tap must check the audio system is really alive (reviveAudioForSoundOn)
   var lastGestureWakeAt = 0;
 
   // AUDIO DEBUG -- off by default, never ships enabled. Flip to true
@@ -8730,7 +8732,61 @@
     if (first) catchUpEngineAudioIfRunning(GAME);
   }
   function onAudioContextStateChange() {
-    if (audioCtx && audioCtx.state === 'running') wakeAudio(false); // the instant the context runs, every wanted loop starts (or carries on)
+    if (!audioCtx) return;
+    var st = audioCtx.state;
+    if (st === 'running') { audioCtxHasRun = true; wakeAudio(false); } // the instant the context runs, every wanted loop starts (or carries on)
+    else if (audioCtxHasRun && (st === 'interrupted' || st === 'suspended')) audioWasInterrupted(); // iOS: the app was left, the screen locked, a call came in
+  }
+
+  // The audio was taken away from the page. SOUND goes back to OFF -- what the player sees is the truth: nothing is playing -- and the next SOUND ON tap
+  // makes sure the audio system is genuinely alive again (reviveAudioForSoundOn). Also called when an iPhone / iPad page is hidden (the app was left): iOS
+  // stops the audio context then, and does not always bring it back by itself.
+  function audioWasInterrupted() {
+    audioInterrupted = true;
+    if (!muted) setMasterMuted(true);
+  }
+
+  // SOUND ON, after the audio was interrupted: resume the context; if it is still not running half a second later (iOS sometimes leaves it dead until
+  // the page is reloaded -- the loops are silent, one-shots still play), rebuild it and start the loops again. The delay is under a second so that, on iOS,
+  // the tap's permission to start audio still applies to the new context.
+  function reviveAudioForSoundOn() {
+    var ctx = audioCtx, interrupted = audioInterrupted;
+    audioInterrupted = false;
+    if (!ctx || (!interrupted && (ctx.state === 'running' || !audioCtxHasRun))) return; // alive (or still starting up for the very first time): nothing to do
+    var t0 = ctx.currentTime;
+    resumeAudioContext('sound on');
+    setTimeout(function () {
+      if (audioCtx !== ctx) return; // already replaced
+      if (muted) { audioInterrupted = true; return; } // switched off again meanwhile: check again at the next SOUND ON
+      if (ctx.state === 'running' && ctx.currentTime > t0 + 0.15) return; // it runs, and its clock moves: alive
+      rebuildAudioContext();
+    }, 600);
+  }
+
+  // A context that cannot be brought back: every old loop is stopped first (and the old context shut and cut off from the speakers), so nothing can play
+  // twice; then a new context and master bus are made, and the loop voices -- which still know what they want -- start again from the top. The decoded
+  // loops (loopBuffers) are plain data, not tied to a context, and are kept.
+  function rebuildAudioContext() {
+    var old = audioCtx, oldMaster = masterGain;
+    loopVoices.forEach(function (v) {
+      v.token++; v.pendingPath = null; v.lastTryAt = 0; // a load that was under way for the old context is dropped
+      if (v.cur) { try { v.cur.stop(0); } catch (e) {} v.cur = null; }
+    });
+    if (old) {
+      try { old.onstatechange = null; } catch (e) {}
+      try { oldMaster.gain.value = 0; oldMaster.disconnect(); } catch (e) {}
+      try { var closing = old.close(); if (closing && typeof closing.catch === 'function') closing.catch(function () {}); } catch (e) {}
+    }
+    audioCtxHasRun = false;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      buildAudioGraph();
+    } catch (e) {
+      console.warn('Audio could not be rebuilt:', describeError(e));
+      audioCtx = null; masterGain = null; // the loops fall back to plain elements
+    }
+    resumeAudioContext('rebuild');
+    wakeAudio(false);
   }
 
   function buildAudioGraph() {
@@ -8790,7 +8846,10 @@
 
   function toggleMute() {
     setMasterMuted(!muted); // the master only -- nothing else in the game reads or applies the mute state
-    if (!muted) syncEnvironmentalAudio('sound on'); // SOUND ON: confirm the right loops are there to be heard -- idempotent, nothing is restarted
+    if (!muted) {
+      reviveAudioForSoundOn(); // SOUND ON after the audio was interrupted: make sure the audio system is really alive (resume it, or rebuild it)
+      syncEnvironmentalAudio('sound on'); // confirm the right loops are there to be heard -- idempotent, nothing is restarted
+    }
   }
 
   function updateSoundLabel() {
@@ -21315,6 +21374,7 @@
       // or resumes it catches up from there -- overwriting it with "now"
       // here would silently discard any time since the last live tick.
       saveGameState(GAME);
+      if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = catchUpFromRealTime(GAME);
       if (ticks > 0) {
