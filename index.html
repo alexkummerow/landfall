@@ -16699,7 +16699,7 @@
   /* ============================================================
      FISHING
      ------------------------------------------------------------
-     CAST -> WAIT -> BITE -> REACT -> LAND -> KEEP/RELEASE. An Above
+     CAST (CASTING for as long as the cast sound plays, then WATCHING THE LINE) -> WAIT -> BITE -> REACT -> LAND -> KEEP/RELEASE. An Above
      Deck activity (see getContextualOptions above and cmdFish below)
      layered on top of two EXISTING systems rather than duplicating
      either: FISH_MEAL_BY_SPECIES/heldFishAsMealItem (the held catch's
@@ -16764,6 +16764,8 @@
          spoilage both key off this, not a separate food[] count)
      ============================================================ */
 
+  var FISHING_CAST_STARTUP_FALLBACK_SECONDS = 8;  // CASTING never lasts longer than this while the cast sound's own length is still unknown
+  var FISHING_CAST_WATCHDOG_MARGIN_SECONDS = 3;   // ...and once it is known, the cast gives up waiting this long after the sound should have ended (the real 'ended' event always comes first)
   var FISHING_CONFIG = {
     biteChance: 0.6, // flat, every cast -- no hidden state modifies this
     bite: {
@@ -17051,7 +17053,7 @@
     el.volume = 0;
     el._baseVolume = FISHING_AUDIO_VOLUME[key];
     var p = el.play();
-    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); });
+    if (p && p.catch) p.catch(function (e) { console.warn('Fishing audio failed to play (' + key + '):', describeError(e)); audioDebugError(key, e); if (onEnded) onEnded(); }); // a refused play() will never fire 'ended' -- whoever is waiting on it carries on
     fadeFishingVolume(el, FISHING_AUDIO_VOLUME[key], FISHING_CROSSFADE_SECONDS);
     if (onEnded) {
       el.onended = function () {
@@ -17059,6 +17061,7 @@
         onEnded();
       };
     }
+    return el; // so a caller that waits on the end of the sound can also watch the element itself (see playFishingCast)
   }
 
   // Starts the continuous reel.mp3 bed -- fresh from the beginning
@@ -18619,6 +18622,7 @@
     cancelFishingDragScheduler();
     stopFishingReelLoop();
     if (!fishingSession) return;
+    if (fishingSession.castCancel) { fishingSession.castCancel(); fishingSession.castCancel = null; } // the cast sound is no longer being waited on (STOP FISHING, a new cast, ...)
     if (fishingSession.resolveTimer) clearTimeout(fishingSession.resolveTimer);
     if (fishingSession.dotsTimer) clearInterval(fishingSession.dotsTimer);
     // The waiting dots are a single DOM node this code inserted directly
@@ -18649,17 +18653,53 @@
     state.pendingChoice = { id: 'fish-idle', options: fishingIdleOptions() };
   }
 
+  // THE CAST. Two beats, and the first is exactly as long as the cast sound: CASTING (dots) while cast.mp3 plays, then -- the moment it has finished -- the same
+  // dots carry on under WATCHING THE LINE, and only then do the wait for a bite and the drag sounds begin (a bite can never arrive in the middle of the cast).
+  // Same safeguards as every audio-driven action (runAudioSyncedAction): the real 'ended' event decides, a sound that never starts, never loads or stops moving
+  // lets the cast carry on anyway, and a refused play() or locked audio completes at once. Returns a cancel function (STOP FISHING / a new cast call it).
+  function playFishingCast(onDone) {
+    var settled = false, el = null, watchdog = null, stallTimer = null, errorHandler = null, durationArm = null;
+    function cleanup() {
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      if (el && errorHandler) { el.removeEventListener('error', errorHandler); errorHandler = null; }
+      if (el && durationArm) { el.removeEventListener('loadedmetadata', durationArm); el.removeEventListener('durationchange', durationArm); durationArm = null; }
+    }
+    function finish() { if (settled) return; settled = true; cleanup(); onDone(); }
+    watchdog = setTimeout(finish, FISHING_CAST_STARTUP_FALLBACK_SECONDS * 1000); // only until the real length of the clip is known
+    el = playFishingOneShot('cast', finish);
+    if (!settled && el) {
+      durationArm = function () {
+        if (settled) return;
+        var d = el.duration;
+        if (!isFinite(d) || d <= 0) return;
+        el.removeEventListener('loadedmetadata', durationArm); el.removeEventListener('durationchange', durationArm); durationArm = null;
+        clearTimeout(watchdog);
+        watchdog = setTimeout(finish, (d + FISHING_CAST_WATCHDOG_MARGIN_SECONDS) * 1000);
+      };
+      durationArm();
+      if (durationArm) { el.addEventListener('loadedmetadata', durationArm); el.addEventListener('durationchange', durationArm); }
+      errorHandler = function () { console.warn('[AUDIO] the cast sound failed to load; casting without it'); finish(); };
+      el.addEventListener('error', errorHandler);
+      var lastT = el.currentTime, lastAt = Date.now();
+      stallTimer = setInterval(function () {
+        if (settled || el.ended) return;
+        if (el.currentTime !== lastT) { lastT = el.currentTime; lastAt = Date.now(); return; }
+        if (Date.now() - lastAt >= AUDIO_STALL_SECONDS * 1000) { console.warn('[AUDIO] the cast sound stopped progressing; carrying on'); finish(); }
+      }, 500);
+    }
+    return function cancel() { settled = true; cleanup(); };
+  }
+
   function performFishCast(state) {
     clearFishingTimers();
     stopFishingLandingSound(); // FISHING HOOK -- see cmdFish's comment on why this is separate from clearFishingTimers
     var willBite = Math.random() < FISHING_CONFIG.biteChance; // flat 60% -- see FISHING_CONFIG.biteChance comment for why nothing else modifies this
 
-    fishingSession = { phase: 'waiting', willBite: willBite, resolveTimer: null, dotsTimer: null, dotsLineEl: null };
+    fishingSession = { phase: 'casting', willBite: willBite, resolveTimer: null, dotsTimer: null, dotsLineEl: null, labelLineEl: null, castCancel: null };
 
-    playFishingOneShot('cast'); // FISHING HOOK -- fire-and-forget, does not delay anything below
     log(state, 'Put a line out.');
     flushNewLogEntries(state);
-    startFishingDragScheduler(); // FISHING HOOK -- cancelled by clearFishingTimers whenever the wait ends, for any reason
 
     // #temp-view was already cleared by the generic click handler that
     // routed the CAST click here (see renderOptions) -- just append the
@@ -18668,11 +18708,11 @@
     // single DOM node whose text content is updated in place -- never
     // prints a new line while waiting.
     printRoomHeader('FISH'); // "> FISH" stays fixed at the top while casting
-    // WATCHING THE LINE is temporary fishing-state UI, never log: gap, ALL-CAPS label, dots on the NEXT line -- all tracked
-    // so clearFishingTimers removes them the moment the wait ends.
+    // CASTING, then WATCHING THE LINE, is temporary fishing-state UI, never log: gap, ALL-CAPS label, dots on the NEXT line -- all tracked
+    // so clearFishingTimers removes them the moment the wait ends. It is ONE label line whose text changes when the cast sound ends; the dots never restart.
     printBlank();
     fishingSession.blankLineEl = tempViewEl.lastElementChild;
-    fishingSession.labelLineEl = printLine('WATCHING THE LINE', 'heading-label');
+    fishingSession.labelLineEl = printLine('CASTING', 'heading-label');
     var dotsLine = document.createElement('p');
     dotsLine.className = 'line dim';
     dotsLine.textContent = '.';
@@ -18688,18 +18728,29 @@
     state.pendingChoice = { id: 'fish-waiting', options: [{ label: 'STOP FISHING', action: 'fish-stop' }] };
 
     var mySession = fishingSession;
-    // If a bite is going to happen at all, it lands at a uniformly
-    // random point somewhere in the full wait window -- not weighted
-    // toward any particular part of it.
-    var resolveAtMs = willBite ? rand(0, FISHING_CONFIG.bite.totalWaitMs) : FISHING_CONFIG.bite.totalWaitMs;
-    fishingSession.resolveTimer = setTimeout(function () {
-      if (fishingSession !== mySession) return; // superseded -- STOP FISHING was clicked, or another cast started
-      if (willBite) beginFishBite(state);
-      else resolveFishNoBite(state);
-    }, resolveAtMs);
     // Deliberately no renderOptions/save/scroll call here -- this runs
     // inside handleAction (via performFishCast), whose own tail does
-    // that once this returns, same as every other action.
+    // that once this returns, same as every other action. (If audio is locked, the cast "ends" right inside the next line,
+    // so the session is already WATCHING THE LINE by the time that tail runs; nothing here depends on the order.)
+    mySession.castCancel = playFishingCast(function () {
+      if (fishingSession !== mySession || mySession.phase !== 'casting') return; // superseded -- STOP FISHING was clicked, or another cast started
+      mySession.castCancel = null;
+      beginFishWatching(state, mySession);
+    });
+  }
+
+  // The cast sound has finished: the label becomes WATCHING THE LINE (the dots simply carry on), the drag sounds start, and the wait for a bite begins. If a bite is going to happen at all, it lands at a
+  // uniformly random point somewhere in the full wait window -- not weighted toward any particular part of it.
+  function beginFishWatching(state, session) {
+    session.phase = 'waiting';
+    if (session.labelLineEl) session.labelLineEl.textContent = 'WATCHING THE LINE';
+    startFishingDragScheduler(); // FISHING HOOK -- cancelled by clearFishingTimers whenever the wait ends, for any reason
+    var resolveAtMs = session.willBite ? rand(0, FISHING_CONFIG.bite.totalWaitMs) : FISHING_CONFIG.bite.totalWaitMs;
+    session.resolveTimer = setTimeout(function () {
+      if (fishingSession !== session) return; // superseded -- STOP FISHING was clicked, or another cast started
+      if (session.willBite) beginFishBite(state);
+      else resolveFishNoBite(state);
+    }, resolveAtMs);
   }
 
   function performFishStop(state) {
@@ -18874,10 +18925,39 @@
     fishingSession.resolveTimer = setTimeout(showNextLine, stepMs);
   }
 
-  // THE catch result: species on the left, weight in the value column, nothing else. The only place a catch is announced.
+  // THE catch result: CAUGHT, then the species on the left and the weight in the value column of the standard grid (the same one HELM and STATUS use). The only
+  // place a catch is announced on screen; the diary's own line for it is written by KEEP / THROW BACK (caughtFishPhrase, below).
   function showCatchResult(name, weightLb) {
     printBlank();
+    printLine('CAUGHT', 'heading-label');
+    printBlank();
     printDataRow(String(name).toUpperCase(), weightLb.toFixed(1) + ' LB', 'data-row-lg');
+  }
+
+  // "a 12.4-pound yellowfin tuna" -- the one phrase the diary uses for a landed fish, whether it is kept or let go. The weight is the one shown on the catch row; the name is
+  // the species as shown there (Ahi / Aku / Ono near Hawai\u02BBi), lower-cased for the middle of a sentence ("Pacific" keeps its capital); a / an follows how the weight is SAID
+  // (8.x, 11.x and 18.x take "an").
+  function caughtFishPhrase(name, weightLb) {
+    var w = (+weightLb).toFixed(1);
+    var lead = parseInt(w, 10);
+    var article = (lead === 8 || lead === 11 || lead === 18) ? 'an' : 'a';
+    return article + ' ' + w + '-pound ' + String(name).toLowerCase().replace(/\bpacific\b/g, 'Pacific');
+  }
+
+  // What the player thinks on keeping a fish: one of these, after the diary's "Caught a ..." line, never the same one twice running.
+  var FISH_KEPT_THOUGHTS = [
+    'That\u2019s dinner sorted.',
+    'Dinner just got better.',
+    'Something fresh for dinner.',
+    'I know what I\u2019m having tonight.',
+    'That\u2019ll make a good dinner.',
+  ];
+  var fishKeptThoughtRecent = [];
+  function pickFishKeptThought() {
+    var line = pickFromPoolAvoidingRecent(FISH_KEPT_THOUGHTS, fishKeptThoughtRecent.slice(-1));
+    fishKeptThoughtRecent.push(line);
+    if (fishKeptThoughtRecent.length > 4) fishKeptThoughtRecent.shift();
+    return line;
   }
 
   function resolveFishLanded(state) {
@@ -18944,7 +19024,7 @@
     state.fishing.heldFish = { speciesId: caught.species.id, caughtDay: voyageDayNumber(state), weightLb: caught.weightLb };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
     bumpHygiene(state, 2); // handling a fish
-    log(state, 'Kept the fish. Dinner taken care of.');
+    log(state, 'Caught ' + caughtFishPhrase(caught.displayName, caught.weightLb) + '. ' + pickFishKeptThought());
     flushNewLogEntries(state);
     logVesselLogEvent(state, 'FISH CAUGHT \u2014 ' + Math.round(caught.weightLb) + ' LB ' + caught.displayName.toUpperCase());
     showFishResultScreen(state);
@@ -18956,14 +19036,14 @@
     if (fishingSession.phase === 'marlin-release') {
       playFishingOneShot('release'); // FISHING HOOK
       // The release is a diary entry now (the marlin's own line, below); the old transient 'You let it go.' is gone, not duplicated.
-      log(state, 'Let the marlin go. It disappeared as quickly as it had come.');
+      log(state, 'Caught and released ' + caughtFishPhrase('marlin', fishingSession.catch.weightLb) + '. It disappeared as quickly as it had come.');
       flushNewLogEntries(state);
       showFishResultScreen(state);
       return;
     }
     if (fishingSession.phase !== 'keep-release') return;
     playFishingOneShot('release'); // FISHING HOOK
-    log(state, 'Let it go. Watched it disappear.');
+    log(state, 'Caught and released ' + caughtFishPhrase(fishingSession.catch.displayName, fishingSession.catch.weightLb) + '.');
     flushNewLogEntries(state);
     showFishResultScreen(state);
   }
@@ -20044,7 +20124,7 @@
     // one retry -- if the browser refused it at CONTINUE -- is made by
     // the FIRST step, UNTIE LINES: playMarinaAmbience is idempotent.)
     { label: 'UNTIE LINES', workingLabel: 'Untying lines…', playAudio: function (onEnded) { if (marinaNightStart !== null) playMarinaAmbience(marinaNightStart); return playMarinaOneShot('lines', onEnded); }, text: 'Untied the lines.' },
-    { label: 'STEP ABOARD', workingLabel: 'Stepping aboard…', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); }, text: 'Stepped aboard SOLACE.' },
+    { label: 'STEP ABOARD', workingLabel: 'Stepping aboard…', playAudio: function (onEnded) { return playMarinaOneShot('board', onEnded); }, text: 'Stepped aboard.' },
     {
       label: 'START ENGINE',
       workingLabel: 'Starting engine…',
