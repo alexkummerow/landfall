@@ -1303,6 +1303,10 @@
         fatigueNarrated: false,
         thirstNarrated: false,
         hungerNarrated: false,
+        thirstWeakNarrated: false,
+        hungerWeakNarrated: false,
+        thirstFinalNarrated: false,
+        hungerFinalNarrated: false,
         cleanlinessNarrated: false,
         galleyNarrated: false,
         lastMilestone: 0,
@@ -6888,13 +6892,60 @@
     if (state.crew.fatigue < 50) f.fatigueNarrated = false;
   }
 
+  // The one-line observation the first time thirst / hunger gets serious; one of these, never the same twice running (pickVariant).
+  var THIRST_NARRATION_LINES = [
+    'I could use some water before I do anything else.',
+    'I could use a glass of water.',
+    'My mouth feels dry.',
+    'I should get something to drink.',
+    'A long drink of water sounds good.',
+    'I\u2019ve let too much time pass without drinking.',
+  ];
+  var HUNGER_NARRATION_LINES = [
+    "Stomach's stopped asking and started aching. I need real food.",
+    'I should make something to eat.',
+    'I could use a proper meal.',
+    'I keep thinking about what\u2019s in the galley.',
+    'It\u2019s been a while since I ate.',
+  ];
+  // PROLONGED neglect -- "I feel hollow and weak". A day with no drink, two days with no meal (the rescue comes at 3 days without water, 7 without food).
+  var THIRST_WEAK_HOURS = 24;
+  var HUNGER_WEAK_HOURS = 48;
+  // The FINAL WARNING, a little before the rescue itself: 12 hours short of 3 days without water, a day short of 7 without food.
+  var THIRST_FINAL_HOURS = 60;
+  var HUNGER_FINAL_HOURS = 144;
+  var THIRST_FINAL_LINE = 'I need water now. If I get any worse, I\u2019ll have to call for help.';
+  var HUNGER_FINAL_LINE = 'I need to eat now. If I get any weaker, I\u2019ll have to call for help.';
+  var THIRST_WEAK_LINES = [
+    'There\u2019s a headache behind my eyes. I need to drink.',
+    'I\u2019m dizzy getting up. Water first.',
+    'I can\u2019t keep putting this off. I need water.',
+    // both have been neglected: the one line that speaks of the meal and the water together
+    { t: 'I\u2019ve gone too long without a meal. I feel weak. I need water now.', when: function (c) { return c.alsoNoMeal; } },
+  ];
+  var HUNGER_WEAK_LINES = [
+    'I need to eat. Everything else can wait.',
+    'Even getting to the galley feels like an effort.',
+    'My hands are trembling. I need food.',
+  ];
   function checkThirstNarration(state) {
     var f = state.flags;
     if (thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY && !f.thirstNarrated) {
       f.thirstNarrated = true;
-      log(state, "I could use some water before I do anything else.");
+      log(state, pickVariant(THIRST_NARRATION_LINES, 'thirstNote'));
     }
     if (thirstLevel(state.crew.hoursSinceWater) < THIRST_THIRSTY) f.thirstNarrated = false;
+    // A PROLONGED stretch without a drink: the body is giving out ("hollow and weak"). Once, when it is reached; again only after drinking and going without again.
+    if (state.crew.hoursSinceWater >= THIRST_WEAK_HOURS && !f.thirstWeakNarrated) {
+      f.thirstWeakNarrated = true;
+      log(state, pickVariant(THIRST_WEAK_LINES, 'thirstWeakNote', { alsoNoMeal: hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY }));
+    }
+    if (state.crew.hoursSinceWater < THIRST_WEAK_HOURS) f.thirstWeakNarrated = false;
+    if (state.crew.hoursSinceWater >= THIRST_FINAL_HOURS && !f.thirstFinalNarrated) { // the final warning
+      f.thirstFinalNarrated = true;
+      log(state, THIRST_FINAL_LINE);
+    }
+    if (state.crew.hoursSinceWater < THIRST_FINAL_HOURS) f.thirstFinalNarrated = false;
   }
 
 
@@ -6902,9 +6953,20 @@
     var f = state.flags;
     if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY && !f.hungerNarrated) {
       f.hungerNarrated = true;
-      log(state, "Stomach's stopped asking and started aching. I need real food.");
+      log(state, pickVariant(HUNGER_NARRATION_LINES, 'hungerNote'));
     }
     if (hungerLevel(state.crew.hoursSinceMeal) < HUNGER_HUNGRY) f.hungerNarrated = false;
+    // A PROLONGED stretch without a meal: the same, once per spell (see checkThirstNarration).
+    if (state.crew.hoursSinceMeal >= HUNGER_WEAK_HOURS && !f.hungerWeakNarrated) {
+      f.hungerWeakNarrated = true;
+      log(state, pickVariant(HUNGER_WEAK_LINES, 'hungerWeakNote'));
+    }
+    if (state.crew.hoursSinceMeal < HUNGER_WEAK_HOURS) f.hungerWeakNarrated = false;
+    if (state.crew.hoursSinceMeal >= HUNGER_FINAL_HOURS && !f.hungerFinalNarrated) { // the final warning
+      f.hungerFinalNarrated = true;
+      log(state, HUNGER_FINAL_LINE);
+    }
+    if (state.crew.hoursSinceMeal < HUNGER_FINAL_HOURS) f.hungerFinalNarrated = false;
   }
 
   function checkCleanlinessNarration(state) {
