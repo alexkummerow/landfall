@@ -1299,6 +1299,7 @@
         currentDay: newVesselLogDay(1, vesselLogMonthDayLabel(now), 0),
         completedDays: [],
       },
+      story: { done: {}, journal: [], aftCabinUnlocked: false }, // the finalized story: which events have happened (each once), the saved journal entries, the aft cabin's key -- see STORY_EVENTS
       flags: {
         fatigueNarrated: false,
         thirstNarrated: false,
@@ -10899,6 +10900,7 @@
     var body = document.createElement('div');
     body.className = 'entry-text';
     body.textContent = entry.text;
+    if (entry.pre) body.style.whiteSpace = 'pre-line'; // a journal entry: its line breaks are kept
     wrap.appendChild(ts);
     wrap.appendChild(body);
     outputEl.insertBefore(wrap, tempViewEl);
@@ -12452,10 +12454,11 @@
   // allowed (no "not tired enough", no lockout after recent sleep): the
   // sailor is simply put to sleep and the current voyage-clock time is
   // stored as the sleep start. The real-time clock is never touched.
+  var sleepFromAftCabin = false; // true only while the AFT CABIN's SLEEP button is being handled (STORY) -- so "too hot" lands back in that room
   function cmdSleep(state) {
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
     if (sleepTooHot(state)) { // clearly overdressed for this cabin: sleep does not begin. (Being underdressed is never a reason: the bedding supplies the warmth.)
-      cmdCabin(state);
+      if (sleepFromAftCabin) cmdAftCabin(state); else cmdCabin(state);
       printLine('Too hot to sleep. I should change clothes.', 'amber');
       return;
     }
@@ -12565,7 +12568,7 @@
   // found-the-key check) rather than needing to touch the interaction
   // itself at all.
   function isAftCabinLocked(state) {
-    return true;
+    return !(state.story && state.story.aftCabinUnlocked); // STORY -- Event 7 (UNLOCK AFT CABIN) opens it for good
   }
   // The door-rattle interaction -- immediate feedback only, never a
   // room of its own: no temporary AFT CABIN screen, nothing logged
@@ -12590,6 +12593,7 @@
       });
       return;
     }
+    cmdEnterAftCabin(state); // unlocked (Event 7): the door opens onto the AFT CABIN room
   }
 
   // HEAD — personal washing. HYGIENE is a pure read of the existing
@@ -12771,6 +12775,7 @@
   // below-deck clutter, which comes from activity all over the boat (a
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
+    if (storyTryTrigger(state, 'saloon')) return; // STORY -- Events 12, 14
     printBlank();
     printLine('MORALE: ' + moraleLevel(state.crew.morale));
     var options = [
@@ -13836,6 +13841,7 @@
   // temperature calculation.
   function cmdCabin(state) {
     printRoomHeader('CABIN');
+    if (storyTryTrigger(state, 'cabin')) return; // STORY -- Events 2, 9, 16
     printBlank();
     var c = state.crew;
     renderComfortRows(state, 'worn'); // ENERGY / COMFORT ABOVE / COMFORT BELOW (+ RAIN PROTECTION only while it is raining and the shell is off), all on the standard grid
@@ -13959,6 +13965,7 @@
   }
 
   function cmdNavStation(state) {
+    if (storyTryTrigger(state, 'nav')) return; // STORY -- Events 1, 5, 6, 10, 13 (the first NAV STATION entry is Dad's Note)
     var b = state.boat;
     printBlank();
     var cabinTempDisplay = b.cabinTemperatureF != null ? Math.round(b.cabinTemperatureF) + '\u00B0F' : '\u2014';
@@ -14369,7 +14376,7 @@
     var b = state.boat;
     if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
     if (b.computerOn) {
-      cmdShipsComputerMenu(state);
+      cmdShipsComputerMenu(state, true);
       return;
     }
     if (!b.accessoryOn) {
@@ -14393,7 +14400,7 @@
       playAudio: function (onEnded) { return playNavStationOneShot('computerStartup', onEnded); },
       action: function (s) {
         s.boat.computerOn = true;
-        cmdShipsComputerMenu(s);
+        cmdShipsComputerMenu(s, true);
       },
     });
   }
@@ -14427,7 +14434,7 @@
         s.flags.weatherSoftwareUpdated = true;
         s.flags.weatherSoftwareUpdateAvailable = false;
         s.boat.computerOn = true;
-        cmdShipsComputerMenu(s); // the desktop returns as normal -- now with WINDY on it
+        cmdShipsComputerMenu(s, true); // the desktop returns as normal -- now with WINDY on it
       },
     });
   }
@@ -14494,7 +14501,7 @@
   // (via the ordinary text screen, since there's no power for the
   // image desktop either) rather than pretending the computer is
   // still running.
-  function cmdShipsComputerMenu(state) {
+  function cmdShipsComputerMenu(state, loggingOn) { // loggingOn: this is the player logging on (not coming back to the desktop from an app) -- STORY Event 15
     if (!state.boat.computerOn) {
       printBlank();
       printLine('The screen is dark. No power.', 'amber');
@@ -14502,7 +14509,9 @@
       return;
     }
     if (weatherSoftwareUpdatePending(state)) { showWeatherSoftwareUpdatePrompt(state); return; } // PHASE 3: the story event waits here for the player's next use of the computer
+    if (loggingOn && storyTryTrigger(state, 'computer')) { shipsComputerOverlayEl.hidden = true; return; } // STORY -- Event 15 (a plain text screen, not the desktop)
     syncWindyIcon(state);
+    syncKauaiIcon(state); // the KAUAʻI folder, once Event 15 has left it
     shipsComputerOverlayEl.hidden = false;
     fitShipsComputerScreen();
     state.pendingChoice = { id: 'ships-computer-menu', options: [{ label: 'SHUT DOWN', action: 'shut-down-computer' }] };
@@ -15746,6 +15755,7 @@
   // Whether a book is on the shelf (and can be picked up). Every book is, for now. THE RUNAWAY BUNNY is meant to be a DISCOVERED item, unlocked during the
   // voyage -- the condition for that goes here (e.g. `if (bookDef.id === 'runawayBunny') return <found yet?>;`) and the shelf and the reading both follow it.
   function bookOnShelf(state, bookDef) {
+    if (bookDef.id === 'runawayBunny') return !!(state.story && state.story.done.bunny); // found in Event 3, and on the shelf for good afterwards
     return true;
   }
 
@@ -15761,6 +15771,7 @@
   function cmdBookshelf(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; }
     printRoomHeader('BOOKSHELF'); // "> BOOKSHELF" -- already on screen when the click echoed it; printed here on the direct redraws
+    if (storyTryTrigger(state, 'bookshelf')) return; // STORY -- Event 3
     state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
   }
 
@@ -15999,6 +16010,7 @@
     var opts = [];
     TAPES.forEach(function (t) {
       if (t.title === activeTapeTitle) return; // already playing -- shown via the status line above, not offered again here
+      if (t.title === CODA_TAPE_TITLE && !(state.story && state.story.done.coda)) return; // CODA is a find (Event 14), not on the shelf from the start
       opts.push({ label: t.title.toUpperCase(), action: 'start-tape:' + t.title });
     });
     if (tapePhase === 'starting' || tapePhase === 'track') {
@@ -16040,6 +16052,7 @@
     // -- beginTapeStartSequence safely cancels whatever this element
     // was already doing before beginning the new sequence (section 10).
     beginTapeStartSequence(tape.title, tape.path);
+    if (storyTryTrigger(state, 'tape')) return; // STORY -- Event 11 (the tape is starting underneath it)
     cmdTapePlayer(state);
   }
 
@@ -16580,6 +16593,7 @@
       log(s, eatFlavorLine(s, item, life));
       momentNoteMeal(s, item);
       flushNewLogEntries(s);
+      if (item.cooked && item.type === 'meal' && storyTryTrigger(s, 'cook')) return; // STORY -- Event 4, after the meal has been cooked
       cmdGalley(s);
     };
 
@@ -17020,6 +17034,642 @@
         { label: 'NO \u2014 KEEP SAILING', action: 'cancel' },
       ],
     };
+  }
+
+  /* ============================================================
+     STORY -- the sixteen finalized story events
+     ------------------------------------------------------------
+     STORY_EVENTS below is the ONE authoritative table for the story: each event's number, title, trigger (a CONTEXT -- where the
+     player has to be doing something -- plus a MILEAGE gate), its observations and actions, the journal entry, the vessel-log
+     line, and which sounds it uses. The copy is exactly the finalized story sheet's; nothing else in the game repeats it.
+     MILEAGE = ELIGIBLE, CONTEXT = TRIGGER. An event never fires merely because the odometer passed its number: it waits for the
+     player to do the thing it is about (enter the CABIN, open the BOOKSHELF, cook a meal, enter the NAV STATION, come BELOW DECK,
+     start a TAPE, enter the SALOON, log on to the SHIP'S COMPUTER). Event 1 (Dad's Note) has no mileage gate: it is the first
+     NAV STATION entry, and nothing else (coming below deck does NOT trigger it). If several events are eligible in the same place,
+     the lowest-numbered one fires; the others wait for the next time.
+     Three events have a prerequisite: 8 needs 7, 11 needs 10, 14 needs 13. Each event happens once.
+     HOW IT RUNS. A trigger starts the event's first step: the observation text, and one button. A step with a sound plays it as a
+     real busy action (the game's usual audio-synced action: the label and dots last exactly as long as the sound; if SOUND is off or
+     the sound fails it simply completes). The last step's button is JOURNAL: JOURNALING . .. ... for the length of journal.mp3, and then the
+     event is COMPLETE -- the entry is saved (state.story.journal, and shown in the log), the vessel-log line is written, the permanent
+     effect takes hold, and the player is returned to the room they were in. The step the player has reached is kept in
+     state.pendingChoice (id 'story-step'), so a reload puts the same screen back; completion is state.story.done[id], so a finished
+     event can never fire again. PERMANENT EFFECTS are all derived from state.story (the bunny on the shelf, the unlocked aft cabin
+     with its SLEEP / PHOTO ALBUM / MOM'S JOURNAL, CODA in the tape list, the KAUAʻI folder on the computer), so they survive a reload.
+     Sounds (audio/story/): journal.mp3 (every JOURNAL), handling_paper.mp3 ('paper': events 1, 4, 5, 6, 10), open_drawer.mp3 ('drawer':
+     8, 9), turn_page.mp3 ('page': each TURN PAGE in 12 and 13), photo_album_turn_page.mp3 ('albumPage': each TURN PAGE in the album),
+     unlock_door.mp3 ('unlock'), toy_car.mp3 ('toyCar': the cue that opens event 8). The dull knock that opens event 12 has no sound
+     file yet; CODA is played by the real tape player (tape_start / Coda.mp3 / tape_stop).
+     ============================================================ */
+  var CODA_TAPE_TITLE = '3/5/93 — Coda';
+  var storySuppress = false; // true only while an event hands the player back to a room, so that room's own entry cannot start the NEXT event on top of it
+
+  // Where a step's button leads is described by `action`:
+  //   { label, busy, audio, short, effect }  -- label: the button; busy: the working label; audio: a STORY sound to wait for; short: seconds of dots instead; effect: a STORY_EFFECTS key
+  //   'journal'                             -- the final JOURNAL button
+  // and a step with `pager` shows that STORY_PAGERS entry page by page (TURN PAGE, and BACK to step `backTo` if it has one) before JOURNAL.
+  var STORY_EVENTS = [
+    { n: 1, id: 'dadsNote', title: "Dad's Note", ctx: ['nav'], miles: 0, back: 'nav',
+      steps: [
+        { text: ["A folded piece of paper sits on the nav station desk. My name is written on the front."], action: { label: 'READ', busy: 'READING', audio: 'paper' } },
+        { text: [
+          "“The autopilot will take you out to the Pacific. After that, the course is yours.",
+          "Use that time to get to know the boat. Everything you need is in the SOLACE HANDBOOK.",
+          "Look after her, and yourself. Eat, drink water, get some sleep. Popcorn isn’t dinner.”",
+          "",
+          "Beneath it:",
+          "“Dad”"], action: 'journal' },
+      ],
+      journal: [
+        "I expected dust and empty cupboards.",
+        "Everything is clean, stocked, and put away.",
+        "Dad had this ready long before I knew I’d be coming."],
+      found: "Found a note from Dad." },
+
+    { n: 2, id: 'marks', title: "Marks on the Wall", ctx: ['cabin'], miles: 50, back: 'cabin',
+      steps: [
+        { text: ["A few pencil marks on the cabin door frame. Dates written beside them."], action: { label: 'LOOK CLOSER' } },
+        { text: [
+          "One mark has been crossed out and measured again. Beside it:",
+          "‘Standing on toes doesn’t count.'"], action: 'journal' },
+      ],
+      journal: [
+        "The dates line up with my childhood.",
+        "Either those marks belong to someone else,",
+        "or this boat has more of a history with us than Dad ever told me."],
+      found: "Found old height marks on the cabin door frame." },
+
+    { n: 3, id: 'bunny', title: "The Runaway Bunny", ctx: ['bookshelf'], miles: 150, back: 'bookshelf',
+      steps: [
+        { text: ["A thin book is tucked behind the others. The Runaway Bunny. I know this one."], action: { label: 'OPEN BOOK' } },
+        { text: [
+          "Inside the cover, a handwritten note:",
+          "“Wherever you go, I will find you.”",
+          "",
+          "Beneath it:",
+          "“Mom”"], action: 'journal' },
+      ],
+      journal: [
+        "I’d forgotten this book until I saw it.",
+        "Flipping through the pages, I could almost hear Mom’s voice.",
+        "Dad kept it aboard all these years. I wonder why it was here."],
+      found: "Found my childhood copy of The Runaway Bunny, with a note from Mom." },
+
+    { n: 4, id: 'receipt', title: "The Old Receipt", ctx: ['cook'], miles: 250, back: 'galley',
+      steps: [
+        { text: ["An old grocery receipt is tucked beneath the silverware."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
+        { text: [
+          "Dated April 17, 1990. On the back, in handwriting too neat to be Dad’s:",
+          "“Bought more clothes pins. The ocean has enough of our socks.”"], action: 'journal' },
+      ],
+      journal: [
+        "The handwriting must be Mom’s.",
+        "I hadn’t realized she’d spent time aboard.",
+        "Enough to do laundry, lose socks over the side, and need more clothespins.",
+        "I wonder how much of their life happened here."],
+      found: "Found an old receipt in the silverware drawer." },
+
+    { n: 5, id: 'photoOfMom', title: "The Photo of Mom", ctx: ['nav'], miles: 350, back: 'nav',
+      steps: [
+        { text: ["A corner of a photograph sticks out beneath a stack of charts."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
+        { text: [
+          "Mom stands barefoot on the bow, steep green cliffs rising behind her.",
+          "Wind in her hair, laughing at whoever’s holding the camera.",
+          "",
+          "On the back:",
+          "“Kauai, 1989”",
+          "",
+          "Beneath it, in a different color ink, Dad’s handwriting:",
+          "“Still my favorite.”"], action: 'journal' },
+      ],
+      journal: [
+        "Dad wanted me to bring the boat home to Kauaʻi.",
+        "I thought he wanted me to have an adventure, to make a journey he once made.",
+        "Now I wonder what else he hoped I’d find along the way.",
+        "",
+        "Photo: Mom stands barefoot on the bow, steep green cliffs rising behind her.",
+        "Wind in her hair, laughing at whoever’s holding the camera.",
+        "On the back: “Kauai, 1989” Beneath it, in a different color ink Dad’s handwriting:",
+        "“Still my favorite.”"],
+      found: "Found a picture of Mom." },
+
+    { n: 6, id: 'slip', title: "The Slip We Called Home", ctx: ['nav'], miles: 450, back: 'nav',
+      steps: [
+        { text: ["A stack of old marina invoices sits in a drawer at the nav station."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
+        { text: [
+          "Monthly mooring fees. Nāwiliwili, Kauaʻi. Solace’s name on every bill.",
+          "The same slip number, across several years."], action: 'journal' },
+      ],
+      journal: [
+        "I didn’t understand why Dad called Kauaʻi home.",
+        "The same slip, month after month, year after year.",
+        "Somewhere in those dates, I was learning to walk."],
+      found: "Found old marina invoices." },
+
+    { n: 7, id: 'aftCabin', title: "The Aft Cabin", ctx: ['below'], miles: 600, back: 'aftcabin',
+      eligible: function (state) { return !state.story.aftCabinUnlocked; }, // the aft cabin must still be locked
+      steps: [
+        { text: [
+          "A small key hangs beside the companionway. The tag reads “Aft cabin.”",
+          "How did I miss this?"], action: { label: 'UNLOCK AFT CABIN', busy: 'UNLOCKING', audio: 'unlock', effect: 'unlockAftCabin' } },
+        { text: [
+          "Mom’s clothes hang neatly in the hanging locker. Her shoes sit paired beneath them.",
+          "Everything is clean, carefully preserved. A photo album rests on the bunk."], action: { label: 'OPEN ALBUM' } },
+        { pager: 'album', backTo: 1 },
+      ],
+      journal: [
+        "I knew Dad’s face so well, but not like this.",
+        "Laughing, letting Mom cut his hair, asleep with me on his chest.",
+        "I always felt Dad hadn’t told me enough.",
+        "Now I wonder if I hadn’t asked enough either.",
+        "I keep flipping through the album.",
+        "I’d wondered about so much, but never pictured an ordinary day."],
+      found: "Unlocked the aft cabin." },
+
+    { n: 8, id: 'toyCar', title: "My Red Toy Car", ctx: ['below'], miles: 700, requires: 'aftCabin', back: 'below',
+      steps: [
+        { cue: 'toyCar', text: ["A rolling sound inside a drawer as the boat rocks."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
+        { text: ["A red toy car, the same one from the photo."], action: 'journal' },
+      ],
+      journal: [
+        "My red car. Dad kept even this.",
+        "I used to wonder what he did aboard all those afternoons without ever leaving the dock. Now I’m sitting among the things he came back to.",
+        "Maybe being here was enough."],
+      found: "Found my red toy car." },
+
+    { n: 9, id: 'danced', title: "Mom Danced", ctx: ['cabin', 'aftcabin'], miles: 850, back: 'cabin',
+      steps: [
+        { text: ["A pink satin ribbon peeks out of the bottom drawer."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
+        { text: ["Pointe shoes, her name written inside in faded ink."], action: 'journal' },
+      ],
+      journal: [
+        "I never knew Mom danced. Maybe that explains the piano tapes.",
+        "I wonder if she used to practice to them."],
+      found: "Found Mom's pointe shoes." },
+
+    { n: 10, id: 'piano', title: "Dad Played Piano", ctx: ['nav'], miles: 1000, back: 'nav',
+      steps: [
+        { text: ["A piece of sheet music amongst the paperwork."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
+        { text: [
+          "STUDIO II",
+          "",
+          "Notes crossed out, passages rewritten. Dad's listed as the composer."], action: 'journal' },
+      ],
+      journal: [
+        "STUDIO II. I know it from the tape. I never knew he played.",
+        "Even listening to the music, I can’t quite picture him at the piano."],
+      found: "Found sheet music for STUDIO II." },
+
+    { n: 11, id: 'recital', title: "They Performed Together", ctx: ['tape'], miles: 1100, requires: 'piano', back: 'tape',
+      steps: [
+        { text: ["A folded performance program is tucked behind the tapes. I've seen it back there but now I'm curious."], action: { label: 'INSPECT' } },
+        { text: [
+          "A recital program from Kauaʻi. Mom’s name beside “Dance,” Dad’s beside “Piano.”",
+          "",
+          "In Mom’s handwriting:",
+          "“Too slow. I’ll be eighty by the end.”",
+          "",
+          "Beneath it, Dad’s:",
+          "“Then you’ll finally stop rushing.”"], action: 'journal' },
+      ],
+      journal: [
+        "They performed together. Mom dancing, Dad at the piano.",
+        "The more time I spend here, the more I learn about her.",
+        "Little notes on receipts, inside books, on the program.",
+        "Such a small thing to know, but it fills a little of the space where",
+        "I’ve always wondered about her.",
+        "I still can’t picture Dad at the piano."],
+      found: "Found Mom and Dad's recital program." },
+
+    { n: 12, id: 'momJournal', title: "Mom's Journal", ctx: ['saloon'], miles: 1400, back: 'saloon',
+      // The dull wooden knock that opens this event has no sound file yet (see the report): the cue is shown, silently.
+      steps: [
+        { cueMissing: 'dull wooden knock', text: ["A dull knock from the aft cabin."], action: { label: 'INSPECT' } },
+        { text: ["A notebook has slipped from behind the bottom drawer. Mom's journal."], action: { label: 'READ' } },
+        { pager: 'momJournal', backTo: 1 },
+      ],
+      journal: [
+        "She wrote about Seattle as a visit. I grew up there.",
+        "Until now, I’d never thought of it as the place we stayed instead of coming back.",
+        "She still had plans here. Another recital. Ordinary days aboard.",
+        "I keep looking at those words: “when we’re back.”"],
+      found: "Found Mom's journal." },
+
+    { n: 13, id: 'medical', title: "Medical Papers", ctx: ['nav'], miles: 1700, back: 'nav',
+      steps: [
+        { text: ["A bundle of papers lies folded in the back of a drawer. Medical records."], action: { label: 'INSPECT' } },
+        { text: [
+          "Mom’s name. A Seattle hospital. Oncology appointments, test results, treatment dates.",
+          "Between them, pages of Dad’s handwritten notes."], action: { label: 'READ' } },
+        { pager: 'medical' },
+      ],
+      journal: [
+        "There are questions for doctors, things she could eat, a sweater to bring.",
+        "He was paying attention to everything. I wonder who was looking after him."],
+      found: "Found Mom’s medical records and Dad’s care notes." },
+
+    { n: 14, id: 'coda', title: "CODA", ctx: ['saloon'], miles: 2050, requires: 'medical', back: 'tape',
+      // Needs a tape player that can actually play right now (accessory power on, battery up): LISTEN uses the real tape system.
+      eligible: function (state) { return storyTapePlayable(state); },
+      steps: [
+        { text: ["A cassette case is wedged behind the bottom drawer."], action: { label: 'INSPECT' } },
+        { text: ["3/5/93 - CODA"], action: { label: 'LISTEN', effect: 'startCoda' } },
+        { text: [
+          "Something else. Mom's death certificate folded up in the case.",
+          "Dated 2/28/93."], action: 'journal' },
+      ],
+      journal: [
+        "Five days after Mom died, Dad recorded this.",
+        "I keep looking at the dates while the piano plays.",
+        "I don’t know how he sat down and began.",
+        "Maybe playing was the only thing he knew to do.",
+        "I’ve never heard him say this much."],
+      found: "Found Dad’s cassette tape, CODA." },
+
+    { n: 15, id: 'dadReturn', title: "Dad Tried to Return", ctx: ['computer'], miles: 2150, back: 'computer',
+      steps: [
+        { heading: 'ARCHIVED FILES FOUND', text: [], action: { label: 'RECOVER', busy: 'RECOVERING', short: 4 }, extra: [{ label: 'SHUT DOWN', action: 'shut-down-computer' }] },
+        { text: ["A new folder appears:", "", "KAUAʻI"], action: { label: 'OPEN' } },
+        { text: null, kauaiFolder: true, action: 'journal' },
+      ],
+      journal: [
+        "He kept getting ready. Charts, repairs, provisions. Different years, the same destination.",
+        "I knew how much time Dad spent on this boat. I never knew how often he meant to leave.",
+        "He sent me to make the journey he never could.",
+        "And to find the things he couldn’t bring himself to tell me."],
+      found: "Found Dad's plans to return." },
+
+    { n: 16, id: 'ashes', title: "Mom's Ashes", ctx: ['cabin'], miles: 2300, back: 'cabin',
+      steps: [
+        { text: [
+          "That wooden box has been here the whole voyage.",
+          "I’ve never noticed the small brass plate."], action: { label: 'INSPECT' } },
+        { text: [
+          "Mom’s name. Her ashes.",
+          "",
+          "Beneath the box, a folded note in Dad’s handwriting:",
+          "“I wanted to take her myself.",
+          "Dad”"], action: 'journal' },
+      ],
+      journal: [
+        "She’s been here the whole way.",
+        "Dad kept her close, along with everything from our life aboard.",
+        "I’m beginning to understand why leaving was so hard.",
+        "There’s only a little ocean left between us and Kauaʻi.",
+        "I wish he could see it with me."],
+      found: "Found Mom’s ashes." },
+  ];
+  var STORY_EVENTS_BY_ID = {};
+  STORY_EVENTS.forEach(function (e) { STORY_EVENTS_BY_ID[e.id] = e; });
+
+  // The pages of the three things you turn page by page. `audio` is the STORY sound each TURN PAGE plays.
+  var STORY_PAGERS = {
+    album: { audio: 'albumPage', pages: [
+      ["Mom pregnant, wet hair clinging to her cheeks, smiling with one hand on her belly.", "A waterfall behind her. An ultrasound print tucked between the pages."],
+      ["Dad at the helm, me on his shoulders, gripping his hair."],
+      ["Mom cutting Dad’s hair on deck. He’s holding up a fallen clump. She’s laughing."],
+      ["Mom pulling the towel off Dad after a swim. He’s reaching for it, laughing."],
+      ["Dad asleep in the cockpit, me asleep on his chest. A red toy car still in his hand."],
+      ["The three of us sitting on Solace’s bow, green mountains behind us.", "Mom and Dad laughing, me grinning between them."],
+    ] },
+    momJournal: { audio: 'page', pages: [
+      ["“The rain finally stopped. Hung everything outside. He says the shirts smell better dried at sea.", "I say they’d smell better if he remembered the soap.”"],
+      ["“He brought half the beach into the cabin today. His father says this is good for the floors.", "His father can sweep.”"],
+      ["“Rehearsal ran late. Came back to find them asleep together, supper covered on the stove.", "He’d saved me the bigger portion.”"],
+      ["“Asked the cards if I’m being dramatic. Pulled The Moon. Fair enough.”"],
+      ["“He played while I tried the new steps. I lost my place and stopped.", "He kept going until I found my way back. Then we did it again.”"],
+      ["“Leaving for Seattle next week. His family wants more time with the little one.", "I’ll miss the next recital, but there’ll be others when we’re back.”"],
+      ["“Tired today. Went below before lunch and slept through it. He brought tea and stayed until I drank it.", "Apparently I need supervision.”"],
+      ["“Seattle. Everyone says how much he’s grown. He’s mostly interested in their cupboards.", "I’d forgotten how cold the floor gets here.”"],
+      ["“Still feeling off. Made an appointment for Thursday. Need to buy a warmer coat.”", "", "The remaining pages are blank."],
+    ] },
+    medical: { audio: 'page', pages: [
+      ["“Ask about the nausea. She barely ate yesterday.”"],
+      ["“Soup stayed down. Try again tomorrow. Small portions.”"],
+      ["“Bring her sweater. The waiting room is cold.”"],
+      ["“No hospital coffee. She says it tastes like burnt rope.”"],
+      ["“She wants to hear about his day before we talk about hers.", "Remember to ask him what happened at preschool.”"],
+    ] },
+  };
+
+  // The KAUAʻI folder's contents (event 15's reveal, and what the folder shows whenever it is reopened).
+  var STORY_KAUAI_FILE = [
+    "June 1996",
+    "Rigging inspected. Water tanks cleaned. Charts updated.",
+    "Leave after school finishes.",
+    "September: Too late this year.",
+    "",
+    "May 2003",
+    "New batteries. Engine serviced. Provision list revised.",
+    "Six weeks should be enough.",
+    "August: Put everything away.",
+    "",
+    "April 2011",
+    "Sails repaired. Route checked.",
+    "Aim for June.",
+    "July: Maybe next spring.",
+    "",
+    "March 2018",
+    "Still have the charts. Boat needs less work than I expected.",
+    "No departure date.",
+    "",
+    "May 2024",
+    "Everything aboard. Everything working.",
+    "Still here.",
+  ];
+
+  // The story's sounds all go through the SALOON one-shot player (same lazy elements, same defensive onEnded handling, so a muted or
+  // failing sound still completes the action). A key with no file (the dull knock) simply completes at once.
+  function playStoryOneShot(key, onEnded) {
+    var k = 'story_' + key;
+    if (!SALOON_AUDIO_FILES[k]) { if (onEnded) onEnded(); return null; }
+    return playSaloonOneShot(k, onEnded);
+  }
+
+  // Can the tape player play right now? (CODA's LISTEN uses it for real, so the event does not start when it could not.)
+  function storyTapePlayable(state) {
+    var b = state.boat;
+    if (!b.accessoryOn) return false;
+    if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) return false;
+    return !!TAPES_BY_TITLE[CODA_TAPE_TITLE];
+  }
+
+  function storyEventEligible(state, ev, ctx) {
+    var st = state.story;
+    if (!st || st.done[ev.id]) return false;
+    if (ev.ctx.indexOf(ctx) === -1) return false;
+    if (state.nav.distanceTraveled < ev.miles) return false;
+    if (ev.requires && !st.done[ev.requires]) return false;
+    if (ev.eligible && !ev.eligible(state)) return false;
+    return true;
+  }
+
+  // The one entry point every trigger site calls. Returns true when an event started (its first step is on screen and the caller
+  // must not draw anything more), false otherwise.
+  function storyTryTrigger(state, ctx) {
+    if (storySuppress || !state.story) return false;
+    if (state.voyageEnd && state.voyageEnd.phase !== 'none') return false;
+    if (state.finale && state.finale.phase !== 'none') return false;
+    if (state.crew.watchState !== 'awake') return false;
+    for (var i = 0; i < STORY_EVENTS.length; i++) {
+      if (storyEventEligible(state, STORY_EVENTS[i], ctx)) {
+        storyRenderStep(state, STORY_EVENTS[i].id, 0, 0, ctx, true);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function storyPrintLines(lines) {
+    (lines || []).forEach(function (ln) { if (ln === '') printBlank(); else printLine(ln); });
+  }
+
+  function storyStepOptions(ev, stepIdx, page) {
+    var step = ev.steps[stepIdx], opts = [];
+    if (step.pager) {
+      var pg = STORY_PAGERS[step.pager], last = page >= pg.pages.length - 1;
+      opts.push(last ? { label: 'JOURNAL', action: 'story:journal' } : { label: 'TURN PAGE', action: 'story:page' });
+      if (step.backTo != null) pushBack(opts, 'story:back');
+      return opts;
+    }
+    if (step.action === 'journal') return [{ label: 'JOURNAL', action: 'story:journal' }];
+    opts.push({ label: step.action.label, action: 'story:act' });
+    if (step.extra) { opts.push({ divider: true }); step.extra.forEach(function (x) { opts.push(x); }); }
+    return opts;
+  }
+
+  // Shows one step of one event (its text) and makes its buttons the pending choice. `fresh` is true only when the step is being
+  // reached for the first time this sitting (not a redraw after a reload), which is when a step's opening sound cue plays.
+  function storyRenderStep(state, evId, stepIdx, page, room, fresh) {
+    var ev = STORY_EVENTS_BY_ID[evId], step = ev.steps[stepIdx];
+    printBlank();
+    if (step.pager) storyPrintLines(STORY_PAGERS[step.pager].pages[page]);
+    else {
+      if (step.heading) { printLine(step.heading, 'heading-label'); if (step.text && step.text.length) printBlank(); }
+      storyPrintLines(step.kauaiFolder ? STORY_KAUAI_FILE : step.text);
+    }
+    state.pendingChoice = { id: 'story-step', ev: evId, step: stepIdx, page: page, room: room, options: storyStepOptions(ev, stepIdx, page) };
+    if (fresh && step.cue) playStoryOneShot(step.cue, null);
+  }
+
+  // A reload puts the same screen back (the step the player had reached is in the saved pendingChoice).
+  function storyRedraw(state) {
+    var pc = state.pendingChoice;
+    if (pc.pager) { storyRenderReread(state, pc.pager, pc.page || 0); return; }
+    if (!STORY_EVENTS_BY_ID[pc.ev]) { state.pendingChoice = null; return; }
+    storyRenderStep(state, pc.ev, pc.step || 0, pc.page || 0, pc.room, false);
+  }
+
+  var STORY_EFFECTS = {
+    unlockAftCabin: function (s) { s.story.aftCabinUnlocked = true; }, // permanent from this moment
+    startCoda: function (s) { // the REAL tape player: tape_start.mp3, then Coda.mp3
+      var t = TAPES_BY_TITLE[CODA_TAPE_TITLE];
+      if (t && s.boat.accessoryOn) beginTapeStartSequence(t.title, t.path);
+    },
+  };
+
+  // The button on a step that is not JOURNAL.
+  function storyDoAction(state) {
+    var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], step = ev.steps[pc.step], act = step.action;
+    var next = pc.step + 1, room = pc.room;
+    function proceed(s) {
+      if (act.effect) STORY_EFFECTS[act.effect](s);
+      storyRenderStep(s, ev.id, next, 0, room, true);
+    }
+    if (act.audio) {
+      runAudioSyncedAction(state, {
+        label: act.busy,
+        playAudio: function (onEnded) { return playStoryOneShot(act.audio, onEnded); },
+        action: proceed,
+      });
+    } else if (act.short) {
+      runShortAction(state, { label: act.busy, duration: act.short, action: proceed });
+    } else {
+      proceed(state);
+    }
+  }
+
+  function storyTurnPage(state) {
+    var pc = state.pendingChoice, pagerId = pc.pager || storyPagerOf(pc), pg = STORY_PAGERS[pagerId], nextPage = (pc.page || 0) + 1;
+    if (nextPage > pg.pages.length - 1) return;
+    runAudioSyncedAction(state, {
+      label: 'TURNING PAGE',
+      playAudio: function (onEnded) { return playStoryOneShot(pg.audio, onEnded); },
+      action: function (s) {
+        if (pc.pager) storyRenderReread(s, pagerId, nextPage);
+        else storyRenderStep(s, pc.ev, pc.step, nextPage, pc.room, false);
+      },
+    });
+  }
+  function storyPagerOf(pc) { return STORY_EVENTS_BY_ID[pc.ev].steps[pc.step].pager; }
+
+  // BACK inside a discovery's pager: close it and return to the step before (OPEN ALBUM / READ).
+  function storyBack(state) {
+    var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], step = ev.steps[pc.step];
+    if (step.backTo == null) return;
+    storyRenderStep(state, ev.id, step.backTo, 0, pc.room, false);
+  }
+
+  // JOURNAL: the existing journaling treatment -- JOURNALING . .. ... for exactly as long as journal.mp3 plays -- and then the event is complete.
+  function storyJournal(state) {
+    var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], room = pc.room;
+    runAudioSyncedAction(state, {
+      label: 'JOURNALING',
+      playAudio: function (onEnded) { return playStoryOneShot('journal', onEnded); },
+      action: function (s) { storyComplete(s, ev, room); },
+    });
+  }
+
+  function storyComplete(state, ev, room) {
+    var st = state.story;
+    if (st.done[ev.id]) return; // an event happens once
+    st.done[ev.id] = true;
+    var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
+    var text = ev.journal.join('\n');
+    st.journal.push({ id: ev.id, n: ev.n, title: ev.title, t: ts, text: text }); // the saved journal entry
+    state.log.push({ t: ts, text: text, pre: true }); // ... shown in the log, line breaks kept
+    flushNewLogEntries(state);
+    logVesselLogEvent(state, ev.found); // the vessel-log line (VESSEL LOG > EVENTS), stamped with the time it was found
+    storyReturnTo(state, ev, room);
+  }
+
+  // Back to the room the player was in. Suppressed so that room's own entry cannot start the next event straight away.
+  function storyReturnTo(state, ev, room) {
+    storySuppress = true;
+    try {
+      switch (ev.back) {
+        case 'nav': cmdNavStation(state); break;
+        case 'cabin': if (room === 'aftcabin') cmdAftCabin(state); else cmdCabin(state); break;
+        case 'bookshelf': cmdBookshelf(state); break;
+        case 'galley': cmdGalley(state); break;
+        case 'aftcabin': cmdAftCabin(state); break;
+        case 'saloon': cmdSaloon(state); break;
+        case 'tape': cmdTapePlayer(state); break;
+        case 'computer': cmdShipsComputerMenu(state); break;
+        default: break; // 'below': the room list itself
+      }
+    } finally { storySuppress = false; }
+  }
+
+  // Everything the story adds to the buttons, in one place.
+  function storyHandleAction(state, verb) {
+    var pc = state.pendingChoice;
+    if (verb.indexOf('reread:') === 0) { storyRenderReread(state, verb.slice(7), 0); return; }
+    if (verb === 'kauai-open') { storyOpenKauaiFolder(state); return; }
+    if (verb === 'kauai-back') { storySuppress = true; try { cmdShipsComputerMenu(state); } finally { storySuppress = false; } return; }
+    if (!pc || pc.id !== 'story-step') return;
+    switch (verb) {
+      case 'act': storyDoAction(state); break;
+      case 'page': storyTurnPage(state); break;
+      case 'back': storyBack(state); break;
+      case 'journal': storyJournal(state); break;
+      case 'reread-back': storySuppress = true; try { cmdAftCabin(state); } finally { storySuppress = false; } break;
+      default: break;
+    }
+  }
+
+  // REREADING: the photo album and Mom's journal, from the AFT CABIN. Same TURN PAGE / BACK, same page sounds; nothing is triggered or saved.
+  function storyRenderReread(state, pagerId, page) {
+    var pg = STORY_PAGERS[pagerId], last = page >= pg.pages.length - 1, opts = [];
+    printBlank();
+    storyPrintLines(pg.pages[page]);
+    if (!last) opts.push({ label: 'TURN PAGE', action: 'story:page' });
+    pushBack(opts, 'story:reread-back');
+    state.pendingChoice = { id: 'story-step', ev: null, pager: pagerId, page: page, step: 0, room: 'aftcabin', options: opts };
+  }
+
+  // The AFT CABIN's own menu, once it has been unlocked.
+  function cmdAftCabin(state) {
+    printRoomHeader('AFT CABIN');
+    if (storyTryTrigger(state, 'aftcabin')) return;
+    printBlank();
+    var st = state.story;
+    var options = [
+      { label: 'SLEEP', action: 'aft-sleep' },
+      { label: 'PHOTO ALBUM', action: 'story:reread:album' },
+    ];
+    if (st.done.momJournal) options.push({ label: "MOM'S JOURNAL", action: 'story:reread:momJournal' });
+    state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(options, 'leave-aft-cabin') };
+  }
+  function cmdEnterAftCabin(state) {
+    runAudioSyncedAction(state, {
+      label: 'OPENING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('open', onEnded); },
+      action: function (s) { cmdAftCabin(s); },
+    });
+  }
+  function cmdLeaveAftCabin(state) {
+    runAudioSyncedAction(state, {
+      label: 'CLOSING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('close', onEnded); },
+      action: function (s) {
+        printBlank();
+        printLine('Left as it was.', 'dim');
+      },
+    });
+  }
+
+  // KAUAʻI, the folder event 15 leaves on the SHIP'S COMPUTER desktop for good (bottom-right, opposite WINDY). Opening it again only shows the file.
+  var kauaiIconEls = null;
+  function syncKauaiIcon(state) {
+    var want = !!(state.story && state.story.done.dadReturn);
+    if (want && !kauaiIconEls) {
+      var img = document.createElement('img');
+      img.className = 'computer-icon-img'; img.src = 'images/folder.png'; img.alt = '';
+      img.style.cssText = 'left:63.396%; top:75.941%; width:15.5%; height:7.531%;';
+      var label = document.createElement('span');
+      label.className = 'computer-icon-label'; label.textContent = 'KAUAʻI';
+      label.style.cssText = 'left:71.146%; top:86.401%;';
+      var hit = document.createElement('button');
+      hit.type = 'button'; hit.className = 'computer-icon-hit'; hit.setAttribute('data-app', 'kauai'); hit.setAttribute('aria-label', 'KAUAʻI');
+      hit.style.cssText = 'left:58.958%; top:73.594%; width:24.375%; height:16.797%;';
+      hit.addEventListener('click', function () {
+        if (!GAME || uiBusy) return;
+        clearTempView(); // closes THIS overlay; the folder is a plain text screen
+        storyOpenKauaiFolder(GAME);
+        renderOptions(GAME);
+        saveGameState(GAME);
+        scrollToBottom();
+      });
+      shipsComputerScreenEl.appendChild(img); shipsComputerScreenEl.appendChild(label); shipsComputerScreenEl.appendChild(hit);
+      kauaiIconEls = [img, label, hit];
+    } else if (!want && kauaiIconEls) {
+      kauaiIconEls.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+      kauaiIconEls = null;
+    }
+  }
+  function storyOpenKauaiFolder(state) {
+    playNavStationOneShot('mouse');
+    shipsComputerOverlayEl.hidden = true;
+    printBlank();
+    printLine('KAUAʻI', 'heading-label');
+    printBlank();
+    storyPrintLines(STORY_KAUAI_FILE);
+    state.pendingChoice = { id: 'story-kauai', options: [{ label: 'BACK', action: 'story:kauai-back' }] };
+  }
+
+  // Anything left over from a previous scenario/sitting that could leak into this one: the story sounds, the hand-back flag, the aft-cabin sleep flag.
+  function storyResetTransient() {
+    storySuppress = false;
+    sleepFromAftCabin = false;
+    Object.keys(saloonAudioEls).forEach(function (k) {
+      if (k.indexOf('story_') !== 0) return;
+      var el = saloonAudioEls[k];
+      if (!el) return;
+      el.onended = null;
+      try { if (!el.paused) el.pause(); el.currentTime = 0; } catch (e) { /* nothing to stop */ }
+    });
+  }
+
+  // A save from before the story existed (or a brand-new state) gets an empty record; nothing is invented for events that have not happened.
+  function migrateStoryIfNeeded(state) {
+    var st = state.story;
+    if (!st || typeof st !== 'object') st = state.story = {};
+    if (!st.done || typeof st.done !== 'object') st.done = {};
+    if (!Array.isArray(st.journal)) st.journal = [];
+    if (typeof st.aftCabinUnlocked !== 'boolean') st.aftCabinUnlocked = !!st.done.aftCabin;
   }
 
   var COMMANDS = {
@@ -17981,6 +18631,14 @@
     sitAWhile: 'audio/saloon/sit_a_while.mp3', // settling in -- see performSitAWhile (it does NOT set how long she sits)
     getUp: 'audio/saloon/get_up.mp3', // getting up again -- see performGetUp
     tarot: 'audio/saloon/tarot.mp3', // pulling a card from the TAROT CARDS deck (about 6 seconds) -- see performPullTarotCard
+    // STORY -- see STORY_EVENTS / playStoryOneShot. (The dull knock that opens Mom's Journal has no file yet, so it has no key.)
+    story_journal: 'audio/story/journal.mp3',
+    story_paper: 'audio/story/handling_paper.mp3',
+    story_drawer: 'audio/story/open_drawer.mp3',
+    story_page: 'audio/story/turn_page.mp3',
+    story_albumPage: 'audio/story/photo_album_turn_page.mp3',
+    story_unlock: 'audio/story/unlock_door.mp3',
+    story_toyCar: 'audio/story/toy_car.mp3',
   };
   var SALOON_AUDIO_VOLUME = {
     hatchOpen: 0.5,
@@ -17991,6 +18649,13 @@
     sitAWhile: 0.5,
     getUp: 0.5,
     tarot: 0.5,
+    story_journal: 0.5,
+    story_paper: 0.5,
+    story_drawer: 0.5,
+    story_page: 0.5,
+    story_albumPage: 0.5,
+    story_unlock: 0.5,
+    story_toyCar: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -20072,6 +20737,13 @@
       cmdLeaveHead(state);
     } else if (action === 'try-aft-cabin') {
       cmdTryAftCabin(state);
+    } else if (action === 'leave-aft-cabin') {
+      cmdLeaveAftCabin(state);
+    } else if (action === 'aft-sleep') {
+      sleepFromAftCabin = true;
+      try { cmdSleep(state); } finally { sleepFromAftCabin = false; }
+    } else if (action.indexOf('story:') === 0) {
+      storyHandleAction(state, action.slice(6));
     } else if (action === 'toggle-autopilot') {
       performAutopilotToggle(state);
     } else if (action === 'toggle-autopilot-nav') {
@@ -20246,6 +20918,7 @@
             flushNewLogEntries(s);
               if (goingBelow) s.crew.atHelm = false; // can't stay at the helm while below -- see cmdSleep for the same pattern
               if (finaleAtStep(s, 'above')) finaleAdvance(s); // THE FINAL ARRIVAL: the player must be on deck to start the engine
+              if (goingBelow) storyTryTrigger(s, 'below'); // STORY -- Events 7, 8 (arriving below deck)
             },
           });
           break;
@@ -21184,6 +21857,15 @@
     if (state.pendingChoice && state.pendingChoice.id === 'sails-choice') { // a save made on the old coastal SAILS screen (RAISE SAILS / FURL SAILS): rebuilt with the four settings
       state.pendingChoice.options = sailOptions(state);
     }
+    if (state.pendingChoice && state.pendingChoice.id === 'story-step') { // STORY -- a reload part-way through an event: the step the player had reached comes back
+      storyRedraw(state);
+      return;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'story-kauai') { // the KAUAʻI folder is a screen of the computer: back to its desktop
+      storySuppress = true;
+      try { cmdShipsComputerMenu(state); } finally { storySuppress = false; }
+      return;
+    }
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
     }
@@ -21331,6 +22013,104 @@
     'cape': { about: 'Just short of the open-Pacific line (the longitude of Cape Flattery), engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests the rescue: the two lines, CALL FOR HELP, the SOS and the end-of-game summary.', build: scenarioRescue },
   };
+
+  /* --------------------------------------------------------------
+     STORY SCENARIOS -- one per finalized story event: "1 — Dad's Note" ... "16 — Mom's Ashes" (titles come straight from STORY_EVENTS).
+     None of them shows or imitates an event. Each one puts the REAL game in the state immediately BEFORE the real trigger -- the miles
+     just past that event's number, every earlier event already marked done (and its permanent effects with it: the bunny on the shelf, the
+     aft cabin unlocked from event 8 on, and so on), the event itself not done -- and leaves the player where the trigger is one tap away.
+     The tap is the real game's: the real room, the real trigger, the real sequence, sounds, JOURNAL, log line and effect.
+     `arrive` (optional) puts the screen the test starts from on display, using the game's own room functions (never the story).
+     -------------------------------------------------------------- */
+  var STORY_SCENARIO_MILES = [12, 55, 155, 255, 355, 455, 605, 705, 855, 1005, 1105, 1405, 1705, 2055, 2155, 2305];
+  // Where on the route a given odometer reading puts the boat (the corridor to Cape Flattery is the first 150 nm of the odometer; the rest is open water to Kauaʻi).
+  function scenarioRoutePosition(miles) {
+    var CORRIDOR_NM = 150, TOTAL_NM = 2480, legs = [], L1 = 0, L2 = 0, i, a, b;
+    for (i = 0; i < WAYPOINTS.length - 1; i++) {
+      a = WAYPOINTS[i]; b = WAYPOINTS[i + 1];
+      legs.push(distanceBetween(a.lat, a.lon, b.lat, b.lon));
+      if (i <= 10) L1 += legs[i]; else L2 += legs[i];
+    }
+    var odo = 0;
+    for (i = 0; i < legs.length; i++) {
+      var scaled = legs[i] * (i <= 10 ? CORRIDOR_NM / L1 : (TOTAL_NM - CORRIDOR_NM) / L2);
+      if (miles <= odo + scaled || i === legs.length - 1) {
+        a = WAYPOINTS[i]; b = WAYPOINTS[i + 1];
+        var f = Math.max(0, Math.min(1, (miles - odo) / scaled));
+        var p = destinationPoint(a.lat, a.lon, bearingBetween(a.lat, a.lon, b.lat, b.lon), f * legs[i]);
+        return { lat: p.lat, lon: p.lon, leg: i };
+      }
+      odo += scaled;
+    }
+    return { lat: WAYPOINTS[0].lat, lon: WAYPOINTS[0].lon, leg: 0 };
+  }
+  function scenarioStory(n, above) {
+    var miles = STORY_SCENARIO_MILES[n - 1];
+    var s = scenarioBase(Math.max(1, Math.round(miles / 110)));
+    var pos = scenarioRoutePosition(miles);
+    if (miles >= 150) { // open Pacific, autopilot holding the way to Kauaʻi
+      scenarioOpenWater(s, pos.lat, pos.lon, FINAL_DEST.lat, FINAL_DEST.lon, miles, pos.leg);
+      s.boat.sailConfig = 'full';
+    } else { // still in the coastal corridor, the way scenarioCape leaves her
+      var wp = WAYPOINTS[pos.leg + 1], b = scenarioPoint(s, pos.lat, pos.lon, wp.lat, wp.lon);
+      s.nav.waypointIndex = pos.leg + 1;
+      s.nav.intendedCourse = b;
+      s.nav.distanceTraveled = miles;
+      s.flags.breakwaterObservationShown = true;
+      s.flags.lastMilestone = Math.floor(miles / 300);
+      s.boat.engineOn = true; s.boat.sailConfig = 'furled'; s.boat.engineRunningMinutes = 60; s.boat.fuelGallons = 16;
+      scenarioTrack(s, pos.leg);
+    }
+    s.boat.cabinLightsOn = true;  // light to read by, and power for the tape player and the computer
+    s.boat.accessoryOn = true;
+    s.crew.location = above ? 'above' : 'below';
+    s.crew.atHelm = false;
+    for (var i = 0; i < n - 1; i++) s.story.done[STORY_EVENTS[i].id] = true; // every earlier event has happened; this one, and every later one, has not
+    s.story.aftCabinUnlocked = n > 7;
+    return s;
+  }
+  var STORY_SCENARIO_ABOUT = [
+    "Below deck, Dad's Note not yet found. Tap NAV STATION: the first NAV STATION entry triggers it (coming below deck does not).",
+    "Below deck, 55 nm out. Tap CABIN.",
+    "In the SALOON, 155 nm out. Tap READ to open the BOOKSHELF.",
+    "In the GALLEY, 255 nm out. Tap EAT, then MEALS, and cook one.",
+    "Below deck, 355 nm out. Tap NAV STATION.",
+    "Below deck, 455 nm out. Tap NAV STATION.",
+    "On deck, 605 nm out, the aft cabin still locked. Tap GO BELOW.",
+    "On deck, 705 nm out, the aft cabin unlocked. Tap GO BELOW.",
+    "Below deck, 855 nm out. Tap CABIN (or AFT CABIN).",
+    "Below deck, 1005 nm out. Tap NAV STATION.",
+    "At the TAPE PLAYER, 1105 nm out, the sheet music found. Play any tape.",
+    "Below deck, 1405 nm out. Tap SALOON.",
+    "Below deck, 1705 nm out. Tap NAV STATION.",
+    "Below deck, 2055 nm out, the medical papers found, accessory power on. Tap SALOON.",
+    "At the NAV STATION, 2155 nm out. Tap SHIP'S COMPUTER.",
+    "Below deck, 2305 nm out. Tap CABIN.",
+  ];
+  var STORY_SCENARIO_ARRIVE = {
+    3: function (s) { cmdSaloon(s); },
+    4: function (s) { cmdGalley(s); },
+    11: function (s) { cmdTapePlayer(s); },
+    15: function (s) { cmdNavStation(s); },
+  };
+  // The four other tests are about the harbor, the Cape and the rescue, not the story: in them every story event is already behind her, so
+  // none of them starts when a room is entered at 1,500 or 2,480 miles. (The aft cabin stays as locked as it always was in them.)
+  Object.keys(SCENARIOS).forEach(function (k) {
+    var build = SCENARIOS[k].build;
+    SCENARIOS[k].build = function () {
+      var s = build();
+      STORY_EVENTS.forEach(function (e) { if (e.id !== 'dadReturn' || s.nav.distanceTraveled >= e.miles) s.story.done[e.id] = true; }); // (the KAUAʻI folder only shows on a computer that has reached Event 15's miles)
+      return s;
+    };
+  });
+  STORY_EVENTS.forEach(function (ev) {
+    SCENARIOS['story-' + (ev.n < 10 ? '0' : '') + ev.n] = {
+      title: ev.n + ' — ' + ev.title,
+      about: STORY_SCENARIO_ABOUT[ev.n - 1],
+      build: function () { return scenarioStory(ev.n, ev.n === 7 || ev.n === 8); },
+      arrive: STORY_SCENARIO_ARRIVE[ev.n],
+    };
+  });
   function scenarioShowMenu(requested) {
     var ov = document.createElement('div');
     ov.id = 'scenario-menu';
@@ -21341,7 +22121,11 @@
     function link(text, href) { var a = document.createElement('a'); a.textContent = text; a.href = href; a.style.cssText = 'display:block;margin:1rem 0 0.1rem;color:var(--phosphor-bright);letter-spacing:0.06em;'; box.appendChild(a); }
     add('TEST SCENARIOS', 'letter-spacing:0.08em;margin-bottom:0.9rem;');
     if (requested && requested !== 'list') add('THERE IS NO SCENARIO CALLED “' + requested.toUpperCase() + '”.', 'color:var(--amber);');
-    Object.keys(SCENARIOS).forEach(function (key) { link(key.toUpperCase(), '?scenario=' + key); add(SCENARIOS[key].about); });
+    var keys = Object.keys(SCENARIOS);
+    add('STORY', 'letter-spacing:0.08em;margin-top:0.4rem;color:var(--phosphor-dim);');
+    keys.filter(function (k) { return SCENARIOS[k].title; }).forEach(function (key) { link(SCENARIOS[key].title, '?scenario=' + key); add(SCENARIOS[key].about); });
+    add('OTHER TESTS', 'letter-spacing:0.08em;margin-top:1.6rem;color:var(--phosphor-dim);');
+    keys.filter(function (k) { return !SCENARIOS[k].title; }).forEach(function (key) { link(key.toUpperCase(), '?scenario=' + key); add(SCENARIOS[key].about); });
     add('Each one starts fresh every time you open it, on its own separate save. Your real voyage is never touched.', 'margin-top:1.4rem;color:var(--phosphor-dim);');
     link('RETURN TO MY VOYAGE', window.location.pathname);
     ov.appendChild(box);
@@ -21360,10 +22144,12 @@
 
   function boot() {
     var saved = loadGameState();
+    var scenarioFresh = false; // a test scenario that was just built (not resumed): see its `arrive`
     if (SCENARIO_NAME) { // a test scenario: seeded fresh on every open (this key only), unless &resume=1 asks to carry on from the test copy
-      scenarioBanner(SCENARIO_NAME);
+      scenarioBanner(SCENARIOS[SCENARIO_NAME].title || SCENARIO_NAME);
+      storyResetTransient(); // nothing story-related from a previous sitting (a page, a sound, a hand-back flag) carries into this test
       var resume = new URLSearchParams(window.location.search).get('resume') === '1';
-      if (!(resume && saved)) { saved = SCENARIOS[SCENARIO_NAME].build(); saveGameState(saved); }
+      if (!(resume && saved)) { saved = SCENARIOS[SCENARIO_NAME].build(); saveGameState(saved); scenarioFresh = true; }
     }
     if (!saved) {
       renderIntroStory();
@@ -21375,6 +22161,7 @@
     recoverPositionIfOnLand(GAME);
     migrateCoastalWaypointIndexIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateStoryIfNeeded(GAME); // STORY -- an older save gets an empty record
     migrateRescueIfNeeded(GAME); // RESCUE -- drop the retired mechanics, start the two timers from the existing hunger/thirst record
     migrateNavGeoIfNeeded(GAME); // NAVIGATION -- the new grounding / warning / finale state; a save in invalid water is moved the minimum distance back into it
     migrateWeatherStateIfNeeded(GAME); // PHASE 5 -- retire any old scripted-weather state, keep what the player is experiencing
@@ -21399,6 +22186,13 @@
     finaleKick(GAME); // a reload during / after the final arrival resumes it where it was
     rescueKick(GAME); // a reload during / after a rescue: the same screen again (the summary, if it had ended)
     finaleSyncChrome(GAME);
+    if (SCENARIO_NAME && scenarioFresh && SCENARIOS[SCENARIO_NAME].arrive) { // the screen a test starts from, drawn by the game's own room function
+      storySuppress = true;
+      try { SCENARIOS[SCENARIO_NAME].arrive(GAME); } finally { storySuppress = false; }
+      renderOptions(GAME);
+      saveGameState(GAME);
+      scrollToBottom();
+    }
     startLiveLoop();
     setTimeout(function () { departureAutoKick(GAME); }, 300); // a reload on "Leaving the marina...": it begins again by itself
     updateClock();
