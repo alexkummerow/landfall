@@ -5343,6 +5343,17 @@
         { pct: 100, text: "Nothing lasts on its own.\nMaybe that's what makes taking care of something matter." },
       ],
     },
+    {
+      id: 'taoTeChing', title: 'Tao Te Ching', author: 'Lao Tzu', requiredMinutes: 90,
+      milestones: [
+        { pct: 5, text: "Water nourishes everything without asking anything back. It finds its way by yielding." },
+        { pct: 20, text: "A bowl is useful because of the space inside it. I hadn’t thought of emptiness as something that could serve a purpose." },
+        { pct: 40, text: "Muddy water clears when it’s left still. Some things become easier to see when we stop stirring them." },
+        { pct: 60, text: "Even a fierce wind cannot last forever. I look up from the book for a moment." },
+        { pct: 80, text: "Knowing when there is enough is its own kind of wealth. I sit with that for a while." },
+        { pct: 100, text: "Living things are soft and flexible. It’s strange how often we mistake being unbending for being strong." },
+      ],
+    },
     // A DISCOVERED book (see bookOnShelf): it is meant to be found during the voyage. Five minutes to read; three beats.
     {
       id: 'runawayBunny', title: 'The Runaway Bunny', author: 'Margaret Wise Brown', requiredMinutes: 5,
@@ -15755,6 +15766,7 @@
     // A passive reference image, not a book -- no progress/completion
     // suffix, no reading-engine involvement (see cmdShipsPlan).
     opts.push({ label: "SHIP'S PLAN", action: 'view-ships-plan' });
+    opts.push({ label: 'TAROT CARDS', action: 'cmd:tarot-cards' }); // the last thing on the shelf: a deck, not a book (see cmdTarotCards)
     return pushBack(opts, 'cmd:saloon');
   }
 
@@ -15762,6 +15774,126 @@
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; }
     printRoomHeader('BOOKSHELF'); // "> BOOKSHELF" -- already on screen when the click echoed it; printed here on the direct redraws
     state.pendingChoice = { id: 'bookshelf-menu', options: buildBookshelfOptions(state) };
+  }
+
+  /* --------------------------------------------------------------
+     TAROT CARDS -- the last item on the BOOKSHELF. Not a book: no progress, no reading engine, nothing saved, no game time, nothing in the diary.
+     TAROT CARDS shows the deck (one observation) with PULL A CARD / BACK. PULL A CARD runs PULLING A CARD with its dots for 5 seconds, then the card
+     that was pulled is shown -- its name and its reading -- with the same two choices again; BACK returns to the bookshelf. A card is drawn at random
+     from all 78 (22 Major Arcana, 14 each of Wands, Cups, Swords and Pentacles) and is never the same one twice running.
+     The `suit` on each card is kept for later; it is not shown.
+     -------------------------------------------------------------- */
+  var TAROT_CARDS = [
+    { suit: "major", name: "The Fool", reading: "You don’t need to know the whole journey to begin." },
+    { suit: "major", name: "The Magician", reading: "Look at what’s within reach. You may already have what you need." },
+    { suit: "major", name: "The High Priestess", reading: "Leave room for what you sense but cannot yet explain." },
+    { suit: "major", name: "The Empress", reading: "Notice what nourishes you. Give it some care in return." },
+    { suit: "major", name: "The Emperor", reading: "A little structure can give you room to breathe." },
+    { suit: "major", name: "The Hierophant", reading: "Something you were taught may be worth understanding again." },
+    { suit: "major", name: "The Lovers", reading: "Let what you care about guide the choice before you." },
+    { suit: "major", name: "The Chariot", reading: "Choose your direction. Bring your scattered efforts together." },
+    { suit: "major", name: "Strength", reading: "Meet what frightens you with patience and a gentle hand." },
+    { suit: "major", name: "The Hermit", reading: "Some things become clearer when you spend time alone with them." },
+    { suit: "major", name: "Wheel of Fortune", reading: "Conditions change. Leave yourself room to change with them." },
+    { suit: "major", name: "Justice", reading: "Look honestly at your part in things, without being cruel to yourself." },
+    { suit: "major", name: "The Hanged Man", reading: "Pause. There may be another way to see what’s before you." },
+    { suit: "major", name: "Death", reading: "An ending changes the shape of what comes next. Give yourself time." },
+    { suit: "major", name: "Temperance", reading: "Find a pace you can sustain. Small adjustments count." },
+    { suit: "major", name: "The Devil", reading: "Notice what has a hold on you. Ask whether it still needs to." },
+    { suit: "major", name: "The Tower", reading: "When an old certainty falls away, take care of what remains." },
+    { suit: "major", name: "The Star", reading: "There is room for hope before you know how things will turn out." },
+    { suit: "major", name: "The Moon", reading: "Uncertainty can make familiar things look strange. Move carefully." },
+    { suit: "major", name: "The Sun", reading: "Let yourself enjoy something without asking it to last forever." },
+    { suit: "major", name: "Judgement", reading: "You may be ready to answer something you’ve put off." },
+    { suit: "major", name: "The World", reading: "Take a moment to recognize how far you’ve come." },
+    { suit: "wands", name: "Ace of Wands", reading: "Follow the small spark of something you want to try." },
+    { suit: "wands", name: "Two of Wands", reading: "Look beyond where you are. Consider what you’re willing to leave." },
+    { suit: "wands", name: "Three of Wands", reading: "You’ve made a beginning. Give your efforts time to reach beyond you." },
+    { suit: "wands", name: "Four of Wands", reading: "Let an ordinary place become somewhere you feel welcome." },
+    { suit: "wands", name: "Five of Wands", reading: "Different wants are pulling at you. Give each one a hearing." },
+    { suit: "wands", name: "Six of Wands", reading: "Allow yourself to feel proud of something you worked for." },
+    { suit: "wands", name: "Seven of Wands", reading: "Hold your ground where it matters. You needn’t defend everything." },
+    { suit: "wands", name: "Eight of Wands", reading: "Things are moving quickly. Give your attention to the next clear step." },
+    { suit: "wands", name: "Nine of Wands", reading: "You’ve come through a lot. Protect your strength without closing yourself off." },
+    { suit: "wands", name: "Ten of Wands", reading: "Look at what you’re carrying. Some of it may be ready to put down." },
+    { suit: "wands", name: "Page of Wands", reading: "Be curious before you worry about being good at something." },
+    { suit: "wands", name: "Knight of Wands", reading: "Give your enthusiasm a direction and enough care to sustain it." },
+    { suit: "wands", name: "Queen of Wands", reading: "Make room for the part of you that feels alive and unafraid." },
+    { suit: "wands", name: "King of Wands", reading: "Let a clear purpose guide your energy. Help others find theirs." },
+    { suit: "cups", name: "Ace of Cups", reading: "Let yourself be moved by something small." },
+    { suit: "cups", name: "Two of Cups", reading: "Give someone your attention. Allow yourself to receive theirs." },
+    { suit: "cups", name: "Three of Cups", reading: "Remember the people with whom you can be yourself." },
+    { suit: "cups", name: "Four of Cups", reading: "Look again at what’s being offered. Weariness can make it easy to miss." },
+    { suit: "cups", name: "Five of Cups", reading: "Give your sorrow room. When you’re ready, notice what remains beside it." },
+    { suit: "cups", name: "Six of Cups", reading: "An old memory may have something new to show you." },
+    { suit: "cups", name: "Seven of Cups", reading: "Many possibilities can blur your wishes. Choose one to look at closely." },
+    { suit: "cups", name: "Eight of Cups", reading: "You can be grateful for something and still be ready to leave it." },
+    { suit: "cups", name: "Nine of Cups", reading: "Enjoy what feels good without rushing toward the next thing." },
+    { suit: "cups", name: "Ten of Cups", reading: "Belonging grows through the ordinary ways people care for one another." },
+    { suit: "cups", name: "Page of Cups", reading: "Take a tender or unexpected feeling seriously." },
+    { suit: "cups", name: "Knight of Cups", reading: "Follow what moves you, while keeping your promises grounded." },
+    { suit: "cups", name: "Queen of Cups", reading: "Listen closely to your feelings. You don’t have to act on all of them." },
+    { suit: "cups", name: "King of Cups", reading: "Make room for strong feelings without letting them steer everything." },
+    { suit: "swords", name: "Ace of Swords", reading: "A clear thought can help you find your next step." },
+    { suit: "swords", name: "Two of Swords", reading: "Name the choice you’ve been avoiding. You can consider it slowly." },
+    { suit: "swords", name: "Three of Swords", reading: "A painful truth deserves gentleness as well as honesty." },
+    { suit: "swords", name: "Four of Swords", reading: "Rest before you ask yourself for another answer." },
+    { suit: "swords", name: "Five of Swords", reading: "Consider what winning this argument would cost you." },
+    { suit: "swords", name: "Six of Swords", reading: "Move toward calmer conditions, even if you carry some sadness with you." },
+    { suit: "swords", name: "Seven of Swords", reading: "Look at what you’re avoiding and what you’re keeping to yourself." },
+    { suit: "swords", name: "Eight of Swords", reading: "Examine the limits around you. Some may allow more movement than you think." },
+    { suit: "swords", name: "Nine of Swords", reading: "Fear grows in isolation. Give your worry words and seek some perspective." },
+    { suit: "swords", name: "Ten of Swords", reading: "Something has reached its end. Begin with the care you need today." },
+    { suit: "swords", name: "Page of Swords", reading: "Ask the question. Stay willing to hear an unexpected answer." },
+    { suit: "swords", name: "Knight of Swords", reading: "Before you rush ahead, make sure you understand what you’re pursuing." },
+    { suit: "swords", name: "Queen of Swords", reading: "Be clear about what you know and honest about what you need." },
+    { suit: "swords", name: "King of Swords", reading: "Let sound judgement include the consequences for other people." },
+    { suit: "pentacles", name: "Ace of Pentacles", reading: "Give a promising beginning something practical to grow from." },
+    { suit: "pentacles", name: "Two of Pentacles", reading: "Adjust your rhythm as demands change. Balance takes movement." },
+    { suit: "pentacles", name: "Three of Pentacles", reading: "Good work grows through shared attention and different skills." },
+    { suit: "pentacles", name: "Four of Pentacles", reading: "Notice what you’re holding tightly and what you’re afraid to lose." },
+    { suit: "pentacles", name: "Five of Pentacles", reading: "You don’t have to manage every hardship alone. Look for support." },
+    { suit: "pentacles", name: "Six of Pentacles", reading: "Give what you can. Accept what you need." },
+    { suit: "pentacles", name: "Seven of Pentacles", reading: "Look at what your effort is growing. Decide what deserves more time." },
+    { suit: "pentacles", name: "Eight of Pentacles", reading: "Give the next small task your full attention. Skill gathers quietly." },
+    { suit: "pentacles", name: "Nine of Pentacles", reading: "Enjoy the steadiness your care and effort have made possible." },
+    { suit: "pentacles", name: "Ten of Pentacles", reading: "Consider what you’ve inherited and what you hope to pass on." },
+    { suit: "pentacles", name: "Page of Pentacles", reading: "Learn by doing something small and doing it carefully." },
+    { suit: "pentacles", name: "Knight of Pentacles", reading: "Keep tending what matters, even when progress feels ordinary." },
+    { suit: "pentacles", name: "Queen of Pentacles", reading: "Care for your body and the place that shelters you." },
+    { suit: "pentacles", name: "King of Pentacles", reading: "Use what you’ve built to make life steadier for yourself and others." },
+  ];
+  var TAROT_PULL_SECONDS = 5;
+  var TAROT_DECK_LINE = 'A small deck of cards, their edges softened with use.';
+  var lastTarotCardIndex = -1; // session only -- just so the same card does not come twice running
+  function tarotOptions() {
+    return pushBack([{ label: 'PULL A CARD', action: 'pull-tarot-card' }], 'cmd:bookshelf');
+  }
+  function drawTarotCardIndex() {
+    var i;
+    do { i = Math.floor(Math.random() * TAROT_CARDS.length); } while (i === lastTarotCardIndex && TAROT_CARDS.length > 1);
+    lastTarotCardIndex = i;
+    return i;
+  }
+  function cmdTarotCards(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; } // the cards need light to be seen, like the books
+    printRoomHeader('TAROT CARDS'); // "> TAROT CARDS" -- already on screen when the click echoed it
+    printLine(TAROT_DECK_LINE);
+    state.pendingChoice = { id: 'tarot-deck', options: tarotOptions() };
+  }
+  function performPullTarotCard(state) {
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; } // defensive -- darkness could fall while the deck is open
+    runShortAction(state, {
+      label: 'PULLING A CARD',
+      duration: TAROT_PULL_SECONDS,
+      action: function (s) {
+        var card = TAROT_CARDS[drawTarotCardIndex()];
+        printBlank();
+        printLine(card.name.toUpperCase(), 'heading-label');
+        printLine(card.reading);
+        s.pendingChoice = { id: 'tarot-deck', options: tarotOptions() };
+      },
+    });
   }
 
   // SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
@@ -16942,6 +17074,7 @@
     wash: cmdWash,
     clothing: cmdClothing,
     bookshelf: cmdBookshelf,
+    'tarot-cards': cmdTarotCards,
     'tape-player': cmdTapePlayer,
     repair: cmdRepair,
     fish: cmdFish, // FISHING HOOK
@@ -19990,6 +20123,8 @@
       performJustExist(state);
     } else if (action === 'back-to-reality') {
       performBackToReality(state);
+    } else if (action === 'pull-tarot-card') {
+      performPullTarotCard(state);
     } else if (action === 'view-ships-plan') {
       cmdShipsPlan(state);
     } else if (action === 'view-vessel-log') {
