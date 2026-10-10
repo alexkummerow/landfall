@@ -161,6 +161,14 @@
     text-shadow: var(--output-glow);
   }
 
+  /* STORY MODE -- a discovery takes over the screen (body.story-mode, set by syncStoryMode for exactly as long as a discovery is the pending screen): the same
+     terminal, the same type and colours, with the header, the voyage strip and everything earlier in the log put away, so only the story's own text, its dots and
+     its one button are there. READING THE JOURNAL (body.reading-journal) puts away only the log, so the written pages have the screen. No card, no frame, no close button. */
+  body.story-mode #topbar, body.story-mode #navstrip { display: none; }
+  body.story-mode #output { padding-top: 2.6rem; }
+  body.story-mode #output > .entry, body.story-mode #output > .persist,
+  body.reading-journal #output > .entry, body.reading-journal #output > .persist { display: none; }
+
   /* SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
      markup notes above #ships-plan-overlay, and cmdShipsPlan below).
      position:fixed + inset:0 covers the entire viewport regardless of
@@ -1299,7 +1307,7 @@
         currentDay: newVesselLogDay(1, vesselLogMonthDayLabel(now), 0),
         completedDays: [],
       },
-      story: { done: {}, journal: [], aftCabinUnlocked: false }, // the finalized story: which events have happened (each once), the saved journal entries, the aft cabin's key -- see STORY_EVENTS
+      story: { done: {}, pending: [], journal: [], aftCabinUnlocked: false }, // the finalized story: which events have happened (each once), the discoveries not yet written about (event ids, oldest first), the written journal entries ({id, t}, oldest first), the aft cabin's key -- see STORY_EVENTS and THE JOURNAL
       flags: {
         fatigueNarrated: false,
         thirstNarrated: false,
@@ -10870,14 +10878,14 @@
 
   function printPersistentLine(text, cls) {
     var p = document.createElement('p');
-    p.className = 'line' + (cls ? ' ' + cls : '');
+    p.className = 'line persist' + (cls ? ' ' + cls : '');
     p.textContent = text;
     outputEl.insertBefore(p, tempViewEl);
   }
 
   function printPersistentBlank() {
     var p = document.createElement('p');
-    p.className = 'gap';
+    p.className = 'gap persist';
     outputEl.insertBefore(p, tempViewEl);
   }
 
@@ -10900,13 +10908,13 @@
     var body = document.createElement('div');
     body.className = 'entry-text';
     body.textContent = entry.text;
-    if (entry.pre) body.style.whiteSpace = 'pre-line'; // a journal entry: its line breaks are kept
     wrap.appendChild(ts);
     wrap.appendChild(body);
     outputEl.insertBefore(wrap, tempViewEl);
   }
 
   function scrollToBottom() {
+    if (document.body.classList.contains('reading-journal')) { outputEl.scrollTop = 0; return; } // the open journal: the newest entry is first, so it opens at the top
     outputEl.scrollTop = outputEl.scrollHeight;
   }
 
@@ -12781,6 +12789,7 @@
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
+      { label: 'JOURNAL', action: 'cmd:journal' }, // the protagonist's journal lives here -- see THE JOURNAL
       { label: 'SIT A WHILE', action: 'sit-a-while' },
       state.boat.hatchOpen
         ? { label: 'CLOSE HATCH', action: 'close-hatch' }
@@ -17048,26 +17057,27 @@
      NAV STATION entry, and nothing else (coming below deck does NOT trigger it). If several events are eligible in the same place,
      the lowest-numbered one fires; the others wait for the next time.
      Three events have a prerequisite: 8 needs 7, 11 needs 10, 14 needs 13. Each event happens once.
-     HOW IT RUNS. A trigger starts the event's first step: the observation text, and one button. A step with a sound plays it as a
-     real busy action (the game's usual audio-synced action: the label and dots last exactly as long as the sound; if SOUND is off or
-     the sound fails it simply completes). The last step's button is JOURNAL: JOURNALING . .. ... for the length of journal.mp3, and then the
-     event is COMPLETE -- the entry is saved (state.story.journal, and shown in the log), the vessel-log line is written, the permanent
-     effect takes hold, and the player is returned to the room they were in. The step the player has reached is kept in
-     state.pendingChoice (id 'story-step'), so a reload puts the same screen back; completion is state.story.done[id], so a finished
-     event can never fire again. PERMANENT EFFECTS are all derived from state.story (the bunny on the shelf, the unlocked aft cabin
-     with its SLEEP / PHOTO ALBUM / MOM'S JOURNAL, CODA in the tape list, the KAUAʻI folder on the computer), so they survive a reload.
-     Sounds (audio/story/): journal.mp3 (every JOURNAL), handling_paper.mp3 ('paper': events 1, 4, 5, 6, 10), open_drawer.mp3 ('drawer':
-     8, 9), turn_page.mp3 ('page': each TURN PAGE in 12 and 13), photo_album_turn_page.mp3 ('albumPage': each TURN PAGE in the album),
-     unlock_door.mp3 ('unlock'), toy_car.mp3 ('toyCar': the cue that opens event 8). The dull knock that opens event 12 has no sound
-     file yet; CODA is played by the real tape player (tape_start / Coda.mp3 / tape_stop).
+     HOW IT RUNS. A trigger starts the event's first step in FULL-SCREEN STORY MODE (see syncStoryMode): the observation text and one button. Pressing
+     it plays that step's sound (if it has one) over FOUR real seconds of the game's label-and-dots (STORY_PACE_SECONDS), with the buttons gone so nothing can be
+     tapped twice, and then the next step appears. The last step shows the discovery's final content and ONE button: BACK. BACK ends the event: full-screen mode
+     is left, the player is back in the room, the factual LOG line ("Found ...", stamped with the moment the final content came up) is in the scrollback, one
+     protagonist thought follows it, the PERMANENT EFFECT already holds, and -- silently -- the discovery has joined the journal's backlog (state.story.pending);
+     writing about it is the player's own choice later, in the SALOON (see THE JOURNAL). The step reached is kept in state.pendingChoice (id 'story-step'), so a
+     reload puts the same screen back; completion is state.story.done[id], so a finished event can never fire again. PERMANENT EFFECTS are all derived from
+     state.story (the bunny on the shelf, the unlocked aft cabin with its SLEEP / PHOTO ALBUM / MOM'S JOURNAL, CODA in the tape list, the KAUAʻI folder on the
+     computer), so they survive a reload.
+     Sounds (audio/story/): handling_paper.mp3 ('paper': events 1, 4, 5, 6, 10), open_drawer.mp3 ('drawer': 8, 9), turn_page.mp3 ('page': each TURN PAGE in 12 and 13),
+     photo_album_turn_page.mp3 ('albumPage': each TURN PAGE in the album), unlock_door.mp3 ('unlock'), toy_car.mp3 ('toyCar': the cue that opens event 8), and
+     journal.mp3 -- which belongs ONLY to WRITE IN JOURNAL in the SALOON, never to a discovery. The dull knock that opens event 12 has no sound file yet; CODA is
+     played by the real tape player (tape_start / Coda.mp3 / tape_stop).
      ============================================================ */
   var CODA_TAPE_TITLE = '3/5/93 — Coda';
   var storySuppress = false; // true only while an event hands the player back to a room, so that room's own entry cannot start the NEXT event on top of it
 
   // Where a step's button leads is described by `action`:
-  //   { label, busy, audio, short, effect }  -- label: the button; busy: the working label; audio: a STORY sound to wait for; short: seconds of dots instead; effect: a STORY_EFFECTS key
-  //   'journal'                             -- the final JOURNAL button
-  // and a step with `pager` shows that STORY_PAGERS entry page by page (TURN PAGE, and BACK to step `backTo` if it has one) before JOURNAL.
+  //   { label, busy, audio, effect }  -- label: the button; busy: the working label shown with the dots; audio: a STORY sound played over the dots; effect: a STORY_EFFECTS key, applied as the action begins
+  //   'end'                           -- the final content: its one button is BACK
+  // and a step with `pager` shows that STORY_PAGERS entry page by page (TURN PAGE, then BACK on the last page).
   var STORY_EVENTS = [
     { n: 1, id: 'dadsNote', title: "Dad's Note", ctx: ['nav'], miles: 0, back: 'nav',
       steps: [
@@ -17078,7 +17088,7 @@
           "Look after her, and yourself. Eat, drink water, get some sleep. Popcorn isn’t dinner.”",
           "",
           "Beneath it:",
-          "“Dad”"], action: 'journal' },
+          "“Dad”"], action: 'end' },
       ],
       journal: [
         "I expected dust and empty cupboards.",
@@ -17088,10 +17098,10 @@
 
     { n: 2, id: 'marks', title: "Marks on the Wall", ctx: ['cabin'], miles: 50, back: 'cabin',
       steps: [
-        { text: ["A few pencil marks on the cabin door frame. Dates written beside them."], action: { label: 'LOOK CLOSER' } },
+        { text: ["A few pencil marks on the cabin door frame. Dates written beside them."], action: { label: 'LOOK CLOSER', busy: 'LOOKING CLOSER' } },
         { text: [
           "One mark has been crossed out and measured again. Beside it:",
-          "‘Standing on toes doesn’t count.'"], action: 'journal' },
+          "‘Standing on toes doesn’t count.'"], action: 'end' },
       ],
       journal: [
         "The dates line up with my childhood.",
@@ -17101,13 +17111,13 @@
 
     { n: 3, id: 'bunny', title: "The Runaway Bunny", ctx: ['bookshelf'], miles: 150, back: 'bookshelf',
       steps: [
-        { text: ["A thin book is tucked behind the others. The Runaway Bunny. I know this one."], action: { label: 'OPEN BOOK' } },
+        { text: ["A thin book is tucked behind the others. The Runaway Bunny. I know this one."], action: { label: 'OPEN BOOK', busy: 'OPENING THE BOOK' } },
         { text: [
           "Inside the cover, a handwritten note:",
           "“Wherever you go, I will find you.”",
           "",
           "Beneath it:",
-          "“Mom”"], action: 'journal' },
+          "“Mom”"], action: 'end' },
       ],
       journal: [
         "I’d forgotten this book until I saw it.",
@@ -17120,7 +17130,7 @@
         { text: ["An old grocery receipt is tucked beneath the silverware."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
         { text: [
           "Dated April 17, 1990. On the back, in handwriting too neat to be Dad’s:",
-          "“Bought more clothes pins. The ocean has enough of our socks.”"], action: 'journal' },
+          "“Bought more clothes pins. The ocean has enough of our socks.”"], action: 'end' },
       ],
       journal: [
         "The handwriting must be Mom’s.",
@@ -17140,7 +17150,7 @@
           "“Kauai, 1989”",
           "",
           "Beneath it, in a different color ink, Dad’s handwriting:",
-          "“Still my favorite.”"], action: 'journal' },
+          "“Still my favorite.”"], action: 'end' },
       ],
       journal: [
         "Dad wanted me to bring the boat home to Kauaʻi.",
@@ -17158,7 +17168,7 @@
         { text: ["A stack of old marina invoices sits in a drawer at the nav station."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
         { text: [
           "Monthly mooring fees. Nāwiliwili, Kauaʻi. Solace’s name on every bill.",
-          "The same slip number, across several years."], action: 'journal' },
+          "The same slip number, across several years."], action: 'end' },
       ],
       journal: [
         "I didn’t understand why Dad called Kauaʻi home.",
@@ -17174,8 +17184,8 @@
           "How did I miss this?"], action: { label: 'UNLOCK AFT CABIN', busy: 'UNLOCKING', audio: 'unlock', effect: 'unlockAftCabin' } },
         { text: [
           "Mom’s clothes hang neatly in the hanging locker. Her shoes sit paired beneath them.",
-          "Everything is clean, carefully preserved. A photo album rests on the bunk."], action: { label: 'OPEN ALBUM' } },
-        { pager: 'album', backTo: 1 },
+          "Everything is clean, carefully preserved. A photo album rests on the bunk."], action: { label: 'OPEN ALBUM', busy: 'OPENING THE ALBUM' } },
+        { pager: 'album' },
       ],
       journal: [
         "I knew Dad’s face so well, but not like this.",
@@ -17189,7 +17199,7 @@
     { n: 8, id: 'toyCar', title: "My Red Toy Car", ctx: ['below'], miles: 700, requires: 'aftCabin', back: 'below',
       steps: [
         { cue: 'toyCar', text: ["A rolling sound inside a drawer as the boat rocks."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
-        { text: ["A red toy car, the same one from the photo."], action: 'journal' },
+        { text: ["A red toy car, the same one from the photo."], action: 'end' },
       ],
       journal: [
         "My red car. Dad kept even this.",
@@ -17200,7 +17210,7 @@
     { n: 9, id: 'danced', title: "Mom Danced", ctx: ['cabin', 'aftcabin'], miles: 850, back: 'cabin',
       steps: [
         { text: ["A pink satin ribbon peeks out of the bottom drawer."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
-        { text: ["Pointe shoes, her name written inside in faded ink."], action: 'journal' },
+        { text: ["Pointe shoes, her name written inside in faded ink."], action: 'end' },
       ],
       journal: [
         "I never knew Mom danced. Maybe that explains the piano tapes.",
@@ -17213,7 +17223,7 @@
         { text: [
           "STUDIO II",
           "",
-          "Notes crossed out, passages rewritten. Dad's listed as the composer."], action: 'journal' },
+          "Notes crossed out, passages rewritten. Dad's listed as the composer."], action: 'end' },
       ],
       journal: [
         "STUDIO II. I know it from the tape. I never knew he played.",
@@ -17222,7 +17232,7 @@
 
     { n: 11, id: 'recital', title: "They Performed Together", ctx: ['tape'], miles: 1100, requires: 'piano', back: 'tape',
       steps: [
-        { text: ["A folded performance program is tucked behind the tapes. I've seen it back there but now I'm curious."], action: { label: 'INSPECT' } },
+        { text: ["A folded performance program is tucked behind the tapes. I've seen it back there but now I'm curious."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
         { text: [
           "A recital program from Kauaʻi. Mom’s name beside “Dance,” Dad’s beside “Piano.”",
           "",
@@ -17230,7 +17240,7 @@
           "“Too slow. I’ll be eighty by the end.”",
           "",
           "Beneath it, Dad’s:",
-          "“Then you’ll finally stop rushing.”"], action: 'journal' },
+          "“Then you’ll finally stop rushing.”"], action: 'end' },
       ],
       journal: [
         "They performed together. Mom dancing, Dad at the piano.",
@@ -17244,9 +17254,9 @@
     { n: 12, id: 'momJournal', title: "Mom's Journal", ctx: ['saloon'], miles: 1400, back: 'saloon',
       // The dull wooden knock that opens this event has no sound file yet (see the report): the cue is shown, silently.
       steps: [
-        { cueMissing: 'dull wooden knock', text: ["A dull knock from the aft cabin."], action: { label: 'INSPECT' } },
-        { text: ["A notebook has slipped from behind the bottom drawer. Mom's journal."], action: { label: 'READ' } },
-        { pager: 'momJournal', backTo: 1 },
+        { cueMissing: 'dull wooden knock', text: ["A dull knock from the aft cabin."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
+        { text: ["A notebook has slipped from behind the bottom drawer. Mom's journal."], action: { label: 'READ', busy: 'READING' } },
+        { pager: 'momJournal' },
       ],
       journal: [
         "She wrote about Seattle as a visit. I grew up there.",
@@ -17257,10 +17267,10 @@
 
     { n: 13, id: 'medical', title: "Medical Papers", ctx: ['nav'], miles: 1700, back: 'nav',
       steps: [
-        { text: ["A bundle of papers lies folded in the back of a drawer. Medical records."], action: { label: 'INSPECT' } },
+        { text: ["A bundle of papers lies folded in the back of a drawer. Medical records."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
         { text: [
           "Mom’s name. A Seattle hospital. Oncology appointments, test results, treatment dates.",
-          "Between them, pages of Dad’s handwritten notes."], action: { label: 'READ' } },
+          "Between them, pages of Dad’s handwritten notes."], action: { label: 'READ', busy: 'READING' } },
         { pager: 'medical' },
       ],
       journal: [
@@ -17272,11 +17282,11 @@
       // Needs a tape player that can actually play right now (accessory power on, battery up): LISTEN uses the real tape system.
       eligible: function (state) { return storyTapePlayable(state); },
       steps: [
-        { text: ["A cassette case is wedged behind the bottom drawer."], action: { label: 'INSPECT' } },
-        { text: ["3/5/93 - CODA"], action: { label: 'LISTEN', effect: 'startCoda' } },
+        { text: ["A cassette case is wedged behind the bottom drawer."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
+        { text: ["3/5/93 - CODA"], action: { label: 'LISTEN', busy: 'LISTENING', effect: 'startCoda' } },
         { text: [
           "Something else. Mom's death certificate folded up in the case.",
-          "Dated 2/28/93."], action: 'journal' },
+          "Dated 2/28/93."], action: 'end' },
       ],
       journal: [
         "Five days after Mom died, Dad recorded this.",
@@ -17288,9 +17298,9 @@
 
     { n: 15, id: 'dadReturn', title: "Dad Tried to Return", ctx: ['computer'], miles: 2150, back: 'computer',
       steps: [
-        { heading: 'ARCHIVED FILES FOUND', text: [], action: { label: 'RECOVER', busy: 'RECOVERING', short: 4 }, extra: [{ label: 'SHUT DOWN', action: 'shut-down-computer' }] },
-        { text: ["A new folder appears:", "", "KAUAʻI"], action: { label: 'OPEN' } },
-        { text: null, kauaiFolder: true, action: 'journal' },
+        { heading: 'ARCHIVED FILES FOUND', text: [], action: { label: 'RECOVER', busy: 'RECOVERING' }, extra: [{ label: 'SHUT DOWN', action: 'shut-down-computer' }] },
+        { text: ["A new folder appears:", "", "KAUAʻI"], action: { label: 'OPEN', busy: 'OPENING' } },
+        { text: null, kauaiFolder: true, action: 'end' },
       ],
       journal: [
         "He kept getting ready. Charts, repairs, provisions. Different years, the same destination.",
@@ -17303,13 +17313,13 @@
       steps: [
         { text: [
           "That wooden box has been here the whole voyage.",
-          "I’ve never noticed the small brass plate."], action: { label: 'INSPECT' } },
+          "I’ve never noticed the small brass plate."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
         { text: [
           "Mom’s name. Her ashes.",
           "",
           "Beneath the box, a folded note in Dad’s handwriting:",
           "“I wanted to take her myself.",
-          "Dad”"], action: 'journal' },
+          "Dad”"], action: 'end' },
       ],
       journal: [
         "She’s been here the whole way.",
@@ -17424,15 +17434,41 @@
     (lines || []).forEach(function (ln) { if (ln === '') printBlank(); else printLine(ln); });
   }
 
+  // How long every story action takes: FOUR real seconds of the game's own label-and-dots (see runShortAction), with the action's own sound (if any) playing
+  // over it -- one beat, not a sound followed by a pause. While the dots run the buttons are gone, so nothing can be tapped twice or skipped ahead.
+  var STORY_PACE_SECONDS = 4;
+  var STORY_THOUGHTS = [
+    "I want to remember this.",
+    "I need to write this down.",
+    "This belongs in the journal.",
+    "I don’t want to forget this.",
+    "I should put this in the journal.",
+    "I want to get this down before I lose it.",
+  ];
+  var lastStoryThought = -1; // session only -- so the same thought does not come twice running
+
+  function storyNowTs(state) { return state.meta.departedAt + state.meta.voyageMinutes * 60000; } // the voyage clock, same as every log line
+
+  // Full-screen story mode: the chrome and the log are hidden (CSS, body.story-mode) for exactly as long as a DISCOVERY is the pending screen;
+  // rereading an object from the aft cabin is not a discovery and stays an ordinary room screen. Reading the protagonist's journal
+  // (body.reading-journal) hides only the scrollback, so the pages have the screen to themselves.
+  function syncStoryMode(state) {
+    var pc = state && state.pendingChoice;
+    var over = !!(state && ((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none')));
+    document.body.classList.toggle('story-mode', !!(pc && pc.id === 'story-step' && pc.ev && !over));
+    document.body.classList.toggle('reading-journal', !!(pc && pc.id === 'journal-reading' && !over));
+  }
+
+  function storyStepIsFinal(step, page) {
+    if (step.pager) return page >= STORY_PAGERS[step.pager].pages.length - 1;
+    return step.action === 'end';
+  }
+
+  // The buttons of one step. The last step of every discovery -- its final content -- has ONE button: BACK.
   function storyStepOptions(ev, stepIdx, page) {
     var step = ev.steps[stepIdx], opts = [];
-    if (step.pager) {
-      var pg = STORY_PAGERS[step.pager], last = page >= pg.pages.length - 1;
-      opts.push(last ? { label: 'JOURNAL', action: 'story:journal' } : { label: 'TURN PAGE', action: 'story:page' });
-      if (step.backTo != null) pushBack(opts, 'story:back');
-      return opts;
-    }
-    if (step.action === 'journal') return [{ label: 'JOURNAL', action: 'story:journal' }];
+    if (storyStepIsFinal(step, page)) return [{ label: 'BACK', action: 'story:finish' }];
+    if (step.pager) return [{ label: 'TURN PAGE', action: 'story:page' }];
     opts.push({ label: step.action.label, action: 'story:act' });
     if (step.extra) { opts.push({ divider: true }); step.extra.forEach(function (x) { opts.push(x); }); }
     return opts;
@@ -17440,7 +17476,8 @@
 
   // Shows one step of one event (its text) and makes its buttons the pending choice. `fresh` is true only when the step is being
   // reached for the first time this sitting (not a redraw after a reload), which is when a step's opening sound cue plays.
-  function storyRenderStep(state, evId, stepIdx, page, room, fresh) {
+  // `foundAt` is the moment the discovery's final content came up (kept in the pending choice, so a reload keeps it): the LOG line is stamped with it.
+  function storyRenderStep(state, evId, stepIdx, page, room, fresh, foundAt) {
     var ev = STORY_EVENTS_BY_ID[evId], step = ev.steps[stepIdx];
     printBlank();
     if (step.pager) storyPrintLines(STORY_PAGERS[step.pager].pages[page]);
@@ -17448,7 +17485,10 @@
       if (step.heading) { printLine(step.heading, 'heading-label'); if (step.text && step.text.length) printBlank(); }
       storyPrintLines(step.kauaiFolder ? STORY_KAUAI_FILE : step.text);
     }
-    state.pendingChoice = { id: 'story-step', ev: evId, step: stepIdx, page: page, room: room, options: storyStepOptions(ev, stepIdx, page) };
+    var pc = { id: 'story-step', ev: evId, step: stepIdx, page: page, room: room, options: storyStepOptions(ev, stepIdx, page) };
+    if (storyStepIsFinal(step, page)) pc.foundAt = foundAt != null ? foundAt : storyNowTs(state);
+    state.pendingChoice = pc;
+    syncStoryMode(state);
     if (fresh && step.cue) playStoryOneShot(step.cue, null);
   }
 
@@ -17457,44 +17497,39 @@
     var pc = state.pendingChoice;
     if (pc.pager) { storyRenderReread(state, pc.pager, pc.page || 0); return; }
     if (!STORY_EVENTS_BY_ID[pc.ev]) { state.pendingChoice = null; return; }
-    storyRenderStep(state, pc.ev, pc.step || 0, pc.page || 0, pc.room, false);
+    storyRenderStep(state, pc.ev, pc.step || 0, pc.page || 0, pc.room, false, pc.foundAt);
   }
 
   var STORY_EFFECTS = {
     unlockAftCabin: function (s) { s.story.aftCabinUnlocked = true; }, // permanent from this moment
-    startCoda: function (s) { // the REAL tape player: tape_start.mp3, then Coda.mp3
+    startCoda: function (s) { // the REAL tape player: tape_start.mp3, then Coda.mp3 (it plays on, whatever the 4 seconds of dots do)
       var t = TAPES_BY_TITLE[CODA_TAPE_TITLE];
       if (t && s.boat.accessoryOn) beginTapeStartSequence(t.title, t.path);
     },
   };
 
-  // The button on a step that is not JOURNAL.
+  // The button on any step that is not the last: its sound and effect begin at once, the label and dots run for STORY_PACE_SECONDS, then the next step appears.
   function storyDoAction(state) {
     var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], step = ev.steps[pc.step], act = step.action;
     var next = pc.step + 1, room = pc.room;
-    function proceed(s) {
-      if (act.effect) STORY_EFFECTS[act.effect](s);
-      storyRenderStep(s, ev.id, next, 0, room, true);
-    }
-    if (act.audio) {
-      runAudioSyncedAction(state, {
-        label: act.busy,
-        playAudio: function (onEnded) { return playStoryOneShot(act.audio, onEnded); },
-        action: proceed,
-      });
-    } else if (act.short) {
-      runShortAction(state, { label: act.busy, duration: act.short, action: proceed });
-    } else {
-      proceed(state);
-    }
+    if (act.audio) playStoryOneShot(act.audio, null);
+    if (act.effect) STORY_EFFECTS[act.effect](state);
+    runShortAction(state, {
+      label: act.busy,
+      duration: STORY_PACE_SECONDS,
+      action: function (s) { storyRenderStep(s, ev.id, next, 0, room, true); },
+    });
   }
 
+  // TURN PAGE: the page sound plays over the same four seconds of dots; the next page appears when they end. (The same for the album and Mom's journal
+  // when they are reread from the aft cabin.)
   function storyTurnPage(state) {
     var pc = state.pendingChoice, pagerId = pc.pager || storyPagerOf(pc), pg = STORY_PAGERS[pagerId], nextPage = (pc.page || 0) + 1;
     if (nextPage > pg.pages.length - 1) return;
-    runAudioSyncedAction(state, {
+    playStoryOneShot(pg.audio, null);
+    runShortAction(state, {
       label: 'TURNING PAGE',
-      playAudio: function (onEnded) { return playStoryOneShot(pg.audio, onEnded); },
+      duration: STORY_PACE_SECONDS,
       action: function (s) {
         if (pc.pager) storyRenderReread(s, pagerId, nextPage);
         else storyRenderStep(s, pc.ev, pc.step, nextPage, pc.room, false);
@@ -17503,40 +17538,38 @@
   }
   function storyPagerOf(pc) { return STORY_EVENTS_BY_ID[pc.ev].steps[pc.step].pager; }
 
-  // BACK inside a discovery's pager: close it and return to the step before (OPEN ALBUM / READ).
-  function storyBack(state) {
-    var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], step = ev.steps[pc.step];
-    if (step.backTo == null) return;
-    storyRenderStep(state, ev.id, step.backTo, 0, pc.room, false);
-  }
-
-  // JOURNAL: the existing journaling treatment -- JOURNALING . .. ... for exactly as long as journal.mp3 plays -- and then the event is complete.
-  function storyJournal(state) {
-    var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], room = pc.room;
-    runAudioSyncedAction(state, {
-      label: 'JOURNALING',
-      playAudio: function (onEnded) { return playStoryOneShot('journal', onEnded); },
-      action: function (s) { storyComplete(s, ev, room); },
-    });
-  }
-
-  function storyComplete(state, ev, room) {
-    var st = state.story;
-    if (st.done[ev.id]) return; // an event happens once
-    st.done[ev.id] = true;
-    var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
-    var text = ev.journal.join('\n');
-    st.journal.push({ id: ev.id, n: ev.n, title: ev.title, t: ts, text: text }); // the saved journal entry
-    state.log.push({ t: ts, text: text, pre: true }); // ... shown in the log, line breaks kept
+  // BACK on a discovery's final content: the discovery is complete. Full-screen mode ends and the player is back in the room they were in. The factual LOG line
+  // (stamped with the moment the discovery's final content came up) is in the scrollback, one protagonist thought follows it (a thought, not a log line), and --
+  // silently, with nothing shown -- the discovery joins the journal's backlog.
+  function storyFinish(state) {
+    var pc = state.pendingChoice;
+    if (!pc || pc.id !== 'story-step' || !pc.ev || !STORY_EVENTS_BY_ID[pc.ev]) return;
+    var ev = STORY_EVENTS_BY_ID[pc.ev], st = state.story;
+    if (!st.done[ev.id]) { // an event happens once, and joins the backlog once
+      st.done[ev.id] = true;
+      if (st.pending.indexOf(ev.id) === -1 && !journalIsWritten(state, ev.id)) st.pending.push(ev.id);
+      var foundAt = pc.foundAt != null ? pc.foundAt : storyNowTs(state);
+      state.log.push({ t: foundAt, text: ev.found });
+      if (state.vesselLog && state.vesselLog.currentDay) state.vesselLog.currentDay.events.push({ time: vesselLogTimeLabel(foundAt), text: ev.found }); // VESSEL LOG > EVENTS
+    }
+    state.pendingChoice = null;
+    syncStoryMode(state);
     flushNewLogEntries(state);
-    logVesselLogEvent(state, ev.found); // the vessel-log line (VESSEL LOG > EVENTS), stamped with the time it was found
-    storyReturnTo(state, ev, room);
+    storyReturnTo(state, ev, pc.room);
   }
 
-  // Back to the room the player was in. Suppressed so that room's own entry cannot start the next event straight away.
+  function storyPickThought() {
+    var i;
+    do { i = Math.floor(Math.random() * STORY_THOUGHTS.length); } while (i === lastStoryThought && STORY_THOUGHTS.length > 1);
+    lastStoryThought = i;
+    return STORY_THOUGHTS[i];
+  }
+
+  // Back to the room the player was in, with the thought on screen above it. Suppressed so that room's own entry cannot start the next event straight away.
   function storyReturnTo(state, ev, room) {
     storySuppress = true;
     try {
+      printLine(storyPickThought()); // not logged, not stamped, not saved
       switch (ev.back) {
         case 'nav': cmdNavStation(state); break;
         case 'cabin': if (room === 'aftcabin') cmdAftCabin(state); else cmdCabin(state); break;
@@ -17545,7 +17578,7 @@
         case 'aftcabin': cmdAftCabin(state); break;
         case 'saloon': cmdSaloon(state); break;
         case 'tape': cmdTapePlayer(state); break;
-        case 'computer': cmdShipsComputerMenu(state); break;
+        case 'computer': cmdNavStation(state); break; // the computer is at the NAV STATION; its desktop (with the new folder) is one tap away
         default: break; // 'below': the room list itself
       }
     } finally { storySuppress = false; }
@@ -17553,6 +17586,7 @@
 
   // Everything the story adds to the buttons, in one place.
   function storyHandleAction(state, verb) {
+    if (uiBusy) return; // an action's dots are running: nothing else in the story can start (no double tap, no skipping ahead)
     var pc = state.pendingChoice;
     if (verb.indexOf('reread:') === 0) { storyRenderReread(state, verb.slice(7), 0); return; }
     if (verb === 'kauai-open') { storyOpenKauaiFolder(state); return; }
@@ -17561,8 +17595,7 @@
     switch (verb) {
       case 'act': storyDoAction(state); break;
       case 'page': storyTurnPage(state); break;
-      case 'back': storyBack(state); break;
-      case 'journal': storyJournal(state); break;
+      case 'finish': storyFinish(state); break;
       case 'reread-back': storySuppress = true; try { cmdAftCabin(state); } finally { storySuppress = false; } break;
       default: break;
     }
@@ -17663,12 +17696,136 @@
     });
   }
 
-  // A save from before the story existed (or a brand-new state) gets an empty record; nothing is invented for events that have not happened.
+  /* ============================================================
+     THE JOURNAL -- the protagonist's own, kept in the SALOON (SALOON > JOURNAL). It is not the ship's log: the log is the factual, stamped record of what
+     happened (a discovery's "Found ..." line is written to it by storyFinish, at the moment of the discovery); the journal is what she writes about it,
+     later, on purpose, and dated when it is written.
+       state.story.pending  -- the discoveries not yet written about: event ids, in the order they were found. A finished discovery joins it silently.
+       state.story.journal  -- the written entries, oldest first: { id, t } (t = the voyage clock when it was written). The title and the prose are looked up in
+                               STORY_EVENTS, so the story's words live in one place only.
+     WRITE IN JOURNAL (offered only while something is pending) writes exactly ONE entry, always the oldest pending: JOURNALING with its dots for as long as
+     journal.mp3 plays -- the only place that sound is used -- then the entry is committed and shown, and the journal menu comes back. READ opens the written entries,
+     newest first, using the book-reading sequence unchanged (SETTLING IN and book_open.mp3, the READING indicator while the pages are open, CLOSING BOOK and
+     book_close.mp3 when she stops) -- but reading writes nothing, changes no time, plays no journal sound and adds nothing to the log.
+     ============================================================ */
+  var JOURNAL_NOTHING_LINES = [
+    "Nothing comes to mind.",
+    "Nothing I need to write down.",
+    "Nothing feels worth putting on paper.",
+    "I don’t have anything to add.",
+    "Nothing’s asking to be written.",
+  ];
+  function journalNothingLine() { return JOURNAL_NOTHING_LINES[Math.floor(Math.random() * JOURNAL_NOTHING_LINES.length)]; }
+
+  function journalIsWritten(state, id) {
+    return state.story.journal.some(function (e) { return e.id === id; });
+  }
+
+  // "DAY 4 · 10 OCT 18:32" -- the voyage's own day count and clock, as the log shows them, for the moment an entry was written.
+  function journalStamp(state, ts) {
+    var departure = new Date(state.meta.departureDateAnchor != null ? state.meta.departureDateAnchor : state.meta.departedAt), d = new Date(ts);
+    var day = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(departure.getFullYear(), departure.getMonth(), departure.getDate())) / 86400000) + 1;
+    return 'DAY ' + Math.max(1, day) + ' · ' + formatShipTime(ts);
+  }
+
+  // One written entry: its event title, when it was written, and the finished prose.
+  function journalPrintEntry(state, entry) {
+    var ev = STORY_EVENTS_BY_ID[entry.id];
+    if (!ev) return;
+    printLine(ev.title.toUpperCase(), 'heading-label');
+    printLine(journalStamp(state, entry.t), 'dim');
+    printBlank();
+    storyPrintLines(ev.journal);
+  }
+
+  function journalMenu(state) {
+    var opts = [];
+    if (state.story.pending.length) opts.push({ label: 'WRITE IN JOURNAL', action: 'journal-write' });
+    opts.push({ label: 'READ', action: 'journal-read' });
+    state.pendingChoice = { id: 'journal-menu', options: pushBack(opts, 'cmd:saloon') };
+  }
+
+  // SALOON > JOURNAL. With nothing waiting to be written, one of the five fixed observations is on screen; `quiet` (coming back from reading) leaves it out.
+  function cmdJournal(state, quiet) {
+    printRoomHeader('JOURNAL'); // "> JOURNAL" -- already on screen when the click echoed it; printed here on the redraws
+    if (!state.story.pending.length && !quiet) {
+      printBlank();
+      printLine(journalNothingLine());
+    }
+    journalMenu(state);
+  }
+
+  function performJournalWrite(state) {
+    if (uiBusy) return; // (a second tap while JOURNALING is ignored)
+    if (!state.story.pending.length) { cmdJournal(state, true); return; } // defensive -- the button is only offered while something is pending
+    runAudioSyncedAction(state, { // JOURNALING lasts as long as journal.mp3 plays; with SOUND off, or a sound that fails, it simply completes
+      label: 'JOURNALING',
+      playAudio: function (onEnded) { return playStoryOneShot('journal', onEnded); },
+      action: function (s) {
+        var st = s.story;
+        if (!st.pending.length) { journalMenu(s); return; }
+        var entry = { id: st.pending.shift(), t: storyNowTs(s) }; // the OLDEST waiting discovery, dated now
+        st.journal.push(entry);
+        printBlank();
+        journalPrintEntry(s, entry);
+        journalMenu(s);
+      },
+    });
+  }
+
+  function performJournalRead(state) {
+    if (uiBusy) return;
+    if (!state.story.journal.length) { // nothing written yet: she looks, and there is nothing to read
+      printBlank();
+      printLine(journalNothingLine());
+      journalMenu(state);
+      return;
+    }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:journal'); return; } // like the books, it needs light
+    runAudioSyncedAction(state, { // the book-reading sequence, as it is for a book
+      label: 'SETTLING IN',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('bookOpen', onEnded); },
+      action: function (s) { journalReadingScreen(s); },
+    });
+  }
+
+  // The open journal: written entries, the newest first, on a screen of their own (the READING indicator above them, STOP READING below).
+  function journalReadingScreen(state) {
+    var list = state.story.journal;
+    printBlank();
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (i < list.length - 1) { printBlank(); printBlank(); }
+      journalPrintEntry(state, list[i]);
+    }
+    state.pendingChoice = { id: 'journal-reading', options: [{ label: 'STOP READING', action: 'journal-stop-reading' }] };
+    syncStoryMode(state);
+  }
+
+  function performJournalStopReading(state) {
+    if (uiBusy) return;
+    stopActivityDots(); // the READING indicator goes the moment STOP READING is pressed, as it does for a book
+    runAudioSyncedAction(state, {
+      label: 'CLOSING BOOK',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('bookClose', onEnded); },
+      action: function (s) { cmdJournal(s, true); },
+    });
+  }
+
+  // A save from before the journal was rebuilt (or before the story existed) is brought up to date: the first version of the story wrote the whole entry at the
+  // moment of discovery (and copied it into the log); those entries keep only which event and when, and the copies leave the log. Nothing is invented.
   function migrateStoryIfNeeded(state) {
     var st = state.story;
     if (!st || typeof st !== 'object') st = state.story = {};
     if (!st.done || typeof st.done !== 'object') st.done = {};
     if (!Array.isArray(st.journal)) st.journal = [];
+    if (!Array.isArray(st.pending)) st.pending = [];
+    st.journal = st.journal.filter(function (e) { return e && STORY_EVENTS_BY_ID[e.id]; }).map(function (e) { return { id: e.id, t: e.t }; });
+    st.pending = st.pending.filter(function (id, i) { return STORY_EVENTS_BY_ID[id] && st.pending.indexOf(id) === i && !journalIsWritten(state, id); });
+    if (Array.isArray(state.log)) {
+      for (var i = state.log.length - 1; i >= 0; i--) if (state.log[i] && state.log[i].pre) state.log.splice(i, 1);
+    }
     if (typeof st.aftCabinUnlocked !== 'boolean') st.aftCabinUnlocked = !!st.done.aftCabin;
   }
 
@@ -17686,6 +17843,7 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
+    journal: cmdJournal,
     cabin: cmdCabin,
     'nav-station': cmdNavStation,
     handbook: cmdHandbook,
@@ -20356,6 +20514,7 @@
     updateWindAudioForState(state);
     updateRainAudioForState(state);
     syncActivityDots(state);
+    syncStoryMode(state); // STORY -- full-screen discovery / the open journal
     updateNavStrip(state); // the strip reflects live state, so refresh it anywhere the options panel does
     optionsEl.innerHTML = '';
     // NAV STATION only -- see the CSS notes on #options.nav-station-fit
@@ -20543,7 +20702,7 @@
   var ACTIVITY_DOT_FRAMES = ['.', '..', '...'];
 
   function activityDotsInfo(state) {
-    if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
+    if (state.pendingChoice && (state.pendingChoice.id === 'reading' || state.pendingChoice.id === 'journal-reading')) return { active: true, label: 'READING' }; // (the open journal is read the way a book is)
     if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // for the whole of the sitting; the observations appear beneath it
     if (obsSession && state.pendingChoice && state.pendingChoice.id === 'existing') return { active: true, label: 'JUST EXISTING' }; // for the whole of the time at the bow; the observations appear beneath it
     if (state.crew.watchState === 'sleeping') return { active: true, label: null };
@@ -20742,6 +20901,12 @@
     } else if (action === 'aft-sleep') {
       sleepFromAftCabin = true;
       try { cmdSleep(state); } finally { sleepFromAftCabin = false; }
+    } else if (action === 'journal-write') {
+      performJournalWrite(state);
+    } else if (action === 'journal-read') {
+      performJournalRead(state);
+    } else if (action === 'journal-stop-reading') {
+      performJournalStopReading(state);
     } else if (action.indexOf('story:') === 0) {
       storyHandleAction(state, action.slice(6));
     } else if (action === 'toggle-autopilot') {
@@ -21861,6 +22026,10 @@
       storyRedraw(state);
       return;
     }
+    if (state.pendingChoice && state.pendingChoice.id === 'journal-reading') { // the open journal: the same pages, under the READING indicator (no sound on a redraw)
+      journalReadingScreen(state);
+      return;
+    }
     if (state.pendingChoice && state.pendingChoice.id === 'story-kauai') { // the KAUAʻI folder is a screen of the computer: back to its desktop
       storySuppress = true;
       try { cmdShipsComputerMenu(state); } finally { storySuppress = false; }
@@ -22019,7 +22188,9 @@
      None of them shows or imitates an event. Each one puts the REAL game in the state immediately BEFORE the real trigger -- the miles
      just past that event's number, every earlier event already marked done (and its permanent effects with it: the bunny on the shelf, the
      aft cabin unlocked from event 8 on, and so on), the event itself not done -- and leaves the player where the trigger is one tap away.
-     The tap is the real game's: the real room, the real trigger, the real sequence, sounds, JOURNAL, log line and effect.
+     The tap is the real game's: the real room, the real trigger, the real full-screen sequence and sounds, BACK, the log line, the thought and the effect.
+     Every EARLIER event is also already WRITTEN in the journal (so READ has them); the tested event is the one waiting in the backlog, and is never
+     written for you: after BACK, go SALOON > JOURNAL > WRITE IN JOURNAL yourself.
      `arrive` (optional) puts the screen the test starts from on display, using the game's own room functions (never the story).
      -------------------------------------------------------------- */
   var STORY_SCENARIO_MILES = [12, 55, 155, 255, 355, 455, 605, 705, 855, 1005, 1105, 1405, 1705, 2055, 2155, 2305];
@@ -22065,7 +22236,11 @@
     s.boat.accessoryOn = true;
     s.crew.location = above ? 'above' : 'below';
     s.crew.atHelm = false;
-    for (var i = 0; i < n - 1; i++) s.story.done[STORY_EVENTS[i].id] = true; // every earlier event has happened; this one, and every later one, has not
+    var base = storyNowTs(s);
+    for (var i = 0; i < n - 1; i++) { // every earlier event has happened and been written about (45 minutes apart, ending shortly before now); this one, and every later one, has not
+      s.story.done[STORY_EVENTS[i].id] = true;
+      s.story.journal.push({ id: STORY_EVENTS[i].id, t: Math.max(s.meta.departedAt, base - (n - 1 - i) * 45 * 60000) });
+    }
     s.story.aftCabinUnlocked = n > 7;
     return s;
   }
@@ -22123,6 +22298,7 @@
     if (requested && requested !== 'list') add('THERE IS NO SCENARIO CALLED “' + requested.toUpperCase() + '”.', 'color:var(--amber);');
     var keys = Object.keys(SCENARIOS);
     add('STORY', 'letter-spacing:0.08em;margin-top:0.4rem;color:var(--phosphor-dim);');
+    add('Earlier events are already found and written in the journal. Play the event, tap BACK, then SALOON > JOURNAL > WRITE IN JOURNAL.', 'color:var(--phosphor-dim);');
     keys.filter(function (k) { return SCENARIOS[k].title; }).forEach(function (key) { link(SCENARIOS[key].title, '?scenario=' + key); add(SCENARIOS[key].about); });
     add('OTHER TESTS', 'letter-spacing:0.08em;margin-top:1.6rem;color:var(--phosphor-dim);');
     keys.filter(function (k) { return !SCENARIOS[k].title; }).forEach(function (key) { link(key.toUpperCase(), '?scenario=' + key); add(SCENARIOS[key].about); });
