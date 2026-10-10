@@ -1220,7 +1220,7 @@
         coffeeCount: 0,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // physically at the Helm -- a pure presence flag now, independent of AUTOPILOT (see cmdHelm/computeHeading: autopilot still wins the actual steering whenever both are true); ends automatically on GO BELOW, SLEEP, BACK (leave-helm), or STEERING damage -- no longer on autopilot re-engaging
-        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null, quiet: null, pong: null }, // voyageMinutes of last use (quiet/pong: of the last PAYOUT), for gentle diminishing returns
+        lastRoutineAt: { wash: null, dress: null, dishes: null, read: null, dryClothes: null, tools: null, bunk: null, air: null, tidy: null, quiet: null, pong: null, tarot: null }, // voyageMinutes of last use (quiet/pong/tarot: of the last PAYOUT), for gentle diminishing returns
         snackMealRatio: 0,            // 0-1 exponential moving average of how "snacky" recent meals have been (see performEat) — hidden monotony pressure on morale, never shown
         dishesDirtySinceMinutes: null, // voyageMinutes a cooked meal first left dishes dirty, or null if clean — set once, not re-stamped by later meals, cleared by DISHES
         lastChocolateAt: null,        // voyageMinutes of last chocolate, for diminishing returns — mirrors lastCoffeeAt's role
@@ -5332,15 +5332,6 @@
         { pct: 50, text: "You can't return as the person who left." },
         { pct: 75, text: "Maybe coming home isn't the same as going back." },
         { pct: 100, text: "Perhaps home isn't where the journey ends.\nIt's what gives the journey a direction." },
-      ],
-    },
-    {
-      id: 'thisOldBoat', title: 'This Old Boat', author: 'Don Casey', requiredMinutes: 30,
-      milestones: [
-        { pct: 25, text: 'Almost everything can last longer if someone keeps tending to it.' },
-        { pct: 50, text: 'Maintenance is mostly noticing small things before they become large ones.' },
-        { pct: 75, text: 'Maybe caring for something is choosing, again and again, not to let it fall apart.' },
-        { pct: 100, text: "Nothing lasts on its own.\nMaybe that's what makes taking care of something matter." },
       ],
     },
     {
@@ -15763,9 +15754,6 @@
       var bs = state.books[b.id];
       return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
     });
-    // A passive reference image, not a book -- no progress/completion
-    // suffix, no reading-engine involvement (see cmdShipsPlan).
-    opts.push({ label: "SHIP'S PLAN", action: 'view-ships-plan' });
     opts.push({ label: 'TAROT CARDS', action: 'cmd:tarot-cards' }); // the last thing on the shelf: a deck, not a book (see cmdTarotCards)
     return pushBack(opts, 'cmd:saloon');
   }
@@ -15777,93 +15765,98 @@
   }
 
   /* --------------------------------------------------------------
-     TAROT CARDS -- the last item on the BOOKSHELF. Not a book: no progress, no reading engine, nothing saved, no game time, nothing in the diary.
-     TAROT CARDS shows the deck (one observation) with PULL A CARD / BACK. PULL A CARD runs PULLING A CARD with its dots for 5 seconds, then the card
+     TAROT CARDS -- the last item on the BOOKSHELF. Not a book: no progress, no reading engine, no game time, nothing in the diary. (Its only effect on the game is the small morale comfort below.)
+     TAROT CARDS shows the deck (one observation) with PULL A CARD / BACK. PULL A CARD runs PULLING A CARD with its dots for as long as tarot.mp3 plays (about 6 seconds), then the card
      that was pulled is shown -- its name and its reading -- with the same two choices again; BACK returns to the bookshelf. A card is drawn at random
      from all 78 (22 Major Arcana, 14 each of Wands, Cups, Swords and Pentacles) and is never the same one twice running.
      The `suit` on each card is kept for later; it is not shown.
      -------------------------------------------------------------- */
   var TAROT_CARDS = [
-    { suit: "major", name: "The Fool", reading: "You don’t need to know the whole journey to begin." },
-    { suit: "major", name: "The Magician", reading: "Look at what’s within reach. You may already have what you need." },
-    { suit: "major", name: "The High Priestess", reading: "Leave room for what you sense but cannot yet explain." },
-    { suit: "major", name: "The Empress", reading: "Notice what nourishes you. Give it some care in return." },
-    { suit: "major", name: "The Emperor", reading: "A little structure can give you room to breathe." },
-    { suit: "major", name: "The Hierophant", reading: "Something you were taught may be worth understanding again." },
-    { suit: "major", name: "The Lovers", reading: "Let what you care about guide the choice before you." },
-    { suit: "major", name: "The Chariot", reading: "Choose your direction. Bring your scattered efforts together." },
-    { suit: "major", name: "Strength", reading: "Meet what frightens you with patience and a gentle hand." },
-    { suit: "major", name: "The Hermit", reading: "Some things become clearer when you spend time alone with them." },
-    { suit: "major", name: "Wheel of Fortune", reading: "Conditions change. Leave yourself room to change with them." },
-    { suit: "major", name: "Justice", reading: "Look honestly at your part in things, without being cruel to yourself." },
-    { suit: "major", name: "The Hanged Man", reading: "Pause. There may be another way to see what’s before you." },
-    { suit: "major", name: "Death", reading: "An ending changes the shape of what comes next. Give yourself time." },
-    { suit: "major", name: "Temperance", reading: "Find a pace you can sustain. Small adjustments count." },
-    { suit: "major", name: "The Devil", reading: "Notice what has a hold on you. Ask whether it still needs to." },
-    { suit: "major", name: "The Tower", reading: "When an old certainty falls away, take care of what remains." },
-    { suit: "major", name: "The Star", reading: "There is room for hope before you know how things will turn out." },
-    { suit: "major", name: "The Moon", reading: "Uncertainty can make familiar things look strange. Move carefully." },
-    { suit: "major", name: "The Sun", reading: "Let yourself enjoy something without asking it to last forever." },
-    { suit: "major", name: "Judgement", reading: "You may be ready to answer something you’ve put off." },
-    { suit: "major", name: "The World", reading: "Take a moment to recognize how far you’ve come." },
-    { suit: "wands", name: "Ace of Wands", reading: "Follow the small spark of something you want to try." },
-    { suit: "wands", name: "Two of Wands", reading: "Look beyond where you are. Consider what you’re willing to leave." },
-    { suit: "wands", name: "Three of Wands", reading: "You’ve made a beginning. Give your efforts time to reach beyond you." },
-    { suit: "wands", name: "Four of Wands", reading: "Let an ordinary place become somewhere you feel welcome." },
-    { suit: "wands", name: "Five of Wands", reading: "Different wants are pulling at you. Give each one a hearing." },
-    { suit: "wands", name: "Six of Wands", reading: "Allow yourself to feel proud of something you worked for." },
-    { suit: "wands", name: "Seven of Wands", reading: "Hold your ground where it matters. You needn’t defend everything." },
-    { suit: "wands", name: "Eight of Wands", reading: "Things are moving quickly. Give your attention to the next clear step." },
-    { suit: "wands", name: "Nine of Wands", reading: "You’ve come through a lot. Protect your strength without closing yourself off." },
-    { suit: "wands", name: "Ten of Wands", reading: "Look at what you’re carrying. Some of it may be ready to put down." },
-    { suit: "wands", name: "Page of Wands", reading: "Be curious before you worry about being good at something." },
-    { suit: "wands", name: "Knight of Wands", reading: "Give your enthusiasm a direction and enough care to sustain it." },
-    { suit: "wands", name: "Queen of Wands", reading: "Make room for the part of you that feels alive and unafraid." },
-    { suit: "wands", name: "King of Wands", reading: "Let a clear purpose guide your energy. Help others find theirs." },
-    { suit: "cups", name: "Ace of Cups", reading: "Let yourself be moved by something small." },
-    { suit: "cups", name: "Two of Cups", reading: "Give someone your attention. Allow yourself to receive theirs." },
-    { suit: "cups", name: "Three of Cups", reading: "Remember the people with whom you can be yourself." },
-    { suit: "cups", name: "Four of Cups", reading: "Look again at what’s being offered. Weariness can make it easy to miss." },
-    { suit: "cups", name: "Five of Cups", reading: "Give your sorrow room. When you’re ready, notice what remains beside it." },
-    { suit: "cups", name: "Six of Cups", reading: "An old memory may have something new to show you." },
-    { suit: "cups", name: "Seven of Cups", reading: "Many possibilities can blur your wishes. Choose one to look at closely." },
-    { suit: "cups", name: "Eight of Cups", reading: "You can be grateful for something and still be ready to leave it." },
-    { suit: "cups", name: "Nine of Cups", reading: "Enjoy what feels good without rushing toward the next thing." },
-    { suit: "cups", name: "Ten of Cups", reading: "Belonging grows through the ordinary ways people care for one another." },
-    { suit: "cups", name: "Page of Cups", reading: "Take a tender or unexpected feeling seriously." },
-    { suit: "cups", name: "Knight of Cups", reading: "Follow what moves you, while keeping your promises grounded." },
-    { suit: "cups", name: "Queen of Cups", reading: "Listen closely to your feelings. You don’t have to act on all of them." },
-    { suit: "cups", name: "King of Cups", reading: "Make room for strong feelings without letting them steer everything." },
-    { suit: "swords", name: "Ace of Swords", reading: "A clear thought can help you find your next step." },
-    { suit: "swords", name: "Two of Swords", reading: "Name the choice you’ve been avoiding. You can consider it slowly." },
-    { suit: "swords", name: "Three of Swords", reading: "A painful truth deserves gentleness as well as honesty." },
-    { suit: "swords", name: "Four of Swords", reading: "Rest before you ask yourself for another answer." },
-    { suit: "swords", name: "Five of Swords", reading: "Consider what winning this argument would cost you." },
-    { suit: "swords", name: "Six of Swords", reading: "Move toward calmer conditions, even if you carry some sadness with you." },
-    { suit: "swords", name: "Seven of Swords", reading: "Look at what you’re avoiding and what you’re keeping to yourself." },
-    { suit: "swords", name: "Eight of Swords", reading: "Examine the limits around you. Some may allow more movement than you think." },
-    { suit: "swords", name: "Nine of Swords", reading: "Fear grows in isolation. Give your worry words and seek some perspective." },
-    { suit: "swords", name: "Ten of Swords", reading: "Something has reached its end. Begin with the care you need today." },
-    { suit: "swords", name: "Page of Swords", reading: "Ask the question. Stay willing to hear an unexpected answer." },
-    { suit: "swords", name: "Knight of Swords", reading: "Before you rush ahead, make sure you understand what you’re pursuing." },
-    { suit: "swords", name: "Queen of Swords", reading: "Be clear about what you know and honest about what you need." },
-    { suit: "swords", name: "King of Swords", reading: "Let sound judgement include the consequences for other people." },
-    { suit: "pentacles", name: "Ace of Pentacles", reading: "Give a promising beginning something practical to grow from." },
-    { suit: "pentacles", name: "Two of Pentacles", reading: "Adjust your rhythm as demands change. Balance takes movement." },
-    { suit: "pentacles", name: "Three of Pentacles", reading: "Good work grows through shared attention and different skills." },
-    { suit: "pentacles", name: "Four of Pentacles", reading: "Notice what you’re holding tightly and what you’re afraid to lose." },
-    { suit: "pentacles", name: "Five of Pentacles", reading: "You don’t have to manage every hardship alone. Look for support." },
-    { suit: "pentacles", name: "Six of Pentacles", reading: "Give what you can. Accept what you need." },
-    { suit: "pentacles", name: "Seven of Pentacles", reading: "Look at what your effort is growing. Decide what deserves more time." },
-    { suit: "pentacles", name: "Eight of Pentacles", reading: "Give the next small task your full attention. Skill gathers quietly." },
-    { suit: "pentacles", name: "Nine of Pentacles", reading: "Enjoy the steadiness your care and effort have made possible." },
-    { suit: "pentacles", name: "Ten of Pentacles", reading: "Consider what you’ve inherited and what you hope to pass on." },
-    { suit: "pentacles", name: "Page of Pentacles", reading: "Learn by doing something small and doing it carefully." },
-    { suit: "pentacles", name: "Knight of Pentacles", reading: "Keep tending what matters, even when progress feels ordinary." },
-    { suit: "pentacles", name: "Queen of Pentacles", reading: "Care for your body and the place that shelters you." },
-    { suit: "pentacles", name: "King of Pentacles", reading: "Use what you’ve built to make life steadier for yourself and others." },
+    { suit: "major", name: "The Fool", reading: "Every beginning asks you to step beyond what you know. Carry your curiosity with you, and leave room for the journey to change you." },
+    { suit: "major", name: "The Magician", reading: "Your attention gives possibility a shape. Bring together what you know, what you have, and what you’re willing to try." },
+    { suit: "major", name: "The High Priestess", reading: "Some understanding arrives quietly, before you have words for it. Spend time with the feeling beneath your thoughts; it may reveal itself without being pressed." },
+    { suit: "major", name: "The Empress", reading: "Life grows where it is nourished. Attend to your body, your surroundings, and the small pleasures that remind you you belong to the living world." },
+    { suit: "major", name: "The Emperor", reading: "Build a foundation that can hold you when your confidence wavers. Let your routines support the life within them, and remain willing to adjust what has become too rigid." },
+    { suit: "major", name: "The Hierophant", reading: "You carry teachings whose origins you may have forgotten. Return to them with an open mind, and consider which still deepen your understanding of how to live." },
+    { suit: "major", name: "The Lovers", reading: "Your choices give form to what you hold sacred. Listen for the answer you can live with honestly, even when it asks something difficult of you." },
+    { suit: "major", name: "The Chariot", reading: "Different parts of you may want different destinations. Gather them around a purpose you believe in, and move with enough awareness to recognize when the course needs changing." },
+    { suit: "major", name: "Strength", reading: "There is courage in remaining gentle when fear asks you to harden. Approach the frightened part of yourself patiently; trust grows through how you treat it." },
+    { suit: "major", name: "The Hermit", reading: "Step away from the voices that tell you what your life should mean. In the quiet, notice which questions remain and which answers begin to feel like your own." },
+    { suit: "major", name: "Wheel of Fortune", reading: "Life moves through seasons you cannot hold in place. Meet this turning with curiosity, remembering that your understanding can grow even when circumstances are beyond your control." },
+    { suit: "major", name: "Justice", reading: "Look closely at the relationship between your choices and their consequences. Honesty can restore balance when it includes responsibility, compassion, and a willingness to make things right." },
+    { suit: "major", name: "The Hanged Man", reading: "Allow a question to remain unanswered for a while. When you loosen your grip on the outcome, a perspective you could not force may become available." },
+    { suit: "major", name: "Death", reading: "An ending can reach into habits, hopes, and the person you understood yourself to be. Honor what mattered, and allow the unfamiliar shape of your life time to emerge." },
+    { suit: "major", name: "Temperance", reading: "Harmony develops through patient adjustment. Listen to where your life feels strained, and bring opposing needs into a rhythm that allows each some room." },
+    { suit: "major", name: "The Devil", reading: "Look gently but honestly at what you feel unable to live without. Understanding the need beneath an attachment can reveal choices you had stopped believing were yours." },
+    { suit: "major", name: "The Tower", reading: "A shaken certainty can leave you unsure where to stand. Begin with what remains trustworthy, and give yourself time before deciding what must be built again." },
+    { suit: "major", name: "The Star", reading: "Hope can begin as a quiet willingness to remain open. Let a small kindness, a distant light, or a moment of beauty remind you that your future is still unfolding." },
+    { suit: "major", name: "The Moon", reading: "In uncertainty, memory and imagination can alter what you see. Attend to your dreams and instincts, while giving yourself time to distinguish a fear from a knowing." },
+    { suit: "major", name: "The Sun", reading: "Let warmth and pleasure reach you without demanding an explanation. There are moments when being fully present to life is enough to make it feel meaningful." },
+    { suit: "major", name: "Judgement", reading: "Something within you may be asking to be heard again. Look back with enough compassion to understand your past, and enough courage to choose how you will carry it forward." },
+    { suit: "major", name: "The World", reading: "Pause at the threshold of completion. Consider how the journey has changed your relationship with yourself, and let that understanding settle before you begin again." },
+    { suit: "wands", name: "Ace of Wands", reading: "A small spark of interest can be the beginning of a more vital life. Give it your attention before asking where it will lead." },
+    { suit: "wands", name: "Two of Wands", reading: "Imagine a life beyond the boundaries you have grown accustomed to. Consider what calls you outward, and what you would choose to carry with you." },
+    { suit: "wands", name: "Three of Wands", reading: "Your efforts have begun to move beyond your immediate reach. Practice the patience of someone who has sent something into the world and must allow it to find its way." },
+    { suit: "wands", name: "Four of Wands", reading: "Belonging takes root through shared rituals and ordinary welcome. Honor a place or relationship where you can set down your vigilance and feel at ease." },
+    { suit: "wands", name: "Five of Wands", reading: "Conflicting desires can reveal what matters to you. Listen beneath the noise, and consider whether these energies might help shape something none could make alone." },
+    { suit: "wands", name: "Six of Wands", reading: "Receive recognition with an open heart. Let it remind you of your effort and the people who helped, while keeping your sense of worth rooted within you." },
+    { suit: "wands", name: "Seven of Wands", reading: "Protect the commitments that give your life meaning. Discernment will help you know when to stand firmly and when an unfamiliar view deserves a hearing." },
+    { suit: "wands", name: "Eight of Wands", reading: "When life gathers speed, presence becomes especially valuable. Attend to what is happening now so that your movement remains connected to your intention." },
+    { suit: "wands", name: "Nine of Wands", reading: "Experience has taught you to be watchful. Honor that wisdom while asking whether every approaching thing needs to be met as another threat." },
+    { suit: "wands", name: "Ten of Wands", reading: "Responsibility can become so familiar that you stop noticing its weight. Consider which burdens express your values and which continue only because you have never set them down." },
+    { suit: "wands", name: "Page of Wands", reading: "Meet an unfamiliar possibility with the openness of a beginner. Wonder can lead you somewhere your need for certainty would never permit." },
+    { suit: "wands", name: "Knight of Wands", reading: "Your desire to move can awaken courage and possibility. Give that fire a purpose worth returning to after the first excitement has passed." },
+    { suit: "wands", name: "Queen of Wands", reading: "Allow yourself to inhabit your life with warmth and confidence. Your presence can encourage others simply by showing them that their own aliveness is welcome." },
+    { suit: "wands", name: "King of Wands", reading: "Hold a vision clearly enough to guide your actions. Make room within it for the imagination of others, so that your purpose becomes something people can share." },
+    { suit: "cups", name: "Ace of Cups", reading: "A feeling may arrive before you understand its source. Receive it gently; your capacity to be moved is part of how you remain connected to life." },
+    { suit: "cups", name: "Two of Cups", reading: "Connection deepens when two people allow themselves to be seen. Offer your attention freely, and notice what changes when you also permit yourself to receive." },
+    { suit: "cups", name: "Three of Cups", reading: "Shared joy deserves a place among your responsibilities. Remember those who make your life feel larger, and honor the small rituals through which you find one another." },
+    { suit: "cups", name: "Four of Cups", reading: "Weariness can make the world seem unable to offer you anything. Rest with that feeling, then look again; something quiet may have escaped your attention." },
+    { suit: "cups", name: "Five of Cups", reading: "Grief asks you to acknowledge what cannot be restored. Give it time, allowing the love and companionship still present to reach you when you are ready." },
+    { suit: "cups", name: "Six of Cups", reading: "Memory carries both what happened and who you were when it happened. Return gently, and notice what your present self can now understand about an earlier tenderness." },
+    { suit: "cups", name: "Seven of Cups", reading: "Imagination opens many doors, and longing can make each one shine. Spend time with what lies beyond the promise, and choose what you are willing to care for." },
+    { suit: "cups", name: "Eight of Cups", reading: "Something can have been precious and still no longer sustain you. Leaving may ask you to trust a need you cannot yet fully explain." },
+    { suit: "cups", name: "Nine of Cups", reading: "Allow yourself to experience satisfaction without immediately reaching beyond it. Gratitude grows when you give pleasure enough attention to feel its fullness." },
+    { suit: "cups", name: "Ten of Cups", reading: "A shared life is made through countless ordinary acts of care. Notice where affection has become part of the day, quietly shaping a place in which people can belong." },
+    { suit: "cups", name: "Page of Cups", reading: "A dream, a tenderness, or an unexpected thought may deserve your curiosity. Let yourself respond before embarrassment persuades you to dismiss it." },
+    { suit: "cups", name: "Knight of Cups", reading: "Follow what touches your heart with sincerity. Give your hopes the care of practical action so that what you imagine can become something another person can trust." },
+    { suit: "cups", name: "Queen of Cups", reading: "Listen deeply to the emotional life within and around you. Compassion becomes more sustainable when you remember that your own boundaries also deserve care." },
+    { suit: "cups", name: "King of Cups", reading: "Strong feelings can be held without being silenced or obeyed immediately. Cultivate a steadiness spacious enough for sorrow, affection, and uncertainty to exist together." },
+    { suit: "swords", name: "Ace of Swords", reading: "Clarity can arrive when you finally name what has been troubling you. Use that understanding carefully, remembering that truth carries responsibility as well as relief." },
+    { suit: "swords", name: "Two of Swords", reading: "A suspended choice can quietly shape your life. Give both possibilities an honest hearing, including the feelings you have kept outside the decision." },
+    { suit: "swords", name: "Three of Swords", reading: "A painful truth may change your understanding of something you loved. Let honesty and tenderness accompany each other as you make room for what you now know." },
+    { suit: "swords", name: "Four of Swords", reading: "Stillness gives an overworked mind somewhere to settle. Allow yourself a period in which nothing needs to be solved, proved, or brought to completion." },
+    { suit: "swords", name: "Five of Swords", reading: "Examine the victory you are pursuing and the relationship it may leave behind. Consider whether being understood, making peace, or walking away would better serve what matters." },
+    { suit: "swords", name: "Six of Swords", reading: "Moving toward peace may involve carrying sorrow into unfamiliar surroundings. You can begin the passage before you have finished understanding everything you are leaving." },
+    { suit: "swords", name: "Seven of Swords", reading: "Secrecy and avoidance can offer temporary shelter. Ask what you are protecting, and whether a more honest approach might give you a freedom that concealment cannot sustain." },
+    { suit: "swords", name: "Eight of Swords", reading: "Fear can narrow the world until every direction seems closed. Examine one boundary at a time, with support if needed, and look for the choices still available." },
+    { suit: "swords", name: "Nine of Swords", reading: "Thoughts can become convincing companions in the dark. Bring your worry into words, and allow another perspective to sit beside the one fear has given you." },
+    { suit: "swords", name: "Ten of Swords", reading: "When something is over, the mind may keep returning to its final moment. Begin again through small acts of care, without asking yourself to understand the whole future." },
+    { suit: "swords", name: "Page of Swords", reading: "Let your questions remain alive longer than your first answer. Curiosity becomes wisdom when it includes the possibility that you have misunderstood." },
+    { suit: "swords", name: "Knight of Swords", reading: "Conviction can carry you swiftly toward action. Pause long enough to consider what your certainty has left out and who may be affected by your arrival." },
+    { suit: "swords", name: "Queen of Swords", reading: "Experience can teach you to speak clearly without abandoning compassion. Honor what you know, acknowledge what you do not, and make your boundaries understandable." },
+    { suit: "swords", name: "King of Swords", reading: "Exercise judgement with awareness of its reach. A decision becomes wiser when reason includes the lives, circumstances, and vulnerabilities of those it touches." },
+    { suit: "pentacles", name: "Ace of Pentacles", reading: "A possibility becomes real through something you can tend. Begin with a practical act, and let your care give the idea a place in the world." },
+    { suit: "pentacles", name: "Two of Pentacles", reading: "Balance is a continuing conversation with changing circumstances. Adjust your rhythm with kindness, remembering that your capacity is part of what must be considered." },
+    { suit: "pentacles", name: "Three of Pentacles", reading: "Shared work reveals how much each person sees that another cannot. Approach collaboration with respect for the different kinds of knowledge needed to make something whole." },
+    { suit: "pentacles", name: "Four of Pentacles", reading: "Holding tightly can begin as an attempt to feel safe. Consider whether what you are protecting still offers security, or has begun to limit your ability to live freely." },
+    { suit: "pentacles", name: "Five of Pentacles", reading: "Hardship can make belonging feel distant. Allow your need to be visible to someone trustworthy; receiving care is one way of remaining connected to the world." },
+    { suit: "pentacles", name: "Six of Pentacles", reading: "Giving and receiving move through a life in changing proportions. Attend to both with dignity, remembering that generosity includes how you allow another person to help you." },
+    { suit: "pentacles", name: "Seven of Pentacles", reading: "Growth has a rhythm that effort alone cannot hurry. Look carefully at what you have been tending, and decide whether patience or a change of approach is needed." },
+    { suit: "pentacles", name: "Eight of Pentacles", reading: "Repeated attention changes your relationship with a task. Through ordinary practice, your hands learn what your mind once had to explain." },
+    { suit: "pentacles", name: "Nine of Pentacles", reading: "Spend time enjoying the life your care has helped create. Let its comforts reach you, and acknowledge the patience that made them possible." },
+    { suit: "pentacles", name: "Ten of Pentacles", reading: "You live among things passed down through other lives: habits, resources, stories, and ways of caring. Consider what you wish to preserve and what you hope to change." },
+    { suit: "pentacles", name: "Page of Pentacles", reading: "Approach learning through close attention to something real. A small task done thoughtfully can reveal more than an ambition held only in the mind." },
+    { suit: "pentacles", name: "Knight of Pentacles", reading: "Faithfulness often takes the form of returning to an ordinary responsibility. Let steady care carry your intention through the days when inspiration is quiet." },
+    { suit: "pentacles", name: "Queen of Pentacles", reading: "Your inner life is supported by food, rest, shelter, and the touch of familiar things. Care for these foundations as part of your spiritual life." },
+    { suit: "pentacles", name: "King of Pentacles", reading: "Consider how your resources can become lasting support. What you have built gains meaning through the steadiness, welcome, and possibility it offers to others." },
   ];
-  var TAROT_PULL_SECONDS = 5;
+  var TAROT_MORALE_GAIN = 2; // per pulled card, paid through spacedMoraleGain: full if 6+ hours since a pull last paid, 40% (so 1) at 2-6 hours, nothing under 2 hours -- a small comfort, not a lever to keep pulling
+  function awardTarotMorale(state) {
+    var gain = spacedMoraleGain(state, 'tarot', TAROT_MORALE_GAIN); // its own spacing clock in crew.lastRoutineAt (opening the deck pays nothing; only a card actually pulled)
+    if (gain > 0) state.crew.morale = clamp(state.crew.morale + gain, 0, 100);
+    return gain;
+  }
   var TAROT_DECK_LINE = 'A small deck of cards, their edges softened with use.';
   var lastTarotCardIndex = -1; // session only -- just so the same card does not come twice running
   function tarotOptions() {
@@ -15883,11 +15876,12 @@
   }
   function performPullTarotCard(state) {
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; } // defensive -- darkness could fall while the deck is open
-    runShortAction(state, {
+    runAudioSyncedAction(state, { // PULLING A CARD lasts exactly as long as tarot.mp3 plays (about 6 seconds); the card appears when the sound ends
       label: 'PULLING A CARD',
-      duration: TAROT_PULL_SECONDS,
+      playAudio: function (onEnded) { return playSaloonOneShot('tarot', onEnded); },
       action: function (s) {
         var card = TAROT_CARDS[drawTarotCardIndex()];
+        awardTarotMorale(s); // a small comfort, spaced like QUIET TIME and PONG -- see above
         printBlank();
         printLine(card.name.toUpperCase(), 'heading-label');
         printLine(card.reading);
@@ -15896,29 +15890,8 @@
     });
   }
 
-  // SHIP'S PLAN -- a true full-viewport image viewer (see the HTML
-  // markup and .ships-plan-overlay CSS notes for the full picture):
-  // opened from the bookshelf, the static #ships-plan-overlay element
-  // is un-hidden and its <img> pointed at images/ships_plan.png,
-  // covering the whole screen edge-to-edge above its own dedicated
-  // BACK control (wired once, permanently, alongside restartBtn/
-  // soundBtn near the bottom of this file). Purely a passive view:
-  // state.crew.readingBookId is never touched (this isn't a book, so
-  // it never engages the reading engine/its progress or completion),
-  // and nothing else in state changes either -- no time advanced, no
-  // resource/morale/statistic affected, no audio, no log entry.
-  // pendingChoice is still set (to a normal, non-empty options array
-  // -- an empty one would trip migrateStalePendingChoiceIfNeeded's own
-  // "empty options means an interrupted sequence, not a resumable
-  // state" rule on a later reload) even though the overlay's own BACK
-  // button, not this options array, is what's actually rendered while
-  // it's open.
-  function cmdShipsPlan(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:bookshelf'); return; }
-    shipsPlanImageEl.src = 'images/ships_plan.png';
-    shipsPlanOverlayEl.hidden = false;
-    state.pendingChoice = { id: 'ships-plan', options: [{ label: 'BACK', action: 'cmd:bookshelf' }] };
-  }
+  // (SHIP'S PLAN is no longer on the bookshelf. Its full-screen overlay markup/CSS and BACK wiring are left in place, unused; the ship's plan picture itself is still
+  // shown in the handbook.)
 
   // Begins the continuous activity: crew.readingBookId marks it active,
   // and syncReadingProgress (called every advanceSimulation, live or
@@ -15938,7 +15911,7 @@
   // render -- no explicit start call needed here.
   function performStartReading(state, bookId) {
     var bookDef = BOOKS_BY_ID[bookId];
-    if (!bookDef) return;
+    if (!bookDef) { cmdBookshelf(state); return; } // a book that is no longer on the shelf (e.g. from an old saved menu)
     var bookState = state.books[bookId];
     if (!bookOnShelf(state, bookDef)) { cmdBookshelf(state); return; } // not found yet
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:saloon'); return; } // defensive -- darkness could fall between opening the shelf and picking a book
@@ -18007,6 +17980,7 @@
     bookClose: 'audio/saloon/book_close.mp3', // ending one (STOP READING, completion, or darkness) -- see performStopReading/syncReadingProgress
     sitAWhile: 'audio/saloon/sit_a_while.mp3', // settling in -- see performSitAWhile (it does NOT set how long she sits)
     getUp: 'audio/saloon/get_up.mp3', // getting up again -- see performGetUp
+    tarot: 'audio/saloon/tarot.mp3', // pulling a card from the TAROT CARDS deck (about 6 seconds) -- see performPullTarotCard
   };
   var SALOON_AUDIO_VOLUME = {
     hatchOpen: 0.5,
@@ -18016,6 +17990,7 @@
     bookClose: 0.5,
     sitAWhile: 0.5,
     getUp: 0.5,
+    tarot: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -20126,7 +20101,7 @@
     } else if (action === 'pull-tarot-card') {
       performPullTarotCard(state);
     } else if (action === 'view-ships-plan') {
-      cmdShipsPlan(state);
+      cmdBookshelf(state); // SHIP'S PLAN was taken off the shelf; an old saved shelf menu that still lists it just redraws the shelf
     } else if (action === 'view-vessel-log') {
       cmdVesselLog(state);
     } else if (action.indexOf('start-tape:') === 0) {
@@ -21005,12 +20980,18 @@
     BOOKS.forEach(function (b) {
       if (!state.books[b.id]) state.books[b.id] = { minutesRead: 0, completed: false, triggeredMilestones: [] };
     });
+    // THIS OLD BOAT was taken off the shelf: drop it from an older save (and stop a read of it that was in progress). A saved shelf menu is rebuilt so it no longer lists
+    // it or SHIP'S PLAN.
+    delete state.books.thisOldBoat;
+    if (c.readingBookId === 'thisOldBoat') c.readingBookId = null;
+    if (state.pendingChoice && state.pendingChoice.id === 'bookshelf-menu') state.pendingChoice.options = buildBookshelfOptions(state);
     if (c.lastRoutineAt.dryClothes === undefined) c.lastRoutineAt.dryClothes = null;
     if (c.lastRoutineAt.tools === undefined) c.lastRoutineAt.tools = null;
     if (c.lastRoutineAt.bunk === undefined) c.lastRoutineAt.bunk = null;
     if (c.lastRoutineAt.air === undefined) c.lastRoutineAt.air = null;
     if (c.lastRoutineAt.quiet === undefined) c.lastRoutineAt.quiet = null;
     if (c.lastRoutineAt.pong === undefined) c.lastRoutineAt.pong = null;
+    if (c.lastRoutineAt.tarot === undefined) c.lastRoutineAt.tarot = null;
     if (c.lastRoutineAt.tidy === undefined) c.lastRoutineAt.tidy = null;
     delete c.lastRoutineAt.relax; // RELAX removed entirely -- clears any lingering field from an older save rather than leaving it as dead state
     if (c.location === undefined) c.location = 'above';
