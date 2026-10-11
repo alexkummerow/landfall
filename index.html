@@ -858,9 +858,18 @@
   .ending-inner { display: flex; flex-direction: column; align-items: center; width: min(94vw, 34rem); margin: auto; padding: 2rem 0; }
   .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.05em; font-size: 0.95rem; line-height: 1.55; text-shadow: var(--output-glow); opacity: 0; transition: opacity 5s linear; } /* the same face, size and spacing as every other line of the game */
   .ending-title.show { opacity: 1; }
+  .ending-titles { display: grid; justify-items: center; text-align: center; } /* LANDFALL and BY ALEX KUMMEROW share one place: one fades out, the other fades in on the same spot */
+  .ending-titles > * { grid-area: 1 / 1; }
+  .ending-credit { transition: opacity 2.5s linear; } /* half LANDFALL's 5 s (FINALE_CREDIT_FADE_SECS) */
+  .ending-overlay.rescue .ending-titles { display: none; }
+  .ending-readjournal + .ending-newvoyage { margin-top: 0.6rem; }
+  .ending-journal { width: min(94vw, 34rem); margin: auto; padding: 0 0 2.5rem; align-self: flex-start; }
+  .ending-journal[hidden], .ending-inner[hidden] { display: none; }
+  .ending-journal-bar { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 1rem 0 0.8rem; }
+  .ending-journal-head { margin: 0 0 1.2rem; }
   @media (max-width: 480px) { .ending-title { font-size: 0.98rem; } } /* the same small-screen size as .line */
   .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
-  .ending-summary.show { max-height: 44rem; opacity: 1; margin-top: 2rem; }
+  .ending-summary.show { max-height: 220rem; opacity: 1; margin-top: 2rem; } /* (the long summary scrolls inside the overlay) */
   .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
   .ending-overlay.rescue #ending-title { display: none; } /* a rescue has no LANDFALL title: straight to the summary */
   .ending-overlay.rescue .ending-summary.show { margin-top: 0; }
@@ -1064,9 +1073,18 @@
 </div>
 <div id="ending-overlay" class="ending-overlay" hidden>
   <div class="ending-inner">
-    <div id="ending-title" class="ending-title">LANDFALL</div>
+    <div class="ending-titles">
+      <div id="ending-title" class="ending-title">LANDFALL</div>
+      <div id="ending-credit" class="ending-title ending-credit">BY ALEX KUMMEROW</div>
+    </div>
     <div id="ending-summary" class="ending-summary"></div>
-    <button id="ending-newvoyage" class="option ending-newvoyage" type="button" hidden>NEW VOYAGE</button>
+    <button id="ending-readjournal" class="option ending-newvoyage ending-readjournal" type="button" hidden>READ JOURNAL</button>
+    <button id="ending-newvoyage" class="option ending-newvoyage" type="button" hidden>RESTART</button>
+  </div>
+  <div id="ending-journal" class="ending-journal" hidden>
+    <div class="ending-journal-bar"><button id="ending-journal-back" class="option" type="button">BACK</button></div>
+    <p class="line heading-label ending-journal-head">JOURNAL</p>
+    <div id="ending-journal-pages"></div>
   </div>
 </div>
 <script>
@@ -1308,6 +1326,7 @@
         heldFish: null,                          // { speciesId, caughtDay, weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
       },
       books: newBooksState(),
+      stats: newStatsState(), // the END-OF-GAME SUMMARY's counters -- see VOYAGE STATS
       // VESSEL LOG -- an automatic, purely factual per-day record
       // (distance, speed, engine time, repairs, notable events),
       // entirely separate from the narrative log()/state.log stream
@@ -1347,7 +1366,7 @@
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null, step: 0 }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: step 0 is the first line + CONTINUE, step 1 the second line + CALL FOR HELP) | 'ended' (the end-of-game summary is up: NEW VOYAGE). One-way, never reversed -- see checkNeglectRescue.
-      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 9, birds: null, noDiesel: false }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 10, birds: null, noDiesel: false }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -2178,8 +2197,8 @@
        -> LINE UP WITH SLIP -> ENGINE OFF (which goes straight into COASTING IN, 15 s: the engine's shut-down sound plays at its start; CODA begins, from its start, and over the whole 15 s the
        sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE -> five lines, each with CONTINUE (each is shown with the earlier ones still above it)
        -> the screen fades out to the game's charcoal (3 s) and the ashes scene fades in (3 s): centered dots, then SCATTER ASHES, then the ashes (exactly the length of the sound), the ashes text
-       fading out over the last 3 s of it -> the screen rests on the game's charcoal (3 s) -> LANDFALL fades in (5 s) and holds (10 s) -> the
-       summary. CODA plays all the way through, never faded, and goes round again; with the marina, the birds and the wind it keeps sounding through the fade,
+       fading out over the last 3 s of it -> the screen rests on the game's charcoal (3 s) -> LANDFALL fades in (5 s), holds (10 s) and fades back out (5 s)
+       -> BY ALEX KUMMEROW fades in (2.5 s), holds (5 s) and fades out (2.5 s) -> the summary fades in (LANDFALL is no longer behind it). CODA plays all the way through, never faded, and goes round again; with the marina, the birds and the wind it keeps sounding through the fade,
        the title and the summary until NEW VOYAGE.
      OUT OF DIESEL (state.finale.noDiesel, decided once at the capture: the tank is empty and the engine is not running): the arrival is the same, made under sail.
        The moment she is captured: "I’m out of diesel." / "I’ll have to sail her in." Then ENTERING -> (GO ABOVE if below) -> HEADING TOWARD THE MARINA (sails stay up; the
@@ -2187,7 +2206,6 @@
        (ENGINE OFF is skipped: there is no engine to stop) -> and from there the very same path as above. Nothing starts the engine, plays an engine sound, or touches the fuel.
      ====================================================================== */
   var FINALE_NO_DIESEL_LINES = ['I’m out of diesel.', 'I’ll have to sail her in.']; // (shown the moment she is captured when the tank is empty; the arrival is then made under sail)
-  var FINALE_BREAKWATER = 'The breakwater slips past. After so much open water, the harbor feels close around me.';
   var FINALE_REFLECTIONS = [
     'Strange to stand here and imagine her here too.',
     'To imagine all of us here together, in a life that feels almost familiar now.',
@@ -2215,10 +2233,11 @@
     { id: 'stage',      kind: 'ui', read: 5, keep: true },   // the four lines stay while the screen fades out to charcoal (3 s); then the ashes scene fades in (3 s): centered animated dots
     { id: 'scatter',    kind: 'ui' },   // ... then SCATTER ASHES, centered
     { id: 'scattering', kind: 'ui' },   // ... the ashes: exactly as long as the sound; the text fades out over its last 3 s
-    { id: 'title',      kind: 'ui' },   // black, LANDFALL
+    { id: 'title',      kind: 'ui' },   // the charcoal, LANDFALL in, held, and back out
+    { id: 'credit',     kind: 'ui' },   // BY ALEX KUMMEROW: in, held and out -- half as long as LANDFALL's in, hold and out
     { id: 'summary',    kind: 'ui' },
   ];
-  var FINALE_VERSION = 9; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
+  var FINALE_VERSION = 10; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
   var FINALE_OLD_IDS = {
     1: ['enter', 'start', 'making', 'approach', 'slowing', 'lining', 'stop', 'secure', 'ashore', 'ashes', 'fade', 'title', 'summary'],
     2: ['enter', 'above', 'start', 'lining', 'stop', 'coast', 'secure', 'ashore', 'ashes', 'wind', 'home', 'title', 'summary'],
@@ -2228,10 +2247,12 @@
     6: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
     7: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'beat', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'title', 'summary'],
     8: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect0', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'title', 'summary'],
+    9: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'furlin', 'stop', 'coast', 'secure', 'ashore', 'reflect0', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'title', 'summary'],
   };
   var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title', ashesout: 'title', beat: 'reflect0' }; // ('home' was "She's home.", now gone; 'ashesout', the text fading out after the ashes, is now the last 3 s of the ashes themselves)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
   var FINALE_FADE_SECS = 3, FINALE_TITLE_FADE_SECS = 5, FINALE_TITLE_HOLD_SECS = 10, FINALE_SUMMARY_FADE_SECS = 2.5; // mirrored by the .ending-* CSS transitions (black over FADE secs, then LANDFALL up over TITLE_FADE secs)
+  var FINALE_CREDIT_FADE_SECS = FINALE_TITLE_FADE_SECS / 2, FINALE_CREDIT_HOLD_SECS = FINALE_TITLE_HOLD_SECS / 2; // BY ALEX KUMMEROW: in, hold, out -- each half as long as LANDFALL's (mirrored by the .ending-credit CSS transition)
   var FINALE_STAGE_OUT_SECS = 3, FINALE_STAGE_IN_SECS = 3, FINALE_ASHES_FALLBACK_SECS = 10, FINALE_TEXT_FADE_SECS = 3; // (the screen fades out over STAGE_OUT, the ashes scene fades in over STAGE_IN; the ashes last as long as their sound -- FALLBACK_SECS if it cannot play -- and their text fades out over the last TEXT_FADE)
   var FINALE_CODA_LOOPS = true; // CODA plays all the way through and then goes round again until NEW VOYAGE (false: it simply stops at its end)
   // The arrival's own sounds. Each action lasts as long as its sound really plays; if the sound is missing or cannot play, the action takes
@@ -2241,6 +2262,7 @@
     ashore: { path: 'audio/marina/board.mp3',            volume: 0.6, fallback: 5 },
     ashes:  { path: 'audio/marina/scattering_ashes.mp3', volume: 0.6, fallback: FINALE_ASHES_FALLBACK_SECS },
   };
+  var FINALE_CRICKETS_PATH = 'audio/marina/hawaii_crickets.mp3'; // a night arrival: these take the Hawaii birds' place (same voice, level and fade)
   var FINALE_BIRDS_PATH = 'audio/marina/hawaii_birds.mp3', FINALE_BIRDS_LEVEL = 0.35; // the same level the opening's Pacific Northwest birds play at
   var FINALE_CODA_PATH = 'audio/saloon/Coda.mp3';
   var finaleTimer = null, finaleRendering = null, finaleWired = false, finaleCodaTries = 0, finaleReadCount = 0, finaleAshesToken = null, finaleAshesDone = false, finaleDotsTimer = null, finaleSoundEls = [];
@@ -2269,7 +2291,7 @@
   // The arrival's log lines carry the moment they happen (see log()).
   function finaleLog(state, text) { log(state, text); flushNewLogEntries(state); }
   // A step that does not apply is passed over: GO ABOVE when the player is already on deck, FURL SAILS when the sails are already furled, START ENGINE when the engine is already running.
-  // Returns true when START ENGINE was passed over (its "Started the engine." never happened, but the breakwater moment still does).
+  // Returns true when START ENGINE was passed over.
   function finaleSkips(state, id) {
     var nd = !!(state.finale && state.finale.noDiesel); // NO DIESEL: no early FURL SAILS (she is sailing in), no START ENGINE, no ENGINE OFF -- and a FURL SAILS at the end instead
     if (id === 'above') return state.crew.location !== 'below';
@@ -2299,7 +2321,7 @@
   function finaleAdvance(state) {
     var f = state.finale, prev = FINALE_STEPS[f.step] ? FINALE_STEPS[f.step].id : null;
     f.step++;
-    if (finaleSkipForward(state)) finaleLog(state, FINALE_BREAKWATER);
+    finaleSkipForward(state);
     f.stepAt = Date.now();
     if (prev === 'lineup') finalePlaceAtDock(state);
     if (FINALE_STEPS[f.step] && FINALE_STEPS[f.step].id === 'summary') f.phase = 'done';
@@ -2318,6 +2340,7 @@
     return {
       ov: document.getElementById('ending-overlay'), title: document.getElementById('ending-title'), sum: document.getElementById('ending-summary'), btn: document.getElementById('ending-newvoyage'),
       stage: document.getElementById('ending-stage'), sl: document.getElementById('ending-stage-label'), sd: document.getElementById('ending-stage-dots'), sb: document.getElementById('ending-stage-btn'),
+      credit: document.getElementById('ending-credit'), jb: document.getElementById('ending-readjournal'), jv: document.getElementById('ending-journal'), jl: document.getElementById('ending-journal-pages'), inner: document.querySelector('#ending-overlay .ending-inner'),
     };
   }
   function finaleShow(el, cls, instant) {
@@ -2327,6 +2350,7 @@
   }
   function finaleWire() {
     if (finaleWired) return; finaleWired = true;
+    endingWireExtras();
     document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.finale && GAME.finale.phase === 'done') confirmRestart(); });
     document.getElementById('ending-stage-btn').addEventListener('click', function () { // SCATTER ASHES: its sound starts inside this tap
       if (!GAME || !finaleAtStep(GAME, 'scatter')) return;
@@ -2428,45 +2452,117 @@
       finaleSchedule(state, left == null ? 0.5 : (fading ? Math.max(0.2, left) : left - FINALE_TEXT_FADE_SECS) + 0.03);
     } // 'scatter' waits for the tap
   }
+  function finaleHide(el, cls, instant) { // the opposite of finaleShow: the layer fades back out (instantly when a reload finds it already gone)
+    if (!el.classList.contains(cls)) return;
+    if (instant) { el.style.transition = 'none'; el.classList.remove(cls); void el.offsetWidth; el.style.transition = ''; }
+    else { void el.offsetWidth; el.classList.remove(cls); }
+  }
+  function finaleRevealButtons(E, instant) { // READ JOURNAL and RESTART, together, once the summary has faded in
+    E.jb.hidden = false; finaleShow(E.jb, 'show', instant);
+    E.btn.hidden = false; finaleShow(E.btn, 'show', instant);
+  }
   function finaleUi(state, id) {
     var f = state.finale, E = finaleEls(), el = (Date.now() - f.stepAt) / 1000;
     if (id === 'stage' || id === 'scatter' || id === 'scattering') { finaleStageUi(state, id, E, el); return; }
     E.ov.hidden = false;
-    if (id === 'title') { // the screen fades to black (3 s), LANDFALL fades in (5 s) and holds (10 s); CODA plays on, untouched
+    if (id === 'title') { // the screen fades to the charcoal (3 s), LANDFALL fades in (5 s), holds (10 s) and fades back out (5 s); CODA plays on, untouched
       finaleShow(E.ov, 'show', el > 1);
-      var end = FINALE_FADE_SECS + FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS;
-      if (el >= FINALE_FADE_SECS) { E.stage.hidden = true; finaleStageDots(false, E); finaleShow(E.title, 'show', el > FINALE_FADE_SECS + 1); }
+      var inAt = FINALE_FADE_SECS, outAt = inAt + FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS, end = outAt + FINALE_TITLE_FADE_SECS;
+      if (el >= inAt) { E.stage.hidden = true; finaleStageDots(false, E); if (el < outAt) finaleShow(E.title, 'show', el > inAt + 1); }
+      if (el >= outAt) finaleHide(E.title, 'show', el > outAt + 1);
       if (el >= end) { finaleAdvance(state); return; }
-      finaleSchedule(state, el < FINALE_FADE_SECS ? FINALE_FADE_SECS - el + 0.05 : end - el);
-    } else { // summary: stays indefinitely; NEW VOYAGE appears only once it has fully faded in
+      finaleSchedule(state, (el < inAt ? inAt : (el < outAt ? outAt : end)) - el + 0.05);
+    } else if (id === 'credit') { // BY ALEX KUMMEROW: fades in once LANDFALL is gone (2.5 s), holds (5 s), fades out (2.5 s) -- half as long as LANDFALL's own in / hold / out
       E.stage.hidden = true; finaleStageDots(false, E);
-      finaleShow(E.ov, 'show', true); finaleShow(E.title, 'show', true);
+      finaleShow(E.ov, 'show', true); finaleHide(E.title, 'show', true);
+      var cOut = FINALE_CREDIT_FADE_SECS + FINALE_CREDIT_HOLD_SECS, cEnd = cOut + FINALE_CREDIT_FADE_SECS;
+      if (el < cOut) finaleShow(E.credit, 'show', el > FINALE_CREDIT_FADE_SECS + 1);
+      else finaleHide(E.credit, 'show', el > cOut + 1);
+      if (el >= cEnd) { finaleAdvance(state); return; }
+      finaleSchedule(state, (el < cOut ? cOut : cEnd) - el + 0.05);
+    } else { // summary: stays indefinitely; READ JOURNAL and RESTART appear only once it has fully faded in. LANDFALL is not shown behind it any more.
+      E.stage.hidden = true; finaleStageDots(false, E);
+      E.title.hidden = true; E.credit.hidden = true;
+      finaleShow(E.ov, 'show', true);
       finaleBuildSummary(state, E);
       finaleShow(E.sum, 'show', el > 1);
-      if (el >= FINALE_SUMMARY_FADE_SECS) { E.btn.hidden = false; finaleShow(E.btn, 'show', el > FINALE_SUMMARY_FADE_SECS + 1); }
+      if (el >= FINALE_SUMMARY_FADE_SECS) finaleRevealButtons(E, el > FINALE_SUMMARY_FADE_SECS + 1);
       else { finaleSchedule(state, FINALE_SUMMARY_FADE_SECS - el + 0.1); }
     }
   }
-  // Only statistics the game really tracks. (Not tracked, so not shown: time under sail, time on autopilot, fish caught, books finished,
-  // cassettes played.)
+  // READ JOURNAL (the summary of an arrival or of a rescue): the journal the voyage wrote, shown inside the ending itself, oldest page first, with BACK to the summary.
+  // The pages are the game's own (journalEntryEl: the same title, stamp and prose as the SALOON's journal); nothing is written, logged or changed.
+  var endingExtrasWired = false;
+  function endingWireExtras() {
+    if (endingExtrasWired) return; endingExtrasWired = true;
+    document.getElementById('ending-readjournal').addEventListener('click', endingOpenJournal);
+    document.getElementById('ending-journal-back').addEventListener('click', endingCloseJournal);
+  }
+  function endingOpenJournal() {
+    if (!GAME) return;
+    var E = finaleEls(), list = (GAME.story && Array.isArray(GAME.story.journal)) ? GAME.story.journal : [], shown = 0;
+    E.jl.innerHTML = '';
+    list.forEach(function (entry) { var pg = journalEntryEl(GAME, entry); if (pg) { E.jl.appendChild(pg); shown++; } });
+    if (!shown) { var none = document.createElement('p'); none.className = 'line dim'; none.textContent = 'Nothing was written.'; E.jl.appendChild(none); }
+    E.inner.hidden = true; E.jv.hidden = false; E.ov.scrollTop = 0;
+  }
+  function endingCloseJournal() {
+    var E = finaleEls();
+    E.jv.hidden = true; E.inner.hidden = false; E.ov.scrollTop = 0;
+  }
+  // Only statistics the game really tracks: every figure below is read from state the game already keeps (the vessel log, the odometer, the groundings, the supplies, the
+  // books, the journal, the coffee count) or from state.stats (VOYAGE STATS). The order and the grouping are the summary's own; `gap` ends a group (a blank line follows it).
+  function statsDuration(mins) { // "42 MIN", "3 HRS 5 MIN"
+    mins = Math.max(0, Math.round(mins));
+    return mins < 60 ? mins + ' MIN' : Math.floor(mins / 60) + ' HRS ' + (mins % 60) + ' MIN';
+  }
+  function statsHours(mins) { return (Math.max(0, mins) / 60).toFixed(1) + ' HRS'; }
+  // The shortest way there that the game itself draws: the coastal legs out of Puget Sound and the Strait, and from Cape Flattery the straight line to Nāwiliwili.
+  function statsDirectRouteNm() {
+    var t = 0, i;
+    for (i = 1; i < OPEN_WATER_WAYPOINT_INDEX; i++) t += distanceBetween(WAYPOINTS[i - 1].lat, WAYPOINTS[i - 1].lon, WAYPOINTS[i].lat, WAYPOINTS[i].lon);
+    var cf = WAYPOINTS[OPEN_WATER_WAYPOINT_INDEX - 1];
+    return t + distanceBetween(cf.lat, cf.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+  }
   function finaleSummaryRows(state) {
-    var vl = state.vesselLog, days = (vl && Array.isArray(vl.completedDays)) ? vl.completedDays.slice() : [];
+    var st = statsOf(state), vl = state.vesselLog, days = (vl && Array.isArray(vl.completedDays)) ? vl.completedDays.slice() : [];
     if (vl && vl.currentDay) days.push(vl.currentDay);
-    var engineHrs = 0, repairs = 0;
-    days.forEach(function (d) { engineHrs += Number.isFinite(d.engineHours) ? d.engineHours : (Number.isFinite(d.engineMinutes) ? d.engineMinutes / 60 : 0); repairs += Array.isArray(d.repairs) ? d.repairs.length : 0; });
+    var engineHrs = 0, repairs = 0, maxSpd = 0, maxWind = 0, depletions = 0;
+    days.forEach(function (d) {
+      engineHrs += Number.isFinite(d.engineHours) ? d.engineHours : (Number.isFinite(d.engineMinutes) ? d.engineMinutes / 60 : 0);
+      repairs += Array.isArray(d.repairs) ? d.repairs.length : 0;
+      if (Number.isFinite(d.maxSpeed) && d.maxSpeed > maxSpd) maxSpd = d.maxSpeed;
+      if (Number.isFinite(d.maxWindSpeed) && d.maxWindSpeed > maxWind) maxWind = d.maxWindSpeed;
+      if (Array.isArray(d.events)) d.events.forEach(function (e) { if (e && e.text === 'BATTERY DEPLETED') depletions++; });
+    });
     var mins = state.meta.voyageMinutes, hrs = mins / 60, nm = state.nav.distanceTraveled;
     var dd = Math.floor(mins / 1440), hh = Math.floor((mins % 1440) / 60), mm = Math.floor(mins % 60);
     var underway = dd > 0 ? dd + (dd === 1 ? ' DAY ' : ' DAYS ') + hh + ' HRS' : hh + ' HRS ' + mm + ' MIN';
-    var notCompleted = !!(state.voyageEnd && state.voyageEnd.phase === 'ended'); // a rescue: the voyage did not reach Nāwiliwili
-    var endedMin = notCompleted ? (Number.isFinite(state.voyageEnd.at) ? state.voyageEnd.at : mins) : (state.finale.arrivedMinutes != null ? state.finale.arrivedMinutes : mins);
-    var arrived = state.meta.departedAt + endedMin * 60000;
+    var rescued = !!(state.voyageEnd && state.voyageEnd.phase === 'ended'); // a rescue: the voyage did not reach Nāwiliwili
+    var remaining = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    var extra = Math.max(0, nm - Math.max(0, statsDirectRouteNm() - remaining)); // what she sailed beyond the direct route to where she got to
+    var novels = 0; BOOKS.forEach(function (bk) { if (state.books && state.books[bk.id] && state.books[bk.id].completed) novels++; });
+    var big = st.bigFish ? Math.round(st.bigFish.weightLb) + ' LB ' + String(st.bigFish.name).toUpperCase() : 'NONE';
+    var seas = seaStateShortLabel(st.maxSea) + ' · ' + seaStateWaveHeightFt(st.maxSea) + ' FT';
+    var n = function (v) { return String(Math.round(v || 0)); };
     return [
-      { text: 'S/V ' + VESSEL_NAME }, { text: 'SHILSHOLE BAY \u2192 N\u0100WILIWILI', gap: true },
-      { label: 'VOYAGE', value: notCompleted ? 'NOT COMPLETED' : 'COMPLETED' },
-      { label: 'DEPARTED', value: formatShipTime(state.meta.departedAt) }, { label: notCompleted ? 'ENDED' : 'ARRIVED', value: formatShipTime(arrived) },
-      { label: 'TIME UNDERWAY', value: underway }, { label: 'DISTANCE SAILED', value: Math.round(nm).toLocaleString() + ' NM' },
-      { label: 'AVERAGE SPEED', value: (hrs > 0 ? nm / hrs : 0).toFixed(1) + ' KT' }, { label: 'TIME UNDER ENGINE', value: engineHrs.toFixed(1) + ' HRS' },
-      { label: 'REPAIRS MADE', value: String(repairs) }, { label: 'TIMES RUN AGROUND', value: String(state.nav.timesAground || 0) },
+      { label: 'VOYAGE', value: rescued ? 'RESCUED' : 'COMPLETED' }, { label: 'DAYS AT SEA', value: n(dd) }, { label: 'TIME UNDERWAY', value: underway, gap: true },
+      { label: 'DISTANCE SAILED', value: Math.round(nm).toLocaleString() + ' NM' }, { label: 'EXTRA MILES SAILED', value: Math.round(extra).toLocaleString() + ' NM' },
+      { label: 'AVERAGE SPEED', value: (hrs > 0 ? nm / hrs : 0).toFixed(1) + ' KT' }, { label: 'MAX SPEED', value: maxSpd.toFixed(1) + ' KT', gap: true },
+      { label: 'TIME UNDER SAIL', value: statsHours(st.sailMin) }, { label: 'TIME UNDER ENGINE', value: engineHrs.toFixed(1) + ' HRS' },
+      { label: 'TIME ON AUTOPILOT', value: statsHours(st.autoMin) }, { label: 'TIME AT THE HELM', value: statsHours(st.helmMin) },
+      { label: 'COURSE CHANGES', value: n(st.courseChanges) }, { label: 'MILES SAILED AT NIGHT', value: Math.round(st.nightNm).toLocaleString() + ' NM', gap: true },
+      { label: 'FARTHEST FROM LAND', value: Math.round(st.maxLandNm).toLocaleString() + ' NM' }, { label: 'FARTHEST OFF DIRECT ROUTE', value: Math.round(st.maxOffRouteNm).toLocaleString() + ' NM', gap: true },
+      { label: 'STORMS WEATHERED', value: n(st.storms) }, { label: 'THUNDERSTORMS EXPERIENCED', value: n(st.thunder) },
+      { label: 'STRONGEST WIND', value: Math.round(maxWind) + ' KT' }, { label: 'HIGHEST SEAS', value: seas, gap: true },
+      { label: 'REPAIRS MADE', value: n(repairs) }, { label: 'TIMES RUN AGROUND', value: n(state.nav.timesAground) }, { label: 'BATTERY DEPLETIONS', value: n(depletions) },
+      { label: 'FUEL REMAINING', value: formatGal(Math.max(0, state.boat.fuelGallons)) + ' GAL' }, { label: 'WATER REMAINING', value: formatGal(Math.max(0, state.water.gallons)) + ' GAL', gap: true },
+      { label: 'MEALS EATEN', value: n(st.meals) }, { label: 'COFFEES MADE', value: n(state.crew.coffeeCount) }, { label: 'TEAS MADE', value: n(st.teas) },
+      { label: 'TIMES WASHED', value: n(st.washes) }, { label: 'CHORES COMPLETED', value: n(st.chores), gap: true },
+      { label: 'FISH CAUGHT', value: n(st.fishCaught) }, { label: 'BIGGEST FISH', value: big }, { label: 'SPECIES CAUGHT', value: n(st.fishSpecies.length) }, { label: 'FISH EATEN', value: n(st.fishEaten), gap: true },
+      { label: 'TIME JUST EXISTING', value: statsDuration(st.existMin) }, { label: 'TIME SITTING A WHILE', value: statsDuration(st.sitMin) },
+      { label: 'NOVELS READ', value: n(novels) }, { label: 'TAPES LISTENED TO', value: n(st.tapes) }, { label: 'TAROT CARDS PULLED', value: n(st.tarot) },
+      { label: 'PONG GAMES PLAYED', value: n(st.pongPlayed) }, { label: 'PONG GAMES WON', value: n(st.pongWon) }, { label: 'JOURNAL ENTRIES WRITTEN', value: n(state.story && state.story.journal ? state.story.journal.length : 0) },
     ];
   }
   function finaleBuildSummary(state, E) {
@@ -2477,7 +2573,8 @@
       if (r.label) {
         el = document.createElement('div'); el.className = 'data-row data-row-lg';
         var a = document.createElement('span'); a.textContent = r.label; var b = document.createElement('span'); b.textContent = r.value; el.appendChild(a); el.appendChild(b);
-      } else { el = document.createElement('p'); el.className = 'line dim ending-line'; el.textContent = r.text; if (r.gap) el.style.marginBottom = '1.2rem'; }
+      } else { el = document.createElement('p'); el.className = 'line dim ending-line'; el.textContent = r.text; }
+      if (r.gap) el.style.marginBottom = '1.2rem';
       E.sum.appendChild(el);
     });
   }
@@ -2521,7 +2618,7 @@
     if (f.codaAt == null) { f.codaAt = Date.now(); saveGameState(state); }
     finaleStartCoda(state, 0);
   }
-  // Whether the birds play is decided ONCE, when the marina begins, and kept to the end: by day (any phase but night) the Hawaii birds, at night none.
+  // Whether the birds play is decided ONCE, when the marina begins, and kept to the end: by day (any phase but night) the Hawaii birds, at night the Hawaii crickets (finale.birds is that choice: true = birds, false = crickets).
   function finaleSampleBirds(state) {
     var f = state.finale;
     if (f.birds == null) { f.birds = getDaylightPhase(state) !== 'night'; saveGameState(state); }
@@ -2565,9 +2662,9 @@
       finaleMarina().set(MARINA_AUDIO_FILES.marinaSound, MARINA_AUDIO_VOLUME.marinaSound, fade); // the existing marina ambience, faded in; the voyage is over: it simply stays (the loop engine keeps it running)
       marinaAmbienceStarted.marinaSound = true;
     }
-    if (state.finale.birds && !finaleBirdsOn) {
+    if (state.finale.birds != null && !finaleBirdsOn) { // by day the Hawaii birds, at night the Hawaii crickets: one voice, one level, one fade
       finaleBirdsOn = true;
-      finaleBirds().set(FINALE_BIRDS_PATH, FINALE_BIRDS_LEVEL, fade);
+      finaleBirds().set(state.finale.birds ? FINALE_BIRDS_PATH : FINALE_CRICKETS_PATH, FINALE_BIRDS_LEVEL, fade);
     }
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
@@ -2581,7 +2678,8 @@
     ['marinaSound', 'pnwBirds'].forEach(function (k) { var el = marinaAudioEls[k]; if (el) { try { el.pause(); } catch (e) {} el.loop = false; } });
     marinaAmbienceStarted = { pnwBirds: false, marinaSound: false };
     var E = finaleEls(); if (!E.ov) return;
-    ['ov', 'title', 'sum', 'btn', 'stage'].forEach(function (k) { E[k].classList.remove('show'); }); E.stage.classList.remove('in');
+    ['ov', 'title', 'credit', 'sum', 'btn', 'jb', 'stage'].forEach(function (k) { E[k].classList.remove('show'); }); E.stage.classList.remove('in');
+    E.title.hidden = false; E.credit.hidden = false; E.jb.hidden = true; E.jv.hidden = true; E.inner.hidden = false; E.jl.innerHTML = '';
     E.sum.innerHTML = ''; E.sum.removeAttribute('data-built'); E.btn.hidden = true; E.ov.hidden = true; E.stage.hidden = true;
     E.sl.textContent = ''; E.sd.textContent = ''; E.sl.hidden = true; E.sb.hidden = true;
     E.sl.classList.remove('fadeout'); E.sd.classList.remove('fadeout');
@@ -5440,6 +5538,74 @@
     return books;
   }
 
+  /* ------------------------------------------------------------
+     VOYAGE STATS -- what the end-of-game summary shows beyond what the game already tracked elsewhere (vessel log, odometer, groundings, books, the
+     journal, coffee count ...). Counters only, persisted in state.stats. A save from before this existed starts counting from that moment (like the vessel log:
+     nothing is invented for the past). Each is bumped at the one place the game already handles that action; the per-tick ones in sampleStatsTick.
+     ------------------------------------------------------------ */
+  var STATS_GAP_MINUTES = 60; // a storm / thunderstorm that comes back within this long of the last time it was seen is the same one
+  function newStatsState() {
+    return {
+      lastDist: null,                        // the odometer as of the last tick sampled (the miles sailed at night are the difference)
+      sailMin: 0, autoMin: 0, helmMin: 0,    // minutes with sails set / the autopilot on / at the helm
+      nightNm: 0, maxLandNm: 0, maxOffRouteNm: 0, maxSea: 0,
+      courseChanges: 0, storms: 0, stormLastMin: null, thunder: 0, thunderLastMin: null,
+      meals: 0, teas: 0, washes: 0, chores: 0,
+      fishCaught: 0, fishSpecies: [], bigFish: null, fishEaten: 0,
+      existMin: 0, sitMin: 0, tapes: 0, tarot: 0, pongPlayed: 0, pongWon: 0,
+    };
+  }
+  function migrateStatsIfNeeded(state) { // fills in whatever a save does not have, keeping what it does
+    var def = newStatsState(), st = state.stats;
+    if (!st || typeof st !== 'object') { state.stats = def; return; }
+    Object.keys(def).forEach(function (k) {
+      if (st[k] === undefined || (typeof def[k] === 'number' && !Number.isFinite(st[k]))) st[k] = def[k];
+    });
+    if (!Array.isArray(st.fishSpecies)) st.fishSpecies = [];
+  }
+  function statsOf(state) { if (!state.stats) state.stats = newStatsState(); return state.stats; }
+  function statAdd(state, key, n) { if (!state || !(n > 0)) return; var st = statsOf(state); st[key] = (Number(st[key]) || 0) + n; }
+  function statsFishCaught(state, c, nameOverride) { // a fish landed (kept or let go); a marlin too
+    var st = statsOf(state), id = (c.species && c.species.id) || nameOverride || 'fish', name = String(nameOverride || c.displayName || id), w = Number(c.weightLb) || 0;
+    st.fishCaught++;
+    if (st.fishSpecies.indexOf(id) < 0) st.fishSpecies.push(id);
+    if (!st.bigFish || w > st.bigFish.weightLb) st.bigFish = { weightLb: w, name: name };
+  }
+  // The route she is measured against: the leg she is on while coasting out (the same "intended track" the POSITION screen uses), and from Cape Flattery the straight line to Nāwiliwili.
+  function statsOffRouteNm(state) {
+    var nav = state.nav, a, b;
+    if (nav.waypointIndex < OPEN_WATER_WAYPOINT_INDEX) { a = WAYPOINTS[Math.max(0, nav.waypointIndex - 1)]; b = WAYPOINTS[nav.waypointIndex] || FINAL_DEST; }
+    else { a = WAYPOINTS[OPEN_WATER_WAYPOINT_INDEX - 1]; b = FINAL_DEST; }
+    var xt = Math.abs(crossTrackNm(nav.lat, nav.lon, a.lat, a.lon, b.lat, b.lon));
+    return Number.isFinite(xt) ? xt : 0;
+  }
+  // Called at the end of every simulation tick (once the tick's values have settled), after the vessel log's own sample.
+  function sampleStatsTick(state) {
+    var st = statsOf(state), b = state.boat, nav = state.nav, w = state.weather, m = state.meta.voyageMinutes, dist = nav.distanceTraveled;
+    var dNm = (st.lastDist == null || !Number.isFinite(st.lastDist)) ? 0 : Math.max(0, dist - st.lastDist);
+    st.lastDist = dist;
+    if (b.sailConfig !== 'furled') st.sailMin += TICK_MINUTES;
+    if (b.autopilotOn) st.autoMin += TICK_MINUTES;
+    if (state.crew.atHelm) st.helmMin += TICK_MINUTES;
+    if (dNm > 0 && getDaylightPhase(state) === 'night') st.nightNm += dNm;
+    if (w.seaState > st.maxSea) st.maxSea = w.seaState;
+    if (w.windSpeed >= 34) { // the game's own "STORM" (see weatherConditionLabel): wind of 34 kt or more
+      if (st.stormLastMin == null || m - st.stormLastMin > STATS_GAP_MINUTES) st.storms++;
+      st.stormLastMin = m;
+    }
+    if (thunderStormNow(state)) { // the authoritative real sky is a thunderstorm (the same test the thunder module uses)
+      if (st.thunderLastMin == null || m - st.thunderLastMin > STATS_GAP_MINUTES) st.thunder++;
+      st.thunderLastMin = m;
+    }
+    if (Math.floor(m) % 5 === 0 && Number.isFinite(nav.lat) && Number.isFinite(nav.lon)) { // the two distances are measured every fifth tick
+      navInit();
+      var near = navNearestOnEdges(navGeoLon(nav.lon), nav.lat, NAV.landEdges);
+      if (near && Number.isFinite(near.nm) && near.nm > st.maxLandNm) st.maxLandNm = near.nm;
+      var off = statsOffRouteNm(state);
+      if (off > st.maxOffRouteNm) st.maxOffRouteNm = off;
+    }
+  }
+
   // Shared CURRENT / ORIGINAL formatting. Gallons keep one decimal place
   // only when the value actually has one — "50" not "50.0", but "42.3"
   // stays "42.3" — matching the existing water/fuel precision. Countable
@@ -6115,6 +6281,7 @@
     // VESSEL LOG -- last, once every other per-tick system (weather,
     // movement, engine) has fully settled this tick's final values.
     sampleVesselLogTick(state);
+    sampleStatsTick(state); // VOYAGE STATS
     // CHART -- same reasoning, position has fully settled for this
     // tick. recordChartTrackPointIfNeeded always runs (history is kept
     // regardless of whether CHART happens to be open right now);
@@ -10580,6 +10747,7 @@
   function awardTapeListenMorale() {
     if (!GAME || tapeSessionQualified) return;
     tapeSessionQualified = true;
+    statAdd(GAME, 'tapes', 1); // VOYAGE STATS -- a tape listened to (the morale limit below does not matter here)
     var c = GAME.crew;
     var today = Math.floor(GAME.meta.voyageMinutes / 1440);
     if (c.tapeListenDay !== today) {
@@ -12443,6 +12611,7 @@
   function rescueEls() { return finaleEls(); }
   function rescueWire() {
     if (rescueWired) return; rescueWired = true;
+    endingWireExtras();
     document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.voyageEnd && GAME.voyageEnd.phase === 'ended' && rescueSummaryUp) confirmRestart(); });
   }
   // CALL FOR HELP: CALLING FOR HELP for exactly as long as the SOS clip plays; the screen starts fading to charcoal RESCUE_FADE_SECS before the clip ends.
@@ -12496,8 +12665,8 @@
       finaleBuildSummary(state, E);
       finaleShow(E.sum, 'show', inst);
       rescueSummaryUp = true;
-      if (inst) { E.btn.hidden = false; finaleShow(E.btn, 'show', true); }
-      else rescueOpenTimers.push(setTimeout(function () { rescueOpenTimers = []; E.btn.hidden = false; finaleShow(E.btn, 'show', false); }, FINALE_SUMMARY_FADE_SECS * 1000 + 100));
+      if (inst) finaleRevealButtons(E, true);
+      else rescueOpenTimers.push(setTimeout(function () { rescueOpenTimers = []; finaleRevealButtons(E, false); }, FINALE_SUMMARY_FADE_SECS * 1000 + 100));
     }
     if (instant) { open(true); return; }
     rescueStartFade();
@@ -13104,6 +13273,7 @@
       if (def.consume) def.consume(s);
       def.clear(s);
       var gain = routineMoraleGain(s, def.moraleKey, def.moraleGain);
+      statAdd(s, 'chores', 1); // VOYAGE STATS -- dishes, tools, bunk, air, tidying
       s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
       log(s, pickChoreLine(kind, life));
       flushNewLogEntries(s);
@@ -13565,6 +13735,7 @@
   function sitEndSession() {
     var s = sitSession;
     if (!s) return;
+    if (s.state) statAdd(s.state, 'sitMin', (Date.now() - s.startedAt) / 60000); // VOYAGE STATS -- however the session ends
     sitSession = null;
     if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
     sitRemoveObservation(s);
@@ -14152,6 +14323,7 @@
   function obsEndSession() {
     var s = obsSession;
     if (!s) return;
+    if (s.state) statAdd(s.state, 'existMin', (Date.now() - s.startedAt) / 60000); // VOYAGE STATS (JUST EXIST) -- however the session ends
     obsSession = null;
     if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
     sitRemoveObservation(s);
@@ -15241,6 +15413,7 @@
     if (!g) return;
     g.phase = 'ended';
     g.winner = winner;
+    if (GAME) { statAdd(GAME, 'pongPlayed', 1); if (winner === 'player') statAdd(GAME, 'pongWon', 1); } // VOYAGE STATS -- a finished match
     g.ballVX = 0; g.ballVY = 0;
     awardPongMorale(winner); // a finished match pays a little morale (a quit mid-match never gets here)
     var key = winner === 'player' ? 'pongPlayerWins' : 'pongComputerWins';
@@ -15893,6 +16066,7 @@
         var life = lifeCtx(s); // before the wash resets hygiene
         consumeWater(s, WATER_WASH_GAL);
         s.crew.hygieneHours = 0; // FRESH again -- see hoursSinceWash
+        statAdd(s, 'washes', 1);
         var gain = routineMoraleGain(s, 'wash', 4);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         log(s, pickVariant(DAILY_COPY.wash, 'wash', life));
@@ -16093,6 +16267,7 @@
         // lastRoutineAt.dryClothes slot, since this is the same
         // routine conceptually, just restructured; see routineMoraleGain.
         var gain = routineMoraleGain(s, 'dryClothes', 3);
+        statAdd(s, 'chores', 1); // (hanging the wet clothes is a chore too)
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         log(s, pickVariant(DAILY_COPY.hang, 'hang', { wearingWet: ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(s, k) && isGarmentWet(s, k); }) })); // "everything" only if nothing wet is still being worn
         flushNewLogEntries(s);
@@ -16250,6 +16425,7 @@
       playAudio: function (onEnded) { return playSaloonOneShot('tarot', onEnded); },
       action: function (s) {
         var card = TAROT_CARDS[drawTarotCardIndex()];
+        statAdd(s, 'tarot', 1); // VOYAGE STATS
         awardTarotMorale(s); // a small comfort, spaced like QUIET TIME and PONG -- see above
         printBlank();
         printLine(card.name.toUpperCase(), 'heading-label');
@@ -16919,6 +17095,8 @@
       } else {
         s.food[key] -= 1;
       }
+      if (isHeldFish || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks and chocolate are not meals
+      if (isHeldFish) statAdd(s, 'fishEaten', 1);
 
       // Hunger: a full meal resets to FULL; a snack is a smaller reset
       // (see HUNGER_RESET_HOURS_BY_TYPE).
@@ -17096,6 +17274,7 @@
       action: function (s) {
         var life = lifeCtx(s);
         s.drinks.tea -= 1;
+        statAdd(s, 'teas', 1);
         consumeWater(s, WATER_TEA_GAL);
         s.crew.hoursSinceWater = 0;
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
@@ -20664,6 +20843,7 @@
   function resolveFishLanded(state) {
     var session = fishingSession, caught = session.catch;
     caught.displayName = fishSpeciesDisplayName(state, caught.species); // fixed here, once -- KEEP reads exactly what is shown
+    statsFishCaught(state, caught); // VOYAGE STATS -- landed, whether she keeps it or not
 
     session.phase = 'keep-release';
     showCatchResult(caught.displayName, caught.weightLb);
@@ -20708,6 +20888,7 @@
         stopFishingReelLoop();
         playFishingLandingAudio(session.catch.weightLb);
         showCatchResult('Marlin', session.catch.weightLb);
+        statsFishCaught(state, session.catch, 'Marlin');
         session.phase = 'marlin-release';
         state.pendingChoice = { id: 'fish-marlin-release', options: [{ label: 'RELEASE', action: 'fish-release' }] };
         renderOptions(state);
@@ -21678,7 +21859,6 @@
             action: function (s) {
               s.boat.engineOn = true; // starts whatever the diesel / battery: the finale is not sailing simulation
               finaleLog(s, 'Started the engine.');
-              finaleLog(s, FINALE_BREAKWATER);
               finaleAdvance(s);
             },
           });
@@ -21721,6 +21901,7 @@
         state.nav.autopilotHeading = state.nav.setCourse; // the player's newest explicit heading — what AUTOPILOT (if on) now holds
         state.nav.courseDraft = null;
         log(state, 'Changed course to ' + Math.round(state.nav.setCourse) + '\u00B0.');
+        statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
         beginCourseTurn(state, {
           targetHeading: courseSteeringTarget(state),
@@ -21739,6 +21920,7 @@
         state.nav.courseDraft = null; // reached from the CHANGE COURSE screen now -- its half-dialled draft is moot
         state.nav.autopilotHeading = state.nav.setCourse; // ...and, like CHANGE COURSE, what AUTOPILOT (if on) then holds — it just holds it, it never chooses it
         log(state, 'Set a course for N\u0101wiliwili. ' + state.nav.setCourse + '\u00B0.');
+        statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
         beginCourseTurn(state, {
           targetHeading: courseSteeringTarget(state),
@@ -22913,6 +23095,7 @@
     migrateRealWeatherIfNeeded(GAME);
     queueWeatherUpdateForExistingSavesIfNeeded(GAME); // OLD-SAVE COMPATIBILITY -- past Cape Flattery with the update not yet run: make it available now (after the line above, which gives very old saves their flags)
     migrateVesselLogIfNeeded(GAME);
+    migrateStatsIfNeeded(GAME); // VOYAGE STATS -- a save from before them starts counting now
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
     realWeatherBootSync(GAME); // REAL WEATHER -- usable cached real data drives the ENVIRONMENT right now, before the catch-up ticks run
