@@ -1347,7 +1347,7 @@
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
       voyageEnd: { phase: 'none', reason: null, at: null, step: 0 }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: step 0 is the first line + CONTINUE, step 1 the second line + CALL FOR HELP) | 'ended' (the end-of-game summary is up: NEW VOYAGE). One-way, never reversed -- see checkNeglectRescue.
-      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 8, birds: null }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
+      finale: { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: 9, birds: null, noDiesel: false }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
       // opens up. ambienceSuppressed holds SEA, WIND, and rain all
       // completely silent (see getSeaAudioState/getWindAudioState/
@@ -2160,8 +2160,8 @@
     if (state.flags && state.flags.landOnHorizonShown === undefined) state.flags.landOnHorizonShown = false;
     var f = state.finale;
     if (f && typeof f === 'object' && f.phase !== 'none' && f.v !== FINALE_VERSION && Number.isInteger(f.step) && f.step >= 0) finaleRemapSave(state, f); // a finale begun before the step list changed
-    if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: FINALE_VERSION, birds: null };
-    else { if (f.v === undefined) f.v = FINALE_VERSION; if (f.birds === undefined) f.birds = null; if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.codaAt === undefined) f.codaAt = null; if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
+    if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: null, v: FINALE_VERSION, birds: null, noDiesel: false };
+    else { if (f.v === undefined) f.v = FINALE_VERSION; f.noDiesel = f.noDiesel === true; if (f.birds === undefined) f.birds = null; if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.codaAt === undefined) f.codaAt = null; if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
     if (state.finale.phase === 'none' && nav.waypointIndex >= OPEN_WATER_WAYPOINT_INDEX && Number.isFinite(nav.lat) && Number.isFinite(nav.lon)) navSnapToWater(state);
   }
 
@@ -2181,7 +2181,12 @@
        fading out over the last 3 s of it -> the screen rests on the game's charcoal (3 s) -> LANDFALL fades in (5 s) and holds (10 s) -> the
        summary. CODA plays all the way through, never faded, and goes round again; with the marina, the birds and the wind it keeps sounding through the fade,
        the title and the summary until NEW VOYAGE.
+     OUT OF DIESEL (state.finale.noDiesel, decided once at the capture: the tank is empty and the engine is not running): the arrival is the same, made under sail.
+       The moment she is captured: "I’m out of diesel." / "I’ll have to sail her in." Then ENTERING -> (GO ABOVE if below) -> HEADING TOWARD THE MARINA (sails stay up; the
+       early FURL SAILS and START ENGINE are skipped) -> LINE UP WITH SLIP -> FURL SAILS (the game’s own lowering of the sails; skipped if they are already furled) -> COASTING IN
+       (ENGINE OFF is skipped: there is no engine to stop) -> and from there the very same path as above. Nothing starts the engine, plays an engine sound, or touches the fuel.
      ====================================================================== */
+  var FINALE_NO_DIESEL_LINES = ['I’m out of diesel.', 'I’ll have to sail her in.']; // (shown the moment she is captured when the tank is empty; the arrival is then made under sail)
   var FINALE_BREAKWATER = 'The breakwater slips past. After so much open water, the harbor feels close around me.';
   var FINALE_REFLECTIONS = [
     'Strange to stand here and imagine her here too.',
@@ -2197,7 +2202,8 @@
     { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } },    // skipped if the engine is already running
     { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 25, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
     { id: 'lineup',   kind: 'action', option: { label: 'LINE UP WITH SLIP', action: 'finale-lineup' } },
-    { id: 'stop',     kind: 'action', option: { label: 'ENGINE OFF', action: 'finale-engine-stop' } },
+    { id: 'furlin',   kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl-in' } },          // NO DIESEL ONLY (skipped otherwise): the sails come down at the point where a fueled arrival turns the engine off, and then COASTING IN
+    { id: 'stop',     kind: 'action', option: { label: 'ENGINE OFF', action: 'finale-engine-stop' } },       // skipped when she came in with no diesel (there is no engine to stop)
     { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 15, coda: true, handoff: true, done: function (s) { finaleEndHandoff(s); } }, // begins the moment ENGINE OFF is tapped: the engine's shut-down sound, CODA from its start, and the sea fading out as the marina (and, by day, the birds) fade in, over the whole 15 s
     { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
     { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
@@ -2212,7 +2218,7 @@
     { id: 'title',      kind: 'ui' },   // black, LANDFALL
     { id: 'summary',    kind: 'ui' },
   ];
-  var FINALE_VERSION = 8; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
+  var FINALE_VERSION = 9; // a finale saved by an earlier step list is carried to the same moment in this one (finaleRemapSave)
   var FINALE_OLD_IDS = {
     1: ['enter', 'start', 'making', 'approach', 'slowing', 'lining', 'stop', 'secure', 'ashore', 'ashes', 'fade', 'title', 'summary'],
     2: ['enter', 'above', 'start', 'lining', 'stop', 'coast', 'secure', 'ashore', 'ashes', 'wind', 'home', 'title', 'summary'],
@@ -2221,6 +2227,7 @@
     5: ['enter', 'above', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
     6: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'ashesout', 'title', 'summary'],
     7: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'beat', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'title', 'summary'],
+    8: ['enter', 'above', 'furl', 'start', 'head', 'lineup', 'stop', 'coast', 'secure', 'ashore', 'reflect0', 'reflect1', 'reflect2', 'reflect3', 'reflect4', 'stage', 'scatter', 'scattering', 'title', 'summary'],
   };
   var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title', ashesout: 'title', beat: 'reflect0' }; // ('home' was "She's home.", now gone; 'ashesout', the text fading out after the ashes, is now the last 3 s of the ashes themselves)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
@@ -2247,7 +2254,10 @@
     return (st && st.kind === 'action') ? [st.option] : [];
   }
   function navBeginFinale(state) {
-    state.finale = { phase: 'arrival', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: state.meta.voyageMinutes, v: FINALE_VERSION, birds: null }; // stepAt 0 = not yet SHOWN: its clock starts when the UI first renders the step (finaleRender)
+    // NO DIESEL: she reaches the harbor with the tank empty (the engine cannot be running: checkFuel stops it at 0). The flag is set here, once, and kept.
+    var fuelNow = state.boat.fuelGallons, noDiesel = Number.isFinite(fuelNow) && fuelNow <= 0 && !state.boat.engineOn;
+    state.finale = { phase: 'arrival', step: 0, stepAt: 0, codaAt: null, arrivedMinutes: state.meta.voyageMinutes, v: FINALE_VERSION, birds: null, noDiesel: noDiesel }; // stepAt 0 = not yet SHOWN: its clock starts when the UI first renders the step (finaleRender)
+    if (noDiesel) { log(state, FINALE_NO_DIESEL_LINES[0]); log(state, FINALE_NO_DIESEL_LINES[1]); } // (the arrival's log() takes the real moment; the live loop prints them at once)
     state.nav.grounded = false;
     state.flags.arrivedAtDestination = true;
     state.pendingChoice = null; state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
@@ -2261,9 +2271,12 @@
   // A step that does not apply is passed over: GO ABOVE when the player is already on deck, FURL SAILS when the sails are already furled, START ENGINE when the engine is already running.
   // Returns true when START ENGINE was passed over (its "Started the engine." never happened, but the breakwater moment still does).
   function finaleSkips(state, id) {
+    var nd = !!(state.finale && state.finale.noDiesel); // NO DIESEL: no early FURL SAILS (she is sailing in), no START ENGINE, no ENGINE OFF -- and a FURL SAILS at the end instead
     if (id === 'above') return state.crew.location !== 'below';
-    if (id === 'furl') return state.boat.sailConfig === 'furled';
-    if (id === 'start') return !!state.boat.engineOn;
+    if (id === 'furl') return nd || state.boat.sailConfig === 'furled';
+    if (id === 'start') return nd || !!state.boat.engineOn;
+    if (id === 'furlin') return !nd || state.boat.sailConfig === 'furled'; // (already furled: there is nothing to lower)
+    if (id === 'stop') return nd;
     return false;
   }
   function finaleSkipForward(state) {
@@ -21645,8 +21658,9 @@
             action: function (s) { navFreeSolace(s); log(s, 'Got Solace free.'); flushNewLogEntries(s); },
           });
           break;
-        case 'finale-furl': { // THE FINAL ARRIVAL: the game's own lowering of the sails -- the same FURLING SAILS action, sound (lowerLong for full sail, lowerShort otherwise) and log line as the SAILS menu's FURL
-          if (!finaleAtStep(state, 'furl')) break;
+        case 'finale-furl': case 'finale-furl-in': { // THE FINAL ARRIVAL: the game's own lowering of the sails -- the same FURLING SAILS action, sound (lowerLong for full sail, lowerShort otherwise) and log line as the SAILS menu's FURL
+          // ('finale-furl-in': the NO DIESEL arrival's FURL SAILS, where a fueled arrival would turn the engine off -- it goes straight into COASTING IN, which starts the moment the sails are down)
+          if (!finaleAtStep(state, action === 'finale-furl' ? 'furl' : 'furlin')) break;
           var furlAudioKey = sailChangeAudioKey(state.boat.sailConfig, 'furled');
           runAudioSyncedAction(state, {
             label: SAIL_CHANGE_WORKING_LABEL.furled,
@@ -22669,7 +22683,7 @@
     s.boat.autopilotOn = true;
     scenarioTrack(s, lastWaypoint);
   }
-  function scenarioHarbor(engineRunning, below, motorsail) {
+  function scenarioHarbor(engineRunning, below, motorsail, noDiesel) {
     var s = scenarioBase(13.5);
     var r = NAV_GEO.capture.ring, A = r[0], B = r[1], C = r[2]; // the funnel is the triangle A-B-C; its east edge runs C -> A
     var mid = { lat: A[1] + 0.68 * (C[1] - A[1]), lon: A[0] + 0.68 * (C[0] - A[0]) };
@@ -22679,7 +22693,7 @@
     s.boat.sailConfig = engineRunning && !motorsail ? 'furled' : 'full'; // (motorsail: the engine is running AND the sails are still up)
     s.boat.engineOn = !!engineRunning;
     s.boat.engineRunningMinutes = engineRunning ? 40 : 0;
-    s.boat.fuelGallons = 12;
+    s.boat.fuelGallons = noDiesel ? 0 : 12; // (noDiesel: the tank is dry -- the arrival is then made under sail)
     if (below) s.crew.location = 'below';
     return s;
   }
@@ -22721,6 +22735,7 @@
     'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
     'harbor-motorsail': { about: 'Motor-sailing: the engine is running and the sails are still up, so the arrival offers FURL SAILS and skips START ENGINE.', build: function () { return scenarioHarbor(true, false, true); } },
     'harbor-engine': { about: 'The same, with the engine already running and the sails already furled, so the arrival skips FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(true); } },
+    'harbor-no-diesel': { about: 'OUT OF DIESEL: a couple of minutes from the Nāwiliwili harbor mouth, under full sail, with the tank empty. Tests the arrival with no engine: "I’m out of diesel. / I’ll have to sail her in.", no START ENGINE, and FURL SAILS (instead of ENGINE OFF) before COASTING IN.', build: function () { return scenarioHarbor(false, false, false, true); } },
     'cape': { about: 'Just short of the open-Pacific line (the longitude of Cape Flattery), engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests the rescue: the two lines, CALL FOR HELP, the SOS and the end-of-game summary.', build: scenarioRescue },
     'thunderstorm': { about: 'On deck in the open Pacific, in a real-looking THUNDERSTORM held in place. The first flash comes 5-25 seconds after it opens, then one every 20-75 seconds; each thunder follows its flash by 0.5-4 seconds (EXT on deck, INT below). Turn SOUND on to hear it; the flash happens either way. The amber STORM bar clears the storm (no more strikes) and brings it back.', build: scenarioThunderstorm },
