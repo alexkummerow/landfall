@@ -1361,7 +1361,7 @@
         galleyNarrated: false,
         lastMilestone: 0,
         arrivedAtDestination: false, // guards the open-ocean arrival log line so it fires once, not every tick spent sitting at Nāwiliwili
-        breakwaterObservationShown: false, // guards the coastal-tutorial "room for sail now" observation (Shilshole Exit arrival) so it fires exactly once per voyage
+        breakwaterObservationShown: false, // no longer used (the Shilshole Exit "room for sail now" log line was removed); kept so older saves and scenarios still load
         realWindUnlocked: false,           // PHASE 3 -- the 30-second opening -> real wind handoff (begun at Pacific control) has completed (permanent)
         weatherSoftwareUpdateAvailable: false, // ...so the Ship's Computer now offers SYSTEM UPDATE AVAILABLE (waits for the next visit)
         weatherSoftwareUpdated: false,     // ...and once the player has run it, WINDY exists on the computer (permanent)
@@ -3060,9 +3060,10 @@
   // directly rather than via runCommand since this is reached from
   // deep inside an action handler, exactly like other mid-action
   // "return to HELM" call sites already do in this file).
+  var COASTAL_LOCK_LINE = 'I\u2019ll let the autopilot hold my course until we reach the Pacific.'; // the same words for CHANGE COURSE and for turning the autopilot off, at the HELM or the NAV STATION
   function blockedByCoastalLock(state) {
     printBlank();
-    printLine('I\u2019ll follow Dad\u2019s course until we reach the Pacific.'); // an observation in the ordinary text (not amber, not caps)
+    printLine(COASTAL_LOCK_LINE); // an observation in the ordinary text (not amber, not caps)
     cmdHelm(state);
   }
 
@@ -6233,24 +6234,20 @@
           state.nav.distanceTraveled += distToWp;
           if (state.nav.tack) state.nav.tackDistanceNm += distToWp;
           nmRemaining -= distToWp;
-          log(state, waypointArrivalLine(wp));
-          // COASTAL TUTORIAL -- two one-time observations layered onto
+          if (wp.name !== 'Shilshole Exit') log(state, waypointArrivalLine(wp)); // Shilshole Exit says nothing: leaving the marina is told once, on the departure screens
+          // COASTAL TUTORIAL -- one one-time observation layered onto
           // this same existing arrival moment (see blockedByCoastalLock/
           // cmdHelm's own notes for the rest of this feature), never a
-          // second navigation system: Shilshole Exit is the breakwater/
-          // marina exit itself (WAYPOINTS[1]; wp here is still the
-          // waypoint just reached, before the increment below), and
-          // Cape Flattery (WAYPOINTS[11]) is the waypoint whose arrival
+          // second navigation system: Cape Flattery (WAYPOINTS[11]; wp
+          // here is still the waypoint just reached, before the increment
+          // below) is the waypoint whose arrival
           // is what actually pushes waypointIndex to
           // OPEN_WATER_WAYPOINT_INDEX (12) a few lines down -- i.e. the
-          // exact existing moment open water begins. Each flag guards
-          // its own line so a save loaded after either moment (or a
-          // multi-tick offline catch-up that crosses one) never replays
-          // it.
-          if (wp.name === 'Shilshole Exit' && !state.flags.breakwaterObservationShown) {
-            state.flags.breakwaterObservationShown = true;
-            log(state, 'The breakwater slips astern. There\u2019s room for sail now. I can shut the engine down and let the wind take over.');
-          }
+          // exact existing moment open water begins. Its flag guards the
+          // line so a save loaded after the moment (or a multi-tick
+          // offline catch-up that crosses it) never replays it. (The
+          // Shilshole Exit "room for sail now" observation that used to
+          // sit here is gone: that moment is the departure screens'.)
           if (wp.name === 'Cape Flattery' && !state.flags.pacificObservationShown) {
             state.flags.pacificObservationShown = true;
             log(state, 'Cape Flattery falls away astern. Ahead, nothing but Pacific. The course is mine now.');
@@ -7416,7 +7413,7 @@
     { id: 'sound-calm-morning', tod: 'morning', p: 0.6, text: 'The Sound was almost flat this morning.', when: function (c) { return c.inSound && c.sea <= 1 && c.wind <= 8; } },
     { id: 'sound-overcast-morning', tod: 'morning', p: 0.8, text: 'Low clouds sat over the Sound all morning.', when: function (c, m) { return c.inSound && c.snap.minutesSinceSunrise >= 150 && c.st.overcast >= c.snap.minutesSinceSunrise - 30; } },
     { id: 'sound-light-rain', once: true, text: 'A little rain on the way out. It felt like Seattle seeing me off.', when: function (c, m) { return c.inSound && c.wp >= 2 && c.raining && !c.heavyRain && c.st.rain >= 10; } },
-    { id: 'sound-wind-up', once: true, text: 'The wind picked up once I was clear of the marina.', when: function (c) { return c.inSound && c.wp >= 2 && c.regChange && c.regChange.to > c.regChange.from && c.regChange.to >= 2; } },
+    { id: 'sound-wind-up', once: true, text: 'The wind picked up once I was out in the Sound.', when: function (c) { return c.inSound && c.wp >= 2 && c.regChange && c.regChange.to > c.regChange.from && c.regChange.to >= 2; } },
     { id: 'sound-first-sunset', ms: true, once: true, tod: 'sunset', text: 'The first sunset underway. I watched it from the deck.', when: function (c) { return c.inSound && c.above && !c.raining && !c.fog && c.cloud < 70; } },
     { id: 'first-night-aboard', ms: true, once: true, tod: 'night', text: "First night on Solace. Strange knowing the dock isn't there anymore.", when: function () { return true; } },
     // ---- STRAIT OF JUAN DE FUCA ----
@@ -7952,7 +7949,6 @@
   }
   function waypointArrivalLine(wp) {
     var lines = {
-      'Shilshole Exit': 'Clear of the marina, into open Puget Sound.',
       'Puget Sound': 'Threading the channel toward Admiralty Inlet.',
       'Admiralty South': 'Into Admiralty Inlet \u2014 the water narrows here.',
       'Admiralty North': 'Clear of Marrowstone Island. Turning toward Port Townsend.',
@@ -11401,7 +11397,7 @@
   function printRoomHeader(name) {
     var last = tempViewEl.lastElementChild;
     if (last && last.classList.contains('echo') && last.textContent === '> ' + name) return;
-    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "I\u2019ll follow Dad\u2019s course until we reach the Pacific."): keep the gap that always sat there
+    if (last && !last.classList.contains('gap')) printBlank(); // re-render under a status line (e.g. "I\u2019ll let the autopilot hold my course until we reach the Pacific."): keep the gap that always sat there
     printEcho(name.toLowerCase());
   }
 
@@ -12176,7 +12172,7 @@
       // already returns through, sending the player back to whichever
       // screen they actually toggled this from.
       printBlank();
-      printLine('I\u2019ll let the autopilot hold our course until we reach the Pacific.'); // an observation in the ordinary text (not amber, not caps)
+      printLine(COASTAL_LOCK_LINE); // an observation in the ordinary text (not amber, not caps)
       render(state);
       return;
     }
@@ -22078,8 +22074,8 @@
   // normal gameplay opens up. Each step is a plain state change (like EAT or
   // REPAIR) — it does not touch the clock; real time is passing throughout
   // exactly as it always does (see PROJECT.md).
-  var DEPARTURE_LINE_CLEAR = 'The breakwater slips behind me. We’re clear of the marina now.';
-  var DEPARTURE_LINE_WIND = 'There’s enough wind to sail. I should hoist the sails and shut down the engine to conserve fuel.';
+  var DEPARTURE_LINE_CLEAR = 'The breakwater slips astern.';
+  var DEPARTURE_LINE_WIND = 'There’s room for sail now. I can shut down the engine, hoist the sails, and let the wind take over.';
   var DEPARTURE_STEPS = [
     // Audio-synced (see playAudio/runAudioSyncedAction, wired in the
     // 'departure-step' case above): UNTYING LINES. .. … lasts exactly as
@@ -22145,8 +22141,9 @@
     // (every choice clears the screen's temporary text). `text` is the logged moment. `reshow` is the line that is on the screen while the step's CONTINUE waits,
     // put back after a reload (renderReturn). After the last CONTINUE the normal controls appear -- the scripted sequence ends here: sails stay furled, the
     // engine stays running, and everything from this point on is a player decision.
-    //   "The breakwater..." (shown) -> CONTINUE -> it disappears; "The voyage has begun." is logged, and the next line is shown ->
-    //   "There's enough wind..." (shown) -> CONTINUE -> it disappears (never logged); the normal controls.
+    //   "The breakwater slips astern." (shown) -> CONTINUE -> it disappears; "The voyage has begun." is logged, and the next line is shown ->
+    //   "There's room for sail now..." (shown) -> CONTINUE -> it disappears (never logged); the normal controls.
+    //   This is the ONE place the game says the marina is behind us and that there is room to sail: nothing later repeats it.
     { label: 'CONTINUE', instant: true, reshow: DEPARTURE_LINE_CLEAR, text: 'The voyage has begun.', show: DEPARTURE_LINE_WIND },
     { label: 'CONTINUE', instant: true, reshow: DEPARTURE_LINE_WIND },
   ];
