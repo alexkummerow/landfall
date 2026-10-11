@@ -866,6 +866,10 @@
   .ending-overlay.rescue .ending-summary.show { margin-top: 0; }
   .ending-newvoyage { margin-top: 2rem; opacity: 0; transition: opacity 1.5s ease; }
   .ending-newvoyage.show { opacity: 1; }
+  /* LIGHTNING (see THUNDER + LIGHTNING in the script): one fixed, full-viewport pale layer above every screen -- the game, the menus, the Ship's Computer, a book,
+     the journal, a story page. Shown for about 200 ms at a time by opacity alone (no fade), never takes a tap, and is display:none the rest of the time.
+     Below the ending overlay (99999): nothing flashes over the final black. */
+  #lightning-flash { position: fixed; inset: 0; z-index: 9000; display: none; opacity: 0; pointer-events: none; background: #e9f1ff; transition: none; }
 </style>
 </head>
 <body>
@@ -1047,6 +1051,8 @@
       <button id="chart-return-btn" type="button" class="option">← RETURN</button>
     </div>
   </div>
+
+<div id="lightning-flash" aria-hidden="true"></div>
 
 <!-- THE ENDING'S FULL-SCREEN VIEW (see FINALE_STEPS): centered dots, SCATTER ASHES, the ashes -- one layer under the overlay below, which fades in over it (to the game's own charcoal). -->
 <div id="ending-stage" class="ending-stage" hidden>
@@ -3670,7 +3676,9 @@
     if (!env.temp) fallbackTempToLive(state);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, false);
     applyActiveWind(state, Date.now()); // the opening wind stays; at Pacific control real wind takes over (Phase 3's 30 s blend); a data failure uses the fallback wind
+    thunderScenarioForceSky(state); // (test scenarios ?scenario=thunderstorm* only; nothing in a normal load)
     sanitizeLiveWeather(state);
+    thunderSync(state); // THUNDER + LIGHTNING: begins / ends with the authoritative real sky; the same sky arriving again changes nothing
   }
 
 
@@ -9541,6 +9549,320 @@
   // reasoning; identical shape, just the rain layer.
   function transitionRainAudioThroughCompanionway(state, targetLocation) {
     applyRainAudioDesiredState(getRainAudioStateFor(targetLocation, currentRainLevel(state), state.boat.hatchOpen), COMPANIONWAY_CROSSFADE_SECONDS);
+  }
+
+  /* --------------------------------------------------------------
+     THUNDER + LIGHTNING -- a transient weather effect that sits ON TOP of the environmental mix and alters none of it.
+
+     WHEN: only while the authoritative REAL sky is a thunderstorm -- state.weather.sky === 'THUNDERSTORM'. That label exists only when real data is driving
+     the sky (rwConditionFromCode: WMO weather codes 95, 96 and 99 -- "thunderstorm", with and without hail; see applyRealEnvironmentToLive): the scripted
+     fallback clears it (rwClearRealSky), so a fallback sky can never thunder. Heavy rain, strong wind, a rough sea and cloud cover do NOT: none of them
+     is looked at here. The effect also stops with the voyage (the rescue and the final arrival freeze the world).
+
+     ONE STRIKE:  LIGHTNING FLASH  ->  0.5-4.0 real seconds  ->  THUNDER (one of six recordings, played once, never looped)
+     STORM TIMING (all real time -- never the voyage clock, game minutes, sailing speed or the weather-fetch cadence):
+       a storm BEGINS  -> first strike 5-25 s later
+       thunder starts  -> the next strike 20-75 s later (a fresh roll every strike; the lightning-to-thunder delay and the recording are rolled afresh too)
+       the storm ENDS  -> nothing further is scheduled; a strike that has already flashed still gets its thunder.
+     ONE scheduler: thunder.timer is the only handle for "the next strike", and thunderSync (called after every environment tick, so after every weather
+     refresh too) only changes it when the storm STARTS or ENDS -- the same thunderstorm arriving again is a no-op. A strike is never started while another
+     is pending or sounding; if the next one falls due too early it waits a second at a time.
+
+     THE SOUND: audio/environment/thunder_N_ext.mp3 above deck, thunder_N_int.mp3 below, N = 1-6 (never the same N twice in a row). EXT / INT is decided
+     when the thunder actually BEGINS (the player may have gone below during the delay), from the same place the sea / wind / rain layers are heard from.
+     The file always starts from its own beginning (no seeking, no trimming): any silence recorded at the start of a file is kept on purpose. Where the
+     loop engine's buffer path is in use (http / https -- every phone) a one-shot is played from the decoded buffer through the master bus, because that
+     path needs no tap to start; on file:// it is a plain <audio> element. SOUND OFF: no thunder sound at all, but the flash still happens and the
+     schedule carries on. A file that fails to load or play is logged and skipped; the next strike tries again.
+
+     THE FLASH: #lightning-flash, one fixed full-viewport pale layer above every screen (z-index 9000, pointer-events: none), opacity only:
+       flash 80 ms -> dark 60 ms -> second, weaker flash 60 ms -> gone (200 ms in all). Peak opacity 0.78 / 0.42 above deck, 65% of that below.
+
+     BACKGROUND / RESUME: hiding the page (or pagehide) cancels everything pending; nothing is caught up. When the page is back, a storm that is still on gets
+     its next strike 20-75 s out. A timer that fires more than THUNDER_OVERDUE_GRACE_MS late (a suspended page) is treated the same way.
+     -------------------------------------------------------------- */
+  var THUNDER_FIRST_STRIKE_S = [5, 25];        // real seconds from a thunderstorm beginning to its first strike
+  var THUNDER_STRIKE_GAP_S = [20, 75];         // real seconds from one strike's thunder starting to the next strike's flash
+  var THUNDER_DELAY_S = [0.5, 4.0];            // real seconds from the flash to the thunder starting
+  var THUNDER_FAST = (SCENARIO_NAME === 'thunderstorm-fast');      // TEST ONLY (the THUNDERSTORM-FAST scenario): the two long waits are shortened so several strikes fit in a minute; the flash-to-thunder delay is untouched
+  var THUNDER_FAST_FIRST_S = [2, 4];
+  var THUNDER_FAST_GAP_S = [6, 14];
+  var THUNDER_VARIANT_COUNT = 6;
+  var THUNDER_AUDIO_VOLUME = 0.85;
+  var THUNDER_FLASH_PEAK = 0.78;               // opacity of the first, bright flash above deck
+  var THUNDER_FLASH_SECOND = 0.42;             // opacity of the weaker second flash above deck
+  var THUNDER_FLASH_INTERIOR_SCALE = 0.65;     // below deck both flashes are this fraction of the above-deck ones
+  var THUNDER_FLASH_MS = [80, 60, 60];         // flash, dark return, second flash
+  var THUNDER_OVERDUE_GRACE_MS = 5000;         // a timer this late means the page was asleep: do not strike for it
+  var THUNDER_PLAY_CAP_MS = 90000;             // a recording that never reports its end releases the strike after this long
+  var THUNDER_DECODED_KEEP = 4;                // decoded thunder buffers kept (two strikes' ext + int); the loop engine's own buffer cache is never touched
+
+  var thunder = {
+    active: false,        // a thunderstorm is on and a next strike is being scheduled
+    timer: null,          // THE one scheduler handle: the next strike (first strike, or the one after the last thunder)
+    dueAt: 0,
+    waitTimer: null,      // the strike in progress: flash done, thunder not yet begun
+    waitDueAt: 0,
+    capTimer: null,
+    strikeActive: false,  // a strike is in flight: from its flash until its thunder has finished (or was skipped)
+    token: 0,             // bumped to abandon whatever a strike was still waiting on (page hidden)
+    variant: 0,           // the recording chosen for the strike in flight
+    lastVariant: 0,       // the one before it (never repeated back to back)
+    afterResume: false,   // the page was hidden during a storm: the first strike after it uses the normal spacing, not the 5-25 s entry wait
+    strikes: 0,
+    last: null,           // what the last thunder actually did: { variant, side, path, backend, ... }
+    log: [],              // the last few scheduler decisions (kind + milliseconds), for diagnosis
+    flashTimers: [],
+  };
+  var thunderEls = {};        // path -> <audio> (file:// / no audio context): created on first use
+  var thunderDecoded = {};    // path -> AudioBuffer (the few most recent)
+  var thunderDecodedOrder = [];
+  var thunderLoading = {};
+  var thunderScenarioStorm = SCENARIO_NAME === 'thunderstorm' || SCENARIO_NAME === 'thunderstorm-fast'; // the two test scenarios hold a real-looking thunderstorm in place
+  var thunderScenarioForced = thunderScenarioStorm;                                    // ...until the scenario's STORM bar clears it
+
+  function thunderLog(kind, ms, extra) {
+    thunder.log.push({ at: Date.now(), kind: kind, ms: ms == null ? null : ms, extra: extra == null ? null : extra });
+    if (thunder.log.length > 60) thunder.log.shift();
+  }
+  function thunderRandRange(range) { return range[0] + Math.random() * (range[1] - range[0]); }
+  function thunderCadence() { return THUNDER_FAST ? { first: THUNDER_FAST_FIRST_S, gap: THUNDER_FAST_GAP_S, delay: THUNDER_DELAY_S } : { first: THUNDER_FIRST_STRIKE_S, gap: THUNDER_STRIKE_GAP_S, delay: THUNDER_DELAY_S }; }
+  function thunderPath(variant, side) { return 'audio/environment/thunder_' + variant + '_' + side + '.mp3'; }
+
+  // Which recording: any of the six except the one just used (so never twice in a row, and no fixed order).
+  function thunderPickVariant() {
+    var pool = [], v;
+    for (v = 1; v <= THUNDER_VARIANT_COUNT; v++) if (v !== thunder.lastVariant) pool.push(v);
+    return pool[Math.min(pool.length - 1, Math.floor(Math.random() * pool.length))];
+  }
+  // Where the player is HEARD from right now -- the very place the sea / wind / rain layers use (the place being left, until a companionway sample ends).
+  function thunderHeardFrom() {
+    var loc = companionwayHoldLocation != null ? companionwayHoldLocation : (GAME && GAME.crew ? GAME.crew.location : 'above');
+    return loc === 'below' ? 'int' : 'ext';
+  }
+  function thunderVoyageOver(state) {
+    return !!((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none'));
+  }
+  // THE one test for "it is thundering": the authoritative real sky label, and nothing inferred from rain, wind, sea or cloud.
+  function thunderStormNow(state) {
+    var w = state && state.weather;
+    return !!(w && w.sky === 'THUNDERSTORM' && !thunderVoyageOver(state));
+  }
+
+  // ---- the flash ----
+  function thunderFlashEl() { return document.getElementById('lightning-flash'); }
+  function thunderFlashClear() {
+    thunder.flashTimers.forEach(function (t) { clearTimeout(t); });
+    thunder.flashTimers = [];
+    var el = thunderFlashEl();
+    if (el) { el.style.opacity = '0'; el.style.display = 'none'; }
+  }
+  function thunderFlash() {
+    var el = thunderFlashEl();
+    if (!el) return;
+    thunderFlashClear();
+    var k = thunderHeardFrom() === 'int' ? THUNDER_FLASH_INTERIOR_SCALE : 1;
+    function at(ms, fn) { thunder.flashTimers.push(setTimeout(fn, ms)); }
+    el.style.display = 'block';
+    el.style.opacity = String(+(THUNDER_FLASH_PEAK * k).toFixed(3));                      // flash
+    at(THUNDER_FLASH_MS[0], function () { el.style.opacity = '0'; });                     // dark return
+    at(THUNDER_FLASH_MS[0] + THUNDER_FLASH_MS[1], function () { el.style.opacity = String(+(THUNDER_FLASH_SECOND * k).toFixed(3)); }); // weaker second flash
+    at(THUNDER_FLASH_MS[0] + THUNDER_FLASH_MS[1] + THUNDER_FLASH_MS[2], thunderFlashClear);                                           // gone
+  }
+
+  // ---- the sound ----
+  function thunderBuffersUsable() {
+    return !!(audioCtx && masterGain && typeof fetch === 'function' && (location.protocol === 'http:' || location.protocol === 'https:'));
+  }
+  function thunderLoadBuffer(path) {
+    if (thunderDecoded[path]) return Promise.resolve(thunderDecoded[path]);
+    if (thunderLoading[path]) return thunderLoading[path];
+    var ctx = audioCtx;
+    var p = fetch(path).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.arrayBuffer();
+    }).then(function (ab) {
+      return new Promise(function (resolve, reject) { // the callback form as well as the promise form: older Safari only has the first
+        var q = ctx.decodeAudioData(ab, resolve, reject);
+        if (q && typeof q.then === 'function') q.then(resolve, reject);
+      });
+    }).then(function (buf) {
+      thunderDecoded[path] = buf; thunderDecodedOrder.push(path); delete thunderLoading[path];
+      while (thunderDecodedOrder.length > THUNDER_DECODED_KEEP) delete thunderDecoded[thunderDecodedOrder.shift()];
+      return buf;
+    }).catch(function (e) {
+      delete thunderLoading[path];
+      console.warn('[THUNDER] could not load ' + path + ': ' + describeError(e));
+      return null;
+    });
+    thunderLoading[path] = p;
+    return p;
+  }
+  function thunderEnd(token) {
+    if (token != null && token !== thunder.token) return;
+    thunder.strikeActive = false;
+    if (thunder.capTimer != null) { clearTimeout(thunder.capTimer); thunder.capTimer = null; }
+  }
+  // Starts the recording for the strike in flight. Returns true when a sound was started (or is on its way), false when this strike is silent.
+  function thunderPlay(token) {
+    if (muted || !audioUnlocked) { thunderLog('silent', null, muted ? 'sound off' : 'locked'); return false; }
+    if (GAME && GAME.departure && GAME.departure.ambienceSuppressed) { thunderLog('silent', null, 'ambience suppressed'); return false; } // the marina scene keeps its own sound, as sea / wind / rain do
+    var side = thunderHeardFrom(), path = thunderPath(thunder.variant, side);
+    thunder.last = { variant: thunder.variant, side: side, path: path, backend: null, at: Date.now() };
+    thunder.capTimer = setTimeout(function () { thunderEnd(token); }, THUNDER_PLAY_CAP_MS);
+    if (thunderBuffersUsable()) {
+      thunder.last.backend = 'buffer';
+      if (audioCtx.state !== 'running') { thunderLog('silent', null, 'context ' + audioCtx.state); thunderEnd(token); return false; } // the system has the audio: no thunder this time
+      var begin = function (buf) {
+        if (token !== thunder.token) return;
+        if (!buf || muted) { thunderEnd(token); return; }
+        try {
+          var src = audioCtx.createBufferSource(), g = audioCtx.createGain();
+          src.buffer = buf; src.loop = false;
+          g.gain.value = THUNDER_AUDIO_VOLUME;
+          src.connect(g); g.connect(masterGain); // through the master bus like everything else, so SOUND OFF / ON applies; no other layer is touched
+          src.onended = function () { try { src.disconnect(); g.disconnect(); } catch (e) {} thunderEnd(token); };
+          src.start(0, 0); // from the very beginning of the file, whatever silence it opens with
+          thunder.last.startedAt = Date.now(); thunder.last.offset = 0;
+        } catch (e) { console.warn('[THUNDER] playback failed (' + path + '):', describeError(e)); thunderEnd(token); }
+      };
+      var ready = thunderDecoded[path];
+      if (ready) begin(ready); else thunderLoadBuffer(path).then(begin); // normally ready: both sides were fetched at the flash
+      return true;
+    }
+    thunder.last.backend = 'element';
+    var el = thunderEls[path];
+    if (!el || el.error) {
+      el = createGameAudio(path);
+      el.preload = 'auto';
+      el.addEventListener('error', function () { console.warn('[THUNDER] audio failed to load: ' + path + (el.error ? ' -- error code ' + el.error.code : '')); });
+      thunderEls[path] = el;
+    }
+    el.loop = false;
+    el.onended = function () { el.onended = null; thunderEnd(token); };
+    el.onerror = function () { thunderEnd(token); };
+    try {
+      if (!el.paused) el.pause();
+      if (el.currentTime !== 0) el.currentTime = 0;
+      el.volume = THUNDER_AUDIO_VOLUME;
+      var pr = el.play();
+      thunder.last.startedAt = Date.now(); thunder.last.offset = el.currentTime;
+      if (pr && pr.then) pr.then(function () {}, function (e) {
+        if (e && e.name === 'AbortError') return;
+        console.warn('[THUNDER] play() failed (' + path + '):', describeError(e));
+        thunderEnd(token);
+      });
+    } catch (e) { console.warn('[THUNDER] playback failed (' + path + '):', describeError(e)); thunderEnd(token); return false; }
+    return true;
+  }
+
+  // ---- the schedule ----
+  function thunderArm(range, why) {
+    if (thunder.timer != null) { clearTimeout(thunder.timer); thunder.timer = null; } // never two
+    var ms = Math.round(thunderRandRange(range) * 1000);
+    thunder.dueAt = Date.now() + ms;
+    thunder.timer = setTimeout(thunderTimerFired, ms);
+    thunderLog(why, ms);
+  }
+  function thunderTimerFired() {
+    thunder.timer = null;
+    if (!thunder.active) return;
+    if (!thunderStormNow(GAME)) { thunder.active = false; thunderLog('stormEnded'); return; } // the sync has not run yet: it is over
+    if (document.visibilityState === 'hidden' || Date.now() - thunder.dueAt > THUNDER_OVERDUE_GRACE_MS) { thunderArm(thunderCadence().gap, 'overdue'); return; } // the page was asleep: never catch up
+    if (thunder.strikeActive) { // one at a time: the last thunder is still sounding
+      thunder.dueAt = Date.now() + 1000;
+      thunder.timer = setTimeout(thunderTimerFired, 1000);
+      thunderLog('deferred', 1000);
+      return;
+    }
+    thunderStrike();
+  }
+  function thunderStrike() {
+    var token = ++thunder.token;
+    thunder.strikeActive = true;
+    thunder.strikes++;
+    thunder.variant = thunderPickVariant();
+    thunder.lastVariant = thunder.variant; // (so the next strike can never repeat it, heard or not)
+    var delayMs = Math.round(thunderRandRange(thunderCadence().delay) * 1000);
+    thunderFlash();
+    if (thunderBuffersUsable() && !muted && audioCtx.state === 'running') { // fetch both sides now, so whichever is right when the thunder begins is ready
+      thunderLoadBuffer(thunderPath(thunder.variant, 'ext'));
+      thunderLoadBuffer(thunderPath(thunder.variant, 'int'));
+    }
+    thunder.waitDueAt = Date.now() + delayMs;
+    thunder.waitTimer = setTimeout(function () { thunderBegin(token); }, delayMs);
+    thunderLog('flash', delayMs, thunder.variant);
+  }
+  function thunderBegin(token) {
+    thunder.waitTimer = null;
+    if (token !== thunder.token) return;
+    if (!GAME || document.visibilityState === 'hidden' || Date.now() - thunder.waitDueAt > THUNDER_OVERDUE_GRACE_MS) { // a restart, or the page was asleep: this thunder is long gone
+      thunderLog('dropped'); thunderEnd(token);
+      if (GAME && thunder.active && thunderStormNow(GAME)) thunderArm(thunderCadence().gap, 'overdue'); // (a storm that is still on carries on, one strike at a time)
+      return;
+    }
+    var playing = false;
+    try { playing = thunderPlay(token); } catch (e) { console.warn('[THUNDER] could not play:', describeError(e)); }
+    if (!playing) thunderEnd(token);
+    if (thunder.active && !thunderStormNow(GAME)) thunderSync(GAME); // it stopped thundering since the last tick: line up nothing
+    if (thunder.active) thunderArm(thunderCadence().gap, 'next');    // thunder is underway (or skipped): the next strike is 20-75 s out
+  }
+  // Called after every environment tick (and at load, and when the page returns). Idempotent: it changes the schedule only when a storm BEGINS or ENDS.
+  function thunderSync(state) {
+    if (state !== GAME) return;
+    var weatherStorm = !!state && thunderStormNow(state), visible = document.visibilityState !== 'hidden', storm = weatherStorm && visible;
+    if (!weatherStorm && visible) thunder.afterResume = false; // a storm that ended while the page was away leaves no mark on the next one
+    if (storm && !thunder.active) { // a thunderstorm BEGINS
+      thunder.active = true;
+      var cad = thunderCadence();
+      var resumed = thunder.afterResume; thunder.afterResume = false;
+      thunderArm(resumed ? cad.gap : cad.first, resumed ? 'resume' : 'first');
+    } else if (storm && thunder.timer == null && !thunder.strikeActive) { // (cannot normally happen: a storm that is on always has a strike scheduled or in flight)
+      thunderArm(thunderCadence().gap, 'rearm');
+    } else if (!storm && thunder.active) { // the thunderstorm ENDS
+      thunder.active = false;
+      if (thunder.timer != null) { clearTimeout(thunder.timer); thunder.timer = null; } // no further strikes; a strike already flashed still gets its thunder (waitTimer is left alone)
+      thunderLog('stormEnded');
+    }
+  }
+  // The page was hidden / put away: forget everything pending. Nothing is caught up when it returns.
+  function thunderSuspend() {
+    var was = thunder.active;
+    thunder.active = false;
+    if (thunder.timer != null) { clearTimeout(thunder.timer); thunder.timer = null; }
+    if (thunder.waitTimer != null) { clearTimeout(thunder.waitTimer); thunder.waitTimer = null; }
+    thunder.token++;
+    thunder.strikeActive = false;
+    if (thunder.capTimer != null) { clearTimeout(thunder.capTimer); thunder.capTimer = null; }
+    thunderFlashClear();
+    thunder.afterResume = was || thunder.afterResume;
+    thunderLog('suspended');
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') thunderSuspend();
+    else thunderSync(GAME);
+  });
+  window.addEventListener('pagehide', thunderSuspend);
+  window.addEventListener('pageshow', function () { thunderSync(GAME); });
+
+  // TEST SCENARIOS ONLY (?scenario=thunderstorm / thunderstorm-fast): holds a real-looking THUNDERSTORM as the live sky at the end of every environment tick,
+  // exactly the fields a real code-95 reading writes (applyRealEnvironmentToLive), so the rain, the header and the thunder all see the real thing. Does nothing
+  // in a normal load (thunderScenarioStorm is false), and nothing once the scenario's STORM bar has cleared it.
+  function thunderScenarioForceSky(state) {
+    if (!thunderScenarioStorm || !thunderScenarioForced || !state) return;
+    var w = state.weather;
+    w.condition = 'squall'; w.sky = 'THUNDERSTORM'; w.rainLevel = 'heavy'; w.cloudPct = 95; w.precipMm = 6;
+  }
+  function thunderScenarioToggle() {
+    if (!thunderScenarioStorm || !GAME) return false;
+    thunderScenarioForced = !thunderScenarioForced;
+    if (thunderScenarioForced) thunderScenarioForceSky(GAME); else fallbackSkyToLive(GAME);
+    sanitizeLiveWeather(GAME);
+    try { updateAudioForState(GAME); } catch (e) {}
+    try { updateNavStrip(GAME); } catch (e) {}
+    thunderSync(GAME);
+    saveGameState(GAME);
+    return thunderScenarioForced;
   }
 
   /* --------------------------------------------------------------
@@ -22374,6 +22696,18 @@
     scenarioTrack(s, 10);
     return s;
   }
+  // On deck in the open Pacific with a THUNDERSTORM as the live sky (the same fields a real code-95 reading writes). The two thunderstorm scenarios hold it
+  // there at the end of every environment tick (thunderScenarioForceSky) until the STORM bar clears it.
+  function scenarioThunderstorm() {
+    var miles = 800, s = scenarioBase(7), pos = scenarioRoutePosition(miles);
+    scenarioOpenWater(s, pos.lat, pos.lon, FINAL_DEST.lat, FINAL_DEST.lon, miles, pos.leg);
+    s.boat.sailConfig = 'full';
+    s.boat.cabinLightsOn = true; s.boat.accessoryOn = true; // light below, and power for the Ship's Computer
+    s.crew.location = 'above'; s.crew.atHelm = false;
+    s.weather.seaState = 4;
+    thunderScenarioForceSky(s);
+    return s;
+  }
   function scenarioRescue() {
     var s = scenarioBase(7), w = WAYPOINTS[13];
     scenarioOpenWater(s, w.lat, w.lon, FINAL_DEST.lat, FINAL_DEST.lon, 1500, 13);
@@ -22389,6 +22723,8 @@
     'harbor-engine': { about: 'The same, with the engine already running and the sails already furled, so the arrival skips FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(true); } },
     'cape': { about: 'Just short of the open-Pacific line (the longitude of Cape Flattery), engine running. A few minutes on, open water begins: the course is yours, MARINE FORECAST opens, the real wind takes over.', build: scenarioCape },
     'rescue': { about: 'Mid-Pacific, three minutes from going three days without a drink. Tests the rescue: the two lines, CALL FOR HELP, the SOS and the end-of-game summary.', build: scenarioRescue },
+    'thunderstorm': { about: 'On deck in the open Pacific, in a real-looking THUNDERSTORM held in place. The first flash comes 5-25 seconds after it opens, then one every 20-75 seconds; each thunder follows its flash by 0.5-4 seconds (EXT on deck, INT below). Turn SOUND on to hear it; the flash happens either way. The amber STORM bar clears the storm (no more strikes) and brings it back.', build: scenarioThunderstorm },
+    'thunderstorm-fast': { about: 'The same storm with the long waits shortened for testing only: the first flash 2-4 seconds in, then one every 6-14 seconds. The flash-to-thunder delay is the real 0.5-4 seconds. Normal play never uses the short waits.', build: scenarioThunderstorm },
   };
 
   /* --------------------------------------------------------------
@@ -22523,6 +22859,15 @@
     b.style.cssText = 'flex-shrink:0;text-align:center;font-size:0.62rem;letter-spacing:0.1em;padding:0.18rem 0.5rem;background:var(--amber);color:var(--bg);';
     var crt = document.getElementById('crt');
     crt.insertBefore(b, document.getElementById('topbar'));
+    if (thunderScenarioStorm) { // a full-width bar (a real tap target on a phone) under the banner: clears the held storm / brings it back
+      var bar = document.createElement('button');
+      bar.id = 'scenario-storm-btn'; bar.type = 'button';
+      bar.style.cssText = 'flex-shrink:0;display:block;width:100%;font:inherit;font-size:0.8rem;letter-spacing:0.1em;text-align:center;padding:0.5rem;background:var(--bg);color:var(--amber);border:0;border-bottom:1px solid var(--amber);cursor:pointer;';
+      var label = function () { bar.textContent = thunderScenarioForced ? 'STORM: ON  (TAP TO CLEAR IT)' : 'STORM: CLEARED  (TAP TO BRING IT BACK)'; };
+      label();
+      bar.addEventListener('click', function () { thunderScenarioToggle(); label(); });
+      crt.insertBefore(bar, document.getElementById('topbar'));
+    }
     document.title = 'TEST · ' + name.toUpperCase();
   }
 
@@ -22563,6 +22908,7 @@
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + regionName(GAME)); // header now shows the current REGION, not a fixed "UNDERWAY" -- see updateNavStrip's own ongoing refresh for how this stays live as the voyage progresses
     resolveInterruptedEngineFailure(GAME); // a reload part-way through an engine failure sequence: the timers are gone, so settle it before any time is simulated
     var ticks = catchUpFromRealTime(GAME);
+    thunderSync(GAME); // THUNDER + LIGHTNING: a storm that is on at load is noticed even when less than a tick has passed
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
     renderReturn(GAME, ticks);
