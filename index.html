@@ -166,6 +166,9 @@
      its one button are there. READING THE JOURNAL (body.reading-journal) puts away only the log, so the written pages have the screen. No card, no frame, no close button. */
   body.story-mode #topbar, body.story-mode #navstrip { display: none; }
   body.story-mode #output { padding-top: 2.6rem; }
+  /* THE TITLE PAGE (a first visit only): the same terminal, with the header and the voyage strip put away -- its own lines stay. */
+  body.title-mode #topbar, body.title-mode #navstrip { display: none; }
+  body.title-mode #output { padding-top: 2.6rem; }
   body.story-mode #output > .entry, body.story-mode #output > .persist,
   body.reading-journal #output > .entry, body.reading-journal #output > .persist { display: none; }
 
@@ -620,6 +623,16 @@
   }
 
   .gap { height: 0.7rem; margin: 0; }
+
+  /* THE JOURNAL -- one rhythm for every page of it, whether it is being written or being read: the title and the date sit together, a clear space, then the
+     paragraphs a little apart (a blank line in the story's own text starts a slightly wider space), and a wider space between one entry and the next. */
+  .journal-entry { margin: 0; }
+  .journal-entry + .journal-entry { margin-top: 2.2rem; }
+  .journal-entry .journal-title { margin: 0 0 0.15rem; }
+  .journal-entry .journal-stamp { margin: 0 0 0.95rem; }
+  .journal-entry .journal-para { margin: 0 0 0.65rem; }
+  .journal-entry .journal-para.journal-block { margin-top: 1.05rem; }
+  .journal-entry .journal-para:last-child { margin-bottom: 0.35rem; }
 
   /* Shared label/value row treatment -- HELM, MARINE WEATHER, GPS,
      electrical/battery, GALLEY/SALOON/CABIN/HEAD status, NAV STATION,
@@ -10074,6 +10087,7 @@
       playMarinaOneShot('marinaSound', null, function () { marinaAmbienceStarted.marinaSound = false; });
     }
   }
+  var introPending = false; // true from the moment a fresh voyage's first screens (the title page, the opening story) are up until CONTINUE is pressed: nothing is saved or caught up before then, so a reload shows them again
   var marinaNightStart = null; // set by this page's opening screen (renderIntroStory): whether the voyage began in the dark. null = no opening here (a reload part-way through the departure): nothing to retry.
 
   // Called once, at the start of LEAVING THE MARINA: fades whichever ambience
@@ -14221,7 +14235,7 @@
         { term: 'GALLEY', body: 'Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed.' },
         { term: 'CABIN', body: 'Sleep to recover energy, then choose WAKE UP when you are ready. Aim for a full night\u2019s sleep. Change clothes for the temperature: COMFORT ABOVE and COMFORT BELOW show how your current outfit feels in each place. If you are too warmly dressed to sleep, remove a layer first.' },
         { p: 'Wet clothing stays wet until dried. Change out of it, then use HANG WET CLOTHES. Clothes take time to dry. Wear the rain shell to protect your clothing in rain.' },
-        { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. Open the hatch to ventilate the cabin; close it when you want to retain warmth. Switch on HEATER at the NAV STATION when needed, remembering its battery cost.' },
+        { term: 'SALOON', body: 'Read, listen to music, write in the JOURNAL, or SIT A WHILE. Open the hatch to ventilate the cabin; close it when you want to retain warmth. Switch on HEATER at the NAV STATION when needed, remembering its battery cost.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
         { p: 'Take care of small chores when they appear. Basic care, reading, music, and quiet time help morale. You do not need to keep every condition perfect.' },
         { p: 'SIT A WHILE and JUST EXIST let you remain seated until you choose to leave. Observations reflect the conditions around you. The voyage keeps moving.' },
@@ -17067,7 +17081,7 @@
      state.story (the bunny on the shelf, the unlocked aft cabin with its SLEEP / PHOTO ALBUM / MOM'S JOURNAL, CODA in the tape list, the KAUAʻI folder on the
      computer), so they survive a reload.
      Sounds (audio/story/): handling_paper.mp3 ('paper': events 1, 4, 5, 6, 10), open_drawer.mp3 ('drawer': 8, 9), turn_page.mp3 ('page': each TURN PAGE in 12 and 13),
-     photo_album_turn_page.mp3 ('albumPage': each TURN PAGE in the album), unlock_door.mp3 ('unlock'), toy_car.mp3 ('toyCar': the cue that opens event 8), and
+     photo_album_turn_page.mp3 ('albumPage': each TURN PAGE in the album), unlock_door.mp3 ('unlock'), toy_car.mp3 ('toyCar': LOOPS from the start of event 8 -- five seconds of dots, then the text -- until INSPECT is pressed), and
      journal.mp3 -- which belongs ONLY to WRITE IN JOURNAL in the SALOON, never to a discovery. The dull knock that opens event 12 has no sound file yet; CODA is
      played by the real tape player (tape_start / Coda.mp3 / tape_stop).
      ============================================================ */
@@ -17077,6 +17091,8 @@
   // Where a step's button leads is described by `action`:
   //   { label, busy, audio, effect }  -- label: the button; busy: the working label shown with the dots; audio: a STORY sound played over the dots; effect: a STORY_EFFECTS key, applied as the action begins
   //   'end'                           -- the final content: its one button is BACK
+  // a step may also carry `lead` (seconds of bare dots, nothing else, before its text appears) and `loop` (a STORY sound that LOOPS from the moment the step
+  // begins -- through the lead -- until its button is pressed); both are used by the toy car (Event 8).
   // and a step with `pager` shows that STORY_PAGERS entry page by page (TURN PAGE, then BACK on the last page).
   var STORY_EVENTS = [
     { n: 1, id: 'dadsNote', title: "Dad's Note", ctx: ['nav'], miles: 0, back: 'nav',
@@ -17104,7 +17120,7 @@
           "‘Standing on toes doesn’t count.'"], action: 'end' },
       ],
       journal: [
-        "The dates line up with my childhood.",
+        "The dates line up with when I was little. Too young to remember any of it.",
         "Either those marks belong to someone else,",
         "or this boat has more of a history with us than Dad ever told me."],
       found: "Found old height marks on the cabin door frame." },
@@ -17176,7 +17192,7 @@
         "Somewhere in those dates, I was learning to walk."],
       found: "Found old marina invoices." },
 
-    { n: 7, id: 'aftCabin', title: "The Aft Cabin", ctx: ['below'], miles: 600, back: 'aftcabin',
+    { n: 7, id: 'aftCabin', title: "The Photo Album", ctx: ['below'], miles: 600, back: 'aftcabin',
       eligible: function (state) { return !state.story.aftCabinUnlocked; }, // the aft cabin must still be locked
       steps: [
         { text: [
@@ -17198,7 +17214,7 @@
 
     { n: 8, id: 'toyCar', title: "My Red Toy Car", ctx: ['below'], miles: 700, requires: 'aftCabin', back: 'below',
       steps: [
-        { cue: 'toyCar', text: ["A rolling sound inside a drawer as the boat rocks."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
+        { loop: 'toyCar', lead: 5, text: ["A rolling sound inside a drawer as the boat rocks."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
         { text: ["A red toy car, the same one from the photo."], action: 'end' },
       ],
       journal: [
@@ -17438,12 +17454,10 @@
   // over it -- one beat, not a sound followed by a pause. While the dots run the buttons are gone, so nothing can be tapped twice or skipped ahead.
   var STORY_PACE_SECONDS = 4;
   var STORY_THOUGHTS = [
-    "I want to remember this.",
     "I need to write this down.",
     "This belongs in the journal.",
-    "I don’t want to forget this.",
     "I should put this in the journal.",
-    "I want to get this down before I lose it.",
+    "I want to write this down before I forget.",
   ];
   var lastStoryThought = -1; // session only -- so the same thought does not come twice running
 
@@ -17457,6 +17471,48 @@
     var over = !!(state && ((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none')));
     document.body.classList.toggle('story-mode', !!(pc && pc.id === 'story-step' && pc.ev && !over));
     document.body.classList.toggle('reading-journal', !!(pc && pc.id === 'journal-reading' && !over));
+    storyLoopSync(state);
+  }
+
+  // A LOOPING STORY SOUND (the toy car in the drawer, Event 8): the game's own loop engine (a voice, repeating seamlessly on the audio clock) plays it for exactly as
+  // long as the discovery's screen is a step that asks for it and its button has not been pressed -- the five seconds of dots, then the text and INSPECT. Deriving it
+  // from what is on screen means a reload mid-step brings it back, and nothing can leave it running. SOUND OFF only mutes it (the engine's master mute).
+  var STORY_LOOP_FADE_SECONDS = 0.25;
+  var storyLoopVoice = makeLoopVoice('STORY LOOP');
+  var storyActing = false; // true from the moment a step's button is pressed until its result is shown (session only)
+  var storyLeadTimer = null;
+  function storyLoopWanted(state) {
+    var pc = state && state.pendingChoice;
+    if (!pc || pc.id !== 'story-step' || !pc.ev || storyActing) return null;
+    if ((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none')) return null;
+    var ev = STORY_EVENTS_BY_ID[pc.ev], step = ev && ev.steps[pc.step || 0];
+    return step && step.loop && SALOON_AUDIO_FILES['story_' + step.loop] ? step.loop : null;
+  }
+  function storyLoopSync(state) {
+    if (!storyLoopVoice) return;
+    var key = storyLoopWanted(state);
+    if (key) storyLoopVoice.set(SALOON_AUDIO_FILES['story_' + key], SALOON_AUDIO_VOLUME['story_' + key], 0.05);
+    else if (storyLoopVoice.wanted() != null) storyLoopVoice.set(null, 0, STORY_LOOP_FADE_SECONDS);
+  }
+
+  // A step with a `lead`: its sound is already playing, the screen shows nothing but the animated dots for `lead` seconds, and then the text and button come up.
+  // The moment it ends is saved with the screen (leadUntil), so a reload picks up what is left of it.
+  function storyBeginLead(state, evId, stepIdx, room, seconds) {
+    state.pendingChoice = { id: 'story-step', ev: evId, step: stepIdx, page: 0, room: room, lead: true, leadUntil: Date.now() + seconds * 1000, options: [] };
+    syncStoryMode(state);
+    storyScheduleLead(state);
+  }
+  function storyScheduleLead(state) {
+    var pc = state.pendingChoice;
+    if (storyLeadTimer) { clearTimeout(storyLeadTimer); storyLeadTimer = null; }
+    storyLeadTimer = setTimeout(function () {
+      storyLeadTimer = null;
+      if (state.pendingChoice !== pc) return; // the screen has moved on (or the game was restarted)
+      storyRenderStep(state, pc.ev, pc.step, 0, pc.room, false, null, true);
+      renderOptions(state); // brings up the button, takes the dots away
+      saveGameState(state);
+      scrollToBottom();
+    }, Math.max(0, (pc.leadUntil || 0) - Date.now()));
   }
 
   function storyStepIsFinal(step, page) {
@@ -17477,8 +17533,9 @@
   // Shows one step of one event (its text) and makes its buttons the pending choice. `fresh` is true only when the step is being
   // reached for the first time this sitting (not a redraw after a reload), which is when a step's opening sound cue plays.
   // `foundAt` is the moment the discovery's final content came up (kept in the pending choice, so a reload keeps it): the LOG line is stamped with it.
-  function storyRenderStep(state, evId, stepIdx, page, room, fresh, foundAt) {
+  function storyRenderStep(state, evId, stepIdx, page, room, fresh, foundAt, leadDone) {
     var ev = STORY_EVENTS_BY_ID[evId], step = ev.steps[stepIdx];
+    if (step.lead && fresh && !leadDone) { storyBeginLead(state, evId, stepIdx, room, step.lead); return; }
     printBlank();
     if (step.pager) storyPrintLines(STORY_PAGERS[step.pager].pages[page]);
     else {
@@ -17497,6 +17554,8 @@
     var pc = state.pendingChoice;
     if (pc.pager) { storyRenderReread(state, pc.pager, pc.page || 0); return; }
     if (!STORY_EVENTS_BY_ID[pc.ev]) { state.pendingChoice = null; return; }
+    storyActing = false;
+    if (pc.lead) { syncStoryMode(state); storyScheduleLead(state); return; } // the dots (and the sound) carry on for what is left of the lead
     storyRenderStep(state, pc.ev, pc.step || 0, pc.page || 0, pc.room, false, pc.foundAt);
   }
 
@@ -17512,12 +17571,14 @@
   function storyDoAction(state) {
     var pc = state.pendingChoice, ev = STORY_EVENTS_BY_ID[pc.ev], step = ev.steps[pc.step], act = step.action;
     var next = pc.step + 1, room = pc.room;
+    storyActing = true;
+    storyLoopSync(state); // a looping sound ends as the button is pressed
     if (act.audio) playStoryOneShot(act.audio, null);
     if (act.effect) STORY_EFFECTS[act.effect](state);
     runShortAction(state, {
       label: act.busy,
       duration: STORY_PACE_SECONDS,
-      action: function (s) { storyRenderStep(s, ev.id, next, 0, room, true); },
+      action: function (s) { storyActing = false; storyRenderStep(s, ev.id, next, 0, room, true); },
     });
   }
 
@@ -17703,8 +17764,9 @@
        state.story.pending  -- the discoveries not yet written about: event ids, in the order they were found. A finished discovery joins it silently.
        state.story.journal  -- the written entries, oldest first: { id, t } (t = the voyage clock when it was written). The title and the prose are looked up in
                                STORY_EVENTS, so the story's words live in one place only.
-     WRITE IN JOURNAL (offered only while something is pending) writes exactly ONE entry, always the oldest pending: JOURNALING with its dots for as long as
-     journal.mp3 plays -- the only place that sound is used -- then the entry is committed and shown, and the journal menu comes back. READ opens the written entries,
+     WRITE IN JOURNAL (offered only while something is pending) writes exactly ONE entry, always the oldest pending: JOURNALING with its dots, the page
+     written out word by word at 100 words a minute while journal.mp3 loops (the only place that sound is used) until the last word; then the entry is
+     committed and the journal menu comes back. READ opens the written entries,
      newest first, using the book-reading sequence unchanged (SETTLING IN and book_open.mp3, the READING indicator while the pages are open, CLOSING BOOK and
      book_close.mp3 when she stops) -- but reading writes nothing, changes no time, plays no journal sound and adds nothing to the log.
      ============================================================ */
@@ -17728,14 +17790,39 @@
     return 'DAY ' + Math.max(1, day) + ' · ' + formatShipTime(ts);
   }
 
-  // One written entry: its event title, when it was written, and the finished prose.
-  function journalPrintEntry(state, entry) {
+  // One page of the journal. The story's journal text is lines; a line that does not end a sentence runs on into the next (so "...someone else," and
+  // "or this boat..." are one paragraph, not two with a gap between), and a blank line in the text starts a new block. Each paragraph is one <p>, and words
+  // flow and wrap naturally inside it.
+  function journalParagraphs(ev) {
+    var out = [], cur = null, block = false;
+    (ev.journal || []).forEach(function (ln) {
+      if (ln === '') { cur = null; block = true; return; }
+      if (cur && !/[.!?\u2026\u201D]$/.test(cur.text)) { cur.text += ' ' + ln; return; }
+      cur = { text: ln, block: block && out.length > 0 };
+      block = false;
+      out.push(cur);
+    });
+    return out;
+  }
+  function journalEntryShell(state, ev, ts) {
+    var root = document.createElement('div'); root.className = 'journal-entry';
+    var title = document.createElement('p'); title.className = 'line heading-label journal-title'; title.textContent = ev.title.toUpperCase();
+    var stamp = document.createElement('p'); stamp.className = 'line dim journal-stamp'; stamp.textContent = journalStamp(state, ts);
+    root.appendChild(title); root.appendChild(stamp);
+    return root;
+  }
+  function journalAddPara(root, text, block) {
+    var p = document.createElement('p'); p.className = 'line journal-para' + (block ? ' journal-block' : ''); p.textContent = text;
+    root.appendChild(p);
+    return p;
+  }
+  // A finished page: title, when it was written, and all of the prose.
+  function journalEntryEl(state, entry) {
     var ev = STORY_EVENTS_BY_ID[entry.id];
-    if (!ev) return;
-    printLine(ev.title.toUpperCase(), 'heading-label');
-    printLine(journalStamp(state, entry.t), 'dim');
-    printBlank();
-    storyPrintLines(ev.journal);
+    if (!ev) return null;
+    var root = journalEntryShell(state, ev, entry.t);
+    journalParagraphs(ev).forEach(function (p) { journalAddPara(root, p.text, p.block); });
+    return root;
   }
 
   function journalMenu(state) {
@@ -17755,22 +17842,75 @@
     journalMenu(state);
   }
 
+  // WRITING. The page appears -- title, then the date and time it is written -- and the words are written out one at a time, 100 words a minute, as if
+  // she were writing them. JOURNALING and its dots stay up for as long as she writes, and journal.mp3 LOOPS (the game's loop engine, seamless) for exactly
+  // that long: it ends with the last word. Her pace comes from the clock, not from a chain of timers, so a page left in the background catches up when
+  // the game is looked at again. The entry is committed when the last word is down (a reload part-way through writes nothing: the entry is still waiting).
+  // Nothing here needs the sound: with SOUND off, or a file that will not play, the page is simply written in silence.
+  var JOURNAL_WORD_MS = 600; // 100 words a minute
+  var JOURNAL_FADE_SECONDS = 0.3;
+  var journalWriteVoice = makeLoopVoice('JOURNAL WRITING');
+
   function performJournalWrite(state) {
-    if (uiBusy) return; // (a second tap while JOURNALING is ignored)
-    if (!state.story.pending.length) { cmdJournal(state, true); return; } // defensive -- the button is only offered while something is pending
-    runAudioSyncedAction(state, { // JOURNALING lasts as long as journal.mp3 plays; with SOUND off, or a sound that fails, it simply completes
-      label: 'JOURNALING',
-      playAudio: function (onEnded) { return playStoryOneShot('journal', onEnded); },
-      action: function (s) {
-        var st = s.story;
-        if (!st.pending.length) { journalMenu(s); return; }
-        var entry = { id: st.pending.shift(), t: storyNowTs(s) }; // the OLDEST waiting discovery, dated now
-        st.journal.push(entry);
-        printBlank();
-        journalPrintEntry(s, entry);
-        journalMenu(s);
-      },
-    });
+    if (uiBusy) return;
+    var st = state.story;
+    if (!st.pending.length) { cmdJournal(state, true); return; } // defensive -- the button is only offered while something is pending
+    var id = st.pending[0], ev = STORY_EVENTS_BY_ID[id];
+    if (!ev) { st.pending.shift(); cmdJournal(state, true); return; }
+    var ts = storyNowTs(state), paras = journalParagraphs(ev), words = 0;
+    paras.forEach(function (p) { words += p.text.split(' ').length; });
+
+    uiBusy = true;
+    optionsEl.innerHTML = '';
+    clearTempView();
+    journalMenu(state); // a reload part-way through lands on the journal menu, with WRITE IN JOURNAL still there
+    var choice = state.pendingChoice;
+
+    var blankEl = document.createElement('p'); blankEl.className = 'gap'; tempViewEl.appendChild(blankEl);
+    var labelEl = document.createElement('p'); labelEl.className = 'line heading-label'; labelEl.textContent = 'JOURNALING'; tempViewEl.appendChild(labelEl);
+    var dotsEl = document.createElement('p'); dotsEl.className = 'line dim'; dotsEl.textContent = ACTIVITY_DOT_FRAMES[0]; tempViewEl.appendChild(dotsEl);
+    var spaceEl = document.createElement('p'); spaceEl.className = 'gap'; tempViewEl.appendChild(spaceEl);
+    var frame = 0, dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
+    var root = journalEntryShell(state, ev, ts); tempViewEl.appendChild(root);
+    journalWriteVoice.set(SALOON_AUDIO_FILES.story_journal, SALOON_AUDIO_VOLUME.story_journal, 0.05); // loops until the last word
+    scrollToBottom();
+
+    var shown = 0, pi = 0, wi = 0, curP = null, t0 = Date.now(), timer = null;
+    function writeUpTo(n) {
+      while (shown < n && pi < paras.length) {
+        var ws = paras[pi].text.split(' ');
+        if (!curP) curP = journalAddPara(root, '', paras[pi].block);
+        curP.textContent = ws.slice(0, wi + 1).join(' ');
+        wi++; shown++;
+        if (wi >= ws.length) { pi++; wi = 0; curP = null; }
+      }
+    }
+    function done() {
+      if (timer) { clearInterval(timer); timer = null; }
+      clearInterval(dotTimer);
+      writeUpTo(words);
+      journalWriteVoice.set(null, 0, JOURNAL_FADE_SECONDS); // the last word is down: the sound ends with it
+      [labelEl, dotsEl, spaceEl].forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); }); // (the blank line above the page stays)
+      var entry = { id: id, t: ts };
+      var i = st.pending.indexOf(id);
+      if (i >= 0) st.pending.splice(i, 1);
+      if (!journalIsWritten(state, id)) st.journal.push(entry); // exactly one entry, dated when she began writing it
+      if (!root.parentNode) { var again = journalEntryEl(state, entry); if (again) tempViewEl.appendChild(again); } // the screen was cleared meanwhile: put the page back
+      if (state.pendingChoice === choice) journalMenu(state);
+      uiBusy = false;
+      renderOptions(state);
+      saveGameState(state);
+      updateAudioForState(state);
+      scrollToBottom();
+    }
+    function tick() {
+      var elapsed = Date.now() - t0;
+      writeUpTo(Math.min(words, Math.floor(elapsed / JOURNAL_WORD_MS) + 1));
+      scrollToBottom();
+      if (elapsed >= words * JOURNAL_WORD_MS) done();
+    }
+    tick();
+    if (uiBusy) timer = setInterval(tick, 100); // (tick() already finished a page with nothing to write)
   }
 
   function performJournalRead(state) {
@@ -17795,8 +17935,8 @@
     var list = state.story.journal;
     printBlank();
     for (var i = list.length - 1; i >= 0; i--) {
-      if (i < list.length - 1) { printBlank(); printBlank(); }
-      journalPrintEntry(state, list[i]);
+      var el = journalEntryEl(state, list[i]);
+      if (el) tempViewEl.appendChild(el); // (the space between one entry and the next is the stylesheet's)
     }
     state.pendingChoice = { id: 'journal-reading', options: [{ label: 'STOP READING', action: 'journal-stop-reading' }] };
     syncStoryMode(state);
@@ -20703,6 +20843,7 @@
 
   function activityDotsInfo(state) {
     if (state.pendingChoice && (state.pendingChoice.id === 'reading' || state.pendingChoice.id === 'journal-reading')) return { active: true, label: 'READING' }; // (the open journal is read the way a book is)
+    if (state.pendingChoice && state.pendingChoice.id === 'story-step' && state.pendingChoice.lead) return { active: true, label: null }; // STORY -- a step's lead: bare dots, nothing else, while its sound plays
     if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // for the whole of the sitting; the observations appear beneath it
     if (obsSession && state.pendingChoice && state.pendingChoice.id === 'existing') return { active: true, label: 'JUST EXISTING' }; // for the whole of the time at the bow; the observations appear beneath it
     if (state.crew.watchState === 'sleeping') return { active: true, label: null };
@@ -21495,7 +21636,67 @@
   // CONTINUE's own 3-second "CONTINUE. .. …" beat can run through the
   // normal runShortAction machinery like every other departure beat,
   // rather than a separate, one-off timer.
-  function renderIntroStory() {
+  // THE TITLE PAGE -- what someone sees on their very first visit (no save exists), before the opening story: the title and a few plain lines in the game's
+  // own type, a SOUND button (SOUND OFF until it is pressed; pressing it is the tap that unlocks audio, turns the sound on and starts the opening
+  // environment -- the marina -- right then), and BEGIN. BEGIN puts the page away, shows the animated dots alone for four seconds, and then the opening story
+  // (renderOpeningStory) appears exactly as it always has. Nothing is saved until CONTINUE resolves, so a reload on any of this shows the title page again.
+  var TITLE_DOTS_SECONDS = 4;
+  function renderTitlePage(nightStart) {
+    document.body.classList.add('title-mode');
+    printPersistentLine('LANDFALL', 'heading-label');
+    printPersistentBlank();
+    printPersistentLine('A real-time sailing voyage across the Pacific.');
+    printPersistentBlank();
+    printPersistentLine('Keep the boat and yourself going.');
+    printPersistentLine('The destination is clear. The past is not.');
+    printPersistentBlank();
+    printPersistentLine('The voyage continues while you\u2019re away.');
+    printPersistentLine('Check in when you can.');
+    printPersistentBlank();
+    printPersistentLine('Best experienced on iPhone. Sound recommended.');
+
+    optionsEl.innerHTML = '';
+    var soundOpt = document.createElement('button');
+    soundOpt.type = 'button';
+    soundOpt.className = 'option';
+    soundOpt.id = 'title-sound-btn';
+    soundOpt.textContent = '> ' + (muted ? 'SOUND OFF' : 'SOUND ON');
+    soundOpt.addEventListener('click', function () {
+      unlockAudio(); // the tap is a real gesture: the browser-required unlock
+      toggleMute();
+      updateSoundLabel();
+      soundOpt.textContent = '> ' + (muted ? 'SOUND OFF' : 'SOUND ON');
+      if (!muted) playMarinaAmbience(nightStart); // the environment begins as the sound comes on (idempotent: CONTINUE's own call later never doubles it)
+    });
+    optionsEl.appendChild(soundOpt);
+
+    var beginOpt = document.createElement('button');
+    beginOpt.type = 'button';
+    beginOpt.className = 'option';
+    beginOpt.id = 'title-begin-btn';
+    beginOpt.textContent = '> BEGIN';
+    beginOpt.addEventListener('click', function () {
+      unlockAudio(); // idempotent -- BEGIN is a gesture too
+      optionsEl.innerHTML = ''; // nothing can be tapped twice
+      resetOutputEl(); // the page is gone: only the dots
+      var dotsEl = document.createElement('p');
+      dotsEl.className = 'line dim';
+      dotsEl.textContent = ACTIVITY_DOT_FRAMES[0];
+      outputEl.insertBefore(dotsEl, tempViewEl);
+      var frame = 0, dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
+      setTimeout(function () {
+        clearInterval(dotTimer);
+        document.body.classList.remove('title-mode');
+        resetOutputEl();
+        renderOpeningStory(nightStart);
+        updateClock();
+      }, TITLE_DOTS_SECONDS * 1000);
+    });
+    optionsEl.appendChild(beginOpt);
+  }
+
+  // `skipTitle` is for a restart (NEW VOYAGE): "exactly like a first visit" from the opening story on, but the title page is only for someone arriving for the first time.
+  function renderIntroStory(skipTitle) {
     GAME = newGameState();
     // Reuses the exact same check newGameState() itself just used to
     // decide NAV LIGHTS/CABIN LIGHTS -- GAME.boat.navLightsOn is
@@ -21504,8 +21705,14 @@
     // answer from a fresh Date.now() here.
     var nightStart = GAME.boat.navLightsOn;
     marinaNightStart = nightStart;
+    introPending = true;
 
     resetOutputEl();
+    if (!skipTitle) { renderTitlePage(nightStart); return; }
+    renderOpeningStory(nightStart);
+  }
+
+  function renderOpeningStory(nightStart) {
     printPersistentLine('Take her home.');
     printPersistentLine('Dad\u2019s last request.');
     printPersistentBlank();
@@ -21527,6 +21734,7 @@
     btn.className = 'option';
     btn.textContent = '> CONTINUE';
     btn.addEventListener('click', function () {
+      introPending = false; // the voyage is under way: from here it is saved like any other
       unlockAudio(); // idempotent -- guaranteed to succeed now if the attempt above was blocked
       playMarinaAmbience(nightStart); // idempotent -- marinaAmbienceStarted's own flags mean this only starts whichever layer(s) never actually got going above
       updateSoundLabel();
@@ -21559,7 +21767,7 @@
     resetOutputEl();
     restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
-    renderIntroStory(); // "it just starts over exactly like a first visit" -- the same opening story screen a fresh boot shows, not a shortcut straight to the marina
+    renderIntroStory(true); // "it just starts over exactly like a first visit" -- the same opening story screen a fresh boot shows, not a shortcut straight to the marina
     updateClock();
   }
 
@@ -22008,7 +22216,7 @@
   // never-persisted state (see CHART's own top comment) -- a reload
   // mid-CHART needs the identical redirect, for the identical reason.
   function migrateStalePendingChoiceIfNeeded(state) {
-    if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
+    if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0 && !(state.pendingChoice.id === 'story-step' && state.pendingChoice.lead)) {
       state.pendingChoice = null;
     }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
@@ -22539,10 +22747,10 @@
       // simulation has been advanced, so whenever the game next loads
       // or resumes it catches up from there -- overwriting it with "now"
       // here would silently discard any time since the last live tick.
-      saveGameState(GAME);
+      if (!introPending) saveGameState(GAME); // (not while the title page / opening story is up: nothing exists to save yet)
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
-      var ticks = catchUpFromRealTime(GAME);
+      var ticks = introPending ? 0 : catchUpFromRealTime(GAME);
       if (ticks > 0) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
@@ -22588,7 +22796,7 @@
   });
 
   window.addEventListener('pagehide', function () {
-    if (!GAME) return;
+    if (!GAME || introPending) return;
     saveGameState(GAME); // save only -- see the note in the visibilitychange handler on why lastTick is never touched here
   });
 
