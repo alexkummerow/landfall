@@ -1259,6 +1259,7 @@
         morale: 72,
         watchState: 'awake',        // 'awake' | 'sleeping' — see the SLEEP note above wakeUp. Entered the moment SLEEP finishes, left only by the player's own WAKE UP.
         sleepStartedAt: null,        // voyageMinutes (the real-elapsed-time voyage clock) when this sleep began -- how long he has slept is always current clock minus this, so it counts correctly across a closed browser
+        sleepRoom: null,             // while in the bunk: which cabin he got into it from -- 'cabin' or 'aft' -- so waking (WAKE UP / GET UP) returns to that cabin's menu
         sleepCapMinutes: null,       // while in the bunk: how long he can actually sleep this time -- 600 (10 h), or 720 (12 h) if he was EXHAUSTED as it began. Past it he is awake, lying in bed -- see SLEEP CAP
         sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
@@ -1290,6 +1291,7 @@
         rainWetWarned: false,         // the one-time "my clothes are getting wet" warning has been given for this episode
         toolsOutSinceMinutes: null,   // voyageMinutes since a completed repair left tools out, or null — cleared by PUT AWAY TOOLS
         bunkUnmadeSinceMinutes: null, // voyageMinutes since last waking, or null once made — cleared by MAKE BUNK
+        bunkUnmadeRoom: null,         // which cabin's bunk it is -- 'cabin' or 'aft' (where he last slept); MAKE BUNK is offered in that cabin's menu. null = the CABIN
         dampCabinHours: 0,            // accumulates while below deck in bad weather; resets when the cabin is aired out
         cabinStuffySinceMinutes: null, // voyageMinutes dampCabinHours first crossed the threshold, or null — cleared by AIR OUT CABIN
         cabinDiscomfortKind: null,    // null | 'cold' | 'stuffy' -- the cabin condition the player has been continuously in, below deck and awake (for the occasional complaint)
@@ -7109,12 +7111,10 @@
 
   // The one-line observation the first time thirst / hunger gets serious; one of these, never the same twice running (pickVariant).
   var THIRST_NARRATION_LINES = [
-    'I could use some water before I do anything else.',
     'I could use a glass of water.',
     'My mouth feels dry.',
     'I should get something to drink.',
     'A long drink of water sounds good.',
-    'I\u2019ve let too much time pass without drinking.',
   ];
   var HUNGER_NARRATION_LINES = [
     "Stomach's stopped asking and started aching. I need real food.",
@@ -7985,7 +7985,7 @@
     var ctx = { minutes: minutes, afloat: !state || !state.nav || !state.nav.grounded };
     return pickVariant(DAILY_COPY[key], key, ctx).split('{D}').join(describeSleepDuration(minutes));
   }
-  function wakeUp(state) {
+  function wakeUp(state, room) {
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
     var capMinutes = sleepCapMinutes(state.crew), pastCap = minutesAsleep > capMinutes; // GET UP: he had stopped sleeping and was lying awake in the bunk
@@ -7993,6 +7993,7 @@
     state.crew.sleepStartedAt = null;
     state.crew.sleepCapMinutes = null;
     if (state.crew.bunkUnmadeSinceMinutes == null) state.crew.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
+    state.crew.bunkUnmadeRoom = room === 'aft' ? 'aft' : 'cabin'; // the bunk he slept in is the one to make (CABIN or AFT CABIN)
     if (pastCap) { // only the time actually slept is reported; he was not just woken, so no "woke to..." moment either
       log(state, 'Slept for ' + describeSleepDuration(capMinutes) + '. Been awake for a while.');
     } else {
@@ -13008,10 +13009,12 @@
       printLine('Too hot to sleep. I should change clothes.', 'amber');
       return;
     }
+    var sleepRoom = sleepFromAftCabin ? 'aft' : 'cabin'; // (read now: the flag is only up while this call is being handled, the action below runs after the sound)
     runAudioSyncedAction(state, {
       label: 'GETTING INTO BUNK',
       playAudio: function (onEnded) { return playCabinOneShot('sleep', onEnded); },
       action: function (s) {
+        s.crew.sleepRoom = sleepRoom;
         s.crew.watchState = 'sleeping';
         s.crew.sleepStartedAt = s.meta.voyageMinutes;
         s.crew.sleepCapMinutes = energyLevel(s.crew.fatigue) === ENERGY_EXHAUSTED ? SLEEP_CAP_EXHAUSTED_MINUTES : SLEEP_CAP_MINUTES; // SLEEP CAP: 12 h if EXHAUSTED as it begins, otherwise 10
@@ -13229,12 +13232,12 @@
   // room's own command calls for itself. Same underlying triggers,
   // same performChore dispatcher, same CHORE_DEFS — only how a due
   // chore surfaces to the player has changed.
-  function choreOptionIfDue(state, kind) {
+  function choreOptionIfDue(state, kind, room) { // room: 'aft' when asked from the AFT CABIN (only its MAKE BUNK uses it); otherwise the CABIN
     var c = state.crew;
     var due;
     if (kind === 'dishes') due = c.dishesDirtySinceMinutes != null;
     else if (kind === 'tools') due = c.toolsOutSinceMinutes != null;
-    else if (kind === 'bunk') due = c.bunkUnmadeSinceMinutes != null;
+    else if (kind === 'bunk') due = c.bunkUnmadeSinceMinutes != null && ((c.bunkUnmadeRoom === 'aft') === (room === 'aft')); // the bunk he last slept in: the CABIN's or the AFT CABIN's
     else if (kind === 'air') due = c.cabinStuffySinceMinutes != null;
     else if (kind === 'tidy') due = c.clutterCount >= CLUTTER_TIDY_THRESHOLD;
     else due = false;
@@ -13271,7 +13274,8 @@
   }
 
   function performChore(state, kind) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, CHORE_ROOM_CMD[kind]); return; }
+    var bunkInAft = kind === 'bunk' && state.crew.bunkUnmadeRoom === 'aft'; // MAKE BUNK from the AFT CABIN returns to the AFT CABIN
+    if (needsCabinLight(state)) { blockedByDarkness(state, bunkInAft ? 'show-aft-cabin' : CHORE_ROOM_CMD[kind]); return; }
     var def = CHORE_DEFS[kind];
     if (!def) return;
     if (def.canDo && !def.canDo(state)) {
@@ -13298,7 +13302,7 @@
       s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
       log(s, pickChoreLine(kind, life));
       flushNewLogEntries(s);
-      var returnCmd = chorePendingReturn(kind);
+      var returnCmd = bunkInAft ? cmdAftCabin : chorePendingReturn(kind);
       if (returnCmd) returnCmd(s);
     };
     var choreAudio = CHORE_AUDIO[kind];
@@ -17834,7 +17838,7 @@
       eligible: function (state) { return storyTapePlayable(state); },
       steps: [
         { text: ["A cassette case is wedged behind the bottom drawer."], action: { label: 'INSPECT', busy: 'INSPECTING' } },
-        { text: ["3/5/93 - CODA"], action: { label: 'LISTEN', busy: 'LISTENING', effect: 'startCoda' } },
+        { text: ["3/5/93 — CODA"], action: { label: 'LISTEN', busy: 'LISTENING', effect: 'startCoda' } },
         { text: [
           "Something else. Mom's death certificate folded up in the case.",
           "Dated 2/28/93."], action: 'end' },
@@ -18218,6 +18222,8 @@
       { label: 'PHOTO ALBUM', action: 'story:reread:album' },
     ];
     if (st.done.momJournal) options.push({ label: "MOM'S JOURNAL", action: 'story:reread:momJournal' });
+    var aftBunkOpt = choreOptionIfDue(state, 'bunk', 'aft'); // MAKE BUNK, if he slept back here
+    if (aftBunkOpt) options.push(aftBunkOpt);
     state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(options, 'leave-aft-cabin') };
   }
   function cmdEnterAftCabin(state) {
@@ -21576,6 +21582,8 @@
       cmdTryAftCabin(state);
     } else if (action === 'leave-aft-cabin') {
       cmdLeaveAftCabin(state);
+    } else if (action === 'show-aft-cabin') {
+      cmdAftCabin(state); // (BACK from "too dark" while making the aft bunk)
     } else if (action === 'aft-sleep') {
       sleepFromAftCabin = true;
       try { cmdSleep(state); } finally { sleepFromAftCabin = false; }
@@ -21715,7 +21723,11 @@
           runAudioSyncedAction(state, {
             label: gettingUp ? 'GETTING UP' : 'WAKING UP',
             playAudio: function (onEnded) { return playCabinOneShot('wakeUp', onEnded); },
-            action: function (s) { wakeUp(s); },
+            action: function (s) {
+              var room = s.crew.sleepRoom; s.crew.sleepRoom = null;
+              wakeUp(s, room);
+              if (room === 'aft') cmdAftCabin(s); else cmdCabin(s); // back in the cabin he slept in: that cabin's own menu (WAKE UP and GET UP alike)
+            },
           });
           break;
         case 'go-above-below':
@@ -22203,7 +22215,7 @@
     soundOpt.type = 'button';
     soundOpt.className = 'option';
     soundOpt.id = 'title-sound-btn';
-    soundOpt.textContent = '> ' + (muted ? 'SOUND OFF' : 'SOUND ON');
+    soundOpt.textContent = '> SOUND ON'; // the title page's button reads SOUND ON (copy only; the page always opens muted, and the tap handler below is unchanged)
     soundOpt.addEventListener('click', function () {
       unlockAudio(); // the tap is a real gesture: the browser-required unlock
       toggleMute();
@@ -22535,6 +22547,7 @@
     delete c.sleepAttemptStartedAt;
     if (c.sleepStartedAt === undefined) c.sleepStartedAt = null;
     if (c.watchState === 'sleeping' && c.sleepStartedAt == null) c.sleepStartedAt = state.meta.voyageMinutes;
+    if (c.sleepRoom === undefined) c.sleepRoom = null; // (a save from before it: waking returns to the CABIN)
     if (c.sleepCapMinutes === undefined) c.sleepCapMinutes = null; // SLEEP CAP: a save from before it reads as the ordinary 10 hours (sleepCapMinutes()), measured from its stored sleepStartedAt
     // SLEEP DEBT / HYGIENE ACCUMULATOR -- new fields. An existing save
     // starts carrying no sleep debt (exactly the ordinary accrual for
@@ -22554,6 +22567,7 @@
     migrateClothingState(c);
     if (c.toolsOutSinceMinutes === undefined) c.toolsOutSinceMinutes = null;
     if (c.bunkUnmadeSinceMinutes === undefined) c.bunkUnmadeSinceMinutes = null;
+    if (c.bunkUnmadeRoom === undefined) c.bunkUnmadeRoom = null; // (a save from before: the CABIN's bunk)
     if (c.dampCabinHours === undefined) c.dampCabinHours = 0;
     if (c.cabinStuffySinceMinutes === undefined) c.cabinStuffySinceMinutes = null;
     if (c.cabinDiscomfortKind === undefined) c.cabinDiscomfortKind = null;
