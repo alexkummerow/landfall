@@ -1259,6 +1259,7 @@
         morale: 72,
         watchState: 'awake',        // 'awake' | 'sleeping' — see the SLEEP note above wakeUp. Entered the moment SLEEP finishes, left only by the player's own WAKE UP.
         sleepStartedAt: null,        // voyageMinutes (the real-elapsed-time voyage clock) when this sleep began -- how long he has slept is always current clock minus this, so it counts correctly across a closed browser
+        sleepCapMinutes: null,       // while in the bunk: how long he can actually sleep this time -- 600 (10 h), or 720 (12 h) if he was EXHAUSTED as it began. Past it he is awake, lying in bed -- see SLEEP CAP
         sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
@@ -5960,7 +5961,9 @@
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
 
-    var asleep = c.watchState === 'sleeping';
+    // SLEEP CAP: in the bunk but past the cap (10 h, 12 h if he was EXHAUSTED as it began) he is no longer actually asleep -- from then on this tick is an
+    // ordinary awake one (fatigue and sleep debt build again, nothing is recovered). The same code runs for live time and for an offline catch-up.
+    var asleep = c.watchState === 'sleeping' && !sleepPastCap(state);
     var w = state.weather;
 
     if (asleep) {
@@ -7985,12 +7988,29 @@
   function wakeUp(state) {
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
+    var capMinutes = sleepCapMinutes(state.crew), pastCap = minutesAsleep > capMinutes; // GET UP: he had stopped sleeping and was lying awake in the bunk
     state.crew.watchState = 'awake';
     state.crew.sleepStartedAt = null;
+    state.crew.sleepCapMinutes = null;
     if (state.crew.bunkUnmadeSinceMinutes == null) state.crew.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
-    momentNoteWake(state, minutesAsleep);
-    log(state, sleepEntryText(minutesAsleep, state));
+    if (pastCap) { // only the time actually slept is reported; he was not just woken, so no "woke to..." moment either
+      log(state, 'Slept for ' + describeSleepDuration(capMinutes) + '. Been awake for a while.');
+    } else {
+      momentNoteWake(state, minutesAsleep);
+      log(state, sleepEntryText(minutesAsleep, state));
+    }
     flushNewLogEntries(state);
+  }
+
+  /* SLEEP CAP -- actual sleep is at most 10 hours, or 12 if he was EXHAUSTED (the game's own lowest ENERGY level) as he got into the bunk; the cap is
+     stored in crew.sleepCapMinutes when the sleep begins. Past it he is awake, lying in the bunk (the screen says LYING DOWN, the button GET UP), until the
+     player gets him up -- nothing moves him. It is all derived from the stored start, the cap and the voyage clock, so a reload or an offline catch-up
+     lands in exactly the same place and never begins another sleep. */
+  var SLEEP_CAP_MINUTES = 600, SLEEP_CAP_EXHAUSTED_MINUTES = 720;
+  function sleepCapMinutes(c) { return c.sleepCapMinutes === SLEEP_CAP_EXHAUSTED_MINUTES ? SLEEP_CAP_EXHAUSTED_MINUTES : SLEEP_CAP_MINUTES; } // (a save with no cap stored: the ordinary 10 hours)
+  function sleepPastCap(state) {
+    var c = state.crew;
+    return c.watchState === 'sleeping' && c.sleepStartedAt != null && state.meta.voyageMinutes - c.sleepStartedAt > sleepCapMinutes(c);
   }
 
   /* ============================================================
@@ -12994,6 +13014,7 @@
       action: function (s) {
         s.crew.watchState = 'sleeping';
         s.crew.sleepStartedAt = s.meta.voyageMinutes;
+        s.crew.sleepCapMinutes = energyLevel(s.crew.fatigue) === ENERGY_EXHAUSTED ? SLEEP_CAP_EXHAUSTED_MINUTES : SLEEP_CAP_MINUTES; // SLEEP CAP: 12 h if EXHAUSTED as it begins, otherwise 10
         s.crew.atHelm = false; // can't stay at the helm while asleep — see cmdHelm
         s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and WAKE UP never actually appears
         clearTempView(); // otherwise printEcho's "> SLEEP" (from the button that led here) sits there redundantly for the whole sleep session
@@ -20966,7 +20987,7 @@
 
 
     if (state.crew.watchState === 'sleeping') {
-      return [{ label: 'WAKE UP', action: 'wake-up' }];
+      return [{ label: sleepPastCap(state) ? 'GET UP' : 'WAKE UP', action: 'wake-up' }]; // (the same action, audio and transition either way -- SLEEP CAP)
     }
 
 
@@ -21362,7 +21383,7 @@
     if (state.pendingChoice && state.pendingChoice.id === 'story-step' && state.pendingChoice.lead) return { active: true, label: null }; // STORY -- a step's lead: bare dots, nothing else, while its sound plays
     if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // for the whole of the sitting; the observations appear beneath it
     if (obsSession && state.pendingChoice && state.pendingChoice.id === 'existing') return { active: true, label: 'JUST EXISTING' }; // for the whole of the time at the bow; the observations appear beneath it
-    if (state.crew.watchState === 'sleeping') return { active: true, label: null };
+    if (state.crew.watchState === 'sleeping') return { active: true, label: sleepPastCap(state) ? 'LYING DOWN' : 'SLEEPING' }; // (SLEEP CAP: past the cap he is awake in the bunk)
     return { active: false, label: null };
   }
 
@@ -22510,6 +22531,7 @@
     delete c.sleepAttemptStartedAt;
     if (c.sleepStartedAt === undefined) c.sleepStartedAt = null;
     if (c.watchState === 'sleeping' && c.sleepStartedAt == null) c.sleepStartedAt = state.meta.voyageMinutes;
+    if (c.sleepCapMinutes === undefined) c.sleepCapMinutes = null; // SLEEP CAP: a save from before it reads as the ordinary 10 hours (sleepCapMinutes()), measured from its stored sleepStartedAt
     // SLEEP DEBT / HYGIENE ACCUMULATOR -- new fields. An existing save
     // starts carrying no sleep debt (exactly the ordinary accrual for
     // however long it's currently been awake), and its hygiene picks up
