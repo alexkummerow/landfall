@@ -10390,7 +10390,7 @@
       playMarinaOneShot('marinaSound', null, function () { marinaAmbienceStarted.marinaSound = false; });
     }
   }
-  var introPending = false; // true from the moment a fresh voyage's title page is up until BEGIN is pressed: nothing is saved or caught up before then, so a reload shows it again
+  var introPending = false; // true from the moment a fresh voyage's title page is up until the intro's CONTINUE is pressed: nothing is saved or caught up before then, so a reload shows it again
   var marinaNightStart = null; // (the marina opening no longer exists; kept so the marina audio below stays exactly as it was)
 
   // Called once, at the start of LEAVING THE MARINA: fades whichever ambience
@@ -12593,7 +12593,7 @@
   // in look or in truth.
   //
   // The helm never steers by itself: the heading is the player's (CHANGE COURSE, or SET COURSE FOR WAYPOINT / SET COURSE FOR NĀWILIWILI, which each take a bearing
-  // once, from where SOLACE is at that moment) and AUTOPILOT only holds it. The GPS chart (the same one as at the NAV STATION) sits under the instrument block.
+  // once, from where SOLACE is at that moment) and AUTOPILOT only holds it. The GPS is its own full-screen app (the GPS button, under HELM).
   function cmdHelm(state) {
     var nav = state.nav;
     if (needsNavLights(state)) { blockedByNavLights(state); return; }
@@ -12620,7 +12620,6 @@
       }
       printBlank();
       printLine('Rudder is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      printGps(state, 'helm');
       state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([autopilotRow]), 'cancel') };
       return;
     }
@@ -12641,7 +12640,6 @@
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    printGps(state, 'helm'); // the GPS (the same chart as at the NAV STATION), under the instrument block
     state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([{ label: 'CHANGE COURSE', action: 'cmd:change-course' }, autopilotRow]), 'leave-helm') };
   }
 
@@ -14207,11 +14205,12 @@
   // else. Groups are separated by blank vertical spacing ALONE
   // (groupedOptions' plain invisible spacer) -- no horizontal rule of
   // any kind anywhere on this screen.
-  // NAV STATION's tools group, in this exact order: MARINE FORECAST (always listed; until SOLACE has full control in the open Pacific it will not open --
+  // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed; until SOLACE has full control in the open Pacific it will not open --
   // cmdMarineForecast says marine weather starts broadcasting there, the way AUTOPILOT says open sailing begins there), SHIP'S COMPUTER. SOLACE HANDBOOK and
-  // STATUS form the next group (see cmdNavStation). The GPS chart has no row here: it is drawn on the screen itself, under the readings (printGps).
+  // STATUS form the next group (see cmdNavStation).
   function navStationToolRows(state) {
     var rows = [];
+    rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
     rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
     return rows;
@@ -14252,7 +14251,6 @@
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
     }
-    printGps(state, 'nav'); // the GPS chart, in the place the instruments used to be
     var toolsOpt = choreOptionIfDue(state, 'tools');
     var extraGroup = [];
     if (toolsOpt) extraGroup.push(toolsOpt);
@@ -14416,7 +14414,7 @@
         { term: 'WIND FROM', body: 'The direction the wind comes from.' },
         { term: 'POINT OF SAIL', body: 'Your angle to the wind.' },
         { p: 'Use CHANGE COURSE to choose a heading. SET COURSE FOR WAYPOINT and SET COURSE FOR N\u0100WILIWILI each take the bearing from where SOLACE is now. The boat turns gradually, then holds that heading. Neither keeps steering toward its target afterward.' },
-        { p: 'The GPS under the helm readings is the same chart as the GPS at the NAV STATION.' },
+        { p: 'The GPS button under HELM opens the same chart as the GPS button at the NAV STATION.' },
         { p: 'AUTOPILOT holds the heading you are on when you switch it on. It does not follow the route or the waypoints, choose a destination, or adjust for changing wind.' },
         { p: 'While you are at the helm, you hold the course yourself and do not need autopilot. Switch on AUTOPILOT before leaving the helm to keep SOLACE holding that heading. Without it, the heading can wander.' },
         { p: 'You always choose your own changes of heading. If your next waypoint or the destination is directly upwind, sail at an angle to it and change sides when needed. This zigzag approach is called tacking.' },
@@ -14425,7 +14423,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The GPS shows SOLACE, her track, and your route. It sits under the HELM readings above deck and replaces the instruments at the NAV STATION below. Both are the same chart: the same position, route and waypoints, and a change made at one shows at once at the other. SHIP\u2019S COMPUTER opens it too.' },
+        { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button under HELM above deck, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. SHIP\u2019S COMPUTER opens it too.' },
         { p: 'The solid line is your track. The dashed line through the numbered markers is your route. The thin line runs from SOLACE to the waypoint you are heading for, and the faint dotted line is the direct line to N\u0101wiliwili, not a safe sailing route. Check for land before following any of them.' },
         { term: 'ADD A WAYPOINT', body: 'Tap water on the chart. The new waypoint goes at the end of the route.' },
         { term: 'MOVE, DELETE, INSERT', body: 'Tap a waypoint to select it. MOVE, then tap water, to move it. DELETE removes it. INSERT, then tap water, adds a waypoint after it. You can also drag a waypoint. The first waypoint can be moved or deleted like any other.' },
@@ -15552,14 +15550,14 @@
   }
 
   /* ======================================================================
-     THE GPS -- one chart, shown in three places
+     THE GPS -- one chart, opened from three places
      ----------------------------------------------------------------------
      A single widget (#gps-widget: the map, the readouts, the waypoint tools) and a single MapLibre map, so every place the chart appears is the SAME chart: one
      position, one planned route, one set of waypoints, one track. The widget is not copied: it is MOVED. gpsMount(host) puts it into a host element and
      gpsPark() puts it away again (off screen, in #gps-park), and clearTempView / resetOutputEl park it before they wipe the screen, so a redraw never destroys it.
-       'helm'     -- under the instrument block on the HELM screen (printGps), inside the scrolling text at its normal width
-       'nav'      -- on the NAV STATION screen (printGps), in the place the instruments used to be
-       'computer' -- the Ship's Computer's GPS app (cmdChart), the only place the chart fills the screen
+       'computer' -- the full-screen GPS (cmdChart). The GPS button under HELM above deck, the GPS button above MARINE FORECAST at the NAV STATION and the Ship's
+                     Computer's GPS app all open it, and its button (BACK / RETURN) goes back to whichever of them it was opened from.
+       ('helm' / 'nav' -- inline hosts printGps can still make; nothing uses them now.)
      Every edit (a waypoint added, moved, deleted; a waypoint reached) changes state.route, and gpsRefresh redraws from it on every tick, so a change made in one
      place is the very thing the next place shows. The camera is the one thing the places do not share by force: it is framed on the boat when the widget is first
      shown and again when it comes back after half a minute away (the boat will have moved); in between it stays where the player left it. BOAT and ALL re-frame it.
@@ -15978,14 +15976,28 @@
     });
   }
 
-  // The Ship's Computer's GPS app: the widget fills #chart-screen. (The Helm and the Nav Station show the same widget with printGps.)
-  function cmdChart(state) {
+  // The full-screen GPS: the widget fills #chart-screen. (Opened from the GPS buttons and from the Ship's Computer.)
+  // The GPS fills the screen. It is opened from three places, and its one button takes the player back to the one it came from:
+  //   'computer' -- the Ship's Computer's GPS app (the button reads RETURN and goes back to the computer's home screen)
+  //   'deck'     -- the GPS button under HELM, above deck (BACK: the above-deck menu)
+  //   'nav'      -- the GPS button above MARINE FORECAST at the NAV STATION (BACK: the NAV STATION)
+  var chartOpenedFrom = 'computer';
+  function cmdChart(state, from) {
+    from = from || 'computer';
+    chartOpenedFrom = from;
     playNavStationOneShot('mouse');
+    chartReturnBtn.textContent = from === 'computer' ? '\u2190 RETURN' : '\u2190 BACK';
     chartOverlayEl.hidden = false;
     fitChartScreen();
     chartEdit.tool = 'add'; chartEdit.msg = '';
-    state.pendingChoice = { id: 'chart', options: [{ label: 'RETURN', action: 'cmd:ships-computer' }] };
+    // (if something wipes the screen while the chart is open, these are the buttons that are left)
+    state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'deck' ? { label: 'BACK', action: 'cancel' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
     gpsMount(chartScreenEl, 'computer', state);
+  }
+  function cmdGpsDeck(state) { cmdChart(state, 'deck'); }
+  function cmdGpsNav(state) {
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
+    cmdChart(state, 'nav');
   }
 
   // Shared by the GPS app's own RETURN button and (were it ever needed) any other exit path -- exactly the same shape as pongReturnToHome: computerOn untouched,
@@ -17593,6 +17605,8 @@
     sails: cmdSails,
     engine: cmdEngine,
     helm: cmdHelm,
+    'gps-deck': cmdGpsDeck,
+    'gps-nav': cmdGpsNav,
     'change-course': cmdChangeCourse,
     galley: cmdGalley,
     head: cmdHead,
@@ -20066,6 +20080,7 @@
     // walk forward to the bow (awake, above, under way, no grounding, no final arrival -- see obsAvailable).
     var aboveActions = [
       { label: 'HELM', action: 'cmd:helm' },
+      { label: 'GPS', action: 'cmd:gps-deck' },
       { label: 'SAILS', action: 'cmd:sails' },
       { label: 'ENGINE', action: 'cmd:engine' },
       { label: 'FISH', action: 'cmd:fish' },
@@ -21073,13 +21088,13 @@
     beginOpt.className = 'option';
     beginOpt.id = 'title-begin-btn';
     beginOpt.textContent = '> BEGIN';
-    beginOpt.addEventListener('click', function () { beginVoyage(); });
+    beginOpt.addEventListener('click', function () { beginIntro(); });
     optionsEl.appendChild(beginOpt);
   }
 
   // The first screen of a fresh voyage (see boot() below) and of a restart. GAME is a placeholder behind the title page: it exists so the rest of the page has a
   // game to look at (the clock, the sound button), but it is not a voyage -- the engine is off and the ambience held silent, nothing is simulated (the live loop
-  // waits for introPending) and nothing is saved. BEGIN replaces it with the real thing.
+  // waits for introPending) and nothing is saved. CONTINUE (after the intro) replaces it with the real thing.
   function renderIntroStory() {
     GAME = newGameState();
     GAME.boat.engineOn = false;
@@ -21089,8 +21104,75 @@
     renderTitlePage();
   }
 
-  // BEGIN. The player is aboard SOLACE in Sitka Sound, already underway: the engine running, the sails furled, the autopilot off, the helm theirs. Nothing is
-  // scripted and nothing happens by itself. Everything below runs inside the BEGIN tap, so the browser allows the audio to start: the engine's recording
+  // THE INTRO -- the scene SOLACE is in, told only with what is really there: the Sound's mountains and forest, its islands, the season on the peaks and the light for
+  // the hour. No weather is stated (nothing is known of it until the voyage is under way: the log says it as it happens) and nothing here is story. Nothing is logged or saved.
+  function introSceneStanzas(state) {
+    var d = new Date(state.meta.departedAt), hour = d.getHours(), month = d.getMonth();
+    var phase = getDaylightPhase(state);
+    var gulls = phase === 'sunrise' || phase === 'day' || phase === 'lateAfternoon' || phase === 'sunset';
+    var snow = month >= 9 || month <= 4; // October to May
+    var light;
+    if (phase === 'dawn') light = ['The sky is lightening behind the mountains.', 'The water is still dark.'];
+    else if (phase === 'sunrise') light = ['The sun is coming up behind the mountains.', 'The ridges are edged with light. The water below them is still in shadow.'];
+    else if (phase === 'day') light = [hour < 12 ? 'Morning light lies on the water.' : 'Afternoon light lies on the water.'];
+    else if (phase === 'lateAfternoon') light = ['The afternoon light is low, slanting across the water.'];
+    else if (phase === 'sunset') light = ['The sun is going down behind the outer islands.', 'The peaks hold the last of the light.'];
+    else if (phase === 'dusk') light = ['The light is going.', 'The mountains have turned dark against a paler sky.'];
+    else light = ['It is dark.', 'The mountains are black shapes against the sky, and the forest has no edge.'];
+    return [
+      ['Mountains stand straight up out of the water.', 'Dark spruce and hemlock run down to the shoreline.'],
+      [snow ? 'Snow lies on the high peaks, above the trees.' : 'Bare rock shows above the trees, with a little old snow in the gullies.',
+       'Islands crowd the Sound, each one forested down to its rocks, with kelp along the edges.'],
+      ['The air is cool. It smells of spruce, salt and low tide.', gulls ? 'Gulls work the water along the kelp.' : 'Water laps at the kelp along the shore.'],
+      light,
+      ['Beyond the outer islands, the Sound opens onto the North Pacific.'],
+    ];
+  }
+  function renderIntroScene() {
+    introSceneStanzas(GAME).forEach(function (lines, i) {
+      if (i > 0) printPersistentBlank();
+      lines.forEach(function (t) { printPersistentLine(t); });
+    });
+    optionsEl.innerHTML = '';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'option';
+    btn.textContent = '> CONTINUE';
+    btn.addEventListener('click', function () { beginVoyage(); }); // the voyage, its clock and its sound begin with this tap
+    optionsEl.appendChild(btn);
+  }
+  // The screen the voyage opens on (after CONTINUE's three dots): the port, the boat, the way she points, the distance. Like the intro, it is never logged.
+  function renderStartScreen() {
+    printPersistentLine(DEPARTURE_PORT.toUpperCase(), 'heading-label');
+    printPersistentBlank();
+    printPersistentLine('SOLACE, a 35-foot ocean-cruising sailboat, is under power in Sitka Sound with her sails furled.');
+    printPersistentBlank();
+    printPersistentLine('The bow points west, toward the passes between the outer islands and the open Pacific.');
+    printPersistentBlank();
+    printPersistentLine('Ahead lies ' + ROUTE_DISTANCE_NM.toLocaleString() + ' nautical miles to Nāwiliwili, Kauaʻi, somewhere past the curve of the earth.');
+  }
+  // BEGIN: the title page goes, four seconds of dots, then the scene.
+  var TITLE_DOTS_SECONDS = 4;
+  function beginIntro() {
+    unlockAudio(); // idempotent -- BEGIN is a gesture too
+    optionsEl.innerHTML = ''; // nothing can be tapped twice
+    resetOutputEl(); // the page is gone: only the dots
+    var dotsEl = document.createElement('p');
+    dotsEl.className = 'line dim';
+    dotsEl.textContent = ACTIVITY_DOT_FRAMES[0];
+    outputEl.insertBefore(dotsEl, tempViewEl);
+    var frame = 0, dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
+    setTimeout(function () {
+      clearInterval(dotTimer);
+      document.body.classList.remove('title-mode');
+      resetOutputEl();
+      renderIntroScene();
+      updateClock();
+    }, TITLE_DOTS_SECONDS * 1000);
+  }
+
+  // CONTINUE (the tap that ends the intro). The player is aboard SOLACE in Sitka Sound, already underway: the engine running, the sails furled, the autopilot off, the helm theirs. Nothing is
+  // scripted and nothing happens by itself. Everything below runs inside that tap, so the browser allows the audio to start: the engine's recording
   // joins its loop for the deck she is on exactly as it does for a saved voyage that resumes with the engine running (never a start.mp3), and the sea and
   // wind come up as they did when the old departure reached open water.
   function beginVoyage() {
@@ -21109,8 +21191,9 @@
     updateAudioForState(GAME);
     startLiveLoop();
     saveGameState(GAME);
-    renderReturn(GAME, 0);
     updateClock();
+    // the beat into the first screen: the intro stays up while the dots run, and the voyage's real time is already running (the clock began with this tap)
+    runShortAction(GAME, { label: 'CONTINUE', duration: 3, action: function (s) { resetOutputEl(); renderStartScreen(s); } });
   }
 
   function confirmRestart() {
@@ -21523,6 +21606,8 @@
     if (state.pendingChoice && state.pendingChoice.id === 'sails-choice') { // a save made on the old coastal SAILS screen (RAISE SAILS / FURL SAILS): rebuilt with the four settings
       state.pendingChoice.options = sailOptions(state);
     }
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'deck') { state.pendingChoice = null; return; } // a reload with the GPS open from the above-deck menu: back at that menu
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'nav') { cmdNavStation(state); return; } // ... or from the NAV STATION: back there
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
     }
@@ -21899,7 +21984,13 @@
   chartReturnBtn.addEventListener('click', function () {
     if (!GAME || uiBusy) return;
     playNavStationOneShot('mouse');
-    chartReturnToHome(GAME);
+    if (chartOpenedFrom === 'computer') { chartReturnToHome(GAME); return; }
+    clearTempView(); // closes the full-screen GPS and puts the widget away
+    if (chartOpenedFrom === 'nav') { printEcho('nav-station'); runCommand(GAME, 'nav-station'); return; } // back at the NAV STATION
+    GAME.pendingChoice = null; // back at the above-deck menu
+    renderOptions(GAME);
+    saveGameState(GAME);
+    scrollToBottom();
   });
   chartToolBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
