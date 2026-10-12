@@ -2221,7 +2221,7 @@
     { id: 'above',    kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },              // only while the player is below deck; the usual GOING ABOVE does the work
     { id: 'furl',     kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl' } },              // skipped if the sails are already furled (motor-sailing: it is the one action on entering the harbor)
     { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } },    // skipped if the engine is already running
-    { id: 'sight',    kind: 'auto',   observe: true, secs: 5 },   // an observation of the harbor, alone on the screen for 5 s (day or night), then HEADING TOWARD THE MARINA
+    { id: 'sight',    kind: 'action', sight: true, option: { label: 'CONTINUE', action: 'finale-continue' } },   // an observation of the harbor (day or night) on the screen, with a CONTINUE under it; CONTINUE starts HEADING TOWARD THE MARINA
     { id: 'head',     kind: 'auto',   label: 'HEADING TOWARD THE MARINA', secs: 25, done: function (s) { finaleLog(s, 'Entered the marina.'); } },
     { id: 'lineup',   kind: 'action', option: { label: 'LINE UP WITH SLIP', action: 'finale-lineup' } },
     { id: 'furlin',   kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl-in' } },          // NO DIESEL ONLY (skipped otherwise): the sails come down at the point where a fueled arrival turns the engine off, and then COASTING IN
@@ -2256,7 +2256,7 @@
   };
   var FINALE_OLD_TO_NEW = { making: 'head', approach: 'head', slowing: 'head', lining: 'lineup', ashes: 'reflect1', fade: 'title', wind: 'title', home: 'title', ashesout: 'title', beat: 'reflect0' }; // ('home' was "She's home.", now gone; 'ashesout', the text fading out after the ashes, is now the last 3 s of the ashes themselves)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
-  // The observation before the marina: the harbor as it looks by day, or at night (the same day / night call the birds and the crickets are chosen by). Shown alone for 5 s.
+  // The observation before the marina: the harbor as it looks by day, or at night (the same day / night call the birds and the crickets are chosen by). Shown on the screen with a CONTINUE under it.
   var FINALE_SIGHT_DAY = 'Nāwiliwili sits beneath steep green hills, the slopes folded deep with trees and rain. Palms move along the shore. Red earth shows through where the land has been cut back, and clouds catch against the ridges above the harbor.';
   var FINALE_SIGHT_NIGHT = 'The hills around Nāwiliwili disappear into darkness. Palms and ridgelines become silhouettes against the sky, with only a few lights scattered along the shore. The air feels warmer here, heavy with plants, salt, and damp earth.';
   function finaleSightText(state) { return getDaylightPhase(state) !== 'night' ? FINALE_SIGHT_DAY : FINALE_SIGHT_NIGHT; }
@@ -2383,17 +2383,6 @@
     if (st.kind === 'auto') {
       var token = f.step + ':' + f.stepAt;
       var sinceStep = (Date.now() - f.stepAt) / 1000, lead = st.lead || 0;
-      if (st.observe) { // an observation: one plain line of the player's own voice, alone on the screen for st.secs (not logged); a reload shows it again for what is left of the 5 s
-        if (uiBusy) return;
-        var seeLeft = st.secs - sinceStep;
-        if (seeLeft < 0.4) { finaleRendering = null; finaleAdvance(state); return; }
-        if (finaleRendering !== token) {
-          finaleRendering = token;
-          optionsEl.innerHTML = ''; clearTempView(); printBlank(); printLine(finaleSightText(state)); scrollToBottom();
-        }
-        finaleSchedule(state, seeLeft + 0.03);
-        return;
-      }
       if (uiBusy || finaleRendering === token) return;
       if (sinceStep < lead) { // a quiet beat after the action that brought us here (ENGINE OFF, FURL SAILS) before this step begins: nothing on the screen, nothing started yet
         optionsEl.innerHTML = ''; clearTempView();
@@ -2407,6 +2396,14 @@
       if (st.handoff) finaleBeginHandoff(state, remaining); // ... and so does the crossfade from the sea to the marina
       runShortAction(state, { label: st.label, duration: remaining, action: function (s) { finaleRendering = null; if (st.done) st.done(s); finaleAdvance(s); } });
     } else if (st.kind === 'action') {
+      if (st.sight) { // the observation of the harbor: up once for this step, then it waits for CONTINUE for as long as the player likes (a reload, or anything that rebuilds the screen, puts it back)
+        var sightToken = f.step + ':' + f.stepAt;
+        if (finaleRendering !== sightToken) {
+          if (uiBusy) { finaleSchedule(state, 0.3); return; } // the action before it is still finishing
+          finaleRendering = sightToken;
+          clearTempView(); printBlank(); printLine(finaleSightText(state)); scrollToBottom();
+        }
+      }
       if (st.read) finaleShowReading(st.read);
       if (!uiBusy) renderOptions(state);
       if (st.read) scrollToBottom(); // (the CONTINUE bar may have just appeared under the text: keep the last line clear of it)
@@ -21960,7 +21957,7 @@
           });
           break;
         case 'finale-continue':
-          if (finaleAtStep(state, 'reflect0') || finaleAtStep(state, 'reflect1') || finaleAtStep(state, 'reflect2') || finaleAtStep(state, 'reflect3') || finaleAtStep(state, 'reflect4')) finaleAdvance(state);
+          if (finaleAtStep(state, 'sight') || finaleAtStep(state, 'reflect0') || finaleAtStep(state, 'reflect1') || finaleAtStep(state, 'reflect2') || finaleAtStep(state, 'reflect3') || finaleAtStep(state, 'reflect4')) finaleAdvance(state);
           break;
       case 'course-draft-confirm':
         state.nav.setCourse = state.nav.courseDraft;
