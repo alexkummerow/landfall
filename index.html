@@ -12804,7 +12804,7 @@
       { label: 'SNACKS', action: 'cmd:snacks' },
       { label: 'DRINKS', action: 'cmd:drink' },
     ];
-    if (heldCatches(state).length) options.push({ label: 'FRESH CATCH', action: 'cmd:fresh-catch' }); // only while there is a fish aboard to prepare
+    heldCatches(state).forEach(function (f) { options.push({ label: f.name.toUpperCase(), action: 'catch:' + f.speciesId }); }); // a fish aboard is a button under its own name (COHO SALMON, ...): its specialty meal and its sashimi are inside; no fish, no button
     var dishesOpt = choreOptionIfDue(state, 'dishes');
     if (dishesOpt) options.push(dishesOpt);
     state.pendingChoice = { id: 'galley-menu', options: pushBack(options, 'cancel') };
@@ -14560,7 +14560,7 @@
     {
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
-        { term: 'GALLEY', body: 'The GALLEY has MEALS, SNACKS, DRINKS, and FRESH CATCH. Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed. A fish you have caught waits in FRESH CATCH: cook it as its specialty meal, which uses the fish and kerosene and fills you like a meal, or eat it as SASHIMI, which uses only the fish and fills you like a snack. Fish does not keep, so eat it soon.' },
+        { term: 'GALLEY', body: 'The GALLEY has MEALS, SNACKS, and DRINKS. Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed. A fish you have caught appears in the GALLEY under its own name: cook it as its specialty meal, which uses the fish and kerosene and fills you like a meal, or eat it as SASHIMI, which uses only the fish and fills you like a snack. Fish does not keep, so eat it soon.' },
         { term: 'CABIN', body: 'Sleep to recover energy, then choose WAKE UP when you are ready. Aim for a full night\u2019s sleep. Change clothes for the temperature: COMFORT ABOVE and COMFORT BELOW show how your current outfit feels in each place. If you are too warmly dressed to sleep, remove a layer first.' },
         { p: 'Wet clothing stays wet until dried. Change out of it, then use HANG WET CLOTHES. Clothes take time to dry. Wear the rain shell to protect your clothing in rain.' },
         { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. CLIMATE shows the cabin temperature and holds the HEATER switch and the hatch. Open the hatch to ventilate the cabin; close it when you want to retain warmth. The heater burns kerosene, not battery.' },
@@ -15949,16 +15949,11 @@
 
   // ---- the camera ----
   function gpsPadding() { return gpsHostName === 'computer' ? { top: 60, bottom: 40, left: 40, right: 40 } : { top: 40, bottom: 30, left: 30, right: 30 }; }
-  // The boat and the next two waypoints (or Nawiliwili, when none is left). Bounds use the same unwrapLon the lines do, so a position near the date line still fits.
+  // THE BOAT VIEW: centred on SOLACE, zoomed in. (Zoom 11 is about nine nautical miles across on a phone; the thin line to the next waypoint runs off the edge when it is farther than that.)
+  var GPS_BOAT_ZOOM = 11;
   function fitChartView(state) {
-    var nav = state.nav, r = routeOf(state), ai = routeActiveIndex(r);
-    var bounds = new maplibregl.LngLatBounds([nav.lon, nav.lat], [nav.lon, nav.lat]);
-    if (ai >= 0) {
-      for (var i = ai; i < Math.min(r.points.length, ai + 2); i++) bounds.extend([unwrapLon(nav.lon, r.points[i].lon), r.points[i].lat]);
-    } else {
-      bounds.extend([unwrapLon(nav.lon, NAWILIWILI_HARBOR.lon), NAWILIWILI_HARBOR.lat]);
-    }
-    chartMap.fitBounds(bounds, { padding: gpsPadding(), maxZoom: 10, duration: 0 });
+    var nav = state.nav;
+    chartMap.jumpTo({ center: [nav.lon, nav.lat], zoom: GPS_BOAT_ZOOM, padding: gpsPadding() });
   }
   // The boat, every waypoint, and Nawiliwili.
   function chartFitAll(state) {
@@ -17134,7 +17129,7 @@
     // otherwise an uncooked snack. Every other snack (trail mix, energy
     // bar) and chocolate stay completely unaffected.
     if ((item.cooked || key === 'cupNoodles') && needsCabinLight(state)) {
-      blockedByDarkness(state, isHeldFish ? 'cmd:fresh-catch' : item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
+      blockedByDarkness(state, isHeldFish ? freshCatchBack(state) : item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
       return;
     }
 
@@ -17437,6 +17432,7 @@
     if (!sp) return [];
     return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: FISH_MEAL_BY_SPECIES[h.speciesId] || null }];
   }
+  function freshCatchBack(state) { var f = heldCatches(state)[0]; return f ? 'catch:' + f.speciesId : 'cmd:galley'; } // where BACK goes from a blocked preparation: the fish's own screen (the galley if it is gone)
   function freshCatchOptions(state) {
     return pushBack(heldCatches(state).map(function (f) { return { label: f.name.toUpperCase(), action: 'catch:' + f.speciesId }; }), 'cmd:galley');
   }
@@ -17451,7 +17447,7 @@
     var opts = [];
     if (f.meal) opts.push({ label: f.meal.toUpperCase(), action: 'eat:' + HELD_FISH_KEY });
     opts.push({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' });
-    return { id: 'fresh-catch-fish', options: pushBack(opts, 'cmd:fresh-catch') };
+    return { id: 'fresh-catch-fish', options: pushBack(opts, 'cmd:galley') };
   }
   function cmdFreshCatchFish(state, speciesId) {
     var choice = freshCatchFishChoice(state, speciesId);
@@ -17463,7 +17459,7 @@
   function performSashimi(state) {
     var fish = heldCatches(state)[0];
     if (!fish) { printBlank(); printLine("That's already gone.", 'dim'); return; }
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:fresh-catch'); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
+    if (needsCabinLight(state)) { blockedByDarkness(state, freshCatchBack(state)); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
     runShortAction(state, {
       label: 'PREPARING ' + fish.name.toUpperCase() + ' SASHIMI', transientLabel: true, duration: 3,
       action: function (s) {
