@@ -998,8 +998,8 @@
       <div class="ships-computer-screen">
         <img class="ships-computer-screen-bg" src="images/ships_computer_screen.png" alt="">
 
-        <!-- The three apps start at the top: PONG, GPS / VESSEL LOG. WINDY, once the system update has put it there,
-             is added in the slot to the right of VESSEL LOG (see syncWindyIcon).
+        <!-- The apps: PONG (top left) and VESSEL LOG (under it) are here; WINDY is added in the top-right slot, where GPS used to be (see syncWindyIcon). The GPS is not on the computer:
+             it is opened from the HELM screen and from the NAV STATION.
              The folders are drawn 20% smaller than they were (15.5% x 7.531% of the screen, from 19.375% x 9.414%), each around its old centre; the labels keep their size and sit the same
              small distance under their folder; the (invisible) tap areas are unchanged. -->
         <img class="computer-icon-img" src="images/folder.png" alt=""
@@ -1007,12 +1007,6 @@
         <span class="computer-icon-label" style="left:29.063%; top:25.620%;">PONG</span>
         <button type="button" class="computer-icon-hit" data-app="pong" aria-label="PONG"
                 style="left:16.875%; top:12.812%; width:24.375%; height:16.797%;"></button>
-
-        <img class="computer-icon-img" src="images/folder.png" alt=""
-             style="left:63.396%; top:15.160%; width:15.5%; height:7.531%;">
-        <span class="computer-icon-label" style="left:71.146%; top:25.620%;">GPS</span>
-        <button type="button" class="computer-icon-hit" data-app="chart" aria-label="GPS"
-                style="left:58.958%; top:12.812%; width:24.375%; height:16.797%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:21.313%; top:38.832%; width:15.5%; height:7.531%;">
@@ -10530,22 +10524,62 @@
   var TAPE_MORALE_SECOND = 2;         // second: noticeably smaller, matching a single reading-morale chunk
   var TAPE_MORALE_DAILY_LIMIT = 2;    // third and beyond: no further benefit, but never blocks listening itself
   var TAPE_VOLUME_BELOW = 1;          // below deck: the MP3's own normal supplied level, unmodified
-  var TAPE_VOLUME_ABOVE = TAPE_VOLUME_BELOW * 0.5; // above deck: half the normal configured level, NEVER a hardcoded literal -- the cassette player is physically below deck, so its music is still audible above, just noticeably quieter; derived so a future change to TAPE_VOLUME_BELOW automatically keeps this at exactly half of it
+  var TAPE_ABOVE_DECK_REDUCTION = 0.6; // above deck the music is 60% quieter: it plays at 40% of its below-deck level
+  var TAPE_VOLUME_ABOVE = TAPE_VOLUME_BELOW * (1 - TAPE_ABOVE_DECK_REDUCTION); // derived, never a hardcoded literal -- the cassette player is physically below deck, so its music is still audible above, just much quieter
   var TAPE_LOCATION_FADE_SECONDS = 1.5; // smooth crossfade for the GO ABOVE/GO BELOW transition specifically -- see transitionTapeLocationAudio; comfortably inside the 2-second GO ABOVE/GO BELOW busy action so it always finishes before that action's own final render re-syncs (applyTapeLocationAudio below), never abruptly cut short by it
+
+  // On an iPhone / iPad the browser ignores an audio element's own volume (it always reads 1), so the music's above/below-deck level and its fade would do nothing there. On exactly those devices the
+  // element is routed through a Web Audio gain control (into the master bus like every other Web Audio sound, so SOUND OFF silences it there too) and the element's `volume` is redirected to that
+  // gain: every fade and instant set below then drives the gain, with no other change. Everywhere else the element's own volume works and this does nothing.
+  function routeTapeElementThroughGain(el) {
+    if (!el || el._tapeGainCtx) return;
+    if (!(audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice()))) return;
+    try {
+      var gainNode = audioCtx.createGain();
+      gainNode.gain.value = (GAME && GAME.crew && GAME.crew.location === 'above') ? TAPE_VOLUME_ABOVE : TAPE_VOLUME_BELOW;
+      var masterTrim = audioCtx.createGain();
+      masterTrim.gain.value = 1 / MASTER_GAIN_LEVEL;
+      audioCtx.createMediaElementSource(el).connect(gainNode).connect(masterTrim).connect(masterGain);
+      var tapeCtx = audioCtx, param = gainNode.gain;
+      Object.defineProperty(el, 'volume', {
+        configurable: true,
+        get: function () { return param.value; },
+        set: function (v) { var now = tapeCtx.currentTime; param.cancelScheduledValues(now); param.setValueAtTime(v, now); }
+      });
+      el._tapeGainCtx = tapeCtx; // the context this element's sound now depends on: if it is ever rebuilt the element is replaced (see ensureTapeAudioReady, recoverCassetteHard)
+    } catch (e) {
+      console.warn('Tape audio: gain routing unavailable, using element volume:', describeError(e));
+    }
+  }
+  // An element routed through a context that has since been rebuilt would be silent for good: put it away (a new one is made at the next tape start).
+  function dropStaleTapeElement() {
+    var old = tapeAudioEl;
+    tapeAudioEl = null;
+    if (!old) return;
+    try { old.pause(); } catch (e) {}
+    if (old._fadeTimer) { clearInterval(old._fadeTimer); old._fadeTimer = null; }
+    old.removeEventListener('ended', onTapeAudioEnded);
+    old.removeEventListener('timeupdate', onTapeTimeUpdate);
+    old.removeEventListener('error', onTapeAudioError);
+  }
 
   // Called from the player's own explicit tape-selection click (never
   // proactively/on load). Lazily creates the one persistent <audio>
-  // element -- no AudioContext, no Web Audio graph, nothing else to
-  // build. Plain HTMLAudioElement playback needs nothing more than a
-  // user-gesture-triggered .play() call to satisfy autoplay policy.
+  // element. Plain HTMLAudioElement playback needs nothing more than a
+  // user-gesture-triggered .play() call to satisfy autoplay policy; the
+  // one addition is the gain routing for an iPhone / iPad (above).
   function ensureTapeAudioReady() {
-    if (tapeAudioEl) return true;
+    if (tapeAudioEl) {
+      if (tapeAudioEl._tapeGainCtx && tapeAudioEl._tapeGainCtx !== audioCtx) dropStaleTapeElement(); // (see routeTapeElementThroughGain)
+      else { routeTapeElementThroughGain(tapeAudioEl); return true; }
+    }
     try {
       tapeAudioEl = createGameAudio();
       tapeAudioEl.preload = 'auto';
       tapeAudioEl.addEventListener('ended', onTapeAudioEnded);
       tapeAudioEl.addEventListener('timeupdate', onTapeTimeUpdate);
       tapeAudioEl.addEventListener('error', onTapeAudioError);
+      routeTapeElementThroughGain(tapeAudioEl);
       return true;
     } catch (e) {
       console.warn('Tape player audio unavailable:', describeError(e));
@@ -10891,11 +10925,12 @@
 
 
 
-  // CASSETTE HARD RECOVERY (section 9) -- separate from the Web Audio
-  // graph entirely (the cassette has never used AudioContext at all;
-  // see the TAPE PLAYER module's own notes), so it is never touched by
-  // the loop engine and has to be checked and, if needed, recovered in
-  // its own right. Tries the
+  // CASSETTE HARD RECOVERY (section 9) -- separate from the loop
+  // engine (the cassette is a plain audio element; only where an
+  // element's own volume is ignored, an iPhone / iPad, does it pass
+  // through a Web Audio gain control -- see routeTapeElementThroughGain),
+  // so it is never touched by the engine's loops and has to be checked
+  // and, if needed, recovered in its own right. Tries the
   // existing SOFT path first (resumeTapeAudioIfSuspended -- same
   // element, same position); only replaces the element outright if
   // that alone doesn't leave it genuinely advancing a moment later.
@@ -10908,7 +10943,8 @@
     if (!tapeAudioEl || tapePhase !== 'track') return;
     resumeTapeAudioIfSuspended();
     var progress = await measureElementProgress(tapeAudioEl, AUDIO_HEALTH_CHECK_WAIT_MS);
-    if (progress.advancing) return; // soft recovery alone was enough
+    var tapeCtxStale = !!(tapeAudioEl._tapeGainCtx && tapeAudioEl._tapeGainCtx !== audioCtx); // advancing, but into a context that has been rebuilt: silent
+    if (progress.advancing && !tapeCtxStale) return; // soft recovery alone was enough
 
     audioDebugLog('cassette element appears wedged -- replacing element in place, preserving position ' + tapeAudioEl.currentTime.toFixed(1) + 's');
     var preservedTime = tapeAudioEl.currentTime;
@@ -10920,6 +10956,7 @@
     freshEl.addEventListener('ended', onTapeAudioEnded);
     freshEl.addEventListener('timeupdate', onTapeTimeUpdate);
     freshEl.addEventListener('error', onTapeAudioError);
+    routeTapeElementThroughGain(freshEl);
     freshEl.playbackRate = 1.0;
     freshEl.defaultPlaybackRate = 1.0;
     freshEl.src = preservedSrc;
@@ -14512,7 +14549,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button on the HELM screen, under CHANGE COURSE, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. SHIP\u2019S COMPUTER opens it too. The GPS runs on ACCESSORY power: with ACCESSORY switched off, or the battery gone, it will not open.' },
+        { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button on the HELM screen, under CHANGE COURSE, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. The GPS runs on ACCESSORY power: with ACCESSORY switched off, or the battery gone, it will not open.' },
         { p: 'The solid line is your track. The dashed line through the numbered markers is your route. The thin line runs from SOLACE to the waypoint you are heading for. N\u0101wiliwili is marked as the destination. Check for land before following any of them.' },
         { term: 'ADD', body: 'Tap ADD, tap the waypoint the new one should follow, then tap water. The new waypoint goes right after it, and the next tap carries on after that one. Tap ADD again to stop.' },
         { term: 'DELETE', body: 'Tap DELETE, then tap a waypoint to remove it. Tap DELETE again to stop.' },
@@ -14536,7 +14573,7 @@
       id: 'handbook-ships-computer', heading: 'SHIP\u2019S COMPUTER',
       blocks: [
         { p: 'Turn on ACCESSORY power at the NAV STATION, then open SHIP\u2019S COMPUTER.' },
-        { p: 'GPS shows your position, your track, and your route, and lets you edit the route. WINDY opens a weather map centered on SOLACE. VESSEL LOG records the passage.' },
+        { p: 'WINDY opens a weather map centered on SOLACE. VESSEL LOG records the passage. The GPS is at the HELM and the NAV STATION.' },
       ],
     },
     {
@@ -14812,22 +14849,22 @@
     try { window.open(url, '_blank', 'noopener'); } catch (e) { /* a blocked pop-up changes nothing about the game */ }
   }
   // Created only once the update has run (so it truly does not exist before -- nothing is held back for it, no placeholder),
-  // in the slot to the right of VESSEL LOG, using exactly the same elements/classes as every other icon.
+  // in the top-right slot (where GPS used to be), using exactly the same elements/classes as every other icon.
   // Removed again if the flag is not set (a new voyage).
   function syncWindyIcon(state) {
     var want = !!(state.flags && state.flags.weatherSoftwareUpdated);
     if (want && !windyIconEls) {
       var img = document.createElement('img');
       img.className = 'computer-icon-img'; img.src = 'images/folder.png'; img.alt = '';
-      img.style.cssText = 'left:63.396%; top:38.832%; width:15.5%; height:7.531%;'; // right of VESSEL LOG, at the same 20%-smaller size
+      img.style.cssText = 'left:63.396%; top:15.160%; width:15.5%; height:7.531%;'; // top right, at the same 20%-smaller size as the others
       var label = document.createElement('span');
       label.className = 'computer-icon-label'; label.textContent = 'WINDY';
-      label.style.cssText = 'left:71.146%; top:49.292%;';
+      label.style.cssText = 'left:71.146%; top:25.620%;';
       var hit = document.createElement('button');
       hit.type = 'button'; hit.className = 'computer-icon-hit'; hit.setAttribute('data-app', 'windy'); hit.setAttribute('aria-label', 'WINDY');
-      hit.style.cssText = 'left:58.958%; top:36.484%; width:24.375%; height:16.797%;';
+      hit.style.cssText = 'left:58.958%; top:12.812%; width:24.375%; height:16.797%;';
       hit.addEventListener('click', function () { if (!GAME || uiBusy) return; openWindyAtPosition(GAME); });
-      shipsComputerScreenEl.appendChild(img); shipsComputerScreenEl.appendChild(label); shipsComputerScreenEl.appendChild(hit); // added after the three, so it is last in the DOM as well as on the screen: PONG, GPS, VESSEL LOG, WINDY
+      shipsComputerScreenEl.appendChild(img); shipsComputerScreenEl.appendChild(label); shipsComputerScreenEl.appendChild(hit); // added after the others, so it is last in the DOM; on the screen it sits top right
       windyIconEls = [img, label, hit];
     } else if (!want && windyIconEls) {
       windyIconEls.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
@@ -15658,8 +15695,8 @@
      A single widget (#gps-widget: the map, the readouts, the waypoint tools) and a single MapLibre map, so every place the chart appears is the SAME chart: one
      position, one planned route, one set of waypoints, one track. The widget is not copied: it is MOVED. gpsMount(host) puts it into a host element and
      gpsPark() puts it away again (off screen, in #gps-park), and clearTempView / resetOutputEl park it before they wipe the screen, so a redraw never destroys it.
-       'computer' -- the full-screen GPS (cmdChart). The GPS button on the HELM screen, the GPS button above MARINE FORECAST at the NAV STATION and the Ship's
-                     Computer's GPS app all open it, and its button (BACK / RETURN) goes back to whichever of them it was opened from.
+       'computer' -- the full-screen GPS (cmdChart). The GPS button on the HELM screen and the GPS button above MARINE FORECAST at the NAV STATION open it, and its
+                     button (BACK) goes back to whichever of them it was opened from. (The Ship's Computer no longer has a GPS app.)
        ('helm' / 'nav' -- inline hosts printGps can still make; nothing uses them now.)
      Every edit (a waypoint added, moved, deleted; a waypoint reached) changes state.route, and gpsRefresh redraws from it on every tick, so a change made in one
      place is the very thing the next place shows. The camera is the one thing the places do not share by force: it is framed on the boat when the widget is first
@@ -16133,9 +16170,9 @@
     if (!uiBusy) renderOptions(state);
   }
 
-  // The full-screen GPS: the widget fills #chart-screen. (Opened from the GPS buttons and from the Ship's Computer.)
-  // The GPS fills the screen. It is opened from three places, and its one button takes the player back to the one it came from:
-  //   'computer' -- the Ship's Computer's GPS app (the button reads RETURN and goes back to the computer's home screen)
+  // The full-screen GPS: the widget fills #chart-screen. (Opened from the GPS buttons at the HELM and the NAV STATION.)
+  // The GPS fills the screen. Its one button takes the player back to where it was opened from:
+  //   'computer' -- no longer used: the Ship's Computer has no GPS app now (WINDY took its place). Kept as the default so a call without a place still works (RETURN, back to the computer's home screen).
   //   'helm'     -- the GPS button on the HELM screen, under CHANGE COURSE (BACK: the HELM screen)
   //   'nav'      -- the GPS button above MARINE FORECAST at the NAV STATION (BACK: the NAV STATION)
   var chartOpenedFrom = 'computer';
@@ -16143,7 +16180,6 @@
     from = from || 'computer';
     if (!gpsPowered(state)) { gpsNoPower(state, from); return; } // no accessory power: the GPS stays dark
     chartOpenedFrom = from;
-    playNavStationOneShot('mouse');
     chartReturnBtn.textContent = from === 'computer' ? '\u2190 RETURN' : '\u2190 BACK';
     chartOverlayEl.hidden = false;
     fitChartScreen();
@@ -22613,10 +22649,9 @@
   // CHART's RETURN -- permanently wired once, same reasoning as
   // pongReturnBtn/vesselLogBackBtn above. There's no mid-match state
   // of CHART's own to worry about interrupting (unlike PONG) -- just
-  // the click sound and the same shared return-to-home tail.
+  // the same shared return-to-home tail. (No click sound: the GPS is silent.)
   chartReturnBtn.addEventListener('click', function () {
     if (!GAME || uiBusy) return;
-    playNavStationOneShot('mouse');
     if (chartOpenedFrom === 'computer') { chartReturnToHome(GAME); return; }
     clearTempView(); // closes the full-screen GPS and puts the widget away
     if (chartOpenedFrom === 'nav') { printEcho('nav-station'); runCommand(GAME, 'nav-station'); return; } // back at the NAV STATION
@@ -22625,32 +22660,22 @@
   chartToolBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy || !chartLoaded) return;
-      playNavStationOneShot('mouse');
       chartToolPressed(btn.dataset.tool);
     });
   });
-  chartViewBoatBtn.addEventListener('click', function () { if (GAME && chartLoaded) { playNavStationOneShot('mouse'); gpsFrame(GAME, 'boat'); } });
-  chartViewAllBtn.addEventListener('click', function () { if (GAME && chartLoaded) { playNavStationOneShot('mouse'); gpsFrame(GAME, 'all'); } });
+  chartViewBoatBtn.addEventListener('click', function () { if (GAME && chartLoaded) { gpsFrame(GAME, 'boat'); } });
+  chartViewAllBtn.addEventListener('click', function () { if (GAME && chartLoaded) { gpsFrame(GAME, 'all'); } });
 
   // SHIP'S COMPUTER HOME's app icons -- permanently wired once, same reasoning as shipsPlanBackBtn/vesselLogBackBtn
   // above (the overlay covers where #options would be, so these live outside the normal rendering pipeline
-  // entirely). One shared handler dispatches on each button's own data-app. GPS ('chart' internally), VESSEL LOG and
-  // PONG are real navigations, each to its own full-viewport overlay. There is no
-  // forecast app here any more -- MARINE FORECAST is a NAV STATION function (see cmdMarineForecast). WINDY is not in
-  // this list: it is created, with its own click handler, only after the one-time software update
-  // (syncWindyIcon), in the exact slot the old forecast app occupied.
+  // entirely). One shared handler dispatches on each button's own data-app. VESSEL LOG and PONG are real navigations,
+  // each to its own full-viewport overlay. There is no GPS app here (the GPS is opened from the HELM screen and the NAV STATION) and no
+  // forecast app -- MARINE FORECAST is a NAV STATION function (see cmdMarineForecast). WINDY is not in
+  // this list: it is created, with its own click handler (syncWindyIcon), in the top-right slot.
   Array.prototype.forEach.call(document.querySelectorAll('.computer-icon-hit'), function (btn) {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy) return;
       var app = btn.dataset.app;
-      if (app === 'chart') {
-        clearTempView(); // closes THIS overlay; cmdChart (which plays its own mouse click) opens its own right after
-        cmdChart(GAME);
-        renderOptions(GAME);
-        saveGameState(GAME);
-        scrollToBottom();
-        return;
-      }
       if (app === 'vesselLog') {
         clearTempView(); // closes THIS overlay; cmdVesselLog (which plays its own mouse click) opens its own right after
         cmdVesselLog(GAME);
