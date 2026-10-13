@@ -2659,6 +2659,7 @@
     finaleSoundEls.forEach(function (el) { try { el.pause(); } catch (e) {} }); finaleSoundEls = [];
     if (finaleMarinaVoice) finaleMarinaVoice.stop(0.3);
     if (finaleBirdsVoice) finaleBirdsVoice.stop(0.3);
+    ['pnwBirds', 'marinaSound'].forEach(function (k) { if (openingVoices[k]) openingVoices[k].stop(0.3); }); // (a voyage that ended before the departure's fade ran: nothing of it carries over)
     ['marinaSound', 'pnwBirds'].forEach(function (k) { var el = marinaAudioEls[k]; if (el) { try { el.pause(); } catch (e) {} el.loop = false; } });
     marinaAmbienceStarted = { pnwBirds: false, marinaSound: false };
     var E = finaleEls(); if (!E.ov) return;
@@ -10283,9 +10284,10 @@
      ambience layer, entirely separate from every persistent/state-
      driven system above (sea_state, engine): pnw_birds.mp3 and
      marina_sound.mp3 fade in together at the very start of the
-     opening and play independently over each other, never looping,
-     until they either finish on their own or are faded out together
-     during CASTING OFF; board.mp3 is a third, short one-shot used
+     opening and play independently over each other as two LOOPS
+     (openingVoice, on the loop engine) that go on for as long as the
+     player stays on the title page, the scene and the dock screen, until
+     they are faded out together during LEAVING THE MARINA; board.mp3 is a third, short one-shot used
      only to time the BOARDING step. None of the three is ever part of
      the recovery layer (recoverLandfallAudio) -- same reasoning as the SAILS one-shots (raiseLong,
      fill, etc.) never being part of it either: a one-shot that has
@@ -10395,15 +10397,20 @@
   // call never restarts or duplicates a layer that's already underway.
   // A layer is marked started the moment it is asked to play (so a second call can never double it), but if the browser REFUSES the play the mark is taken
   // back, so the next call -- CONTINUE's click, then BOARD's -- gets another chance to start it. A layer that played and finished stays finished.
+  // The two opening loops. Created on first use (this code is read before the loop engine is initialised).
+  var openingVoices = { pnwBirds: null, marinaSound: null };
+  function openingVoice(key) { return openingVoices[key] || (openingVoices[key] = makeLoopVoice('OPENING ' + key)); }
   function playMarinaAmbience(nightStart) {
     if (!audioUnlocked) return;
+    // Each layer is asked for once (marinaAmbienceStarted), and from then on it is the loop engine's job to keep it going: it starts the moment the browser lets audio run,
+    // tries again if a play is refused, and loops without a gap. A layer that has been faded out for the departure is never asked for again.
     if (!nightStart && !marinaAmbienceStarted.pnwBirds) {
       marinaAmbienceStarted.pnwBirds = true;
-      playMarinaOneShot('pnwBirds', null, function () { marinaAmbienceStarted.pnwBirds = false; });
+      openingVoice('pnwBirds').set(MARINA_AUDIO_FILES.pnwBirds, MARINA_AUDIO_VOLUME.pnwBirds, MARINA_AMBIENCE_FADE_IN_SECONDS);
     }
     if (!marinaAmbienceStarted.marinaSound) {
       marinaAmbienceStarted.marinaSound = true;
-      playMarinaOneShot('marinaSound', null, function () { marinaAmbienceStarted.marinaSound = false; });
+      openingVoice('marinaSound').set(MARINA_AUDIO_FILES.marinaSound, MARINA_AUDIO_VOLUME.marinaSound, MARINA_AMBIENCE_FADE_IN_SECONDS);
     }
   }
   var introPending = false; // true from the moment a fresh voyage's title page is up until the intro's CONTINUE is pressed: nothing is saved or caught up before then, so a reload shows it again
@@ -10421,12 +10428,9 @@
   // mid-CASTING-OFF cannot interrupt or override it.
   function fadeMarinaAmbienceOut(seconds) {
     ['pnwBirds', 'marinaSound'].forEach(function (key) {
-      if (!marinaAmbienceStarted[key]) return;
-      var el = marinaAudioEls[key];
-      if (!el || el.paused || el.ended) return;
-      fadeMarinaVolume(el, 0, seconds, function () {
-        if (!el.paused) el.pause();
-      });
+      var v = openingVoices[key];
+      if (!marinaAmbienceStarted[key] || !v || v.wanted() == null) return; // never started (the birds on a night start) or already faded out: left alone
+      v.stop(seconds); // the loop engine's own fade: a gain ramp over exactly `seconds`, after which the loop is gone for good
     });
   }
 
@@ -21152,7 +21156,7 @@
         s.departure.ambienceSuppressed = false;
         applySeaAudioDesiredState(getSeaAudioState(s), 2);
         applyWindAudioDesiredState(getWindAudioState(s), 2);
-        fadeMarinaAmbienceOut(20); // the full length of this step (its duration, above)
+        fadeMarinaAmbienceOut(20); // the marina and the birds have been going since the title page; they fade over the full length of this step (its duration, above), from the moment it begins
       },
       show: DEPARTURE_LINE_UNDERWAY, // put on the screen when the 20 seconds end (not logged: it goes with the player's next choice)
       showClass: 'heading-label',
@@ -21506,12 +21510,54 @@
     }, (TITLE_DOTS_SECONDS + openingWxWaitExtra()) * 1000);
   }
 
+  // THE STARTING OUTFIT -- dressed for the deck, for the weather the voyage really begins in.
+  // The conditions are the opening reading (the real temperature at the dock, and whether it is raining; the opening wind of the voyage itself, for the chill). With no reading
+  // (offline) they are the voyage's own baseline for Sitka. The ladder is ordinary clothes, lightest to heaviest; each rung is judged by evaluateOutfit exactly as COMFORT ABOVE
+  // judges it, and the rung nearest the middle of the GOOD window is worn (the first of equals). In rain the RAIN SHELL is on over whichever rung it is.
+  var START_OUTFITS = [
+    ['tshirt', 'shorts', 'socks', 'deckShoes'],
+    ['tshirt', 'pants', 'socks', 'deckShoes'],
+    ['longSleeve', 'pants', 'socks', 'deckShoes'],
+    ['tshirt', 'pants', 'sweater', 'socks', 'deckShoes'],
+    ['longSleeve', 'pants', 'sweater', 'socks', 'deckShoes'],
+    ['longSleeve', 'pants', 'sweater', 'socks', 'deckShoes', 'beanie'],
+    ['longSleeve', 'pants', 'sweater', 'fleece', 'socks', 'deckShoes'],
+    ['longSleeve', 'pants', 'sweater', 'fleece', 'socks', 'deckShoes', 'beanie'],
+    ['longSleeve', 'pants', 'sweater', 'fleece', 'socks', 'deckShoes', 'beanie', 'gloves'],
+  ];
+  function startingConditions(state) { // the weather a fresh voyage's first outfit is judged against
+    var w0 = state.weather, w = { temperatureF: w0.temperatureF, windSpeed: w0.windSpeed, condition: w0.condition, rainLevel: w0.rainLevel };
+    try {
+      var h = openingWx.state, now = Date.now();
+      if (h && h.realWeather && realWeatherAssess(h, now).usable) {
+        var t = rwTarget(h.realWeather, now);
+        if (t && rwInRange(t.tempF, RW_LIMITS.tempF)) w.temperatureF = t.tempF;
+        if (t && rwLegacyCondition(t) != null) { w.condition = rwLegacyCondition(t); w.rainLevel = rwRainLevel(t); }
+      }
+    } catch (e) { /* no reading: the voyage's own baseline stands */ }
+    return w;
+  }
+  function startingOutfit(state) {
+    var sx = Object.create(state); sx.weather = startingConditions(state); // (evaluateOutfit reads state.weather: judged against the conditions above, the voyage itself untouched)
+    var rain = isRaining(sx), center = (COMFORT_HOT_MARGIN - COMFORT_COLD_MARGIN) / 2, best = null, bestGap = Infinity;
+    START_OUTFITS.forEach(function (list) {
+      var outfit = {};
+      ALL_GARMENT_KEYS.forEach(function (k) { outfit[k] = list.indexOf(k) >= 0 || (k === 'rainShell' && rain); });
+      var e = evaluateOutfit(sx, outfit, 'above');
+      var gap = Math.abs(e.delta - center) + (e.verdict === 'appropriate' ? 0 : 100);
+      if (gap < bestGap - 1e-9) { best = outfit; bestGap = gap; }
+    });
+    return normalizeClothingOutfit(best);
+  }
+
   // CONTINUE (the tap that ends the intro). SOLACE is at the dock in Sitka: lines tied, engine off, sails furled. Everything below runs inside that tap, so the browser allows
   // the audio to start. It is the story build's own path: the marina ambience (the marina and the Pacific Northwest birds) is already playing from the title page's SOUND
   // button, or starts here; UNTIE LINES, BOARD and START ENGINE play their own recordings over it; LEAVING THE MARINA fades it out as the sea and the wind come up.
   function beginVoyage() {
     unlockAudio(); // idempotent -- CONTINUE is a gesture too
     GAME = newGameState(); // a fresh voyage starting now: the time spent on the title page and the intro is not part of it
+    GAME.weather.temperatureF = startingConditions(GAME).temperatureF; // the air the voyage begins in is the air the opening reading found (it would otherwise read the 45 F placeholder until its own first reading arrives, and judge this outfit against that)
+    GAME.crew.clothing = startingOutfit(GAME); // dressed for the deck, for the weather it really begins in
     printedCount = 0;
     introPending = false; // the voyage is under way: from here it is saved like any other
     playMarinaAmbience(marinaNightStart); // idempotent -- a layer that never got going (no gesture yet) starts now
