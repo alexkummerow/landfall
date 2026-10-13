@@ -1082,7 +1082,7 @@
 
 <div id="lightning-flash" aria-hidden="true"></div>
 
-<!-- THE ENDING (see FINALE_STEPS): over the game's own charcoal, once the crew has stepped ashore: LANDFALL (centered; in, held, out), then the voyage statistics and RESTART. -->
+<!-- THE ENDING (see FINALE_STEPS): over the game's own charcoal, once the crew has stepped ashore and secured the lines: LANDFALL (centered; in, held, out), then the voyage statistics and RESTART. -->
 <div id="ending-overlay" class="ending-overlay" hidden>
   <div class="ending-inner">
     <div class="ending-titles">
@@ -1204,7 +1204,7 @@
       weather: {
         // The LIVE weather fields. Each has one authority (see WEATHER AUTHORITY near the engine): real data, the opening
         // wind until Pacific controlled journeying begins, and the minimal fallback only when real data is unusable.
-        windDirection: 168.75,  // the midpoint of the S-SSE departure band, matching the opening wind's own first target
+        windDirection: 168.75,  // a placeholder until the real wind at the dock replaces it (see beginVoyage), and the fallback wind's starting point if there never is one
         windSpeed: 12,
         seaState: 2,
         condition: 'overcast',
@@ -1214,16 +1214,8 @@
         precipMm: null,         // real precipitation, mm
         rainLevel: null,        // 'none' | 'light' | 'heavy' -- what the existing rain audio is driven by while real data is valid
         waveHeightFt: null,     // real wave height in feet (seaState is only its category)
-        // THE OPENING WIND -- the only scripted wind: the S-SSE departure wind, until Pacific controlled journeying begins
-        // (clearing Sitka Sound), after which this is set to null and never comes back.
-        engine: {
-          booted: false,                 // false: the first tick makes a genuine, safety-checked corridor pick
-          phaseStartedAt: 0,
-          plannedPhaseDuration: 0,       // real value assigned the first time the engine runs
-          intensity: 0.3,
-          targetWindSpeed: 12,
-          targetWindDirection: 168.75,
-        },
+        // No scripted wind: the voyage sails in the real wind from its first minute (the old opening wind is retired). Kept as null so older saves still load.
+        engine: null,
         fallback: null,  // the minimal fallback wind -- exists only while it is actually needed (see fallbackWindEnsure)
       },
       // REAL WEATHER (Phase 1) -- the centralized real-weather cache + status; see the REAL WEATHER section. Persisted with the save.
@@ -1233,6 +1225,9 @@
         engineOn: false,           // running under power (departure motor-out, or engine failure recovery later)
         engineFaultHidden: false,  // the engine is mechanically DAMAGED but she has not found out yet -- see triggerEngineFailure
         engineFailureStage: null,  // null | 'stopping' (broke while running: its normal shutdown is pending) | 'probe' (the discovery run after START ENGINE) -- persisted so a reload mid-sequence can be settled
+        keroseneGallons: KEROSENE_STARTING_GALLONS, // kerosene remaining, in gallons: ONE reserve for the heater, the stove and the lantern -- see burnKerosene
+        lanternLit: false,         // the emergency lantern is lit (it burns kerosene only while lit; it stays lit between decks) -- see lanternLit()
+        keroseneOutNoted: false,   // "I'm out of kerosene" has been said (once: the reserve never refills)
         fuelGallons: 30,           // diesel remaining, in gallons — see DIESEL_BURN_RATE_GPH
         speed: 0,                  // kt — recomputed every tick; POSITION displays a live value regardless
         // The four tracked systems — GOOD or DAMAGED, nothing in between.
@@ -2174,7 +2169,8 @@
     if (nav.groundBearing === undefined) nav.groundBearing = null;
     if (state.flags && state.flags.landOnHorizonShown === undefined) state.flags.landOnHorizonShown = false;
     var f = state.finale;
-    if (f && typeof f === 'object' && f.v === 1 && f.phase !== 'none' && Number.isInteger(f.step) && f.step >= 0) { f.step++; f.v = FINALE_VERSION; } // an arrival saved before the 'welcome' step existed: every step is one further on
+    if (f && typeof f === 'object' && f.v === 1 && f.phase !== 'none' && Number.isInteger(f.step) && f.step >= 0) { f.step++; f.v = 2; } // an arrival saved before the 'welcome' step existed: every step is one further on
+    if (f && typeof f === 'object' && f.v === 2 && f.phase !== 'none' && Number.isInteger(f.step) && f.step >= 0) { if (f.step === 11) f.step = 10; f.v = FINALE_VERSION; } // saved when SECURE LINES came before STEP ASHORE: stepping ashore is now the step at index 10
     if (!f || typeof f !== 'object' || ['none', 'arrival', 'done'].indexOf(f.phase) < 0 || !Number.isInteger(f.step) || f.step < 0 || f.step >= FINALE_STEPS.length) state.finale = { phase: 'none', step: 0, stepAt: 0, arrivedMinutes: null, v: FINALE_VERSION, birds: null, noDiesel: false };
     else { if (f.v === undefined) f.v = FINALE_VERSION; f.noDiesel = f.noDiesel === true; if (f.birds === undefined) f.birds = null; if (!Number.isFinite(f.stepAt)) f.stepAt = Date.now(); if (f.arrivedMinutes === undefined) f.arrivedMinutes = null; }
     if (nav.boundaryStopped !== true) nav.boundaryStopped = false;
@@ -2198,7 +2194,7 @@
   var ROUTE_MAX_POINTS = 60;
   // The pre-plotted start: one waypoint about 5 nm off the outer coast of Kruzof Island, on a safe route out of Sitka Sound (the nearest land to it is 5.8 nm away, and the leg from the
   // start keeps at least 3.3 nm from every shore). The player can move it, delete it, or add the rest of the route.
-  var DEFAULT_ROUTE = [[56.914708, -135.601238]]; // waypoint 1, out of the harbor into Sitka Sound; the player plots the rest
+  var DEFAULT_ROUTE = [[56.860739, -135.610573]]; // waypoint 1: the end of Sitka Sound and the beginning of the Pacific crossing; the player plots the rest
   function newRoute() {
     var pts = DEFAULT_ROUTE.map(function (p, i) { return { id: i + 1, lat: p[0], lon: p[1], reached: false }; });
     return { points: pts, nextId: pts.length + 1 };
@@ -2333,7 +2329,7 @@
      moment it really happens -- the world has stopped, so log() takes the real clock for as long as the finale runs):
        ENTERING NAWILIWILI HARBOR -> GO ABOVE (only when below deck) -> FURL SAILS (only when sails are up; the game's own lower-sails sequence and audio) -> START ENGINE (only when it is off) -> HEADING TOWARD THE MARINA (25 s)
        -> LINE UP WITH SLIP -> ENGINE OFF (which goes straight into COASTING IN, 15 s: the engine's shut-down sound plays at its start; over the whole 15 s the
-       sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> SECURE LINES -> STEP ASHORE
+       sea fades out as the marina and, unless it is night, the Hawaii birds fade in; the wind goes on) -> STEP ASHORE -> SECURE LINES
        -> THE ENDING (finaleUi): the screen fades to the charcoal (3 s) -> LANDFALL fades in, centered (3 s), is held (7 s) and fades out (3 s) -> the voyage statistics fade in (2.5 s)
        -> RESTART. Nothing else is on it, and the audio is not touched by any of it.
        The marina and the birds keep sounding through the summary until RESTART.
@@ -2354,11 +2350,11 @@
     { id: 'furlin',   kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl-in' } },          // NO DIESEL ONLY (skipped otherwise): the sails come down at the point where a fueled arrival turns the engine off, and then COASTING IN
     { id: 'stop',     kind: 'action', option: { label: 'ENGINE OFF', action: 'finale-engine-stop' } },       // skipped when she came in with no diesel (there is no engine to stop)
     { id: 'coast',    kind: 'auto',   label: 'COASTING IN', secs: 15, lead: 2, handoff: true, done: function (s) { finaleEndHandoff(s); } }, // begins 2 s after ENGINE OFF (or the sails coming down) is done -- `lead`, a quiet beat: the engine's shut-down sound and the sea fading out as the marina (and, by day, the birds) fade in, over the whole 15 s
-    { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },
-    { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },
+    { id: 'ashore',   kind: 'action', option: { label: 'STEP ASHORE', action: 'finale-ashore' } },          // the crew steps ashore first ...
+    { id: 'secure',   kind: 'action', option: { label: 'SECURE LINES', action: 'finale-secure' } },         // ... then makes the lines fast: the last step, after which the ending begins
     { id: 'summary',    kind: 'ui' },
   ];
-  var FINALE_VERSION = 2; // (2: the 'welcome' step was added at the front)
+  var FINALE_VERSION = 3; // (2: the 'welcome' step was added at the front; 3: STEP ASHORE and SECURE LINES changed places)
   function finaleStepIndex(id) { for (var i = 0; i < FINALE_STEPS.length; i++) if (FINALE_STEPS[i].id === id) return i; return -1; }
   var FINALE_FADE_SECS = 3, FINALE_SUMMARY_FADE_SECS = 2.5; // the screen fades to the charcoal over FADE secs (the .ending-overlay CSS transition); the summary fades in over SUMMARY_FADE
   var FINALE_TITLE_FADE_SECS = 3, FINALE_TITLE_HOLD_SECS = 7; // LANDFALL: fades in over TITLE_FADE (the .ending-title CSS transition), is held fully visible for TITLE_HOLD, and fades out over TITLE_FADE
@@ -2507,7 +2503,7 @@
     E.act.hidden = false; finaleShow(E.act, 'show', instant);
     E.btn.hidden = false; finaleShow(E.btn, 'show', instant);
   }
-  function finaleUi(state, id) { // the one UI step: the ending. Every moment is worked out from the real time since STEP ASHORE (f.stepAt), so a reload lands exactly where it should.
+  function finaleUi(state, id) { // the one UI step: the ending. Every moment is worked out from the real time since SECURE LINES, the last step (f.stepAt), so a reload lands exactly where it should.
     //   0 s   the screen fades to the charcoal                                    (FINALE_FADE_SECS)
     //   3 s   LANDFALL fades in, centered                                         (FINALE_TITLE_FADE_SECS)
     //   6 s   LANDFALL is held                                                    (FINALE_TITLE_HOLD_SECS)
@@ -2957,8 +2953,13 @@
   function isDark(state) {
     return getDaylightPhase(state) === 'night'; // ONLY NIGHT is mechanically dark: dusk and dawn can look dim but never restrict an action
   }
+  // THE LANTERN. One lamp, lit or not, wherever the player is; it only burns while there is kerosene to burn (an empty reserve puts it out -- keroseneRanDry).
+  function lanternLit(state) { return !!state.boat.lanternLit && keroseneLeft(state) > 0; }
+  // The electric light that counts where the player is standing: the cabin lights below deck, the nav lights above.
+  function relevantElectricLightOn(state) { return state.crew.location === 'below' ? !!state.boat.cabinLightsOn : !!state.boat.navLightsOn; }
+  // Light enough to work by at night: the cabin lights (below deck), or a lit lantern.
   function needsCabinLight(state) {
-    return isDark(state) && !state.boat.cabinLightsOn;
+    return isDark(state) && !state.boat.cabinLightsOn && !lanternLit(state);
   }
   function blockedByDarkness(state, backAction) {
     printBlank();
@@ -2980,26 +2981,18 @@
     return isDark(state);
   }
   // The nav lights cannot be powered: the battery has really died (0%) and has not yet climbed back to the restart threshold -- the very state in which the NAV STATION
-  // panel will not switch anything on (see performElectricalToggle's DEAD PANEL). Nothing is faked or switched on here: this only says whether the lights can be asked for.
+  // panel will not switch anything on (see performElectricalToggle's DEAD PANEL). This no longer excuses anyone from needing light: it only changes what the player is told.
   function navLightsPowerOut(state) {
     var b = state.boat;
     return !!(b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT);
   }
+  // Light enough to work on deck at night: the nav lights, or a lit lantern. A dead battery waives nothing; with no powered light and no lantern the work waits for daylight.
   function needsNavLights(state) {
-    if (navLightsPowerOut(state)) return false; // no power for them: they cannot be required, so a dead battery never locks the player out of the HELM, the SAILS or the rest of the deck
-    return isNavLightsNight(state) && !state.boat.navLightsOn;
-  }
-  // Coming above deck at night with the nav lights unavailable: said once per dead-battery spell (the flag is cleared when the battery has recovered -- see updateBattery), logged like any other note.
-  function navLightsOutNote(state) {
-    if (!isNavLightsNight(state) || !navLightsPowerOut(state) || state.boat.navLightsOn) return;
-    if (!state.flags) state.flags = {};
-    if (state.flags.navLightsOutNoted) return;
-    state.flags.navLightsOutNoted = true;
-    log(state, "No power for the nav lights. I\u2019ll have to go on without them.");
+    return isNavLightsNight(state) && !state.boat.navLightsOn && !lanternLit(state);
   }
   function blockedByNavLights(state, backAction) {
     printBlank();
-    printLine("I should turn on the nav lights first."); // an observation in the ordinary text (not amber, not caps)
+    printLine(navLightsPowerOut(state) ? "It's too dark to work on deck. I need some light." : "I should turn on the nav lights first."); // an observation in the ordinary text (not amber, not caps)
     state.pendingChoice = { id: 'navlights-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
   }
 
@@ -3510,20 +3503,15 @@
   var WEATHER_TEXTURE_DIRECTION_DEG_PER_HOUR = 2.5;
 
   /* ----------------------------------------------------------------
-     THE OPENING WIND
+     THE OPENING WIND -- RETIRED
      ----------------------------------------------------------------
-     The only scripted wind that remains, and only until Pacific controlled journeying begins: the departure water
-     (Sitka Sound and its passes, out to open water). It is the old FAVORABLE DEPARTURE regime and nothing else --
-     a southerly (S-SSE) wind that is re-picked every 3-6 hours and the instant the boat reaches a new corridor leg, safety-
-     checked against the leg's course (see pickDepartureCorridorDirectionDeg). Speed follows a per-phase intensity inside a
-     fixed 10-15 kt range.
-     "Pacific controlled journeying begins" is the existing event the game already has: leaving Sitka Sound for the open Pacific (nav.pacificControl, set when she is west of SOUND_EXIT_LON), which hands the wind over from the scripted opening wind to the real wind. pacificControlBegun is
-     the single definition of it; the real-wind handoff and MARINE FORECAST both read it. From that moment this engine is
-     retired for good and real wind is the wind.
+     There used to be a scripted southerly (S-SSE, 10-15 kt) wind for the departure water, handed over to the real wind when the boat left Sitka Sound. It no longer runs:
+     the voyage sails in the real wind from the very beginning and nothing is blended (see applyActiveWind). The functions below are what is left of it and are never
+     called; a data failure uses the bounded fallback wind instead (fallbackWindEnsure).
      ---------------------------------------------------------------- */
   var CORRIDOR_WIND = { durationRangeHours: [3, 6], windSpeedRange: [15, 10], intensityRange: [0.1, 0.9] };
   function pacificControlBegun(state) { return !!state.nav.pacificControl; }
-  function openingWindActive(state) { return !pacificControlBegun(state); }
+  function openingWindActive(state) { return false; } // RETIRED: there is no scripted opening wind any more; the real wind is the wind from the first minute
   function newOpeningWindEngine(state) {
     var w = state.weather || {};
     return { booted: false, phaseStartedAt: (state.meta && Number.isFinite(state.meta.voyageMinutes)) ? state.meta.voyageMinutes : 0, plannedPhaseDuration: 0, intensity: 0.5,
@@ -3711,9 +3699,8 @@
   // THE ENVIRONMENT TICK -- the only place the live weather fields are decided
   // ======================================================================
   //   temperature / sky / cloud / rain / sea     -> real data when usable, else the minimal fallback above
-  //   wind, BEFORE Pacific controlled journeying -> the opening wind (advanceCorridorWind)
-  //   wind, AT / AFTER Pacific control           -> real wind (applyActiveWind / windHandoffStep, Phase 3)
-  //   wind, Pacific control but no real wind     -> the minimal fallback wind (a data-failure safeguard)
+  //   wind, from the very start                 -> real wind (applyActiveWind / windHandoffStep), adopted in full the moment it exists
+  //   wind, no usable real wind                  -> the minimal fallback wind (a data-failure safeguard)
   // The last line of defence, run at the end of every environment tick (and after a boot sync): whatever happened above, no
   // invalid value can sit in the live weather -- so nothing downstream (steering, point of sail, audio, solar, instruments) can
   // ever see a NaN, an impossible direction or an out-of-range reading.
@@ -3739,7 +3726,7 @@
     var env = forceFallback ? { temp: false, sky: false, sea: false, target: null } : realEnvironmentForTick(state, Date.now());
     if (!forceFallback) rwNoteEnvironment(state, env);
 
-    // WIND: the opening wind only until Pacific controlled journeying begins; after that the scripted engine does not exist.
+    // WIND: real wind from the start; no scripted engine exists.
     if (openingWindActive(state)) advanceCorridorWind(state);
     else retireOpeningWindEngine(state);
 
@@ -3747,7 +3734,7 @@
     if (!env.sea) fallbackSeaToLive(state);
     if (!env.temp) fallbackTempToLive(state);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, false);
-    applyActiveWind(state, Date.now()); // the opening wind stays; at Pacific control real wind takes over (Phase 3's 30 s blend); a data failure uses the fallback wind
+    applyActiveWind(state, Date.now()); // real wind in full as soon as it exists; a data failure uses the fallback wind
     thunderScenarioForceSky(state); // (test scenarios ?scenario=thunderstorm* only; nothing in a normal load)
     sanitizeLiveWeather(state);
     thunderSync(state); // THUNDER + LIGHTNING: begins / ends with the authoritative real sky; the same sky arriving again changes nothing
@@ -3781,11 +3768,8 @@
   // course are never touched here, only the weather engine fields
   // below.
   function enforceFavorableDepartureIfNeeded(state) {
-    if (pacificControlBegun(state)) return;
-    var w = state.weather;
-    w.windSpeed = 12;
-    w.windDirection = pickDepartureCorridorDirectionDeg(state.nav.intendedCourse);
-    w.engine = { booted: false, phaseStartedAt: state.meta.voyageMinutes, plannedPhaseDuration: 0, intensity: 0.5, targetWindSpeed: w.windSpeed, targetWindDirection: w.windDirection }; // booted false: a genuinely fresh corridor pick on the next tick
+    // RETIRED with the opening wind: a boat in Sitka Sound has the real wind like any other, so nothing is forced on load. A save that still carries the old corridor engine drops it.
+    if (state.weather && state.weather.engine) state.weather.engine = null;
   }
 
   // DEV ONLY -- a compact snapshot of who is driving the weather right now (the live fields have one authority each).
@@ -3793,7 +3777,7 @@
     if (!GAME) { console.log('[WEATHER DEBUG] no active game'); return; }
     var w = GAME.weather, e = w.engine, rw = GAME.realWeather || {}, now = GAME.meta.voyageMinutes;
     console.log('[WEATHER DEBUG] ---- weather authority snapshot ----');
-    console.log('[WEATHER DEBUG] WIND', (+w.windSpeed).toFixed(1) + ' kt FROM ' + Math.round(w.windDirection) + '  | source:', activeWindSource(GAME) + ' (protected = the opening wind, before Pacific control)',
+    console.log('[WEATHER DEBUG] WIND', (+w.windSpeed).toFixed(1) + ' kt FROM ' + Math.round(w.windDirection) + '  | source:', activeWindSource(GAME) + ' (protected = no real wind yet: the fallback wind)',
       '| Pacific control', pacificControlBegun(GAME) ? 'BEGUN' : 'not yet', '| fallback wind', w.fallback ? 'running' : 'off');
     if (e) console.log('[WEATHER DEBUG] OPENING WIND phase age (min)', Math.round(now - e.phaseStartedAt), '/', Math.round(e.plannedPhaseDuration), '| target', (+e.targetWindSpeed).toFixed(1) + ' kt FROM ' + Math.round(e.targetWindDirection));
     console.log('[WEATHER DEBUG] ENVIRONMENT authority (real | fallback):', JSON.stringify(rw.environment), '| status', rw.status);
@@ -4232,20 +4216,17 @@
   // AUTHORITY SPLIT (PHASE 5.1):
   //
   //   REAL data -> temperature, cloud cover, sky condition, precipitation / rain level, the solar weather input, wave height and
-  //                sea state -- and, from the moment Pacific controlled journeying begins, the wind.
-  //   OPENING WIND (advanceCorridorWind) -> wind speed and wind direction, and nothing else, ONLY in the departure corridor
-  //                (before Pacific control). It is retired for good (weather.engine = null) when the boat leaves Sitka Sound.
+  //                sea state -- and the wind, from the very beginning of the voyage.
   //
-  // There is no scripted sky, sea or temperature, and no protected wind after the Cape. Real wind keeps being fetched, cached and
-  // sampled (rwTarget(...).windKt / .windFromDeg, or state.realWeather.current.windKt / .windFromDeg); before Pacific control it is
-  // written to no live field, and from Pacific control (the handoff below) it is the active wind. Calms, headwinds, weak and strong
-  // wind are whatever the provider supplies.
+  // There is no scripted sky, sea, temperature or wind. Real wind is fetched, cached and sampled (rwTarget(...).windKt / .windFromDeg, or
+  // state.realWeather.current.windKt / .windFromDeg) and is the active wind (below). Calms, headwinds, weak and strong wind are whatever the
+  // provider supplies. Only a data failure uses the bounded fallback wind.
 
   // ======================================================================
   // PHASE 3 -- THE REAL-WIND HANDOFF
   // ======================================================================
-  // BEFORE Pacific controlled journeying the opening wind is the active wind, completely untouched; real wind is only cached.
-  // The moment Pacific control begins (pacificControlBegun: the boat leaves Sitka Sound) and valid real wind exists, a 30
+  // THE REAL WIND IS ADOPTED IN FULL the moment valid real wind exists (beginRealWindHandoff): from the start of the voyage, with no blend and no timer. The blend
+  // described below is what older versions did at the Sound's exit; it survives only so a voyage saved in the middle of one still finishes it. It was: a 30
   // REAL-SECOND blend starts at once -- wall-clock time, not voyage time -- from the wind the boat has right then to the real
   // wind: speed linearly, direction along the SHORTEST arc (interpAngleDeg), 50/50 at 15 s, exactly real at 30 s. It exists only
   // so the wind (and the boat speed computed from it) does not jump; it protects nothing. AFTER it, real wind IS the active
@@ -4319,12 +4300,12 @@
     var h = state.realWeather && state.realWeather.windHandoff;
     if (!h) return false;
     if (h.status !== 'protected') return h.status === 'blending';
-    if (!pacificControlBegun(state)) return false;
     var sample = rwRealWindSample(state, nowMs);
-    if (!sample) return false;                           // no valid real wind: the fallback wind carries on and the data layer keeps retrying
-    fallbackWindEnsure(state);                           // the wind the blend starts from = the wind the boat has right now
-    h.status = 'blending'; h.startedAt = nowMs; h.updatedAt = nowMs; h.completedAt = null; h.weight = 0; h.real = { kt: sample.kt, from: sample.from };
-    syncWindHandoffTimer();
+    if (!sample) return false;                           // no valid real wind yet: the fallback wind carries on and the data layer keeps retrying
+    // The real wind IS the wind, in full, from the moment it exists: no blend, no timer. (A voyage saved mid-blend by an older version still finishes its blend: windHandoffStep.)
+    h.status = 'real'; h.startedAt = nowMs; h.updatedAt = nowMs; h.completedAt = nowMs; h.weight = 1; h.real = { kt: sample.kt, from: sample.from };
+    windHandoffCompleted(state);
+    windHandoffStep(state, nowMs);                       // writes it to the live wind right now (and releases the fallback wind)
     return true;
   }
 
@@ -4336,7 +4317,6 @@
     if (!h) return;
     var w = state.weather;
     if (h.status === 'protected') {
-      if (!pacificControlBegun(state)) return;           // the opening: the corridor wind is the active wind
       if (!beginRealWindHandoff(state, nowMs)) fallbackWindToLive(state); // no usable real wind yet: the bounded fallback carries on
     } else if (w.fallback) {
       fallbackWindAdvance(state);                        // the fallback wind exists only while something still needs it
@@ -4530,7 +4510,7 @@
     if (hd.real && (!rwInRange(hd.real.kt, RW_LIMITS.windKt) || !isFinite(hd.real.from))) hd.real = null;
     else if (hd.real) { hd.real.kt = clamp(hd.real.kt, 0, 60); hd.real.from = normalizeDeg(hd.real.from); }
     if (hd.status === 'blending' && !hd.real) { hd.status = 'protected'; hd.weight = 0; hd.startedAt = null; hd.updatedAt = null; }
-    if (hd.status !== 'protected' && !pacificControlBegun(state)) { hd.status = 'protected'; hd.weight = 0; hd.startedAt = null; hd.updatedAt = null; hd.completedAt = null; hd.real = null; } // a boat still in the corridor always has the opening wind (real wind only ever takes over at Pacific control) // cannot resume without a real wind to blend toward: it simply starts cleanly again
+    // (a boat still in Sitka Sound keeps the real wind it has: the real wind is the wind from the start)
     if (hd.status === 'real' && state.flags) state.flags.realWindUnlocked = true;
     rw.authority = 'fallback'; // decided fresh by realWeatherBootSync / every tick, never trusted from disk
     rw.status = ok ? 'cached' : 'idle';
@@ -4555,7 +4535,7 @@
       forecastHours: rw.forecast ? rw.forecast.hours.length : 0,
       forecastSpan: rw.forecast ? { from: new Date(rw.forecast.startT).toISOString(), to: new Date(rw.forecast.endT).toISOString() } : null,
       environment: rw.environment,    // who is driving each environmental group right now: 'real' | 'scripted' (the silent fallback)
-      windHandoff: { status: activeWindSource(s), progressPct: Math.round(((rw.windHandoff && rw.windHandoff.weight) || 0) * 100), trigger: 'pacific control (leaving Sitka Sound)', pacificControlBegun: pacificControlBegun(s), startedAt: (rw.windHandoff && rw.windHandoff.startedAt) ? new Date(rw.windHandoff.startedAt).toISOString() : null, realWindInUse: rw.windHandoff ? rw.windHandoff.real : null },
+      windHandoff: { status: activeWindSource(s), progressPct: Math.round(((rw.windHandoff && rw.windHandoff.weight) || 0) * 100), trigger: 'from the start (no handoff)', pacificControlBegun: pacificControlBegun(s), startedAt: (rw.windHandoff && rw.windHandoff.startedAt) ? new Date(rw.windHandoff.startedAt).toISOString() : null, realWindInUse: rw.windHandoff ? rw.windHandoff.real : null },
       activeWind: { source: activeWindSource(s), windKt: +w.windSpeed.toFixed(1), windFromDeg: Math.round(w.windDirection), cachedRealWind: rw.current ? { kt: +rw.current.windKt.toFixed(1), fromDeg: Math.round(rw.current.windFromDeg) } : null }, // real wind is cached but NOT driving sailing (Phase 3)
       liveEnvironment: { tempF: +w.temperatureF.toFixed(1), sky: w.sky, condition: w.condition, cloudPct: w.cloudPct, precipMm: w.precipMm, rainLevel: w.rainLevel, waveHeightFt: w.waveHeightFt, seaState: w.seaState },
       lastError: rw.error,
@@ -4968,7 +4948,7 @@
   // damaged by faults/events and fixed by REPAIR). See updateBattery
   // for how these are applied per tick.
   var BATTERY_DRAIN_AUTOPILOT_PER_HOUR = 2;
-  var BATTERY_DRAIN_HEATER_PER_HOUR = 2;
+  // (the heater burns kerosene, not battery: it has no entry here -- see KEROSENE_HEATER_GPH)
   var BATTERY_DRAIN_LIGHTS_PER_HOUR = 0.5;
   var BATTERY_DRAIN_CASSETTE_PER_HOUR = 0.05; // a cassette actually playing -- almost negligible next to the majors above; the ACCESSORY circuit itself draws nothing just being switched on, see updateBattery
   var BATTERY_CHARGE_PER_HOUR = 100; // engine running: 0% -> 100% in 60 minutes = 100%/hour
@@ -5278,6 +5258,26 @@
   // PROJECT.md. FOOD_ITEMS carries its own `original` per item above.
   var FUEL_STARTING_GALLONS = 30;
   var WATER_STARTING_GALLONS = 60.0;
+  // KEROSENE -- ONE reserve (state.boat.keroseneGallons) shared by the heater, the stove and the lantern. Every constant for it is here, and nowhere else.
+  // Calibrated for a 30+ day passage with up to 20 cold days (below 55 F) with the heater running continuously (see keroseneBudget, which does this sum):
+  //   heater    20 days x 24 h x 0.032 gal/h                         = 15.4 gal   (a small cabin heater, about 4,300 BTU/h at ~135,000 BTU a gallon)
+  //   stove     32 days x (2.5 meals x 0.012 + 1 hot drink x 0.008)  =  1.2 gal   (warming 2-3 meals a day and about one coffee or tea)
+  //   lantern   occasional emergency use, 40 h x 0.010 gal/h         =  0.4 gal
+  //   --------------------------------------------------------------- 17.0 gal, which leaves about 4 gal (19%) as a reserve buffer out of 21.
+  var KEROSENE_STARTING_GALLONS = 21;
+  var KEROSENE_HEATER_GPH = 0.032;          // gallons an hour while the heater is on against cold air
+  var KEROSENE_LANTERN_GPH = 0.010;         // gallons an hour while the lantern is lit
+  var KEROSENE_STOVE_MEAL_GAL = 0.012;      // warming a meal: about ten minutes of burner
+  var KEROSENE_STOVE_DRINK_GAL = 0.008;     // coffee, tea, hot water for cup noodles, popping popcorn: about six minutes
+  var KEROSENE_STOVE_FISH_GAL = 0.015;      // cooking a fresh catch's specialty meal
+  var HEATER_COLD_BELOW_F = 68;             // the heater works (and so burns) only against air colder than the warmest cabin it ever aims for (getHeatedCabinTarget's ceiling)
+  var KEROSENE_PLAN = { days: 32, coldDays: 20, mealsPerDay: 2.5, drinksPerDay: 1, lanternHours: 40 };
+  function keroseneBudget() { // the calibration above, as numbers (also what the tests check)
+    var P = KEROSENE_PLAN;
+    var heater = P.coldDays * 24 * KEROSENE_HEATER_GPH, stove = P.days * (P.mealsPerDay * KEROSENE_STOVE_MEAL_GAL + P.drinksPerDay * KEROSENE_STOVE_DRINK_GAL), lantern = P.lanternHours * KEROSENE_LANTERN_GPH;
+    var total = heater + stove + lantern;
+    return { heater: heater, stove: stove, lantern: lantern, total: total, buffer: KEROSENE_STARTING_GALLONS - total };
+  }
   var ORIGINAL_COFFEE = 24;
   var ORIGINAL_TEA = 24;
   var ORIGINAL_SPARES = {
@@ -6209,7 +6209,6 @@
     } else {
       var drain = 0;
       if (b.autopilotOn) drain += BATTERY_DRAIN_AUTOPILOT_PER_HOUR;
-      if (b.heaterOn) drain += BATTERY_DRAIN_HEATER_PER_HOUR;
       if (b.cabinLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR;
       if (b.navLightsOn) drain += BATTERY_DRAIN_LIGHTS_PER_HOUR; // same rate as cabin lights -- see its own state-field comment
       // ACCESSORY HOOK -- the circuit itself draws nothing just being
@@ -6262,10 +6261,9 @@
     // alone -- so ordinary depletion down through 3%, 2%, 1% never
     // triggers any lockout; only a genuine 0% event does.
     if (b.battery <= 0) {
-      var hadSomethingOn = b.autopilotOn || b.heaterOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
+      var hadSomethingOn = b.autopilotOn || b.cabinLightsOn || b.accessoryOn || b.navLightsOn;
       b.batteryRecovering = true;
       b.autopilotOn = false;
-      b.heaterOn = false;
       b.cabinLightsOn = false;
       b.accessoryOn = false;
       b.navLightsOn = false;
@@ -6352,6 +6350,50 @@
     return live;
   }
 
+  // ---- KEROSENE: the one reserve, and everything that draws on it ----
+  function keroseneLeft(state) { var g = state.boat.keroseneGallons; return Number.isFinite(g) ? Math.max(0, g) : 0; }
+  // Draws up to `gallons` from the reserve, never below zero. Returns what was actually drawn.
+  function burnKerosene(state, gallons) {
+    var have = keroseneLeft(state), take = Math.min(have, Math.max(0, +gallons || 0));
+    state.boat.keroseneGallons = Math.max(0, have - take);
+    return take;
+  }
+  // The reserve has reached zero: whatever was burning goes out, and the sailor says so (once -- it never refills).
+  function keroseneRanDry(state) {
+    var b = state.boat;
+    if (keroseneLeft(state) > 0) return;
+    var heater = b.heaterOn, lantern = b.lanternLit;
+    b.heaterOn = false; b.lanternLit = false;
+    if (b.keroseneOutNoted) return;
+    b.keroseneOutNoted = true;
+    log(state, 'I\u2019m out of kerosene.');
+    if (heater) log(state, 'The heater has gone cold.');
+    if (lantern) log(state, 'The lantern has gone out.');
+  }
+  // The burn of `minutes` of time against outside air of `outsideF`: the heater (only against cold air) and the lantern (while lit). An unknown temperature counts as cold.
+  function keroseneBurnStep(state, minutes, outsideF) {
+    var b = state.boat, gph = 0;
+    if (b.heaterOn && !(outsideF >= HEATER_COLD_BELOW_F)) gph += KEROSENE_HEATER_GPH;
+    if (b.lanternLit) gph += KEROSENE_LANTERN_GPH;
+    if (gph <= 0) return;
+    burnKerosene(state, gph * minutes / 60);
+    if (keroseneLeft(state) <= 0) keroseneRanDry(state);
+  }
+  // The stove, for an action that uses it. Callers check stoveReady first; this draws the amount (clamped) and notices the reserve running out.
+  function stoveDraw(state, gallons) {
+    burnKerosene(state, gallons);
+    if (keroseneLeft(state) <= 0) keroseneRanDry(state);
+  }
+  function stoveReady(state) { return keroseneLeft(state) > 0; }
+  // LIGHTING STOVE -- the match, once, before anything that uses the stove begins; then `startFn` (the action as it always was) carries straight on.
+  function lightStoveThen(state, startFn) {
+    runAudioSyncedAction(state, {
+      label: 'LIGHTING STOVE', transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('match', onEnded); },
+      chain: startFn,
+    });
+  }
+
   function syncCabinTemperature(state) {
     var b = state.boat;
     var now = currentGameMinutes(state);
@@ -6371,6 +6413,7 @@
     var steps = Math.max(1, Math.ceil(elapsed / CABIN_TEMP_STEP_MINUTES)), dt = elapsed / steps;
     for (var i = 0; i < steps; i++) {
       var outside = cabinOutsideTempF(state, departed + (from + (i + 0.5) * dt) * 60000, nowMs);
+      keroseneBurnStep(state, dt, Number.isFinite(outside) ? outside : state.weather.temperatureF); // the heater and the lantern burn kerosene for this stretch of time; if it runs dry they go out HERE, before the cabin is moved
       if (!Number.isFinite(outside)) continue; // never write a bad number into the cabin
       // HEATER -- OFF: the cabin simply tracks outside. ON: it moves toward getHeatedCabinTarget(outside), but the heater only ever pulls the
       // cabin UP toward that target, never down: once the cabin is at or above it the target falls back to outside -- exactly the unheated
@@ -6484,7 +6527,7 @@
     BOAT_FAIL_SYSTEMS.forEach(function (k) { weights[k] = BASE_FAILURE_WEIGHT[k]; });
     if (b.engineOn) weights.engine += 1.5;
     weights.engine += engineRuntimeWeightBonus(b.engineRunningMinutes);
-    var loadCount = (b.autopilotOn ? 1 : 0) + (b.heaterOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
+    var loadCount = (b.autopilotOn ? 1 : 0) + (b.cabinLightsOn ? 1 : 0);
     if (loadCount >= 2) weights.electrical += 1;
     if (loadCount >= 3) weights.electrical += 0.5;
     // Rough OR wet weather, not just heavy seas — a damp panel is its
@@ -6655,7 +6698,6 @@
       // manually switches it back on (see performElectricalToggle) —
       // repair only restores ACCESS, never flips anything back on itself.
       b.autopilotOn = false;
-      b.heaterOn = false;
       b.cabinLightsOn = false;
     }
     log(state, pickFromPool(FAILURE_NARRATIVES[systemKey]));
@@ -7730,12 +7772,11 @@
     }
   }
 
-  // Pacific controlled journeying begins (the boat is west of SOUND_EXIT_LON, past the outer coast of Sitka Sound): permanent. One plain line says what can be seen, and
-  // the real-wind handoff starts on this very tick (blend weight 0, so the wind -- and the boat speed computed from it -- is unchanged until it begins to blend).
+  // The Sound is behind her (the boat is west of SOUND_EXIT_LON, past the outer coast of Sitka Sound): permanent. One plain line says what can be seen. The wind is not involved:
+  // it has been the real wind since the voyage began.
   function beginOpenPacific(state) {
     state.nav.pacificControl = true;
     log(state, 'The last of the islands is astern. Ahead, open water.');
-    beginRealWindHandoff(state, Date.now());
   }
 
   /* --------------------------------------------------------------
@@ -11771,7 +11812,6 @@
   var ELECTRICAL_TOGGLE_FIELDS = {
     cabinLights: 'cabinLightsOn',
     navLights: 'navLightsOn',
-    heater: 'heaterOn',
     accessory: 'accessoryOn',
   };
 
@@ -11902,19 +11942,6 @@
     // alone would miss.
     if (key === 'accessory' && !turningOn && tapePhase != null) {
       resetTapePlaybackImmediately();
-    }
-    // HEATER HOOK -- immediate player feedback only, OFF -> ON alone
-    // (never ON -> OFF, and never repeated on every subsequent toggle
-    // or temperature tick -- this only runs on the actual edge, right
-    // here in the one place the switch is actually thrown). A plain
-    // printLine, not log(): this is a transient screen confirmation,
-    // not a voyage-log-worthy event, so it deliberately never touches
-    // state.log. It does not itself change cabinTemperatureF in any
-    // way -- the cabin still only ever moves via syncCabinTemperature's
-    // own gradual, periodic blend toward getHeatedCabinTarget's target.
-    if (key === 'heater' && turningOn) {
-      printBlank();
-      printLine('Heater on. Warm air begins moving through the cabin.');
     }
     cmdNavStation(state);
   }
@@ -12232,20 +12259,8 @@
   }
 
   function cmdSails(state) {
-    // BATTERY FAILURE -- lowering sail is one of the few physical
-    // actions the task this implements explicitly allows in a
-    // nighttime failure (raising is a separate matter, gated within
-    // performSailChange below), so this screen's own nav-lights-at-
-    // night gate is bypassed whenever battery is actually recovering
-    // from a true 0% failure -- otherwise the player couldn't even
-    // reach the menu to lower sail in the dark with a dead battery.
-    // Gated on batteryRecovering, not just the raw battery value, so
-    // ordinary low-battery depletion (nav lights still on, never having
-    // hit 0%) never triggers this bypass at all -- needsNavLights would
-    // already be false in that case anyway. HELM/ENGINE/FISH have their
-    // own, separate reasoning for whether they get the same exception;
-    // this doesn't change any of them.
-    if (needsNavLights(state) && !(state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
+    // NIGHT: sail handling above deck needs light like all the rest of the deck's work (the nav lights, or the lantern). A dead battery excuses nothing.
+    if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printBlank();
     printLine('CURRENTLY: ' + sailConfigLabel(state.boat.sailConfig).toUpperCase());
     state.pendingChoice = { id: 'sails-choice', options: sailOptions(state) };
@@ -12479,19 +12494,8 @@
   }
 
   function cmdEngine(state) {
-    // BATTERY FAILURE -- nav lights can't be lit while actually
-    // recovering from a dead battery (see updateBattery), and starting
-    // the engine is the ONLY way to get power back at all, so this
-    // specific screen's own nav-lights-at-night gate is bypassed
-    // whenever batteryRecovering is true and battery is still under the
-    // threshold -- without this, a nighttime failure would be a genuine
-    // dead end (no nav lights -> can't reach ENGINE -> can't charge ->
-    // nav lights never come back). Gated on the recovery flag, not the
-    // raw battery value alone, so ordinary low-battery depletion (nav
-    // lights still on, never having hit 0%) never needs or triggers
-    // this bypass. HELM/SAILS/FISH keep this gate completely unchanged;
-    // only ENGINE gets the exception, and only during real recovery.
-    if (needsNavLights(state) && !(state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT)) { blockedByNavLights(state); return; }
+    // NIGHT: the engine, like the rest of the deck's work, needs light (the nav lights, or the lantern). A dead battery excuses nothing: with no light the engine waits for daylight.
+    if (needsNavLights(state)) { blockedByNavLights(state); return; }
     printBlank();
     printDataRow('STATUS', state.boat.engineOn ? 'RUNNING' : 'OFF', 'data-row-md');
     printDataRow('DIESEL', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS).toUpperCase(), 'data-row-md');
@@ -12773,9 +12777,9 @@
     });
   }
 
-  // GALLEY — food, drink, and the dishes chore, all in one place. The
+  // GALLEY — MEALS, SNACKS, DRINKS and FRESH CATCH, and the dishes chore, all in one place. The
   // menu itself never hides options based on darkness (matches the old
-  // WELLBEING screen's philosophy) — EAT/DRINK already check
+  // WELLBEING screen's philosophy) — the cooked things already check
   // needsCabinLight at their own top, so the player discovers the
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
@@ -12784,8 +12788,10 @@
     printLine('HUNGER: ' + HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]);
     printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
     var options = [
-      { label: 'EAT', action: 'cmd:eat' },
-      { label: 'DRINK', action: 'cmd:drink' },
+      { label: 'MEALS', action: 'cmd:meals' },
+      { label: 'SNACKS', action: 'cmd:snacks' },
+      { label: 'DRINKS', action: 'cmd:drink' },
+      { label: 'FRESH CATCH', action: 'cmd:fresh-catch' },
     ];
     var dishesOpt = choreOptionIfDue(state, 'dishes');
     if (dishesOpt) options.push(dishesOpt);
@@ -13043,9 +13049,7 @@
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
       { label: 'SIT A WHILE', action: 'sit-a-while' },
-      state.boat.hatchOpen
-        ? { label: 'CLOSE HATCH', action: 'close-hatch' }
-        : { label: 'OPEN HATCH', action: 'open-hatch' },
+      { label: 'CLIMATE', action: 'cmd:climate' },
     ];
     var tidyOpt = choreOptionIfDue(state, 'tidy');
     if (tidyOpt) options.push(tidyOpt);
@@ -13071,7 +13075,7 @@
       action: function (s) {
         s.boat.hatchOpen = true;
         s.boat.hatchChangedAt = s.meta.voyageMinutes;
-        cmdSaloon(s);
+        cmdClimate(s);
       },
     });
   }
@@ -13083,7 +13087,58 @@
       action: function (s) {
         s.boat.hatchOpen = false;
         s.boat.hatchChangedAt = s.meta.voyageMinutes;
-        cmdSaloon(s);
+        cmdClimate(s);
+      },
+    });
+  }
+
+  // CLIMATE -- the Saloon's cabin controls. It shows the cabin temperature (the whole degree, as CABIN TEMP always did) and whether the heater is on, and offers the two things that
+  // change them: the HEATER (kerosene: it will not light on an empty reserve) and the HATCH (OPEN HATCH / CLOSE HATCH, audio-synced as before). Nothing here is gated by darkness, as the
+  // hatch never was. The two readings are kept current while the screen is open (refreshClimateRows, called from the live loop's refreshComfortRows).
+  var climateRowEls = null;
+  function climateCabinTempText(state) { var f = state.boat.cabinTemperatureF; return f != null ? Math.round(f) + '\u00B0F' : '\u2014'; }
+  function refreshClimateRows(state) {
+    if (!climateRowEls || !state || !tempViewEl.contains(climateRowEls.temp)) { climateRowEls = null; return; }
+    var t = climateCabinTempText(state), h = state.boat.heaterOn ? 'ON' : 'OFF';
+    if (climateRowEls.temp.textContent !== t) climateRowEls.temp.textContent = t;
+    if (climateRowEls.heater.textContent !== h) climateRowEls.heater.textContent = h;
+  }
+  function cmdClimate(state) {
+    var b = state.boat;
+    printBlank();
+    climateRowEls = {
+      temp: printDataRow('CABIN TEMP', climateCabinTempText(state), 'data-row-md'),
+      heater: printDataRow('HEATER', b.heaterOn ? 'ON' : 'OFF', 'data-row-md'),
+    };
+    state.pendingChoice = { id: 'climate-menu', options: pushBack([
+      { label: b.heaterOn ? 'TURN HEATER OFF' : 'TURN HEATER ON', action: 'climate-heater' },
+      b.hatchOpen ? { label: 'CLOSE HATCH', action: 'close-hatch' } : { label: 'OPEN HATCH', action: 'open-hatch' },
+    ], 'cmd:saloon') };
+  }
+  // The heater switch. Switching it on needs kerosene; switching it off always works. The cabin only ever moves through syncCabinTemperature's own gradual blend.
+  function performHeaterToggle(state) {
+    var b = state.boat;
+    if (b.heaterOn) { // switching it off is not an ignition: no match
+      b.heaterOn = false;
+      playElectricalSwitchSound(false);
+      cmdClimate(state);
+      return;
+    }
+    if (keroseneLeft(state) <= 0) {
+      printBlank();
+      printLine('There\u2019s no kerosene left for the heater.');
+      cmdClimate(state);
+      return;
+    }
+    runAudioSyncedAction(state, {
+      label: 'LIGHTING HEATER', transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('match', onEnded); }, // the match: once, for as long as it takes to light; the heater is on when it has
+      action: function (s) {
+        if (keroseneLeft(s) <= 0) { printBlank(); printLine('There\u2019s no kerosene left for the heater.'); cmdClimate(s); return; }
+        s.boat.heaterOn = true;
+        printBlank();
+        printLine('Heater on. Warm air begins moving through the cabin.'); // a transient screen confirmation, not a log entry
+        cmdClimate(s);
       },
     });
   }
@@ -14189,7 +14244,7 @@
 
   // NAV STATION STATUS -- vessel systems / repair state, the same
   // collapsible treatment as INSTRUMENTS just above (see
-  // navStationExpanded's own notes). CABIN TEMP/BATTERY no longer
+  // navStationExpanded's own notes). The supplies -- WATER, DIESEL and KEROSENE, in gallons -- are read here. CABIN TEMP/BATTERY no longer
   // appear here at all -- information-architecture pass, section 5:
   // those readings already have a home (the three rows at the top of
   // this same screen), and duplicating them here served no purpose.
@@ -14206,6 +14261,9 @@
       { dataRow: true, label: 'RUDDER', value: b.steering, widthCls: 'data-row-md' },
       { dataRow: true, label: 'ENGINE', value: systemDamageKnown(state, 'engine') || b.engine !== 'DAMAGED' ? b.engine : 'GOOD', widthCls: 'data-row-md' }, // an undiscovered failure still reads GOOD
       { dataRow: true, label: 'ELECTRICAL', value: b.electrical, widthCls: 'data-row-md' },
+      { dataRow: true, label: 'WATER', value: galCurrentOnly(Math.max(0, state.water.gallons)).toUpperCase(), widthCls: 'data-row-md' },
+      { dataRow: true, label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase(), widthCls: 'data-row-md' },
+      { dataRow: true, label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase(), widthCls: 'data-row-md' },
     ]);
     if (hasRepairableDamage(state)) {
       rows.push({ label: 'REPAIR', action: 'cmd:repair' });
@@ -14242,13 +14300,11 @@
   function cmdNavStation(state) {
     var b = state.boat;
     printBlank();
-    var cabinTempDisplay = b.cabinTemperatureF != null ? Math.round(b.cabinTemperatureF) + '\u00B0F' : '\u2014';
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    // CABIN TEMP (the exact reading), then BATTERY and SOLAR CHARGING, all on the shared label/value grid (.data-row-md). How the cabin
-    // FEELS (cabinComfort) stays internal -- it is never shown here; the player hears about it through the prompts (too cold / too stuffy).
-    printDataRow('CABIN TEMP', cabinTempDisplay, 'data-row-md');
+    // BATTERY and SOLAR CHARGING on the shared label/value grid (.data-row-md). The cabin temperature is read in the Saloon (CLIMATE); how the cabin
+    // FEELS (cabinComfort) stays internal -- the player hears about it through the prompts (too cold / too stuffy).
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
     printDataRow('BATTERY', batteryLabel, 'data-row-md');
     printDataRow('SOLAR CHARGING', solarOutputWatts(state) + ' W', 'data-row-md');
@@ -14299,7 +14355,6 @@
       { label: 'CABIN LIGHTS', on: b.cabinLightsOn, action: 'electrical:cabinLights' },
       { label: 'NAV LIGHTS', on: b.navLightsOn, action: 'electrical:navLights' },
       { label: 'AUTOPILOT', on: b.autopilotOn, action: 'toggle-autopilot-nav' },
-      { label: 'HEATER', on: b.heaterOn, action: 'electrical:heater' },
       { label: 'ACCESSORY', on: b.accessoryOn, action: 'electrical:accessory' },
     ].map(function (row) {
       return { label: row.label, action: row.action, indicator: row.on ? 'on' : 'off' };
@@ -14386,7 +14441,7 @@
       id: 'handbook-notes-for-this-passage', heading: 'NOTES FOR THIS PASSAGE',
       blocks: [
         { lines: ['Departure: Sitka Sound, Alaska.', 'Destination: N\u0101wiliwili Harbor, Kaua\u02BBi.', 'Route: out through the Sound to the open North Pacific, then southwest across it to Hawai\u02BBi.'] },
-        { p: 'The first waypoint, out past the islands, is already plotted on the GPS, and N\u0101wiliwili is marked as the destination. Add the waypoints that follow, or change the first. SOLACE never follows the route by herself: you steer, or set the autopilot to hold a heading.' },
+        { p: 'The first waypoint, out past the islands, is already plotted on the GPS, which runs on ACCESSORY power, and N\u0101wiliwili is marked as the destination. Add the waypoints that follow, or change the first. SOLACE never follows the route by herself: you steer, or set the autopilot to hold a heading.' },
         { p: 'Keep the boat moving and take care of yourself. Before turning in or spending time away from the helm, check your heading, autopilot, battery, and the weather. Eat and drink regularly.' },
       ],
     },
@@ -14446,7 +14501,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button on the HELM screen, under CHANGE COURSE, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. SHIP\u2019S COMPUTER opens it too.' },
+        { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button on the HELM screen, under CHANGE COURSE, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. SHIP\u2019S COMPUTER opens it too. The GPS runs on ACCESSORY power: with ACCESSORY switched off, or the battery gone, it will not open.' },
         { p: 'The solid line is your track. The dashed line through the numbered markers is your route. The thin line runs from SOLACE to the waypoint you are heading for. N\u0101wiliwili is marked as the destination. Check for land before following any of them.' },
         { term: 'ADD A WAYPOINT', body: 'Tap water on the chart. The new waypoint goes at the end of the route.' },
         { term: 'MOVE, DELETE, INSERT', body: 'Tap a waypoint to select it. MOVE, then tap water, to move it. DELETE removes it. INSERT, then tap water, adds a waypoint after it. You can also drag a waypoint. The first waypoint can be moved or deleted like any other.' },
@@ -14475,18 +14530,28 @@
       blocks: [
         { p: 'The engine moves the boat and charges the battery. Use ENGINE above deck to start or stop it. It can run with the sails raised. Running it uses limited diesel.' },
         { p: 'Solar charges during daylight, with less output in poor weather. It may not keep up with the systems you leave on.' },
-        { p: 'The controls for AUTOPILOT, HEATER, CABIN LIGHTS, NAV LIGHTS, and ACCESSORY are at the NAV STATION. Autopilot, the heater, lights, and music playback use battery power. Switch off what you do not need. ACCESSORY supplies the computer.' },
-        { p: 'Daylight changes with SOLACE\u2019s position. At night, switch on CABIN LIGHTS for tasks below deck and NAV LIGHTS for work above deck.' },
+        { p: 'The controls for AUTOPILOT, CABIN LIGHTS, NAV LIGHTS, and ACCESSORY are at the NAV STATION. Autopilot, lights, and music playback use battery power. Switch off what you do not need. ACCESSORY supplies the computer and the GPS.' },
+        { p: 'Daylight changes with SOLACE\u2019s position. At night you need light to work. Switch on CABIN LIGHTS for tasks below deck and NAV LIGHTS for work above deck, or light the lantern when they are off or the battery is gone.' },
         { p: 'Charge the battery before it runs out. If it reaches zero, powered systems switch off. Wait for solar to restore at least 2% before starting the engine. Once power returns, switch the systems you need back on yourself.' },
+      ],
+    },
+    {
+      id: 'handbook-kerosene', heading: 'KEROSENE',
+      blocks: [
+        { p: 'SOLACE carries one reserve of kerosene, 21 gallons, shared by the heater, the stove, and the lantern. STATUS at the NAV STATION shows what is left, with water and diesel.' },
+        { term: 'HEATER', body: 'Switch it on in CLIMATE, in the SALOON. It burns kerosene while it is on and the air outside is cold. It uses no battery.' },
+        { term: 'STOVE', body: 'Warming a meal, or making coffee or tea, lights the stove and uses a little kerosene. Water, cold snacks, and sashimi use none.' },
+        { term: 'LANTERN', body: 'Kept in a bracket by the companionway. At night, when the electric light for the deck you are on is off, LIGHT LANTERN is offered beside GO ABOVE or GO BELOW. It burns kerosene only while lit, stays lit as you go between decks, and gives enough light to work by. EXTINGUISH LANTERN when you are done.' },
+        { p: 'The cold days are the costly ones: a heater left on all day burns far more than cooking does. When the kerosene is gone, the heater goes cold, the lantern goes out, and the stove will not light.' },
       ],
     },
     {
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
-        { term: 'GALLEY', body: 'Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed.' },
+        { term: 'GALLEY', body: 'The GALLEY has MEALS, SNACKS, DRINKS, and FRESH CATCH. Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed. A fish you have caught waits in FRESH CATCH: cook it as its specialty meal, which uses the fish and kerosene and fills you like a meal, or eat it as SASHIMI, which uses only the fish and fills you like a snack. Fish does not keep, so eat it soon.' },
         { term: 'CABIN', body: 'Sleep to recover energy, then choose WAKE UP when you are ready. Aim for a full night\u2019s sleep. Change clothes for the temperature: COMFORT ABOVE and COMFORT BELOW show how your current outfit feels in each place. If you are too warmly dressed to sleep, remove a layer first.' },
         { p: 'Wet clothing stays wet until dried. Change out of it, then use HANG WET CLOTHES. Clothes take time to dry. Wear the rain shell to protect your clothing in rain.' },
-        { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. Open the hatch to ventilate the cabin; close it when you want to retain warmth. Switch on HEATER at the NAV STATION when needed, remembering its battery cost.' },
+        { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. CLIMATE shows the cabin temperature and holds the HEATER switch and the hatch. Open the hatch to ventilate the cabin; close it when you want to retain warmth. The heater burns kerosene, not battery.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
         { p: 'Take care of small chores when they appear. Basic care, reading, music, and quiet time help morale. You do not need to keep every condition perfect.' },
         { p: 'SIT A WHILE and JUST EXIST let you remain seated until you choose to leave. Observations reflect the conditions around you. The voyage keeps moving.' },
@@ -14497,7 +14562,7 @@
       blocks: [
         { p: 'Go below to the NAV STATION and open STATUS to check SAILS, RUDDER, ENGINE, and ELECTRICAL. A system marked DAMAGED needs attention.' },
         { p: 'When damage is identified, REPAIR appears beneath the status readings. Select REPAIR, choose the damaged system, and review the repair quality shown before starting work.' },
-        { p: 'Repairs are started here, through NAV STATION \u2192 STATUS \u2192 REPAIR. At night, turn on CABIN LIGHTS first.' },
+        { p: 'Repairs are started here, through NAV STATION \u2192 STATUS \u2192 REPAIR. At night, turn on CABIN LIGHTS or light the lantern first.' },
         { p: 'If the engine will not run despite a good status reading, try starting it and check the fault reported. Some engine problems are only identified when starting.' },
         { p: 'Repair materials are carried aboard and do not need replenishing during this passage.' },
         { p: 'Repair quality depends on your energy and morale. Hunger, thirst, and very rough seas can make the result worse.' },
@@ -14512,10 +14577,11 @@
         { term: 'DAMAGED RUDDER', body: 'Repair it before changing course.' },
         { term: 'DAMAGED ENGINE', body: 'Continue under sail if possible, then repair it.' },
         { term: 'ELECTRICAL FAILURE', body: 'Replace the fuse, then switch needed systems back on.' },
-        { term: 'DEAD BATTERY', body: 'Wait for daylight charging to reach 2%, then start the engine.' },
+        { term: 'DEAD BATTERY', body: 'Wait for daylight charging to reach 2%, then start the engine. Until then there are no powered lights and no GPS; at night, light the lantern to work.' },
         { term: 'RUN AGROUND', body: 'Use FREE SOLACE to get underway again.' },
         { term: 'EDGE OF THE PASSAGE AREA', body: 'The coast and the outer edges of the chart. SOLACE turns back toward N\u0101wiliwili by herself.' },
-        { term: 'TOO DARK TO SEE', body: 'Turn on cabin lights below deck or navigation lights above deck.' },
+        { term: 'TOO DARK TO SEE', body: 'Turn on cabin lights below deck or navigation lights above deck, or light the lantern. With no light and no kerosene, wait for daylight.' },
+        { term: 'OUT OF KEROSENE', body: 'The heater goes cold, the lantern goes out, and the stove will not light. Water, cold snacks, and sashimi need no fuel.' },
         { term: 'NO SAILING SPEED', body: 'Check wind, point of sail, sail area, trim, and damage.' },
         { p: 'Do not go without food or water. After three days without a drink or seven days without food, you must call for help and the passage cannot continue.' },
       ],
@@ -14523,7 +14589,7 @@
     {
       id: 'handbook-final-checklist', heading: 'FINAL CHECKLIST',
       blocks: [
-        { lines: ['Check the wind and marine forecast.', 'Choose sail area for the conditions.', 'Check your route and the next waypoint.', 'Set a useful heading.', 'Trim the sails if needed.', 'Switch on autopilot before leaving the helm.', 'Check battery charge and turn off unnecessary systems.', 'Eat, drink, and rest as needed.'] },
+        { lines: ['Check the wind and marine forecast.', 'Choose sail area for the conditions.', 'Check your route and the next waypoint.', 'Set a useful heading.', 'Trim the sails if needed.', 'Switch on autopilot before leaving the helm.', 'Check battery charge and turn off unnecessary systems.', 'Check kerosene, water, and diesel in STATUS.', 'Eat, drink, and rest as needed.'] },
       ],
     },
   ];
@@ -15990,6 +16056,29 @@
     });
   }
 
+  // ---- the GPS runs on the accessory circuit ----
+  function gpsPowered(state) {
+    var b = state.boat;
+    return !!b.accessoryOn && !(b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT);
+  }
+  function gpsNoPower(state, from) {
+    printBlank();
+    printLine(state.boat.accessoryOn ? 'The GPS has no power.' : 'The GPS has no power. Accessory power is off.');
+    var back = from === 'nav' ? 'cmd:nav-station' : from === 'helm' ? 'cmd:helm' : 'cmd:ships-computer';
+    state.pendingChoice = { id: 'gps-blocked', options: [{ label: 'BACK', action: back }] };
+  }
+  // Called from the live loop (and on coming back to the page): if the GPS is up and its power has gone, it goes dark and the player is back where they were.
+  function gpsPowerWatch(state) {
+    if (!state || introPending || chartOverlayEl.hidden || gpsPowered(state)) return;
+    var from = chartOpenedFrom;
+    clearTempView(); // closes the full-screen GPS and puts the widget away
+    state.pendingChoice = null;
+    log(state, 'The GPS went dark.');
+    flushNewLogEntries(state);
+    if (from === 'nav') cmdNavStation(state); else if (from === 'helm') cmdHelm(state); else cmdShipsComputerMenu(state);
+    if (!uiBusy) renderOptions(state);
+  }
+
   // The full-screen GPS: the widget fills #chart-screen. (Opened from the GPS buttons and from the Ship's Computer.)
   // The GPS fills the screen. It is opened from three places, and its one button takes the player back to the one it came from:
   //   'computer' -- the Ship's Computer's GPS app (the button reads RETURN and goes back to the computer's home screen)
@@ -15998,6 +16087,7 @@
   var chartOpenedFrom = 'computer';
   function cmdChart(state, from) {
     from = from || 'computer';
+    if (!gpsPowered(state)) { gpsNoPower(state, from); return; } // no accessory power: the GPS stays dark
     chartOpenedFrom = from;
     playNavStationOneShot('mouse');
     chartReturnBtn.textContent = from === 'computer' ? '\u2190 RETURN' : '\u2190 BACK';
@@ -16176,6 +16266,7 @@
   function refreshComfortRows(state) {
     var wrap = document.getElementById('comfort-rows');
     if (wrap && tempViewEl.contains(wrap) && state) fillComfortRows(wrap, state);
+    refreshClimateRows(state); // the CLIMATE screen's cabin temperature and heater, kept current while it is open
   }
 
   function cmdClothing(state) {
@@ -16783,18 +16874,14 @@
   function buildMealsOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return f.type === 'meal' && state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
-    // FISHING HOOK -- the currently-held catch's specialty meal, if any,
-    // appended as an additional MEALS option — never a generic FRESH
-    // FISH entry. Only one can ever be held, so the count is always 1.
-    var fishItem = heldFishAsMealItem(state);
-    if (fishItem) opts.push({ label: fishItem.name.toUpperCase() + ' (1)', action: 'eat:' + HELD_FISH_KEY });
-    return pushBack(opts, 'cmd:eat');
+    // (a fresh catch's specialty meal is prepared under FRESH CATCH, not here)
+    return pushBack(opts, 'cmd:galley');
   }
 
   function buildSnacksOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
-    return pushBack(opts, 'cmd:eat');
+    return pushBack(opts, 'cmd:galley');
   }
 
   // Whichever of MEALS/SNACKS an item belongs to, as a redisplay target
@@ -16802,45 +16889,29 @@
   // chocolate never reaches these gates (see performEat), so this only
   // ever needs to choose between the other two.
   function eatSubmenuPendingChoice(state, item) {
+    if (item.key === HELD_FISH_KEY) return freshCatchFishChoice(state); // the specialty meal is prepared from FRESH CATCH
     return item.type === 'meal'
       ? { id: 'meals-menu', options: buildMealsOptions(state) }
       : { id: 'snacks-menu', options: buildSnacksOptions(state) };
   }
 
-  function cmdEat(state) {
-    // BATTERY FAILURE -- this screen itself only offers MEALS/SNACKS, and
-    // several snacks (trail mix, energy bar) need no cooking or
-    // light at all -- see the task this implements. Left reachable here;
-    // cmdMeals (all cooked) and individual snack items are gated where
-    // they actually matter, in cmdMeals and performEat respectively.
-    var anyMeal = FOOD_ITEMS.some(function (f) { return f.type === 'meal' && state.food[f.key] > 0; }) || !!heldFishAsMealItem(state);
-    var anySnack = FOOD_ITEMS.some(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; });
-    if (!anyMeal && !anySnack) {
-      printBlank();
-      printLine('Nothing left aboard to eat.', 'amber');
-      return;
-    }
-    state.pendingChoice = {
-      id: 'provisions-menu',
-      options: [
-        { label: 'MEALS', action: 'cmd:meals' },
-        { label: 'SNACKS', action: 'cmd:snacks' },
-        { divider: true },
-        { label: 'BACK', action: 'cmd:galley' },
-      ],
-    };
-  }
+  // EAT is gone as a screen: an older saved menu that still points here simply lands in the galley.
+  function cmdEat(state) { cmdGalley(state); }
 
   function cmdMeals(state) {
     // BATTERY FAILURE -- every meal (see FOOD_ITEMS/heldFishAsMealItem)
     // is a cooked item, so the whole submenu is blocked at once rather
     // than offering a screen full of individually-blocked options.
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:eat'); return; }
-    state.pendingChoice = { id: 'meals-menu', options: buildMealsOptions(state) };
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:galley'); return; }
+    var meals = buildMealsOptions(state);
+    if (meals.length === 1) { printBlank(); printLine('There are no meals left.'); } // (BACK alone)
+    state.pendingChoice = { id: 'meals-menu', options: meals };
   }
 
   function cmdSnacks(state) {
-    state.pendingChoice = { id: 'snacks-menu', options: buildSnacksOptions(state) };
+    var snacks = buildSnacksOptions(state);
+    if (snacks.length === 1) { printBlank(); printLine('There are no snacks left.'); }
+    state.pendingChoice = { id: 'snacks-menu', options: snacks };
   }
 
   // THE EATING DIARY ENTRIES. A meal's name comes from the GAME clock -- the very instant every log entry is stamped with
@@ -17051,7 +17122,7 @@
     // otherwise an uncooked snack. Every other snack (trail mix, energy
     // bar) and chocolate stay completely unaffected.
     if ((item.cooked || key === 'cupNoodles') && needsCabinLight(state)) {
-      blockedByDarkness(state, isHeldFish || item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
+      blockedByDarkness(state, isHeldFish ? 'cmd:fresh-catch' : item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
       return;
     }
 
@@ -17092,6 +17163,14 @@
         state.pendingChoice = eatSubmenuPendingChoice(state, item);
         return;
       }
+    }
+    // KEROSENE: everything that is heated -- every cooked item, and the hot water for cup noodles -- uses the stove, and the stove needs kerosene. (Uncooked snacks and chocolate never do.)
+    var usesStove = !!item.cooked || key === 'cupNoodles';
+    if (usesStove && !stoveReady(state)) {
+      printBlank();
+      printLine('There\u2019s no kerosene left for the stove.');
+      state.pendingChoice = eatSubmenuPendingChoice(state, item);
+      return;
     }
     // Cooking water: only items with a per-serving cost (item.waterGal,
     // currently just Oatmeal) draw any; everything else is 0 and this
@@ -17160,6 +17239,7 @@
       c.morale = clamp(c.morale + moraleGain, 0, 100);
       log(s, eatFlavorLine(s, item, life));
       momentNoteMeal(s, item);
+      if (usesStove) stoveDraw(s, isHeldFish ? KEROSENE_STOVE_FISH_GAL : item.type === 'meal' ? KEROSENE_STOVE_MEAL_GAL : KEROSENE_STOVE_DRINK_GAL); // the stove burned for this (and, if it was the last, says so after the meal)
       flushNewLogEntries(s);
       cmdGalley(s);
     };
@@ -17180,6 +17260,7 @@
     // map) keeps the existing permanent label, unchanged.
     var isStandardizedSnackAction = !!SNACK_ACTION_LABEL[item.name];
     var prepAudioKey = FOOD_PREP_AUDIO_KEY[item.name];
+    var startPrep = function () {
     if (prepAudioKey) {
       runAudioSyncedAction(state, {
         label: label,
@@ -17195,6 +17276,8 @@
         action: doEat,
       });
     }
+    };
+    if (usesStove) lightStoveThen(state, startPrep); else startPrep(); // the stove is lit first for anything heated; the rest carries on as it was
   }
 
   // DRINK — its own ROUTINE submenu (matching the existing submenu
@@ -17262,7 +17345,13 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    runAudioSyncedAction(state, {
+    if (!stoveReady(state)) {
+      printBlank();
+      printLine('There\u2019s no kerosene left for the stove.');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    lightStoveThen(state, function () { runAudioSyncedAction(state, {
       label: 'MAKING COFFEE',
       playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
@@ -17274,10 +17363,11 @@
         s.crew.lastCoffeeAt = s.meta.voyageMinutes;
         s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
         log(s, pickVariant(DAILY_COPY.coffee, 'coffee', life));
+        stoveDraw(s, KEROSENE_STOVE_DRINK_GAL);
         flushNewLogEntries(s);
         cmdGalley(s);
       },
-    });
+    }); });
   }
 
   function performTea(state) {
@@ -17299,7 +17389,13 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    runAudioSyncedAction(state, {
+    if (!stoveReady(state)) {
+      printBlank();
+      printLine('There\u2019s no kerosene left for the stove.');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    lightStoveThen(state, function () { runAudioSyncedAction(state, {
       label: 'MAKING TEA',
       playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
       action: function (s) {
@@ -17311,6 +17407,65 @@
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
         log(s, pickVariant(DAILY_COPY.tea, 'tea', life));
+        stoveDraw(s, KEROSENE_STOVE_DRINK_GAL);
+        flushNewLogEntries(s);
+        cmdGalley(s);
+      },
+    }); });
+  }
+
+  /* --------------------------------------------------------------
+     FRESH CATCH -- the fish aboard, and what to make of it. Today a boat keeps one fish at a time (state.fishing.heldFish; it spoils at the next local midnight -- checkSpoilage), but the
+     menu is built from a LIST so it would show several. Choosing a fish offers its species' specialty meal (FISH_MEAL_BY_SPECIES: cooked on the stove -- kerosene, dishes, hunger like a
+     meal -- exactly performEat's held-fish path as before) and [FISH] SASHIMI (raw: nothing from the stove, no kerosene, no dishes; hunger like a snack, as a snack's reset and weight).
+     -------------------------------------------------------------- */
+  function heldCatches(state) {
+    var h = state.fishing && state.fishing.heldFish;
+    var sp = h && FISH_SPECIES_BY_ID[h.speciesId];
+    if (!sp) return [];
+    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: FISH_MEAL_BY_SPECIES[h.speciesId] || null }];
+  }
+  function freshCatchOptions(state) {
+    return pushBack(heldCatches(state).map(function (f) { return { label: f.name.toUpperCase(), action: 'catch:' + f.speciesId }; }), 'cmd:galley');
+  }
+  function cmdFreshCatch(state) {
+    if (!heldCatches(state).length) { printBlank(); printLine('There\u2019s no fresh fish aboard.'); }
+    state.pendingChoice = { id: 'fresh-catch-menu', options: freshCatchOptions(state) };
+  }
+  // The options for one fish: its specialty meal and its sashimi. (Returns the pendingChoice, so a refused cook can put the same screen back.)
+  function freshCatchFishChoice(state, speciesId) {
+    var f = heldCatches(state).filter(function (c) { return speciesId == null || c.speciesId === speciesId; })[0];
+    if (!f) return { id: 'fresh-catch-menu', options: freshCatchOptions(state) };
+    var opts = [];
+    if (f.meal) opts.push({ label: f.meal.toUpperCase(), action: 'eat:' + HELD_FISH_KEY });
+    opts.push({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' });
+    return { id: 'fresh-catch-fish', options: pushBack(opts, 'cmd:fresh-catch') };
+  }
+  function cmdFreshCatchFish(state, speciesId) {
+    var choice = freshCatchFishChoice(state, speciesId);
+    if (choice.id === 'fresh-catch-fish') { printBlank(); printLine(heldCatches(state)[0].name.toUpperCase(), 'heading-label'); }
+    state.pendingChoice = choice;
+  }
+  var SASHIMI_ENTRIES = ["Sliced the [FISH] into sashimi. Couldn't get much fresher.", 'Cut the [FISH] into thin slices and ate it raw. Clean and cold.', 'Had the [FISH] as sashimi. Nothing between me and the sea.',
+    'Sliced up some of the [FISH] and ate it as it was. Not bad at all.', 'Ate the [FISH] raw, sliced thin. It tasted of the sea.', 'Made sashimi from the [FISH]. Quiet, quick and good.'];
+  function performSashimi(state) {
+    var fish = heldCatches(state)[0];
+    if (!fish) { printBlank(); printLine("That's already gone.", 'dim'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:fresh-catch'); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
+    runShortAction(state, {
+      label: 'PREPARING ' + fish.name.toUpperCase() + ' SASHIMI', transientLabel: true, duration: 3,
+      action: function (s) {
+        if (!s.fishing.heldFish) { printBlank(); printLine("That's already gone.", 'dim'); return; } // spoiled while it was being prepared
+        var life = lifeCtx(s), c = s.crew;
+        s.fishing.heldFish = null; // consumed whole, as the cooked meal does (so it is never later logged as spoiled)
+        statAdd(s, 'fishEaten', 1); // (it is a snack, not a meal: no 'meals' count)
+        c.hoursSinceMeal = Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack); // hunger like a snack
+        c.lastAteAt = s.meta.voyageMinutes;
+        c.snackMealRatio = c.snackMealRatio * 0.7 + 1 * 0.3; // a snack's weight in the hidden meal-history monotony
+        bumpClutter(s, 1);
+        c.fatigue = clamp(c.fatigue - 1, 0, 100); // a snack's smaller lift
+        c.morale = clamp(c.morale + 1, 0, 100);
+        log(s, pickVariant(SASHIMI_ENTRIES, 'sashimi', life).replace('[FISH]', fishNameForProse(fish.name)));
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -17625,6 +17780,7 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
+    climate: cmdClimate,
     cabin: cmdCabin,
     'nav-station': cmdNavStation,
     handbook: cmdHandbook,
@@ -17633,6 +17789,7 @@
     meals: cmdMeals,
     snacks: cmdSnacks,
     drink: cmdDrink,
+    'fresh-catch': cmdFreshCatch,
     wash: cmdWash,
     clothing: cmdClothing,
     bookshelf: cmdBookshelf,
@@ -18568,6 +18725,7 @@
     bookClose: 'audio/saloon/book_close.mp3', // ending one (STOP READING, completion, or darkness) -- see performStopReading/syncReadingProgress
     sitAWhile: 'audio/saloon/sit_a_while.mp3', // settling in -- see performSitAWhile (it does NOT set how long she sits)
     getUp: 'audio/saloon/get_up.mp3', // getting up again -- see performGetUp
+    match: 'audio/saloon/match.mp3', // striking a match to light the lantern, the heater or the stove -- see lightStoveThen / performLanternLight / performHeaterToggle
     tarot: 'audio/saloon/tarot.mp3', // pulling a card from the TAROT CARDS deck (about 6 seconds) -- see performPullTarotCard
   };
   var SALOON_AUDIO_VOLUME = {
@@ -18578,6 +18736,7 @@
     bookClose: 0.5,
     sitAWhile: 0.5,
     getUp: 0.5,
+    match: 0.5,
     tarot: 0.5,
   };
   var SALOON_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
@@ -19510,6 +19669,9 @@
       if (labelEl && labelEl.parentNode) labelEl.parentNode.removeChild(labelEl); // transientLabel: gone once resolved, same as runShortAction's own
       if (blankEl && blankEl.parentNode) blankEl.parentNode.removeChild(blankEl); // the blank line above it goes with it -- see this function's own comment above for why
       try { if (config.action) config.action(state); } catch (e) { console.error('Audio-synced action: its result threw (the screen is released regardless):', describeError(e)); }
+      if (config.chain) { // a follow-on action (LIGHTING STOVE -> the cooking): it takes over the screen itself, so the screen is not released in between
+        try { config.chain(state); return; } catch (e) { console.error('Audio-synced action: its follow-on threw (the screen is released regardless):', describeError(e)); }
+      }
       if (state.pendingChoice === choiceAtStart) state.pendingChoice = null;
       uiBusy = false;
       renderOptions(state);
@@ -19575,8 +19737,7 @@
 
   function performSailChange(state, targetConfig) {
     var fromConfig = state.boat.sailConfig;
-    // NIGHT, DEAD BATTERY -- the sail controls work as they do by day: raising, adjusting and furling are all allowed. With no power for the nav lights the
-    // requirement for them is waived (see needsNavLights), and the player is never made to furl or stop.
+    // (night work needs light -- see cmdSails; nothing is waived for a dead battery any more)
     var audioKey = sailChangeAudioKey(fromConfig, targetConfig);
     runAudioSyncedAction(state, {
       label: SAIL_CHANGE_WORKING_LABEL[targetConfig],
@@ -20093,7 +20254,7 @@
           { label: 'GALLEY', action: 'cmd:galley' },
           { label: 'NAV STATION', action: 'cmd:nav-station' },
         ],
-        [{ label: goLabel, action: 'go-above-below' }],
+        lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
       ]);
     }
 
@@ -20108,8 +20269,48 @@
     if (obsAvailable(state)) aboveActions.push({ label: 'JUST EXIST', action: 'just-exist' });
     return groupedOptions([
       aboveActions,
-      [{ label: goLabel, action: 'go-above-below' }],
+      lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
     ]);
+  }
+
+  // The lantern's button, which sits with GO ABOVE / GO BELOW on both decks: EXTINGUISH LANTERN whenever it is lit; LIGHT LANTERN at night while the electric light that applies here is off.
+  function lanternRows(state) {
+    if (lanternLit(state)) return [{ label: 'EXTINGUISH LANTERN', action: 'lantern-out' }];
+    if (isDark(state) && !relevantElectricLightOn(state)) return [{ label: 'LIGHT LANTERN', action: 'lantern-light' }];
+    return [];
+  }
+  // Called from the live loop (and on coming back to the page): keeps the lantern button on the plain deck menu in step with the light.
+  function lanternMenuWatch(state) {
+    if (!state || introPending || uiBusy || state.pendingChoice || !chartOverlayEl.hidden) return;
+    var shown = [].map.call(optionsEl.querySelectorAll('button'), function (b) { return b.textContent.trim(); });
+    if (shown.indexOf('> GO ABOVE') < 0 && shown.indexOf('> GO BELOW') < 0) return; // not the plain deck menu: leave whatever is on screen alone
+    var want = lanternRows(state).map(function (r) { return '> ' + r.label; })[0] || '';
+    var has = shown.indexOf('> LIGHT LANTERN') >= 0 ? '> LIGHT LANTERN' : shown.indexOf('> EXTINGUISH LANTERN') >= 0 ? '> EXTINGUISH LANTERN' : '';
+    if (want !== has) renderOptions(state);
+  }
+  function performLanternLight(state) {
+    var below = state.crew.location === 'below';
+    if (keroseneLeft(state) <= 0) { printBlank(); printLine('There\u2019s no kerosene left for the lantern.'); return; }
+    runAudioSyncedAction(state, {
+      label: 'LIGHTING LANTERN', transientLabel: true,
+      playAudio: function (onEnded) { return playSaloonOneShot('match', onEnded); }, // the match: once, for as long as it takes to light
+      action: function (s) {
+        if (keroseneLeft(s) <= 0) { printBlank(); printLine('There\u2019s no kerosene left for the lantern.'); return; }
+        s.boat.lanternLit = true;
+        log(s, below ? 'Took the lantern down from its bracket by the companionway and lit it.' : 'Reached in for the lantern in its bracket by the companionway and lit it.');
+        flushNewLogEntries(s);
+      },
+    });
+  }
+  function performLanternOut(state) {
+    runShortAction(state, {
+      label: 'PUTTING OUT THE LANTERN', transientLabel: true, duration: 2,
+      action: function (s) {
+        s.boat.lanternLit = false;
+        log(s, 'Put out the lantern and hung it back in its bracket by the companionway.');
+        flushNewLogEntries(s);
+      },
+    });
   }
 
   // Which of the read-only "information" categories (if any) currently
@@ -20151,6 +20352,7 @@
      DAYLIGHT section), never from a clock hour. ONLY those two phases change it: DUSK fades it down over exactly the 30 minutes after
      astronomical sunset, DAWN brings it back up over exactly the 30 minutes before astronomical sunrise; every other phase is stable.
      It is text brightness ONLY -- whether an action is available never reads it (see isDark). */
+  var LANTERN_TEXT_BRIGHTNESS = 0.4; // a lit lantern: steady and readable, a little above the no-light level below, well short of powered light (1). The one tunable for it.
   var NIGHT_TEXT_BRIGHTNESS = 0.2; // the one tunable dim floor -- 1.0 is full/normal (unchanged) brightness; this is as dim as natural light alone ever gets (80% darker than normal, per the task this implements). Retune only this.
 
   // Returns 0..1: how bright natural light ALONE makes the text right now, as a pure function of the game instant and SOLACE's position.
@@ -20234,6 +20436,8 @@
   function applyNaturalLightDimming(state) {
     var lightsOverrideOn = state.crew.location === 'below' ? !!state.boat.cabinLightsOn : !!state.boat.navLightsOn;
     var factor = lightsOverrideOn ? 1 : naturalLightBrightness(state);
+    if (!lightsOverrideOn && lanternLit(state)) factor = Math.max(factor, LANTERN_TEXT_BRIGHTNESS); // a lit lantern holds the text at a steady level (powered light is still full brightness; daylight still wins)
+    factor = Math.max(factor, NIGHT_TEXT_BRIGHTNESS); // never dimmer than the no-light level: the text stays legible in darkness
     if (factor >= 1) {
       NATURAL_LIGHT_TEXT_VARS.forEach(function (name) { document.documentElement.style.removeProperty(name); });
       document.documentElement.style.removeProperty('--output-glow');
@@ -20371,7 +20575,7 @@
             return;
           }
           openInfoPanel = INFO_COMMANDS[cmdName] ? cmdName : null;
-          printEcho(cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName);
+          printEcho(cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName === 'drink' ? 'drinks' : cmdName.indexOf('gps-') === 0 ? 'gps' : cmdName);
           runCommand(state, cmdName);
         } else {
           clearTempView();
@@ -20631,6 +20835,12 @@
       performPutOnWet(state, action.slice(11));
     } else if (action === 'hang-wet-clothes') {
       performHangWetClothes(state);
+    } else if (action === 'climate-heater') {
+      performHeaterToggle(state);
+    } else if (action === 'lantern-light') {
+      performLanternLight(state);
+    } else if (action === 'lantern-out') {
+      performLanternOut(state);
     } else if (action === 'open-hatch') {
       cmdOpenHatch(state);
     } else if (action === 'close-hatch') {
@@ -20679,6 +20889,10 @@
       performStartTape(state, action.slice(11));
     } else if (action === 'stop-tape') {
       performStopTape(state);
+    } else if (action.indexOf('catch:') === 0) {
+      cmdFreshCatchFish(state, action.slice(6));
+    } else if (action === 'catch-sashimi') {
+      performSashimi(state);
     } else if (action === 'drink:water') {
       performDrinkWater(state);
     } else if (action === 'drink:coffee') {
@@ -20810,7 +21024,6 @@
               companionwayTransitionActive = false;
               s.crew.location = goingBelow ? 'below' : 'above';
             syncComfortExposure(s); // the new place: the 60-second clocks start over, nothing is carried between above and below
-              if (!goingBelow) navLightsOutNote(s); // night, battery dead: "No power for the nav lights. ..." (once)
             flushNewLogEntries(s);
               if (goingBelow) s.crew.atHelm = false; // can't stay at the helm while below -- see cmdSleep for the same pattern
               if (finaleAtStep(s, 'above')) finaleAdvance(s); // THE FINAL ARRIVAL: the player must be on deck to start the engine
@@ -21190,6 +21403,8 @@
       if (!GAME || introPending) return; // (after a restart the title page's placeholder game is not a voyage: nothing is simulated or saved until BEGIN)
       var ticks = catchUpFromRealTime(GAME); // same single clock as boot/resume -- see catchUpFromRealTime
       refreshComfortRows(GAME); // a rain shower starting or stopping updates an open CABIN / CHANGE CLOTHES read-out in place
+      gpsPowerWatch(GAME); // the GPS goes dark if its (accessory) power is lost while it is open
+      lanternMenuWatch(GAME); // dusk, or the lights going out, brings LIGHT LANTERN onto the plain deck menu without waiting for the next tap
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
@@ -21530,6 +21745,7 @@
   function beginVoyage() {
     unlockAudio(); // idempotent -- CONTINUE is a gesture too
     GAME = newGameState(); // a fresh voyage starting now: the time spent on the title page and the intro is not part of it
+    try { var wind0 = openingWx.state && rwRealWindSample(openingWx.state, Date.now()); if (wind0) { GAME.weather.windSpeed = wind0.kt; GAME.weather.windDirection = wind0.from; } } catch (e) { /* no reading: the fallback wind starts from the placeholder */ } // the real wind at the dock, from the first minute (the voyage's own reading replaces it within moments, straight to the real wind)
     GAME.weather.temperatureF = startingConditions(GAME).temperatureF; // the air the voyage begins in is the air the opening reading found (it would otherwise read the 45 F placeholder until its own first reading arrives, and judge this outfit against that)
     GAME.crew.clothing = startingOutfit(GAME); // dressed for the deck, for the weather it really begins in
     printedCount = 0;
@@ -21783,6 +21999,12 @@
     if (b.batteryRecovering === undefined) b.batteryRecovering = b.battery <= 0;
     if (b.autopilotOn === undefined) b.autopilotOn = true;
     if (b.heaterOn === undefined) b.heaterOn = false;
+    // KEROSENE -- a save from before the reserve existed starts it full; anything unreadable is treated the same; it can never exceed what the tank holds.
+    if (!Number.isFinite(b.keroseneGallons)) b.keroseneGallons = KEROSENE_STARTING_GALLONS;
+    b.keroseneGallons = clamp(b.keroseneGallons, 0, KEROSENE_STARTING_GALLONS);
+    if (b.keroseneOutNoted === undefined) b.keroseneOutNoted = b.keroseneGallons <= 0;
+    if (b.lanternLit === undefined) b.lanternLit = false;
+    if (b.keroseneGallons <= 0) { b.heaterOn = false; b.lanternLit = false; } // nothing can be burning on an empty reserve
     if (b.cabinLightsOn === undefined) b.cabinLightsOn = false;
     // NAV LIGHTS -- one single state, never two. A save from before this
     // exact rename still has the old exteriorLightsOn key; carry its
@@ -21893,20 +22115,10 @@
     if (w.fallback === undefined) w.fallback = null;
     if (w.fallback && !isValidDirectionDeg(w.fallback.anchorDeg)) w.fallback.anchorDeg = w.fallback.windDeg; // saves from before the fallback wind was anchored (it used latitude bands)
 
-    var old = (w.engine && typeof w.engine === 'object') ? w.engine : {};
-    if (pacificControlBegun(state)) { w.engine = null; return; }
-    var fin = Number.isFinite;
-    var sameRegime = old.currentEvent === 'favorableDeparture' || (old.currentEvent === undefined && old.booted !== undefined);
-    w.engine = {
-      booted: false,
-      phaseStartedAt: fin(old.phaseStartedAt) ? old.phaseStartedAt : state.meta.voyageMinutes,
-      plannedPhaseDuration: (sameRegime && fin(old.plannedPhaseDuration)) ? old.plannedPhaseDuration : 0,
-      intensity: (fin(old.intensity) && old.intensity >= CORRIDOR_WIND.intensityRange[0] && old.intensity <= CORRIDOR_WIND.intensityRange[1]) ? old.intensity : 0.5,
-      targetWindSpeed: fin(old.targetWindSpeed) ? old.targetWindSpeed : w.windSpeed,
-      targetWindDirection: fin(old.targetWindDirection) ? old.targetWindDirection : (isValidDirectionDeg(w.windDirection) ? w.windDirection : EMERGENCY_FALLBACK_WIND_DEG),
-    };
-    if (sameRegime && old.booted !== false && isValidDirectionDeg(old.phaseDirectionAnchorDeg) && w.engine.plannedPhaseDuration > 0) { w.engine.phaseDirectionAnchorDeg = old.phaseDirectionAnchorDeg; w.engine.booted = true; }
+    w.engine = null; // there is no scripted opening wind any more (a save that still has one drops it: the real wind is the wind)
   }
+
+
 
 
   // A handful of automatic sequences (the fishing bite prompt, the
@@ -21948,6 +22160,14 @@
   function migrateStalePendingChoiceIfNeeded(state) {
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
+    }
+    if (state.pendingChoice && (state.pendingChoice.id === 'galley-menu' || state.pendingChoice.id === 'provisions-menu')) { // the old GALLEY / EAT screens: the galley, as it is now
+      cmdGalley(state);
+      return;
+    }
+    if (state.pendingChoice && (state.pendingChoice.id === 'saloon-menu' || state.pendingChoice.id === 'nav-station-menu')) { // a save made on a menu that has changed (the hatch and the heater moved to CLIMATE): drawn afresh
+      if (state.pendingChoice.id === 'saloon-menu') cmdSaloon(state); else cmdNavStation(state);
+      return;
     }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
       cmdSaloon(state);
@@ -22435,6 +22655,7 @@
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = introPending ? 0 : catchUpFromRealTime(GAME);
+      if (!introPending) { gpsPowerWatch(GAME); lanternMenuWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
