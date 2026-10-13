@@ -534,9 +534,9 @@
   .gps-readout { margin-top: 0.55rem; }
   .gps-row {
     display: grid;
-    grid-template-columns: 22ch 1fr;
+    grid-template-columns: 17ch 1fr; /* 17 characters: the longest label, WAYPOINT 60 OF 60 */
     column-gap: 1ch;
-    font-size: 0.82rem;
+    font-size: clamp(0.68rem, 3.4vw, 0.82rem); /* 0.82rem as before on a wide screen; a little smaller on the narrowest phones so the position (the longest value) stays on one line */
     line-height: 1.5;
     letter-spacing: 0.02em;
   }
@@ -587,9 +587,9 @@
   }
   .chart-hint .chart-hint-msg { color: var(--phosphor-bright); display: block; }
   .chart-tools { display: flex; flex-wrap: wrap; gap: 0.4rem 0.5rem; margin-bottom: 0.2rem; }
-  .chart-tool { border: 1px solid var(--phosphor-dim); padding: 0.4rem 0.8rem; min-height: 40px; font-size: 0.8rem; letter-spacing: 0.06em; }
-  .chart-tool.is-on { border-color: var(--phosphor-bright); }
-  .chart-tool.is-off { color: var(--phosphor-dim); }
+  .option.chart-tool { border: 1px solid var(--phosphor-dim); padding: 0.4rem 0.8rem; min-height: 40px; font-size: 0.8rem; letter-spacing: 0.06em; }
+  .option.chart-tool.is-on { border-color: var(--phosphor-bright); background: var(--phosphor-bright); color: var(--bg); } /* the active mode: filled, like the active waypoint's dot */
+  .option.chart-tool.is-off { color: var(--phosphor-dim); opacity: 0.55; } /* UNDO with nothing to undo */
   /* the Ship's Computer's GPS app: the same widget, filling the app's screen (the map takes whatever height the readouts and tools leave) */
   #chart-screen { display: flex; justify-content: center; align-items: stretch; overflow-y: auto; box-sizing: border-box; padding: 0.6rem 1.2rem 0; }
   .gps-widget.gps-full { display: flex; flex-direction: column; max-width: 640px; min-height: 0; }
@@ -1073,9 +1073,8 @@
       <p id="chart-hint" class="chart-hint"></p>
       <div class="chart-tools">
         <button type="button" class="option chart-tool" data-tool="add">ADD</button>
-        <button type="button" class="option chart-tool" data-tool="insert">INSERT</button>
-        <button type="button" class="option chart-tool" data-tool="move">MOVE</button>
         <button type="button" class="option chart-tool" data-tool="delete">DELETE</button>
+        <button type="button" class="option chart-tool is-off" data-tool="undo" disabled>UNDO</button>
       </div>
     </div>
   </div>
@@ -14515,8 +14514,11 @@
       blocks: [
         { p: 'The GPS shows SOLACE, her track, and your route. Open it with the GPS button on the HELM screen, under CHANGE COURSE, or the GPS button above MARINE FORECAST at the NAV STATION below. It fills the screen, and BACK returns you to where you were. Both open the same chart: the same position, route and waypoints, and a change made in one is there in the other. SHIP\u2019S COMPUTER opens it too. The GPS runs on ACCESSORY power: with ACCESSORY switched off, or the battery gone, it will not open.' },
         { p: 'The solid line is your track. The dashed line through the numbered markers is your route. The thin line runs from SOLACE to the waypoint you are heading for. N\u0101wiliwili is marked as the destination. Check for land before following any of them.' },
-        { term: 'ADD A WAYPOINT', body: 'Tap water on the chart. The new waypoint goes at the end of the route.' },
-        { term: 'MOVE, DELETE, INSERT', body: 'Tap a waypoint to select it. MOVE, then tap water, to move it. DELETE removes it. INSERT, then tap water, adds a waypoint after it. You can also drag a waypoint. The first waypoint can be moved or deleted like any other.' },
+        { term: 'ADD', body: 'Tap ADD, tap the waypoint the new one should follow, then tap water. The new waypoint goes right after it, and the next tap carries on after that one. Tap ADD again to stop.' },
+        { term: 'DELETE', body: 'Tap DELETE, then tap a waypoint to remove it. Tap DELETE again to stop.' },
+        { term: 'MOVE', body: 'Drag a waypoint to a new place on the water.' },
+        { term: 'UNDO', body: 'Reverses the last waypoint change: an addition, a deletion, or a move. It is greyed out when there is nothing to undo.' },
+        { p: 'The first waypoint can be moved or deleted like any other. Waypoints are renumbered after every change.' },
         { p: 'A waypoint cannot be placed on land or outside the passage area. A leg between two waypoints can still cross land. The chart marks it, and the route is only a plan.' },
         { term: 'REACHING A WAYPOINT', body: 'Come within 0.3 nautical miles of the active waypoint, the first one not yet reached. It is marked reached and the next one becomes active. SOLACE does not turn by herself: steer for the next waypoint yourself.' },
         { p: 'After the last waypoint there is nothing left to follow, so add the next. No line is drawn to N\u0101wiliwili; its bearing and distance are always shown.' },
@@ -15665,10 +15667,9 @@
      WHAT IT DRAWS: the actual track (solid), the planned route from where the voyage began through each waypoint (dashed; dim once reached; dotted where a leg
      crosses land), a thin line from the boat to the active waypoint, and Nawiliwili marked as the destination. There is no line to Nawiliwili: the player plots
      the way there. The chart is guidance only: nothing it shows ever steers the boat.
-     EDITING (the same everywhere, none of it touching the simulation clock): ADD (the default -- a tap on water adds a waypoint at the END of the route), INSERT (a
-     tap adds one right AFTER the selected waypoint), MOVE (a tap moves the selected waypoint), DELETE (removes it). A waypoint is selected by tapping its number, and
-     can also simply be dragged. Whatever the tool, the place is checked by routeCheckPlacement -- the same water test that grounds the boat -- and a tap on land (or
-     outside the passage area) is refused with a plain message and changes nothing.
+     EDITING (the same everywhere, none of it touching the simulation clock): ADD and DELETE are modes, UNDO reverses the last change, and a waypoint is moved by dragging it. In ADD,
+     select a waypoint (tap its number) and then tap water: the new waypoint goes straight after the selected one. In DELETE, tapping a waypoint deletes it. The place is checked by
+     routeCheckPlacement -- the same water test that grounds the boat -- and a tap on land (or outside the passage area) is refused with a plain message and changes nothing.
      ====================================================================== */
   var gpsStatusEl = document.getElementById('gps-status');
   var gpsReadoutEl = document.getElementById('gps-readout');
@@ -15687,7 +15688,7 @@
   var GPS_REFIT_AFTER_MS = 30000;
   var GPS_REFRESH_MIN_MS = 250;
 
-  var chartEdit = { tool: 'add', selectedId: null, msg: '' }; // never saved: the tool in hand, the selected waypoint, and the last thing the chart said
+  var chartEdit = { tool: null, selectedId: null, msg: '' }; // never saved: the mode in hand (null, 'add' or 'delete'), the selected waypoint, and the last thing the chart said
   var chartWpMarkers = {};       // waypoint id -> { marker, el, dot }
   var chartDraggingId = null;    // a waypoint being dragged right now (the live refresh leaves it alone)
   var chartIgnoreClickUntil = 0; // a drag ends with a click on some browsers; it must not also select / place
@@ -15699,40 +15700,44 @@
     bad: 'A waypoint can’t go there.',
   };
 
-  // ---- the readouts: nine rows, always the same nine, so the layout never jumps ----
+  // ---- the readout: six rows, always the same six, so the layout never jumps ----
+  //   POSITION          56° 34.6′ N, 135° 50.4′ W
+  //   HEADING           189°
+  //   SPEED             2.8 KT
+  //   WAYPOINT 2 OF 4   BRG 188° · 702 NM       (the active waypoint)
+  //   OFF ROUTE         5.7 NM RIGHT
+  //   NĀWILIWILI        BRG 216° · 2,323 NM     (always the direct bearing and distance to the harbor)
   var GPS_ROWS = [
     ['position', 'POSITION'], ['heading', 'HEADING'], ['speed', 'SPEED'],
-    ['wp', 'WAYPOINT'], ['wpBearing', 'WAYPOINT BEARING'], ['wpDist', 'WAYPOINT DISTANCE'], ['off', 'OFF ROUTE'],
-    ['bearing', 'BEARING TO NĀWILIWILI'], ['dist', 'DISTANCE TO NĀWILIWILI'],
+    ['wp', 'WAYPOINT'], ['off', 'OFF ROUTE'], ['dest', 'N\u0100WILIWILI'],
   ];
-  var gpsRowEls = {};
+  var gpsRowEls = {}, gpsLabelEls = {};
   GPS_ROWS.forEach(function (row) {
     var d = document.createElement('div');
     d.className = 'gps-row';
     var a = document.createElement('span'); a.textContent = row[1];
-    var b = document.createElement('span'); b.textContent = '—';
+    var b = document.createElement('span'); b.textContent = '\u2014';
     d.appendChild(a); d.appendChild(b);
     gpsReadoutEl.appendChild(d);
-    gpsRowEls[row[0]] = b;
+    gpsRowEls[row[0]] = b; gpsLabelEls[row[0]] = a;
   });
-  function gpsSetRow(key, text) { var el = gpsRowEls[key]; if (el.textContent !== text) el.textContent = text; }
+  function gpsSetRow(key, text, label) {
+    var el = gpsRowEls[key]; if (el.textContent !== text) el.textContent = text;
+    if (label != null) { var l = gpsLabelEls[key]; if (l.textContent !== label) l.textContent = label; }
+  }
   // Position, heading and speed are the same figures the Helm reads (currentLatLon with its uncertain-fix jitter when the electrics are damaged, nav.heading,
-  // computeBoatSpeed); the waypoint rows come from routeGuidance, the one place the route's bearings and distances are worked out; the last two are always the
+  // computeBoatSpeed); the waypoint rows come from routeGuidance, the one place the route's bearings and distances are worked out; the last row is always the
   // direct bearing and distance to Nawiliwili Harbor, whatever the route says.
   function gpsRenderReadouts(state) {
-    var nav = state.nav, fix = currentLatLon(state), g = routeGuidance(state), dash = '—';
-    gpsSetRow('position', formatLatLon(fix.lat, fix.lon));
-    gpsSetRow('heading', Math.round(nav.heading) + '°');
+    var nav = state.nav, fix = currentLatLon(state), g = routeGuidance(state), dash = '\u2014', dot = ' \u00B7 ';
+    gpsSetRow('position', formatLatLon(fix.lat, fix.lon).replace(/'/g, '\u2032'));
+    gpsSetRow('heading', Math.round(nav.heading) + '\u00B0');
     gpsSetRow('speed', computeBoatSpeed(state, nav.heading).toFixed(1) + ' KT');
-    if (g.count === 0) gpsSetRow('wp', 'NONE PLOTTED');
-    else if (g.complete) gpsSetRow('wp', 'ALL REACHED');
-    else gpsSetRow('wp', g.number + ' OF ' + g.count);
-    var live = g.point && !g.complete;
-    gpsSetRow('wpBearing', live ? routeBearingText(g.bearing) : dash);
-    gpsSetRow('wpDist', live ? routeDistText(g.distNm) : dash);
-    gpsSetRow('off', live ? routeOffText(g) : dash);
-    gpsSetRow('bearing', routeBearingText(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)));
-    gpsSetRow('dist', routeDistText(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)));
+    if (g.count === 0) gpsSetRow('wp', 'NONE PLOTTED', 'WAYPOINT');
+    else if (g.complete) gpsSetRow('wp', 'ALL REACHED', 'WAYPOINT');
+    else gpsSetRow('wp', 'BRG ' + routeBearingText(g.bearing) + dot + routeDistText(g.distNm), 'WAYPOINT ' + g.number + ' OF ' + g.count);
+    gpsSetRow('off', g.point && !g.complete ? routeOffText(g) : dash);
+    gpsSetRow('dest', 'BRG ' + routeBearingText(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)) + dot + routeDistText(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)));
   }
   function gpsSetStatus(text) { if (gpsStatusEl.textContent !== text) gpsStatusEl.textContent = text; }
 
@@ -15818,14 +15823,16 @@
       if (Date.now() < chartIgnoreClickUntil) return;
       chartSelectWaypoint(id);
     });
-    marker.on('dragstart', function () { chartDraggingId = id; });
+    var beforeDrag = null; // the route as it was when the drag began (kept for UNDO if the drop is accepted)
+    marker.on('dragstart', function () { chartDraggingId = id; beforeDrag = GAME ? chartSnapshot(GAME, 'move') : null; });
     marker.on('dragend', function () {
       chartDraggingId = null;
       chartIgnoreClickUntil = Date.now() + 350;
       var ll = marker.getLngLat();
       var res = GAME ? routeMovePoint(GAME, id, ll.lat, ll.lng) : { ok: false, reason: 'bad' };
       if (res.ok) {
-        chartEdit.selectedId = id; chartEdit.tool = 'add';
+        if (beforeDrag) chartRemember(GAME, beforeDrag);
+        if (chartEdit.tool !== 'delete') chartEdit.selectedId = id;
         chartEdit.msg = 'Moved waypoint ' + (res.index + 1) + '.';
         saveGameState(GAME);
       } else {
@@ -15873,14 +15880,44 @@
     chartRenderToolbar(state);
   }
 
+  // ---- UNDO: the waypoints as they were before each change ----
+  var chartUndo = { route: null, stack: [] }; // belongs to one route object: a new voyage (or a loaded save) starts with nothing to undo
+  var CHART_UNDO_LIMIT = 100;
+  function chartUndoStack(state) {
+    var r = routeOf(state);
+    if (chartUndo.route !== r) chartUndo = { route: r, stack: [] };
+    return chartUndo.stack;
+  }
+  function chartSnapshot(state, kind) {
+    return { kind: kind, points: routeOf(state).points.map(function (pt) { return { id: pt.id, lat: pt.lat, lon: pt.lon, reached: !!pt.reached }; }) };
+  }
+  function chartRemember(state, snap) {
+    var st = chartUndoStack(state);
+    st.push(snap);
+    if (st.length > CHART_UNDO_LIMIT) st.shift();
+  }
+  var CHART_UNDO_MSG = { add: 'Undid the new waypoint.', delete: 'Brought the deleted waypoint back.', move: 'Moved the waypoint back.' };
+  function chartUndoLast(state) {
+    var st = chartUndoStack(state);
+    if (!st.length) return;
+    var snap = st.pop(), r = routeOf(state), now = {};
+    r.points.forEach(function (pt) { now[pt.id] = !!pt.reached; });
+    var pts = snap.points.map(function (pt) { return { id: pt.id, lat: pt.lat, lon: pt.lon, reached: !!pt.reached || !!now[pt.id] }; }); // (a waypoint the boat has reached since stays reached)
+    var last = -1; pts.forEach(function (pt, i) { if (pt.reached) last = i; });
+    for (var i = 0; i < last; i++) pts[i].reached = true; // reached points are always the ones at the front of the route
+    r.points = pts;
+    chartEdit.msg = CHART_UNDO_MSG[snap.kind] || 'Undone.';
+    saveGameState(state);
+    gpsRefreshRoute(state, true);
+    gpsRenderReadouts(state);
+  }
+
   function chartHintLines(state) {
-    var r = routeOf(state), sel = chartSelectedIndex(state), n = sel + 1, lines = [];
+    var r = routeOf(state), lines = [];
     if (!chartLoaded) return [chartLibraryFailed ? '' : 'Loading the chart...'];
-    if (chartEdit.tool === 'move' && sel >= 0) lines.push('Tap water to move waypoint ' + n + ', or drag it.');
-    else if (chartEdit.tool === 'insert' && sel >= 0) lines.push('Tap water to add a waypoint after waypoint ' + n + '.');
-    else if (sel >= 0) lines.push('Waypoint ' + n + ' selected. Move it, insert after it, or delete it. Tap water to add at the end.');
-    else if (r.points.length === 0) lines.push('No waypoints. Tap water to add one.');
-    else lines.push('Tap water to add a waypoint. Tap a waypoint to select it.');
+    if (chartEdit.tool === 'add') lines.push(r.points.length === 0 ? 'No waypoints. Tap the chart to add one.' : 'Select a waypoint, then tap the chart to add one after it.');
+    else if (chartEdit.tool === 'delete') lines.push('Select a waypoint to delete it.');
+    else lines.push(r.points.length === 0 ? 'No waypoints. Select ADD, then tap the chart.' : 'Drag a waypoint to move it.');
     var land = chartLandLegs(state), bad = [];
     land.forEach(function (x, i) { if (x) bad.push(i + 1); });
     if (bad.length) lines.push((bad.length === 1 ? 'The leg to waypoint ' + bad[0] + ' crosses land.' : 'The legs to waypoints ' + bad.slice(0, 3).join(', ') + (bad.length > 3 ? ' and ' + (bad.length - 3) + ' more' : '') + ' cross land.'));
@@ -15889,60 +15926,70 @@
   function chartRenderToolbar(state) {
     var st = state || GAME;
     if (!st) return;
-    var hasSel = chartSelectedIndex(st) >= 0, lines = chartHintLines(st);
-    var sig = [chartEdit.tool, hasSel, chartEdit.msg, lines.join('|')].join('~'); // redrawn only when something it says has changed
+    var canUndo = chartUndoStack(st).length > 0, lines = chartHintLines(st);
+    var sig = [chartEdit.tool, canUndo, chartEdit.msg, lines.join('|')].join('~'); // redrawn only when something it says has changed
     if (sig === gpsToolbarSig) return;
     gpsToolbarSig = sig;
     chartHintEl.innerHTML = '';
     if (chartEdit.msg) { var m = document.createElement('span'); m.className = 'chart-hint-msg'; m.textContent = chartEdit.msg; chartHintEl.appendChild(m); }
     lines.forEach(function (t) { var s = document.createElement('span'); s.style.display = 'block'; s.textContent = t; chartHintEl.appendChild(s); });
     chartToolBtns.forEach(function (b) {
-      var t = b.dataset.tool;
+      var t = b.dataset.tool, off = t === 'undo' && !canUndo;
       b.classList.toggle('is-on', t === chartEdit.tool);
-      b.classList.toggle('is-off', (t === 'move' || t === 'insert' || t === 'delete') && !hasSel);
+      b.classList.toggle('is-off', off);
+      b.disabled = off;
+      if (t !== 'undo') b.setAttribute('aria-pressed', t === chartEdit.tool ? 'true' : 'false');
     });
   }
 
+  // A tap on a waypoint's number: in DELETE it deletes the waypoint; otherwise it selects it (tapping the selected one again lets go), which is where ADD puts the next one.
   function chartSelectWaypoint(id) {
+    if (chartEdit.tool === 'delete') { chartDeleteWaypoint(id); return; }
     chartEdit.selectedId = chartEdit.selectedId === id ? null : id;
-    if (chartEdit.selectedId == null && chartEdit.tool !== 'add') chartEdit.tool = 'add';
     chartEdit.msg = '';
     gpsRefreshRoute(GAME);
   }
+  function chartDeleteWaypoint(id) {
+    var snap = chartSnapshot(GAME, 'delete'), res = routeDeletePoint(GAME, id);
+    if (res.ok) {
+      chartRemember(GAME, snap);
+      chartEdit.msg = 'Deleted waypoint ' + (res.index + 1) + '.';
+      if (chartEdit.selectedId === id) chartEdit.selectedId = null;
+      saveGameState(GAME);
+    }
+    gpsRefreshRoute(GAME, true);
+    gpsRenderReadouts(GAME);
+  }
+  // ADD and DELETE switch on and off (the active one's button is highlighted); pressing the other switches to it. UNDO reverses the last change.
   function chartToolPressed(tool) {
-    var sel = chartSelectedIndex(GAME);
+    if (tool === 'undo') { chartUndoLast(GAME); return; }
     chartEdit.msg = '';
-    if (tool === 'add') chartEdit.tool = 'add';
-    else if (sel < 0) { chartEdit.msg = 'Select a waypoint first: tap its number.'; chartEdit.tool = 'add'; }
-    else if (tool === 'delete') {
-      var res = routeDeletePoint(GAME, chartEdit.selectedId);
-      if (res.ok) { chartEdit.msg = 'Deleted waypoint ' + (res.index + 1) + '.'; saveGameState(GAME); }
-      chartEdit.selectedId = null; chartEdit.tool = 'add';
-    } else chartEdit.tool = chartEdit.tool === tool ? 'add' : tool; // MOVE / INSERT: pressing it again puts it down
+    chartEdit.tool = chartEdit.tool === tool ? null : tool;
+    if (chartEdit.tool === 'delete') chartEdit.selectedId = null; // nothing is selected going into DELETE: the next waypoint tapped is the one that goes
     gpsRefreshRoute(GAME);
     gpsRenderReadouts(GAME);
   }
-  // A tap on the water. What it does depends on the tool in hand.
+  // A tap on the water. Only ADD does anything with it: the new waypoint goes straight after the selected one (the first one, if there are none), at the place tapped.
   function chartOnMapClick(e) {
     if (!GAME || !chartLoaded || Date.now() < chartIgnoreClickUntil) return;
     var t = e.originalEvent && e.originalEvent.target;
     if (t && t.closest && t.closest('.chart-wp, .chart-vessel-marker, .chart-dest-marker, .chart-view-btns')) return;
-    var lat = e.lngLat.lat, lng = e.lngLat.lng, sel = chartSelectedIndex(GAME), res, said;
-    if (chartEdit.tool === 'move' && sel >= 0) {
-      res = routeMovePoint(GAME, chartEdit.selectedId, lat, lng);
-      said = res.ok ? 'Moved waypoint ' + (res.index + 1) + '.' : null;
-      if (res.ok) chartEdit.tool = 'add';
-    } else if (chartEdit.tool === 'insert' && sel >= 0) {
-      res = routeAddPoint(GAME, lat, lng, chartEdit.selectedId);
-      said = res.ok ? 'Added waypoint ' + (res.index + 1) + ' after waypoint ' + res.index + '.' : null;
-      if (res.ok) chartEdit.selectedId = res.point.id; // so the next tap adds the one after it
+    if (chartEdit.tool !== 'add') return;
+    var r = routeOf(GAME), sel = chartSelectedIndex(GAME), res;
+    if (sel < 0 && r.points.length > 0) {
+      chartEdit.msg = 'Select a waypoint first: tap its number.';
     } else {
-      res = routeAddPoint(GAME, lat, lng);
-      said = res.ok ? 'Added waypoint ' + (res.index + 1) + '.' : null;
-      if (res.ok) chartEdit.selectedId = res.point.id;
+      var snap = chartSnapshot(GAME, 'add');
+      res = routeAddPoint(GAME, e.lngLat.lat, e.lngLat.lng, sel >= 0 ? chartEdit.selectedId : undefined);
+      if (res.ok) {
+        chartRemember(GAME, snap);
+        chartEdit.selectedId = res.point.id; // so the next tap adds the one after it
+        chartEdit.msg = 'Added waypoint ' + (res.index + 1) + '.';
+        saveGameState(GAME);
+      } else {
+        chartEdit.msg = CHART_PLACE_FAIL[res.reason] || CHART_PLACE_FAIL.bad;
+      }
     }
-    chartEdit.msg = res.ok ? said : (CHART_PLACE_FAIL[res.reason] || CHART_PLACE_FAIL.bad);
-    if (res.ok) saveGameState(GAME);
     gpsRefreshRoute(GAME, true);
     gpsRenderReadouts(GAME);
   }
@@ -16100,7 +16147,7 @@
     chartReturnBtn.textContent = from === 'computer' ? '\u2190 RETURN' : '\u2190 BACK';
     chartOverlayEl.hidden = false;
     fitChartScreen();
-    chartEdit.tool = 'add'; chartEdit.msg = '';
+    chartEdit.tool = null; chartEdit.msg = '';
     // (if something wipes the screen while the chart is open, these are the buttons that are left)
     state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'helm' ? { label: 'BACK', action: 'cmd:helm' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
     gpsMount(chartScreenEl, 'computer', state);
