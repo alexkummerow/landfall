@@ -13091,13 +13091,16 @@
   // below-deck clutter, which comes from activity all over the boat (a
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
+    var b = state.boat;
     printBlank();
     printLine('MORALE: ' + moraleLevel(state.crew.morale));
+    climateRowEls = { temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)) }; // CABIN TEMP and HEATER, just under MORALE (kept current by refreshClimateRows)
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'LISTEN', action: 'cmd:tape-player' },
       { label: 'SIT A WHILE', action: 'sit-a-while' },
-      { label: 'CLIMATE', action: 'cmd:climate' },
+      { label: b.heaterOn ? 'TURN HEATER OFF' : 'TURN HEATER ON', action: 'climate-heater' },
+      b.hatchOpen ? { label: 'CLOSE HATCH', action: 'close-hatch' } : { label: 'OPEN HATCH', action: 'open-hatch' },
     ];
     var tidyOpt = choreOptionIfDue(state, 'tidy');
     if (tidyOpt) options.push(tidyOpt);
@@ -13123,7 +13126,7 @@
       action: function (s) {
         s.boat.hatchOpen = true;
         s.boat.hatchChangedAt = s.meta.voyageMinutes;
-        cmdClimate(s);
+        cmdSaloon(s);
       },
     });
   }
@@ -13135,33 +13138,23 @@
       action: function (s) {
         s.boat.hatchOpen = false;
         s.boat.hatchChangedAt = s.meta.voyageMinutes;
-        cmdClimate(s);
+        cmdSaloon(s);
       },
     });
   }
 
-  // CLIMATE -- the Saloon's cabin controls. It shows the cabin temperature (the whole degree, as CABIN TEMP always did) and whether the heater is on, and offers the two things that
-  // change them: the HEATER (kerosene: it will not light on an empty reserve) and the HATCH (OPEN HATCH / CLOSE HATCH, audio-synced as before). Nothing here is gated by darkness, as the
-  // hatch never was. The two readings are kept current while the screen is open (refreshClimateRows, called from the live loop's refreshComfortRows).
+  // The Saloon's cabin readings: CABIN TEMP (the whole degree, as it always was) and HEATER (ON / OFF) are two plain lines just under MORALE, kept current while the screen is open
+  // (refreshClimateRows, called from the live loop's refreshComfortRows). The controls that change them -- TURN HEATER ON / OFF and OPEN HATCH / CLOSE HATCH -- are buttons on the Saloon
+  // menu itself, under SIT A WHILE (there is no CLIMATE menu). Nothing here is gated by darkness, as the hatch never was; the heater will not light on an empty kerosene reserve.
   var climateRowEls = null;
   function climateCabinTempText(state) { var f = state.boat.cabinTemperatureF; return f != null ? Math.round(f) + '\u00B0F' : '\u2014'; }
+  function climateTempLine(state) { return 'CABIN TEMP: ' + climateCabinTempText(state); }
+  function climateHeaterLine(state) { return 'HEATER: ' + (state.boat.heaterOn ? 'ON' : 'OFF'); }
   function refreshClimateRows(state) {
     if (!climateRowEls || !state || !tempViewEl.contains(climateRowEls.temp)) { climateRowEls = null; return; }
-    var t = climateCabinTempText(state), h = state.boat.heaterOn ? 'ON' : 'OFF';
+    var t = climateTempLine(state), h = climateHeaterLine(state);
     if (climateRowEls.temp.textContent !== t) climateRowEls.temp.textContent = t;
     if (climateRowEls.heater.textContent !== h) climateRowEls.heater.textContent = h;
-  }
-  function cmdClimate(state) {
-    var b = state.boat;
-    printBlank();
-    climateRowEls = {
-      temp: printDataRow('CABIN TEMP', climateCabinTempText(state), 'data-row-md'),
-      heater: printDataRow('HEATER', b.heaterOn ? 'ON' : 'OFF', 'data-row-md'),
-    };
-    state.pendingChoice = { id: 'climate-menu', options: pushBack([
-      { label: b.heaterOn ? 'TURN HEATER OFF' : 'TURN HEATER ON', action: 'climate-heater' },
-      b.hatchOpen ? { label: 'CLOSE HATCH', action: 'close-hatch' } : { label: 'OPEN HATCH', action: 'open-hatch' },
-    ], 'cmd:saloon') };
   }
   // The heater switch. Switching it on needs kerosene; switching it off always works. The cabin only ever moves through syncCabinTemperature's own gradual blend.
   function performHeaterToggle(state) {
@@ -13169,24 +13162,24 @@
     if (b.heaterOn) { // switching it off is not an ignition: no match
       b.heaterOn = false;
       playElectricalSwitchSound(false);
-      cmdClimate(state);
+      cmdSaloon(state);
       return;
     }
     if (keroseneLeft(state) <= 0) {
       printBlank();
       printLine('There\u2019s no kerosene left for the heater.');
-      cmdClimate(state);
+      cmdSaloon(state);
       return;
     }
     runAudioSyncedAction(state, {
       label: 'LIGHTING HEATER', transientLabel: true,
       playAudio: function (onEnded) { return playSaloonOneShot('match', onEnded); }, // the match: once, for as long as it takes to light; the heater is on when it has
       action: function (s) {
-        if (keroseneLeft(s) <= 0) { printBlank(); printLine('There\u2019s no kerosene left for the heater.'); cmdClimate(s); return; }
+        if (keroseneLeft(s) <= 0) { printBlank(); printLine('There\u2019s no kerosene left for the heater.'); cmdSaloon(s); return; }
         s.boat.heaterOn = true;
         printBlank();
         printLine('Heater on. Warm air begins moving through the cabin.'); // a transient screen confirmation, not a log entry
-        cmdClimate(s);
+        cmdSaloon(s);
       },
     });
   }
@@ -14351,7 +14344,7 @@
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
     // handler already printed just above is the screen identifier;
     // repeating it as a heading was pure duplication.
-    // BATTERY and SOLAR CHARGING on the shared label/value grid (.data-row-md). The cabin temperature is read in the Saloon (CLIMATE); how the cabin
+    // BATTERY and SOLAR CHARGING on the shared label/value grid (.data-row-md). The cabin temperature is read in the Saloon; how the cabin
     // FEELS (cabinComfort) stays internal -- the player hears about it through the prompts (too cold / too stuffy).
     var batteryLabel = (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%';
     printDataRow('BATTERY', batteryLabel, 'data-row-md');
@@ -14590,7 +14583,7 @@
       id: 'handbook-kerosene', heading: 'KEROSENE',
       blocks: [
         { p: 'SOLACE carries one reserve of kerosene, 20 gallons, shared by the heater, the stove, and the lantern. STATUS at the NAV STATION shows what is left, with water and diesel.' },
-        { term: 'HEATER', body: 'Switch it on in CLIMATE, in the SALOON. It burns kerosene while it is on and the air outside is cold. It uses no battery.' },
+        { term: 'HEATER', body: 'Switch it on in the SALOON. It burns kerosene while it is on and the air outside is cold. It uses no battery.' },
         { term: 'STOVE', body: 'Warming a meal, or making coffee or tea, lights the stove and uses a little kerosene. Water, cold snacks, and sashimi use none.' },
         { term: 'LANTERN', body: 'Kept in a bracket by the companionway. At night, when the electric light for the deck you are on is off, LIGHT LANTERN is offered beside GO ABOVE or GO BELOW. It burns kerosene only while lit, stays lit as you go between decks, and gives enough light to work by. EXTINGUISH LANTERN when you are done.' },
         { p: 'The cold days are the costly ones: a heater left on all day burns far more than cooking does. When the kerosene is gone, the heater goes cold, the lantern goes out, and the stove will not light.' },
@@ -14602,7 +14595,7 @@
         { term: 'GALLEY', body: 'The GALLEY has MEALS, SNACKS, and DRINKS. Eat and drink regularly. Coffee and tea also use fresh water. Food and water are limited; watch the amounts shown when using them. Wash dishes when needed. A fish you have caught appears in the GALLEY under its own name: cook it as its specialty meal, which uses the fish and kerosene and fills you like a meal, or eat it as SASHIMI, which uses only the fish and fills you like a snack. Fish does not keep, so eat it soon.' },
         { term: 'CABIN', body: 'Sleep to recover energy, then choose WAKE UP when you are ready. Aim for a full night\u2019s sleep. Change clothes for the temperature: COMFORT ABOVE and COMFORT BELOW show how your current outfit feels in each place. If you are too warmly dressed to sleep, remove a layer first.' },
         { p: 'Wet clothing stays wet until dried. Change out of it, then use HANG WET CLOTHES. Clothes take time to dry. Wear the rain shell to protect your clothing in rain.' },
-        { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. CLIMATE shows the cabin temperature and holds the HEATER switch and the hatch. Open the hatch to ventilate the cabin; close it when you want to retain warmth. The heater burns kerosene, not battery.' },
+        { term: 'SALOON', body: 'Read, listen to music, or SIT A WHILE. It shows the cabin temperature and whether the HEATER is on, and holds the HEATER switch and the hatch. Open the hatch to ventilate the cabin; close it when you want to retain warmth. The heater burns kerosene, not battery.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
         { p: 'Take care of small chores when they appear. Basic care, reading, music, and quiet time help morale. You do not need to keep every condition perfect.' },
         { p: 'SIT A WHILE and JUST EXIST let you remain seated until you choose to leave. Observations reflect the conditions around you. The voyage keeps moving.' },
@@ -16356,7 +16349,7 @@
   function refreshComfortRows(state) {
     var wrap = document.getElementById('comfort-rows');
     if (wrap && tempViewEl.contains(wrap) && state) fillComfortRows(wrap, state);
-    refreshClimateRows(state); // the CLIMATE screen's cabin temperature and heater, kept current while it is open
+    refreshClimateRows(state); // the Saloon's cabin temperature and heater lines, kept current while it is open
   }
 
   function cmdClothing(state) {
@@ -17872,7 +17865,6 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
-    climate: cmdClimate,
     cabin: cmdCabin,
     'nav-station': cmdNavStation,
     handbook: cmdHandbook,
@@ -22258,8 +22250,8 @@
       cmdGalley(state);
       return;
     }
-    if (state.pendingChoice && (state.pendingChoice.id === 'saloon-menu' || state.pendingChoice.id === 'nav-station-menu')) { // a save made on a menu that has changed (the hatch and the heater moved to CLIMATE): drawn afresh
-      if (state.pendingChoice.id === 'saloon-menu') cmdSaloon(state); else cmdNavStation(state);
+    if (state.pendingChoice && (state.pendingChoice.id === 'saloon-menu' || state.pendingChoice.id === 'climate-menu' || state.pendingChoice.id === 'nav-station-menu')) { // a save made on a menu that has changed (the CLIMATE menu is gone: its heater and hatch are on the Saloon menu): drawn afresh
+      if (state.pendingChoice.id === 'saloon-menu' || state.pendingChoice.id === 'climate-menu') cmdSaloon(state); else cmdNavStation(state);
       return;
     }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
