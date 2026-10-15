@@ -2651,7 +2651,7 @@
     var rescued = !!(state.voyageEnd && state.voyageEnd.phase === 'ended'); // a rescue: the voyage did not reach Nāwiliwili
     var novels = 0; BOOKS.forEach(function (bk) { if (state.books && state.books[bk.id] && state.books[bk.id].completed) novels++; });
     var big = st.bigFish ? Math.round(st.bigFish.weightLb) + ' LB ' + String(st.bigFish.name).toUpperCase() : 'NONE';
-    var seas = seaStateShortLabel(st.maxSea) + ' · ' + seaStateWaveHeightFt(st.maxSea) + ' FT';
+    var seas = seaReadout(st.maxWaveFt > 0 ? st.maxWaveFt : seaStateWaveHeightFt(st.maxSea));
     var n = function (v) { return String(Math.round(v || 0)); };
     return [
       { label: 'VOYAGE', value: rescued ? 'RESCUED' : 'COMPLETED' }, { label: 'DAYS AT SEA', value: n(dd) }, { label: 'TIME AT SEA', value: statsClock(secsAtSea), gap: true },
@@ -5471,7 +5471,7 @@
     return {
       lastDist: null,                        // the odometer as of the last tick sampled (the miles sailed at night are the difference)
       sailMin: 0, autoMin: 0, helmMin: 0,    // minutes with sails set / the autopilot on / at the helm
-      nightNm: 0, maxLandNm: 0, maxOffRouteNm: 0, maxSea: 0,
+      nightNm: 0, maxLandNm: 0, maxOffRouteNm: 0, maxSea: 0, maxWaveFt: 0,
       courseChanges: 0, waypointsReached: 0, storms: 0, stormLastMin: null, thunder: 0, thunderLastMin: null,
       meals: 0, teas: 0, washes: 0, chores: 0,
       fishCaught: 0, fishSpecies: [], bigFish: null, fishEaten: 0,
@@ -5512,6 +5512,7 @@
     if (state.crew.atHelm) st.helmMin += TICK_MINUTES;
     if (dNm > 0 && getDaylightPhase(state) === 'night') st.nightNm += dNm;
     if (w.seaState > st.maxSea) st.maxSea = w.seaState;
+    var seaFtNow = currentSeaFt(w); if (seaFtNow > st.maxWaveFt) st.maxWaveFt = seaFtNow; // (the height HIGHEST SEAS reports)
     if (w.windSpeed >= 34) { // the game's own "STORM" (see weatherConditionLabel): wind of 34 kt or more
       if (st.stormLastMin == null || m - st.stormLastMin > STATS_GAP_MINUTES) st.storms++;
       st.stormLastMin = m;
@@ -9135,7 +9136,7 @@
   // just past it -- before the tier actually changes, so a value
   // sitting right on a boundary can't flap back and forth every time
   // it wobbles a fraction of a foot either way.
-  var SEA_AUDIO_HYSTERESIS_FT = 0.75;
+  var SEA_AUDIO_HYSTERESIS_FT = 0.25;
   var seaAudioTierState = { current: null }; // 'calm' | 'moderate' | 'rough' | 'heavy' | null (not yet established)
 
   function seaAudioRawTierForWaveHeight(ft) {
@@ -9158,8 +9159,14 @@
   // section's own header notes. First-ever call (seaAudioTierState.current
   // still null) has nothing to be hysteretic ABOUT yet, so it just
   // takes the raw tier.
+  // The wave height the sea audio bands by: the REAL wave height (what SEAS and the MARINE FORECAST print) whenever real marine data is driving the sea; otherwise the
+  // sea-state tier's own table height, as before.
+  function seaAudioWaveFt(seaState) {
+    var w = (typeof GAME !== 'undefined' && GAME) ? GAME.weather : null;
+    return (w && w.waveHeightFt != null && isFinite(w.waveHeightFt)) ? w.waveHeightFt : seaStateWaveHeightFt(seaState);
+  }
   function seaAudioTierFor(seaState) {
-    var ft = seaStateWaveHeightFt(seaState);
+    var ft = seaAudioWaveFt(seaState);
     var t = SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT, h = SEA_AUDIO_HYSTERESIS_FT;
     var current = seaAudioTierState.current;
     if (current == null) { seaAudioTierState.current = seaAudioRawTierForWaveHeight(ft); return seaAudioTierState.current; }
@@ -11738,10 +11745,6 @@
     return label.padEnd(14) + value;
   }
 
-  var SEA_STATE_SHORT_LABELS = ['CALM', 'SLIGHT', 'LIGHT', 'MODERATE', 'ROUGH', 'VERY ROUGH', 'HIGH'];
-  function seaStateShortLabel(n) {
-    return SEA_STATE_SHORT_LABELS[clamp(n, 0, 6)];
-  }
 
   // Representative wave height in feet per sea-state tier, for the
   // compact SEAS line in WEATHER. Tied to the SAME w.seaState tier that
@@ -11754,6 +11757,12 @@
   function seaStateWaveHeightFt(n) {
     return SEA_STATE_WAVE_HEIGHT_FT[clamp(n, 0, 6)];
   }
+
+  // THE SEA READOUT: what the sea is called and how high, written ONE way everywhere the player reads it -- the WEATHER screen's SEAS line, the voyage summary's
+  // HIGHEST SEAS and the MARINE FORECAST's SEA line (which builds the same text from the same function: seaAudioRawTierForWaveHeight is also what the sea audio bands by).
+  // currentSeaFt: the real wave height whenever real marine data is driving the sea (w.waveHeightFt), otherwise the tier's representative height (offline).
+  function seaReadout(ft) { return seaAudioRawTierForWaveHeight(ft).toUpperCase() + ' ' + Math.round(ft) + ' FT'; }
+  function currentSeaFt(w) { return (w.waveHeightFt != null && isFinite(w.waveHeightFt)) ? w.waveHeightFt : seaStateWaveHeightFt(w.seaState); }
 
   // NAV STATION INSTRUMENTS' own player-facing SEAS range -- the SAME
   // low/high derivation the forecast's own outlook periods already use
@@ -12187,7 +12196,7 @@
     var w = state.weather;
     printBlank();
     printDataRow('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT');
-    printDataRow('SEAS', seaStateShortLabel(w.seaState) + ' \u00B7 ' + seaStateWaveHeightFt(w.seaState) + ' FT');
+    printDataRow('SEAS', seaReadout(currentSeaFt(w)));
     printDataRow('TEMP', Math.round(w.temperatureF) + '\u00B0F');
     printDataRow('SKY', skyDisplayLabel(state));
     state.pendingChoice = {
