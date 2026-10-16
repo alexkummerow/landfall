@@ -1149,7 +1149,7 @@
         distanceTraveled: 0,       // odometer — actual nm sailed, not progress toward the goal
         intendedCourse: startBearing, // the live direct bearing to Nāwiliwili (for the BEARING TO NĀWILIWILI display) -- informational only, NOT what the boat is steering; see setCourse for that. Refreshed every tick.
         setCourse: startBearing,   // the player's chosen compass heading (0-359), via CHANGE COURSE, SET COURSE FOR WAYPOINT or SET COURSE FOR NĀWILIWILI. The boat starts on the heading of the first plotted waypoint, out of Sitka Sound.
-        autopilotHeading: null,    // the compass heading AUTOPILOT is holding while it is ON -- captured from the boat's ACTUAL current heading the moment the player engages it (or set to the new heading when the player explicitly changes course), never computed from navigation/wind/current/the route; null while there is nothing to hold (the voyage starts with AUTOPILOT off)
+        autopilotHeading: startBearing, // (a new voyage starts with the AUTOPILOT on, holding this) the compass heading AUTOPILOT is holding while it is ON -- captured from the boat's ACTUAL current heading the moment the player engages it (or set to the new heading when the player explicitly changes course), never computed from navigation/wind/current/the route; null while there is nothing to hold (the voyage starts with AUTOPILOT off)
         courseDraft: null,         // in-progress heading value while the CHANGE COURSE picker is open; null when not in use
         landWarningLevel: 'none',  // 'none' | 'ahead' | 'close' | 'danger' — escalating land-proximity state, so each level only logs once on the way up (and clears silently once the danger passes)
         grounded: false,           // run aground on land, anywhere (see navOnGround): she cannot move until FREE SOLACE. (There are no ocean boundaries.)
@@ -1214,11 +1214,11 @@
         repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
         batteryRecovering: false,  // true ONLY from the moment battery actually reaches 0% until it climbs back to BATTERY_RESTART_THRESHOLD_PCT -- see updateBattery. Makes that threshold a true dead-battery RECOVERY gate rather than a general minimum: every performXToggle/cmdEngine/etc. check requires this flag too, not just battery<BATTERY_RESTART_THRESHOLD_PCT, so ordinary depletion through 3%/2%/1% never locks anything out on its own.
-        autopilotOn: false,         // OFF at the start. When ON it holds the heading it was engaged on, and nothing more — no auto-tack, no navigation (see autopilotSteeringSolution); OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
+        autopilotOn: true,          // ON at the start, holding the heading she starts on (nav.autopilotHeading). When ON it holds the heading it was engaged on, and nothing more — no auto-tack, no navigation (see autopilotSteeringSolution); OFF (or STEERING/ELECTRICAL damaged) means the boat just wanders roughly along its present heading — see computeHeading
         heaterOn: false,
         cabinLightsOn: false,
         navLightsOn: false,         // NAV STATION / ELECTRICAL PANEL — the boat's running lights, one single state (never a separate "exterior lights" duplicate) driving the indicator, the battery draw, and the nighttime Above Deck restriction alike; same BATTERY_DRAIN_LIGHTS_PER_HOUR drain as cabinLightsOn; required after dark (19:00-05:59) for Above Deck activities (HELM/SAILS/ENGINE/FISH) — see needsNavLights/blockedByNavLights and isNavLightsNight's own notes
-        accessoryOn: false,         // powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
+        accessoryOn: true,          // ON at the start. Powers the cassette player only — draws nothing by itself, and (unlike the other four) is never force-switched off by a dead battery; see updateBattery/performStartTape
         computerOn: false,          // SHIP'S COMPUTER runtime power state -- true only while it's actually booted; see cmdShipsComputer/performShutDownComputer. Forced false (no shutdown sound) the instant a real battery blackout occurs -- see updateBattery.
         cabinStartsAtOutside: true, // a brand-new voyage's cabin is seeded from a PLACEHOLDER outside temperature (no real reading exists yet); the first real reading snaps the cabin to the real outside air, once -- see applyRealEnvironmentToLive. Saves without this field are not touched, except a voyage under two hours old (see the boat-field migration)
         cabinTemperatureF: null,    // initialized near outside temperature at departure — see newGameState below
@@ -2176,6 +2176,15 @@
   function navPredict(lat, lon, heading, maxNm) {
     var to = destinationPoint(lat, lon, heading, maxNm), hw = worldFirstHit(lon, lat, to.lon, to.lat, true);
     return { landNm: hw ? hw.t * maxNm : null };
+  }
+  // ON A DIRECT COURSE: the run along her heading meets land. Every line that says land / the island is "ahead" asks this first (she moves exactly along her heading, so a heading
+  // that points past the land is not "ahead"). It looks as far as the thing is away: distDest (nm to the harbor) + 15, never less than 15 nor more than 70 nm.
+  function navDirectCourseNm(distDest) { return Math.min(70, Math.max(15, (isFinite(distDest) ? distDest : 0) + 15)); }
+  function navOnDirectCourse(state, distDest) {
+    var n = state && state.nav;
+    if (!n || !isFinite(n.heading) || !isFinite(n.lat) || !isFinite(n.lon)) return false;
+    navInit();
+    return navPredict(n.lat, n.lon, n.heading, navDirectCourseNm(distDest)).landNm != null;
   }
   // Warnings come from an actual projected collision, never from mere closeness; the approach zone relaxes them (land stays solid).
   function navCheckWarnings(state) {
@@ -7174,6 +7183,7 @@
       dExit: dExit, shoreNm: null,
     };
     ctx.encRegion = encRegion(ctx);
+    ctx.onCourse = distDest <= 70 && navOnDirectCourse(state, distDest); // her heading points at land (only worked out within 70 nm of the harbor): what "ahead" needs
     if (ctx.encRegion === 'sound' || ctx.encRegion === 'passes' || ctx.encRegion === 'offCoast') { // how near the nearest shore or island is (the shore animals need one close by)
       navInit();
       var sh = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.landEdges);
@@ -7354,12 +7364,12 @@
     { id: 'kauai-grows', ms: true, once: true, tod: 'daytime', text: 'The island looked bigger every time I checked.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 14 && c.distDest > 8 && !c.fog && !c.heavyRain; } },
     { id: 'kauai-smell', ms: true, once: true, text: 'The air smelled different today. Soil and plants underneath the salt.', when: function (c) { return c.distDest <= 8 && c.distDest > 2.5 && !c.raining && angleDiffDeg(c.windDir, bearingBetween(c.n.lat, c.n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) <= 55 && c.wind >= 4; } },
     { id: 'kauai-evening', ms: true, once: true, tod: 'evening', text: 'Kaua\u02BBi stayed on the horizon as the light went down.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 25 && !c.fog; } },
-    { id: 'kauai-night', ms: true, once: true, tod: 'night', text: 'Land somewhere ahead in the dark. Close now.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 20; } },
+    { id: 'kauai-night', ms: true, once: true, tod: 'night', text: 'Land somewhere ahead in the dark. Close now.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 20 && c.onCourse; } },
     { id: 'kauai-dawn', ms: true, once: true, tod: 'afterNight', text: 'Kaua\u02BBi came back with the morning light.', when: function (c, m) { return m.fired['kauai-night'] != null && c.distDest <= 25 && c.cloud <= 85 && !c.fog; } },
     // ---- N\u0100WILIWILI APPROACH (increasingly restrained: the arrival is about to take over) ----
-    { id: 'approach-20', ms: true, once: true, text: 'Kaua\u02BBi ahead. No mistaking it now.', when: function (c) { return c.distDest <= 20 && c.daytime && !c.fog; } },
+    { id: 'approach-20', ms: true, once: true, text: 'Kaua\u02BBi ahead. No mistaking it now.', when: function (c) { return c.distDest <= 20 && c.daytime && !c.fog && c.onCourse; } },
     { id: 'approach-10', ms: true, once: true, text: 'Close enough to make out the shape of the coast.', when: function (c) { return c.distDest <= 10 && c.daytime && !c.fog && !c.heavyRain; } },
-    { id: 'approach-5', ms: true, once: true, text: 'N\u0101wiliwili ahead.', when: function (c) { if (c.distDest > 15 || c.s.finale.phase !== 'none') return false; navInit(); return navPointInRing(navGeoLon(c.n.lon), c.n.lat, NAV.approach); } },
+    { id: 'approach-5', ms: true, once: true, text: 'N\u0101wiliwili ahead.', when: function (c) { if (c.distDest > 15 || c.s.finale.phase !== 'none' || !c.onCourse) return false; navInit(); return navPointInRing(navGeoLon(c.n.lon), c.n.lat, NAV.approach); } },
     { id: 'approach-harbor', ms: true, once: true, topic: 'land', text: 'The breakwater shows at the harbor mouth, the shore buildings behind it.', when: function (c) { return c.distDest <= 5 && c.distDest > 0.8 && c.daytime && !c.fog && !c.heavyRain && c.s.finale.phase === 'none'; } },
     // ---- environmental facts the game did not track when this library was first written: now it does ----
     { id: 'kauai-mountains', ms: true, once: true, tod: 'daytime', topic: 'land',
@@ -14028,6 +14038,7 @@
     whale: function (x) { return x.see.whale; },                                // a spout
     cloudy: function (x) { return x.wx === 'partly'; },                         // "cloud shadow"
     shoreLights: function (x) { return x.shoreLights; },                        // a line that names shore lights without carrying the tag
+    onCourse: function (x) { return x.onCourse; },                              // a line that says land / the island is "ahead": her heading has to point at it
   };
   var OBS_IMPLICIT = {
     1: ['land'], 3: ['land'], 4: ['land'], 5: ['land'], 6: ['land', 'sun'], 7: ['land'], 10: ['land'], 12: ['land'], 13: ['land'], 14: ['land'], 16: ['wind5'], 20: ['land'],
@@ -14037,6 +14048,7 @@
     132: ['hawaiiRange'], 139: ['sun'], 147: ['shoreLights'], 140: ['near'], 148: ['land'], 149: ['land'], 150: ['land'],
     162: ['near'],          // "fog softens the coast": the coast has to be within sight range for the fog to be hiding it
     182: ['land'],         // "cloud moves over the peaks"
+    137: ['onCourse'], 171: ['onCourse'], 173: ['onCourse'], 205: ['onCourse'], 206: ['onCourse'], // each says land or the island is "ahead" (see navOnDirectCourse)
   };
   // The only TIME=ANY lines that make sense in the dark (the air on the face, the cold in the rail). Every other TIME=ANY line describes something seen, so it needs light to see by.
   var OBS_NIGHT_OK = { 17: true, 41: true, 65: true, 136: true, 137: true };
@@ -14176,7 +14188,7 @@
     return {
       region: region, phase: phase, wx: wx, sea: sea, tempF: tempF, wind: wind, cloud: cloud, light: light, daylit: daylit, goodVis: goodVis, sun: sun,
       horizon: wx === 'clear' || wx === 'partly' || wx === 'overcast' || wx === 'lightRain',
-      landNm: landNm, landNear: landNear, range: range, landSeen: landSeen, hawaiiRange: hawaiiRange, kauai20: region === 'hawaii' && distDest < 20, kauai8: region === 'hawaii' && distDest < 8,
+      landNm: landNm, landNear: landNear, range: range, landSeen: landSeen, hawaiiRange: hawaiiRange, kauai20: region === 'hawaii' && distDest < 20, kauai8: region === 'hawaii' && distDest < 8, onCourse: region === 'hawaii' && distDest <= 70 && navOnDirectCourse(state, distDest),
       kauaiOutline: region === 'hawaii' && distDest > 20 && distDest <= 55 && light && goodVis, snow: snow, northWater: n.lat >= 44, southWater: n.lat <= 36, lowLight: lowLight,
       starsVisible: starsVisible, darkSky: darkSky, milkyWay: milkyWay, shoreLights: shoreLights,
       cloudVisible: cloudVisible, cloudDetail: (cloudVisible && cloud >= 15) || nightCloud, cloudBank: light && wx === 'partly' && cloud >= 30,
@@ -17695,7 +17707,7 @@
     { match: 'Trade-wind clouds march by', topic: 'cloud', when: function (c) { return c.n.lat <= 32 && c.cloud >= 20 && c.cloud <= 75 && c.wind >= 8 && c.daytime && !c.raining && !c.fog; } },
     { match: 'The sea is a color it', topic: 'color', when: function (c) { return c.n.lat <= 36 && c.daytime && c.cloud <= 70 && !c.fog && !c.raining; } },
     { match: 'The stars are different here', topic: 'stars', when: function (c) { return c.n.lat <= 30 && c.tod.night && c.clear; } },
-    { match: 'The cloud pattern ahead looks different', topic: 'land', when: function (c) { return c.distDest <= 60 && c.cloud >= 40 && c.daytime && !c.fog && !c.raining; } },
+    { match: 'The cloud pattern ahead looks different', topic: 'land', when: function (c) { return c.distDest <= 60 && c.cloud >= 40 && c.daytime && !c.fog && !c.raining && c.onCourse; } },
     { match: 'A smudge on the horizon', topic: 'land', when: function (c) { return c.distDest > 20 && c.distDest <= 55 && c.daytime && !c.fog && !c.s.flags.landOnHorizonShown; } },
   ];
   function ambientRuleFor(text) {
