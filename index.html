@@ -5439,8 +5439,8 @@
      filtering) lives in section 6, AMBIENT AUDIO, alongside audioCtx.
      -------------------------------------------------------------- */
   var TAPES = [ // alphabetical by title (the menu prints them in capitals)
-    { title: 'Dew in the Valley', path: 'audio/finals/dew_in_the_valley.mp3' },
     { title: 'Homeward Bound', path: 'audio/finals/homeward_bound.mp3' },
+    { title: 'Morning in the Valley', path: 'audio/finals/dew_in_the_valley.mp3' },
     { title: 'Old Mountain Road', path: 'audio/finals/old_mountain_road.mp3' },
     { title: 'Stargazing', path: 'audio/finals/Coda.mp3' },
     { title: 'The Lehua Tree', path: 'audio/finals/the_lehua_tree.mp3' },
@@ -8945,13 +8945,24 @@
 
   // Called by every gesture listener (and by the SOUND button, CONTINUE, repair audio): the player has interacted. The first time, the context and its master
   // bus are created; every time, a context that is not running is asked to run and everything that was waiting for audio is woken.
+  // Every sound file in the game is 44.1 kHz stereo; the sound engine is made at that rate so nothing it plays is re-timed on the way in (see the pitch note in patch 59). A device that will not
+  // take the setting gives its own rate, as before. Page-address switches for testing on a phone: ?audiorate=auto (the device's own rate) and ?tape=native (the song without the Web Audio path).
+  var AUDIO_CONTEXT_RATE_HZ = 44100;
+  function audioUrlOption(name) { try { return new URLSearchParams(window.location.search).get(name); } catch (e) { return null; } }
+  function newGameAudioContext() {
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    if (audioUrlOption('audiorate') !== 'auto') {
+      try { return new Ctor({ sampleRate: AUDIO_CONTEXT_RATE_HZ }); } catch (e) { console.warn('Audio engine rate could not be set, using the device rate:', describeError(e)); }
+    }
+    return new Ctor();
+  }
   function unlockAudio() {
     var first = !audioUnlocked;
     audioUnlocked = true;
     if (first) {
       try {
         applyAudioSessionType();
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx = newGameAudioContext();
         buildAudioGraph();
         startAudioWatchdog();
       } catch (e) {
@@ -9023,7 +9034,7 @@
     audioCtxHasRun = false;
     audioSessionTypeSet = null; applyAudioSessionType(); // (asked for again with the new context)
     try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx = newGameAudioContext();
       buildAudioGraph();
     } catch (e) {
       console.warn('Audio could not be rebuilt:', describeError(e));
@@ -10634,6 +10645,7 @@
   // gain: every fade and instant set below then drives the gain, with no other change. Everywhere else the element's own volume works and this does nothing.
   function routeTapeElementThroughGain(el) {
     if (!el || el._tapeGainCtx) return;
+    if (audioUrlOption('tape') === 'native') return; // test switch: the song plays straight from the file
     if (!(audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice()))) return;
     try {
       var gainNode = audioCtx.createGain();
@@ -22929,7 +22941,8 @@
     document.body.appendChild(diagEl);
     setInterval(function () {
       var head = 'LOOPS  ctx:' + (audioCtx ? audioCtx.state : 'none') + '  volIgnored:' + (elementVolumeIsIgnored() ? 'Y' : 'N') + '  iOS:' + (isAppleTouchDevice() ? 'Y' : 'N') + '  phase:' + engineAudioPhase + '  key:' + engineActiveKey + '  loc:' + (GAME ? GAME.crew.location : '?');
-      diagEl.textContent = head + '\n' + ambienceChannelPairs().map(function (pair) { return pair[1].voice.diag(); }).concat(['ENGINE'], engineAudio.diagLines()).join('\n');
+      var tapeLine = 'TAPE  phase:' + tapePhase + '  rate:' + (audioCtx ? audioCtx.sampleRate : '-') + '  webaudio:' + (tapeAudioEl && tapeAudioEl._tapeGainCtx ? 'Y' : 'N') + '  t:' + (tapeAudioEl && isFinite(tapeAudioEl.currentTime) ? tapeAudioEl.currentTime.toFixed(1) : '-');
+      diagEl.textContent = head + '\n' + tapeLine + '\n' + ambienceChannelPairs().map(function (pair) { return pair[1].voice.diag(); }).concat(['ENGINE'], engineAudio.diagLines()).join('\n');
     }, 250);
   }
 
