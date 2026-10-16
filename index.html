@@ -8945,13 +8945,13 @@
 
   // Called by every gesture listener (and by the SOUND button, CONTINUE, repair audio): the player has interacted. The first time, the context and its master
   // bus are created; every time, a context that is not running is asked to run and everything that was waiting for audio is woken.
-  // Every sound file in the game is 44.1 kHz stereo; the sound engine is made at that rate so nothing it plays is re-timed on the way in (see the pitch note in patch 59). A device that will not
-  // take the setting gives its own rate, as before. Page-address switches for testing on a phone: ?audiorate=auto (the device's own rate) and ?tape=native (the song without the Web Audio path).
+  // The sound engine is made at the device's own rate. Page-address switches for testing on a phone: ?audiorate=44100 (the engine at 44.1 kHz, the rate of every sound file; a device that will not take
+  // the setting gives its own rate) and ?tape=gain (the song through a Web Audio gain control -- NOT the default, see the note at the top of the TAPE PLAYER).
   var AUDIO_CONTEXT_RATE_HZ = 44100;
   function audioUrlOption(name) { try { return new URLSearchParams(window.location.search).get(name); } catch (e) { return null; } }
   function newGameAudioContext() {
     var Ctor = window.AudioContext || window.webkitAudioContext;
-    if (audioUrlOption('audiorate') !== 'auto') {
+    if (audioUrlOption('audiorate') === '44100') {
       try { return new Ctor({ sampleRate: AUDIO_CONTEXT_RATE_HZ }); } catch (e) { console.warn('Audio engine rate could not be set, using the device rate:', describeError(e)); }
     }
     return new Ctor();
@@ -10608,6 +10608,12 @@
      touches playbackRate away from 1.0, detunes anything, or
      periodically corrects currentTime.
 
+     KEEP IT THAT WAY. An iPhone ignores an audio element's own
+     volume, so there the music is the same level above and below
+     deck; routing the element through Web Audio to change that
+     (routeTapeElementThroughGain, a test switch only) brought the
+     pitch jumps back. Do not make it the default again.
+
      All of this state is intentionally module-level, not part of
      `state`/save data — see the note above tapeListenDay/tapeListenCount
      in newGameState for the one piece that DOES need to persist (the
@@ -10640,12 +10646,13 @@
   var TAPE_VOLUME_ABOVE = TAPE_VOLUME_BELOW * (1 - TAPE_ABOVE_DECK_REDUCTION); // derived, never a hardcoded literal -- the cassette player is physically below deck, so its music is still audible above, just much quieter
   var TAPE_LOCATION_FADE_SECONDS = 1.5; // smooth crossfade for the GO ABOVE/GO BELOW transition specifically -- see transitionTapeLocationAudio; comfortably inside the 2-second GO ABOVE/GO BELOW busy action so it always finishes before that action's own final render re-syncs (applyTapeLocationAudio below), never abruptly cut short by it
 
-  // On an iPhone / iPad the browser ignores an audio element's own volume (it always reads 1), so the music's above/below-deck level and its fade would do nothing there. On exactly those devices the
-  // element is routed through a Web Audio gain control (into the master bus like every other Web Audio sound, so SOUND OFF silences it there too) and the element's `volume` is redirected to that
-  // gain: every fade and instant set below then drives the gain, with no other change. Everywhere else the element's own volume works and this does nothing.
+  // DO NOT turn this on by default. On an iPhone / iPad the browser ignores an audio element's own volume (it always reads 1), so the music's above/below-deck level and its glide do nothing there.
+  // Routing the element through a Web Audio gain control (which is what this does) would make them work -- and makes the song's pitch jump up and down in an instant, because the element's clock
+  // is then re-timed against the sound engine's. That was reported, fixed by leaving the cassette a plain element, and reported again when this routing (patch 42) brought it back; patch 60 turned it
+  // off. It stays here only as a test switch: ?tape=gain. Off, the music on an iPhone is the same level above and below deck.
   function routeTapeElementThroughGain(el) {
     if (!el || el._tapeGainCtx) return;
-    if (audioUrlOption('tape') === 'native') return; // test switch: the song plays straight from the file
+    if (audioUrlOption('tape') !== 'gain') return; // the song plays straight from the file unless the page address asks for the gain routing
     if (!(audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice()))) return;
     try {
       var gainNode = audioCtx.createGain();
@@ -10679,8 +10686,8 @@
   // Called from the player's own explicit tape-selection click (never
   // proactively/on load). Lazily creates the one persistent <audio>
   // element. Plain HTMLAudioElement playback needs nothing more than a
-  // user-gesture-triggered .play() call to satisfy autoplay policy; the
-  // one addition is the gain routing for an iPhone / iPad (above).
+  // user-gesture-triggered .play() call to satisfy autoplay policy, and
+  // nothing more: no Web Audio routing (see the note at the top).
   function ensureTapeAudioReady() {
     if (tapeAudioEl) {
       if (tapeAudioEl._tapeGainCtx && tapeAudioEl._tapeGainCtx !== audioCtx) dropStaleTapeElement(); // (see routeTapeElementThroughGain)
@@ -11039,9 +11046,8 @@
 
 
   // CASSETTE HARD RECOVERY (section 9) -- separate from the loop
-  // engine (the cassette is a plain audio element; only where an
-  // element's own volume is ignored, an iPhone / iPad, does it pass
-  // through a Web Audio gain control -- see routeTapeElementThroughGain),
+  // engine (the cassette is a plain audio element and stays one: it is
+  // not routed through Web Audio -- see routeTapeElementThroughGain),
   // so it is never touched by the engine's loops and has to be checked
   // and, if needed, recovered in its own right. Tries the
   // existing SOFT path first (resumeTapeAudioIfSuspended -- same
