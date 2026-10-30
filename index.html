@@ -633,6 +633,20 @@
     letter-spacing: 0.05em;
     color: var(--phosphor-bright);
   }
+  .chart-fleet-marker { position: relative; width: 16px; height: 16px; line-height: 0; pointer-events: none; } /* another player's boat: a hollow triangle (yours is the solid one) and its code; taps pass through to the chart */
+  .chart-fleet-icon { width: 16px; height: 16px; }
+  .chart-fleet-label {
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.05em;
+    line-height: 1;
+    color: var(--phosphor);
+  }
 
   .line {
     margin: 0 0 0.35rem;
@@ -15824,6 +15838,229 @@
   }
 
   /* ======================================================================
+     THE FLEET -- the other boats that are playing, on the GPS
+     ----------------------------------------------------------------------
+     OFF unless FLEET_DB_URL (or ?fleet=) names a Firebase Realtime Database; while it is off nothing here does anything at all (no request, no storage key, no row).
+     ON: this browser has a hidden code (FLEET_ID_KEY, its own storage key -- never part of the save). While the voyage runs, fleetLiveTick (called from the live loop) PUTs
+     { lat, lon, hdg, t } to  <database>/boats/<code>.json  at most every FLEET_POST_EVERY_MS. While the GPS is open, fleetGpsTick (called from gpsRefresh) GETs
+     <database>/boats.json at most every FLEET_POLL_EVERY_MS and draws every OTHER boat as a hollow triangle with "<first 3 characters of its code> · <age>".
+     The FLEET row (the seventh row of the GPS readout) says "YOU <code> · N OTHERS", or NO CONTACT after two failed requests in a row; ?fleetdiag adds the last HTTP result of each kind
+     (POST 401 = the database's rules refuse it).
+     NEVER IN THE WAY: asynchronous, time-limited (FLEET_TIMEOUT_MS), every error swallowed, a growing pause after failures, nothing written to GAME or the save, no screen, no sound.
+     ====================================================================== */
+  var FLEET_DB_URL = 'https://landfall-a5942-default-rtdb.firebaseio.com';          // the database's address -- empty: the whole feature is off
+  var FLEET_POST_EVERY_MS = 3 * 60 * 1000;      // how often this boat reports its position
+  var FLEET_POLL_EVERY_MS = 60 * 1000;          // how often the fleet is read while the GPS is open
+  var FLEET_HIDE_AFTER_MS = 7 * 24 * 3600 * 1000; // a boat that has not reported for a week is not drawn
+  var FLEET_DIM_AFTER_MS = 2 * 3600 * 1000;     // a boat that has not reported for two hours is drawn dim
+  var FLEET_TIMEOUT_MS = 8000;                  // a request that has not answered by then is dropped
+  var FLEET_BACKOFF_MAX_MS = 15 * 60 * 1000;    // the longest pause after repeated failures
+  var FLEET_MAX_BOATS = 40;                     // the most boats ever drawn
+  var FLEET_ID_KEY = 'landfallFleetId';         // this browser's boat code (its own key; the voyage save is untouched)
+  var FLEET_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'; // no 0 O 1 I L: a code is read aloud ("I'm 7KQ")
+  var fleet = { url: undefined, diag: false, id: null, lastPostAt: 0, lastFetchAt: 0, lastDrawAt: 0, postBusy: false, fetchBusy: false, fails: 0, nextOkAt: 0, boats: [], gotList: false, lastPost: '', lastGet: '', rowEl: null };
+  var fleetMarkers = {}; // boat code -> { marker, el, icon, label }
+
+  // Only a Firebase database (or this computer, for testing) is accepted: a made-up link cannot send positions anywhere else.
+  function fleetCleanUrl(s) {
+    s = String(s == null ? '' : s).replace(/^\s+|\s+$/g, '').replace(/\/+$/, '');
+    if (!s) return '';
+    if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.(firebaseio\.com|firebasedatabase\.app)$/i.test(s)) return s;
+    if (/^http:\/\/(127\.0\.0\.1|localhost)(:[0-9]+)?$/.test(s)) return s;
+    return '';
+  }
+  // The database address in force ('' = the feature is off). Decided once. Never in a test scenario.
+  function fleetBaseUrl() {
+    if (fleet.url !== undefined) return fleet.url;
+    var u = '';
+    try {
+      var qs = new URLSearchParams(window.location.search);
+      fleet.diag = qs.has('fleetdiag');
+      if (!SCENARIO_NAME) u = fleetCleanUrl(qs.has('fleet') ? qs.get('fleet') : FLEET_DB_URL);
+    } catch (e) { u = ''; }
+    fleet.url = u;
+    return u;
+  }
+  function fleetValidId(id) {
+    if (typeof id !== 'string' || id.length !== 10) return false;
+    for (var i = 0; i < 10; i++) if (FLEET_ALPHABET.indexOf(id.charAt(i)) < 0) return false;
+    return true;
+  }
+  function fleetNewId() {
+    var out = '', bytes = null, i;
+    try { if (window.crypto && window.crypto.getRandomValues) { bytes = new Uint8Array(10); window.crypto.getRandomValues(bytes); } } catch (e) { bytes = null; }
+    for (i = 0; i < 10; i++) out += FLEET_ALPHABET.charAt((bytes ? bytes[i] : Math.floor(Math.random() * 256)) % FLEET_ALPHABET.length);
+    return out;
+  }
+  // This browser's code, made the first time it is needed. null when the browser will not keep one: the boat then stays off the fleet (it would otherwise appear as a new boat on every visit).
+  function fleetOwnId() {
+    if (fleet.id) return fleet.id;
+    var id = null;
+    try {
+      id = window.localStorage.getItem(FLEET_ID_KEY);
+      if (!fleetValidId(id)) {
+        id = fleetNewId();
+        window.localStorage.setItem(FLEET_ID_KEY, id);
+        if (window.localStorage.getItem(FLEET_ID_KEY) !== id) id = null;
+      }
+    } catch (e) { id = null; }
+    fleet.id = id;
+    return id;
+  }
+
+  // One request: time-limited, and `done(ok, status, text)` is called exactly once whatever happens. Never throws.
+  function fleetRequest(method, url, body, done) {
+    var finished = false, ctrl = null, timer = null;
+    function finish(ok, status, text) {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      try { done(ok, status, text); } catch (e) {}
+    }
+    try {
+      if (typeof fetch !== 'function') { finish(false, 0, null); return; }
+      if (typeof AbortController === 'function') ctrl = new AbortController();
+      timer = setTimeout(function () { try { if (ctrl) ctrl.abort(); } catch (e) {} finish(false, 0, null); }, FLEET_TIMEOUT_MS);
+      var opts = { method: method, cache: 'no-store', credentials: 'omit' };
+      if (ctrl) opts.signal = ctrl.signal;
+      if (body != null) { opts.body = body; opts.headers = { 'Content-Type': 'application/json' }; }
+      fetch(url, opts).then(function (r) {
+        return r.text().then(function (t) { finish(r.ok, r.status, t); }, function () { finish(false, r.status, null); });
+      }).catch(function () { finish(false, 0, null); });
+    } catch (e) { finish(false, 0, null); }
+  }
+  // What a request came to: success clears the pause; failure lengthens it (30 s, 1, 2, 4 ... minutes, to FLEET_BACKOFF_MAX_MS).
+  function fleetNote(ok, status, what) {
+    var res = ok ? 'OK' : (status ? String(status) : 'NONE');
+    if (what === 'post') fleet.lastPost = res; else fleet.lastGet = res;
+    if (ok) { fleet.fails = 0; fleet.nextOkAt = 0; }
+    else { fleet.fails++; fleet.nextOkAt = Date.now() + Math.min(FLEET_BACKOFF_MAX_MS, 30000 * Math.pow(2, Math.min(fleet.fails, 6) - 1)); }
+    fleetRowUpdate();
+  }
+
+  // THE REPORT: called from the live loop (every 20 s) and when the page comes back; it sends only when the interval is up. `soon`: the page has just come back to the front, so a fresh
+  // position is worth sending after a short wait rather than a full interval.
+  function fleetLiveTick(state, soon) {
+    try {
+      var base = fleetBaseUrl();
+      if (!base || !state || !state.nav || introPending || document.hidden || fleet.postBusy) return;
+      var now = Date.now();
+      if (now < fleet.nextOkAt || now - fleet.lastPostAt < (soon ? 20000 : FLEET_POST_EVERY_MS)) return;
+      var id = fleetOwnId();
+      if (!id) return;
+      var nav = state.nav;
+      if (!isFinite(nav.lat) || !isFinite(nav.lon)) return;
+      fleet.postBusy = true; fleet.lastPostAt = now;
+      var body = JSON.stringify({ lat: Math.round(nav.lat * 10000) / 10000, lon: Math.round(nav.lon * 10000) / 10000, hdg: isFinite(nav.heading) ? Math.round(nav.heading) : 0, t: now });
+      fleetRequest('PUT', base + '/boats/' + id + '.json', body, function (ok, status) { fleet.postBusy = false; fleetNote(ok, status, 'post'); });
+    } catch (e) { fleet.postBusy = false; }
+  }
+
+  // THE READING: whatever the database sent, checked. A boat is kept only with a valid code that is not this one, numbers in range, and a report less than a week old.
+  function fleetClean(data, now) {
+    var out = [], own = fleet.id;
+    if (!data || typeof data !== 'object') return out;
+    Object.keys(data).forEach(function (k) {
+      var v = data[k];
+      if (!fleetValidId(k) || k === own || !v || typeof v !== 'object') return;
+      var lat = v.lat, lon = v.lon, t = v.t, h = v.hdg;
+      if (typeof lat !== 'number' || typeof lon !== 'number' || typeof t !== 'number' || !isFinite(lat) || !isFinite(lon) || !isFinite(t)) return;
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+      if (now - t > FLEET_HIDE_AFTER_MS) return;
+      if (t > now) t = now; // a clock a little ahead of ours
+      out.push({ id: k, lat: lat, lon: lon, t: t, hdg: (typeof h === 'number' && isFinite(h)) ? h : 0 });
+    });
+    out.sort(function (a, b) { return b.t - a.t; });
+    return out.slice(0, FLEET_MAX_BOATS);
+  }
+  function fleetFetch() {
+    fleet.fetchBusy = true; fleet.lastFetchAt = Date.now();
+    fleetRequest('GET', fleetBaseUrl() + '/boats.json', null, function (ok, status, text) {
+      fleet.fetchBusy = false;
+      if (ok) {
+        var data = null;
+        try { data = (text && text.length < 200000) ? JSON.parse(text) : null; } catch (e) { ok = false; }
+        if (ok) { fleet.boats = fleetClean(data, Date.now()); fleet.gotList = true; }
+      }
+      fleetNote(ok, status, 'get');
+      fleetDraw();
+    });
+  }
+
+  function fleetAgeText(ms) {
+    if (ms < 60000) return 'NOW';
+    if (ms < 3600000) return Math.floor(ms / 60000) + 'M';
+    if (ms < 48 * 3600000) return Math.floor(ms / 3600000) + 'H';
+    return Math.floor(ms / 86400000) + 'D';
+  }
+  // The FLEET row: the seventh row of the GPS readout, added the first time the GPS is drawn with the fleet on.
+  function fleetEnsureRow() {
+    if (fleet.rowEl || !gpsReadoutEl) return;
+    var d = document.createElement('div'); d.className = 'gps-row';
+    var a = document.createElement('span'); a.textContent = 'FLEET';
+    var b = document.createElement('span'); b.textContent = '—';
+    d.appendChild(a); d.appendChild(b);
+    gpsReadoutEl.appendChild(d);
+    fleet.rowEl = b;
+  }
+  function fleetRowUpdate() {
+    if (!fleet.rowEl) return;
+    var code = fleet.id ? fleet.id.slice(0, 3) : '', txt;
+    if (!code) txt = 'NOT SHARING';
+    else if (fleet.fails >= 2) txt = 'YOU ' + code + ' · NO CONTACT';
+    else if (!fleet.gotList) txt = 'YOU ' + code;
+    else txt = 'YOU ' + code + ' · ' + fleet.boats.length + (fleet.boats.length === 1 ? ' OTHER' : ' OTHERS');
+    if (fleet.diag) txt += ' · POST ' + (fleet.lastPost || '-') + ' GET ' + (fleet.lastGet || '-');
+    if (fleet.rowEl.textContent !== txt) fleet.rowEl.textContent = txt;
+  }
+  function fleetMakeMarker() {
+    var el = document.createElement('div'); el.className = 'chart-fleet-marker';
+    var icon = document.createElement('div'); icon.className = 'chart-fleet-icon';
+    icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" xmlns="http://www.w3.org/2000/svg">'
+      + '<path d="M12 2 L19 21 L12 16.5 L5 21 Z" fill="none" stroke="' + shipsComputerColors.phosphor + '" stroke-width="2" stroke-linejoin="round"/></svg>';
+    var label = document.createElement('div'); label.className = 'chart-fleet-label';
+    el.appendChild(icon); el.appendChild(label);
+    return { marker: new maplibregl.Marker({ element: el }), el: el, icon: icon, label: label };
+  }
+  // Puts the boats on the chart: one marker each, moved or removed as the list changes. Does nothing until the chart exists.
+  function fleetDraw() {
+    try {
+      fleetEnsureRow();
+      fleetRowUpdate();
+      if (!chartLoaded || !chartMap || typeof maplibregl === 'undefined') return;
+      var now = Date.now(), seen = {};
+      fleet.lastDrawAt = now;
+      fleet.boats.forEach(function (b) {
+        seen[b.id] = true;
+        var m = fleetMarkers[b.id];
+        if (!m) { m = fleetMarkers[b.id] = fleetMakeMarker(); m.marker.setLngLat([b.lon, b.lat]).addTo(chartMap); }
+        else m.marker.setLngLat([b.lon, b.lat]);
+        m.icon.style.transform = 'rotate(' + Math.round(b.hdg) + 'deg)';
+        var label = b.id.slice(0, 3) + ' · ' + fleetAgeText(now - b.t);
+        if (m.label.textContent !== label) m.label.textContent = label;
+        var dim = (now - b.t) > FLEET_DIM_AFTER_MS ? '0.5' : '1'; // (on the parts, not on the marker itself: the map manages the marker's own opacity)
+        if (m.icon.style.opacity !== dim) { m.icon.style.opacity = dim; m.label.style.opacity = dim; }
+      });
+      Object.keys(fleetMarkers).forEach(function (id) {
+        if (!seen[id]) { try { fleetMarkers[id].marker.remove(); } catch (e) {} delete fleetMarkers[id]; }
+      });
+    } catch (e) {}
+  }
+  // Called from gpsRefresh (the GPS is open and its chart exists): reads the fleet when it is time, and redraws every so often so the ages stay right.
+  function fleetGpsTick(force) {
+    try {
+      if (!fleetBaseUrl()) return;
+      fleetOwnId();
+      var now = Date.now();
+      if (!fleet.fetchBusy && now >= fleet.nextOkAt && now - fleet.lastFetchAt >= (force ? 20000 : FLEET_POLL_EVERY_MS)) fleetFetch();
+      if (force || now - fleet.lastDrawAt >= 15000) fleetDraw();
+    } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') setTimeout(function () { fleetLiveTick(GAME, true); }, 2500); // after the page has caught the voyage up
+  });
+
+  /* ======================================================================
      THE GPS -- one chart, opened from three places
      ----------------------------------------------------------------------
      A single widget (#gps-widget: the map, the readouts, the waypoint tools) and a single MapLibre map, so every place the chart appears is the SAME chart: one
@@ -16209,6 +16446,7 @@
     var tr = nav.track, sig = tr.length + ':' + (tr.length ? tr[tr.length - 1][0] + ',' + tr[tr.length - 1][1] : '');
     if (sig !== gpsTrackSig || force) { gpsTrackSig = sig; chartMap.getSource('chart-track').setData(chartLineStringFeature(unwrapTrackCoordinates(tr))); }
     gpsRefreshRoute(state, false);
+    fleetGpsTick(force); // the other boats (does nothing unless a fleet database is set)
   }
   // simTick calls this every tick; it does nothing unless the GPS is on screen.
   function refreshChartMapIfOpen(state) {
@@ -21628,6 +21866,7 @@
       var ticks = catchUpFromRealTime(GAME); // same single clock as boot/resume -- see catchUpFromRealTime
       refreshComfortRows(GAME); // a rain shower starting or stopping updates an open CABIN / CHANGE CLOTHES read-out in place
       gpsPowerWatch(GAME); // the GPS goes dark if its (accessory) power is lost while it is open
+      fleetLiveTick(GAME); // reports this boat's position to the fleet database (does nothing unless one is set)
       lanternMenuWatch(GAME); // dusk, or the lights going out, brings LIGHT LANTERN onto the plain deck menu without waiting for the next tap
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
