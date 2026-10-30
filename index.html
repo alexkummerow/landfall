@@ -15987,11 +15987,25 @@
     });
   }
 
-  function fleetAgeText(ms) {
-    if (ms < 60000) return 'NOW';
-    if (ms < 3600000) return Math.floor(ms / 60000) + 'M';
-    if (ms < 48 * 3600000) return Math.floor(ms / 3600000) + 'H';
-    return Math.floor(ms / 86400000) + 'D';
+  // The short name shown for a boat: a letter and two digits (like K72), worked out from the whole code so every device shows the same one. Looks like a sail number.
+  function fleetCode(id) {
+    var h = 2166136261, i;
+    for (i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    var L = 'ABCDEFGHJKMNPQRSTUVWXYZ', D = '23456789';
+    var a = h % L.length; h = Math.floor(h / L.length);
+    var b = h % D.length; h = Math.floor(h / D.length);
+    var c = h % D.length;
+    return L.charAt(a) + D.charAt(b) + D.charAt(c);
+  }
+  // Distance from this boat to another, as the GPS readout writes it: tenths of a mile when close, whole miles with a comma when not.
+  function fleetDistText(lat, lon) {
+    try {
+      var n = GAME && GAME.nav;
+      if (!n || !isFinite(n.lat) || !isFinite(n.lon)) return '-- NM';
+      var nm = distanceBetween(n.lat, n.lon, lat, lon);
+      if (!isFinite(nm)) return '-- NM';
+      return (nm < 10 ? nm.toFixed(1) : Math.round(nm).toLocaleString()) + ' NM';
+    } catch (e) { return '-- NM'; }
   }
   // The FLEET row: the seventh row of the GPS readout, added the first time the GPS is drawn with the fleet on.
   function fleetEnsureRow() {
@@ -16005,7 +16019,7 @@
   }
   function fleetRowUpdate() {
     if (!fleet.rowEl) return;
-    var code = fleet.id ? fleet.id.slice(0, 3) : '', txt;
+    var code = fleet.id ? fleetCode(fleet.id) : '', txt;
     if (!code) txt = 'NOT SHARING';
     else if (fleet.fails >= 2) txt = 'YOU ' + code + ' · NO CONTACT';
     else if (!fleet.gotList) txt = 'YOU ' + code;
@@ -16036,7 +16050,7 @@
         if (!m) { m = fleetMarkers[b.id] = fleetMakeMarker(); m.marker.setLngLat([b.lon, b.lat]).addTo(chartMap); }
         else m.marker.setLngLat([b.lon, b.lat]);
         m.icon.style.transform = 'rotate(' + Math.round(b.hdg) + 'deg)';
-        var label = b.id.slice(0, 3) + ' · ' + fleetAgeText(now - b.t);
+        var label = fleetCode(b.id) + ' · ' + fleetDistText(b.lat, b.lon);
         if (m.label.textContent !== label) m.label.textContent = label;
         var dim = (now - b.t) > FLEET_DIM_AFTER_MS ? '0.5' : '1'; // (on the parts, not on the marker itself: the map manages the marker's own opacity)
         if (m.icon.style.opacity !== dim) { m.icon.style.opacity = dim; m.label.style.opacity = dim; }
