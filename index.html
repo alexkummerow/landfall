@@ -1316,7 +1316,7 @@
       // section's fishingSession variable and its own comment for why).
       fishing: {
         keptFishOnDay: null,                     // voyageDayNumber() on which a fish was last kept, for the one-kept-fish-per-day rule
-        heldFish: null,                          // { speciesId, caughtDay, weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set; spoils at the next day rollover (voyageDayNumber), not on a rolling timer — see checkSpoilage()
+        heldFish: null,                          // { speciesId, caughtDay, caughtAt (the voyage minute it was caught: a save from before patch 65 has none), weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set (and its sashimi in SNACKS); spoils 12 hours after caughtAt (a save with no caughtAt: at the next local midnight) — see checkSpoilage()
       },
       books: newBooksState(),
       stats: newStatsState(), // the END-OF-GAME SUMMARY's counters -- see VOYAGE STATS
@@ -7858,14 +7858,15 @@
     if (state._ambientEventsThisPass !== undefined) state._ambientEventsThisPass++;
   }
 
+  // How long a kept fish lasts: 12 hours from the moment it was caught (patch 65; before that it lasted to the next local midnight).
+  var FISH_KEEP_MINUTES = 12 * 60;
   function checkSpoilage(state) {
-    // FISHING HOOK -- the held catch spoils at the next local-midnight
-    // day rollover (voyageDayNumber), not on a rolling elapsed-hours
-    // timer -- a fish kept at 11:40pm has only minutes of grace, one
-    // kept at 8am stays good the rest of that day. See
-    // performFishKeep/heldFishAsMealItem.
+    // FISHING HOOK -- the held catch spoils 12 hours after it was caught (voyage minutes: time away from the page counts like everything else).
+    // A catch saved before the 12-hour rule has no catch time: it keeps the old rule (the next local midnight, voyageDayNumber). See performFishKeep/heldFishAsMealItem.
     var held = state.fishing.heldFish;
-    if (held && held.caughtDay !== voyageDayNumber(state)) {
+    if (!held) return;
+    var gone = (typeof held.caughtAt === 'number' && isFinite(held.caughtAt)) ? (state.meta.voyageMinutes - held.caughtAt >= FISH_KEEP_MINUTES) : (held.caughtDay !== voyageDayNumber(state));
+    if (gone) {
       state.fishing.heldFish = null;
       log(state, 'The fish had spoiled. I threw it overboard.');
     }
@@ -12989,7 +12990,7 @@
     });
   }
 
-  // GALLEY — MEALS, SNACKS, DRINKS and FRESH CATCH, and the dishes chore, all in one place. The
+  // GALLEY — MEALS, SNACKS, DRINKS, and the dishes chore, all in one place (a fresh catch is under MEALS and SNACKS now, patch 65). The
   // menu itself never hides options based on darkness (matches the old
   // WELLBEING screen's philosophy) — the cooked things already check
   // needsCabinLight at their own top, so the player discovers the
@@ -13004,7 +13005,6 @@
       { label: 'SNACKS', action: 'cmd:snacks' },
       { label: 'DRINKS', action: 'cmd:drink' },
     ];
-    heldCatches(state).forEach(function (f) { options.push({ label: f.name.toUpperCase(), action: 'catch:' + f.speciesId }); }); // a fish aboard is a button under its own name (COHO SALMON, ...): its specialty meal and its sashimi are inside; no fish, no button
     var dishesOpt = choreOptionIfDue(state, 'dishes');
     if (dishesOpt) options.push(dishesOpt);
     state.pendingChoice = { id: 'galley-menu', options: pushBack(options, 'cancel') };
@@ -14772,7 +14772,7 @@
       blocks: [
         { p: 'Your physical condition affects your ability to manage the boat.' },
         { term: 'GALLEY', body: 'Prepare meals, eat snacks, and drink. Food and freshwater are limited. Coffee and tea also consume water.' },
-        { p: 'Freshly caught fish can be cooked as a meal or eaten as sashimi without using kerosene. Fish does not keep indefinitely.' },
+        { p: 'Freshly caught fish can be cooked as a meal or eaten as sashimi without using kerosene. Fish keeps for 12 hours after it is caught.' },
         { p: 'Wash dishes when needed.' },
         { term: 'CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
         { term: 'SALOON', body: 'Read, stretch, or SIT A WHILE. Control the heater and hatch here.' },
@@ -17377,13 +17377,16 @@
   function buildMealsOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return f.type === 'meal' && state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
-    // (a fresh catch's specialty meal is prepared under FRESH CATCH, not here)
+    // a fresh catch's specialty meal comes first while one is aboard (it will not keep); cooked as ever -- performEat's held-fish path
+    heldCatches(state).forEach(function (f) { if (f.meal) opts.unshift({ label: f.meal.toUpperCase(), action: 'eat:' + HELD_FISH_KEY }); });
     return pushBack(opts, 'cmd:galley');
   }
 
   function buildSnacksOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+    // a fresh catch's sashimi comes first while one is aboard (it will not keep); prepared as ever -- performSashimi
+    heldCatches(state).forEach(function (f) { opts.unshift({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' }); });
     return pushBack(opts, 'cmd:galley');
   }
 
@@ -17392,7 +17395,7 @@
   // chocolate never reaches these gates (see performEat), so this only
   // ever needs to choose between the other two.
   function eatSubmenuPendingChoice(state, item) {
-    if (item.key === HELD_FISH_KEY) return freshCatchFishChoice(state); // the specialty meal is prepared from FRESH CATCH
+    if (item.key === HELD_FISH_KEY) return { id: 'meals-menu', options: buildMealsOptions(state) }; // the fish's meal is in MEALS (patch 65)
     return item.type === 'meal'
       ? { id: 'meals-menu', options: buildMealsOptions(state) }
       : { id: 'snacks-menu', options: buildSnacksOptions(state) };
@@ -17624,7 +17627,7 @@
     // otherwise an uncooked snack. Every other snack (trail mix, energy
     // bar) and chocolate stay completely unaffected.
     if ((item.cooked || key === 'cupNoodles') && needsCabinLight(state)) {
-      blockedByDarkness(state, isHeldFish ? freshCatchBack(state) : item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks');
+      blockedByDarkness(state, item.type === 'meal' ? 'cmd:meals' : 'cmd:snacks'); // (the held fish is a meal: heldFishAsMealItem)
       return;
     }
 
@@ -17917,7 +17920,7 @@
   }
 
   /* --------------------------------------------------------------
-     FRESH CATCH -- the fish aboard, and what to make of it. Today a boat keeps one fish at a time (state.fishing.heldFish; it spoils at the next local midnight -- checkSpoilage), but the
+     FRESH CATCH -- the fish aboard, and what to make of it. Today a boat keeps one fish at a time (state.fishing.heldFish; it spoils 12 hours after it was caught -- checkSpoilage). Since patch 65 the cooked meal is listed under MEALS and the sashimi under SNACKS (buildMealsOptions / buildSnacksOptions); the separate FRESH CATCH screens below are no longer reached from the galley. The
      menu is built from a LIST so it would show several. Choosing a fish offers its species' specialty meal (FISH_MEAL_BY_SPECIES: cooked on the stove -- kerosene, dishes, hunger like a
      meal -- exactly performEat's held-fish path as before) and [FISH] SASHIMI (raw: nothing from the stove, no kerosene, no dishes; hunger like a snack, as a snack's reset and weight).
      -------------------------------------------------------------- */
@@ -17954,7 +17957,7 @@
   function performSashimi(state) {
     var fish = heldCatches(state)[0];
     if (!fish) { printBlank(); printLine("That's already gone.", 'dim'); return; }
-    if (needsCabinLight(state)) { blockedByDarkness(state, freshCatchBack(state)); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:snacks'); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
     runAudioSyncedAction(state, {
       label: 'PREPARING ' + fish.name.toUpperCase() + ' SASHIMI', transientLabel: true,
       playAudio: function (onEnded) { return playGalleyOneShot('sashimi', onEnded); }, // the dots last as long as sashimi.mp3 plays
@@ -20612,8 +20615,8 @@
     session.phase = 'keep-release';
     showCatchResult(caught.displayName, caught.weightLb);
 
-    if (fishAlreadyKeptToday(state)) {
-      printLine('Already had enough for dinner.'); // on screen only, never logged
+    if (fishAlreadyKeptToday(state) || state.fishing.heldFish) { // (a fish can now still be aboard after midnight, when the day's one-fish limit starts again: it is not replaced)
+      printLine(fishAlreadyKeptToday(state) ? 'Already had enough for dinner.' : 'There\u2019s still a fish aboard.'); // on screen only, never logged
       state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'THROW BACK', action: 'fish-release' }] };
     } else {
       state.pendingChoice = { id: 'fish-keep-release', options: [{ label: 'KEEP', action: 'fish-keep' }, { label: 'THROW BACK', action: 'fish-release' }] };
@@ -20665,7 +20668,7 @@
   function performFishKeep(state) {
     if (!fishingSession || fishingSession.phase !== 'keep-release' || !fishingSession.catch || !fishingSession.catch.species) return;
     var caught = fishingSession.catch;
-    state.fishing.heldFish = { speciesId: caught.species.id, caughtDay: voyageDayNumber(state), weightLb: caught.weightLb };
+    state.fishing.heldFish = { speciesId: caught.species.id, caughtDay: voyageDayNumber(state), caughtAt: state.meta.voyageMinutes, weightLb: caught.weightLb };
     state.fishing.keptFishOnDay = voyageDayNumber(state);
     bumpHygiene(state, 2); // handling a fish
     log(state, 'Caught ' + caughtFishPhrase(caught.displayName, caught.weightLb) + '. ' + pickFishKeptThought());
@@ -22691,6 +22694,12 @@
       if (state.pendingChoice.id === 'saloon-menu' || state.pendingChoice.id === 'climate-menu') cmdSaloon(state); else cmdNavStation(state);
       return;
     }
+    if (state.pendingChoice && (state.pendingChoice.id === 'fresh-catch-menu' || state.pendingChoice.id === 'fresh-catch-fish')) { // a save made on the old fish screens (patch 65): the galley, as it is now
+      cmdGalley(state);
+      return;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'meals-menu') state.pendingChoice.options = buildMealsOptions(state); // drawn afresh: a fish aboard is in it now
+    if (state.pendingChoice && state.pendingChoice.id === 'snacks-menu') state.pendingChoice.options = buildSnacksOptions(state);
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
       cmdSaloon(state);
       return;
