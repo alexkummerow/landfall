@@ -1043,6 +1043,15 @@
     </div>
   </div>
 
+  <!-- CAPTAIN'S BRIEFING -- the welcome-back report after an absence of an hour or more (see briefingShow). The vessel-log shell again (same classes, so the same look and no new CSS); last
+       in the page so it sits over any other full-screen screen. Hidden by default; CONTINUE closes it and does nothing else. The body is built each time it opens. -->
+  <div id="briefing-overlay" class="vessel-log-overlay" hidden>
+    <div id="briefing-body" class="vessel-log-body"></div>
+    <div class="vessel-log-back-area">
+      <button id="briefing-continue-btn" type="button" class="option">&gt; CONTINUE</button>
+    </div>
+  </div>
+
   <!-- THE GPS -- the one chart widget (see THE GPS in the script). It lives here, off screen, whenever it is not being shown: under the Helm, at the Nav Station,
        or inside #chart-screen above (the Ship's Computer's GPS app). The script moves this same element between them, so the map, the route and the readouts are
        one thing everywhere. #chart-map is handed to MapLibre GL JS as its container. -->
@@ -11242,6 +11251,9 @@
   var handbookOverlayEl = document.getElementById('handbook-overlay');
   var handbookBodyEl = document.getElementById('handbook-body');
   var handbookBackBtn = document.getElementById('handbook-back-btn');
+  var briefingOverlayEl = document.getElementById('briefing-overlay'); // CAPTAIN'S BRIEFING (see briefingShow)
+  var briefingBodyEl = document.getElementById('briefing-body');
+  var briefingContinueBtn = document.getElementById('briefing-continue-btn');
   var shipsComputerOverlayEl = document.getElementById('ships-computer-overlay');
   var shipsComputerScreenAreaEl = document.querySelector('.ships-computer-screen-area');
   var shipsComputerScreenEl = document.querySelector('.ships-computer-screen');
@@ -22163,7 +22175,7 @@
     if (liveTimer) return;
     liveTimer = setInterval(function () {
       if (!GAME || introPending) return; // (after a restart the title page's placeholder game is not a voyage: nothing is simulated or saved until BEGIN)
-      var ticks = catchUpFromRealTime(GAME); // same single clock as boot/resume -- see catchUpFromRealTime
+      var ticks = briefingCatchUp(GAME); // same single clock as boot/resume -- see catchUpFromRealTime (the wrapper only adds the CAPTAIN'S BRIEFING's readings)
       refreshComfortRows(GAME); // a rain shower starting or stopping updates an open CABIN / CHANGE CLOTHES read-out in place
       gpsPowerWatch(GAME); // the GPS goes dark if its (accessory) power is lost while it is open
       marineForecastPowerWatch(GAME); // ... and so does the MARINE FORECAST radio
@@ -22184,6 +22196,7 @@
       finaleKick(GAME); // the final arrival: starts / resumes its current step (idempotent)
       rescueKick(GAME); // a rescue: puts its current screen up (idempotent)
       departureAutoKick(GAME); // "Leaving the marina...", should a reload have left it waiting (idempotent)
+      briefingKick(GAME); // a CAPTAIN'S BRIEFING that was held back (idempotent)
       saveGameState(GAME);
     }, LIVE_TICK_SECONDS * 1000);
   }
@@ -22544,6 +22557,7 @@
     // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
     // an in-progress voyage, it just starts over exactly like a first visit.
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save:', describeError(e)); }
+    briefingHide();
     rescueResetUi();
     finaleResetUi(); // nothing of a finished voyage's ending (overlay, marina) may leak into the next one
     stopAllEngineLoops(); // the discarded voyage's engine (if it was running) must not keep sounding over the fresh one -- and the fresh voyage's own START ENGINE must begin from a clean engine-audio state
@@ -22580,6 +22594,217 @@
     if (depNow && depNow.reshow) { printBlank(); printLine(depNow.reshow); } // a reload while a closing departure line is waiting for its CONTINUE: it is put back (it was never in the log)
     renderOptions(state);
     scrollToBottom();
+  }
+
+  /* ======================================================================
+     CAPTAIN'S BRIEFING -- the welcome-back report (patch 70)
+     ----------------------------------------------------------------------
+     After ONE continuous absence of BRIEFING_MIN_AWAY_MS (60 minutes) or more, a single read-only screen: how long, how far, how things stand now, what changed, and (only if
+     there is one) what needs attention. It reports; it never simulates. The world is advanced by the one existing catchUpFromRealTime and by nothing else -- briefingCatchUp wraps that call,
+     reading the state the player LEFT (the stored snapshot) against the state after the catch-up, and writes nothing but its own small record, state.meta.briefing:
+         seenAt   real ms the player last had the page in front of them     snap    the numbers below, as they were then     report   null, or the report waiting to be read
+     seenAt / snap are refreshed whenever the page is visible (every live tick and every return) and when it is hidden / paged away -- never from a page that is only running in the background.
+     A save with no record, or a bad one, is NOT an absence (it is just stamped). The screen is an overlay over whatever the player was doing, so it changes nothing underneath.
+     ====================================================================== */
+  var BRIEFING_MIN_AWAY_MS = 60 * 60000;     // 59 minutes is not an absence; 60 is
+  var BRIEFING_NOTES_MAX = 3;
+  var BRIEFING_WIND_SPEED_KT = 8;            // a wind this much stronger / weaker ...
+  var BRIEFING_WIND_SHIFT_DEG = 60;          // ... or a shift this large (in a wind of at least BRIEFING_WIND_SPEED_KT) is "changed"
+  var BRIEFING_SEA_FT = 2;                   // a sea band change of at least this many feet
+  var BRIEFING_BATTERY_PTS = 10;             // a battery charge change of at least this many points
+  var BRIEFING_LOW_FRACTION = 0.2;           // diesel / kerosene "low": under a fifth of the starting amount
+  var BRIEFING_BLOCKING_CHOICES = ['binoculars', 'existing', 'reading', 'sitting', 'pong', 'repair-menu', 'repair-decision', 'rescue-call', 'restart-choice', 'voyage-ended']; // screens that are an activity in progress
+  var BRIEFING_REGION_WORDS = { 'SITKA SOUND': 'Sitka Sound', 'GULF OF ALASKA': 'the Gulf of Alaska', 'NORTH PACIFIC': 'the North Pacific', 'CENTRAL NORTH PACIFIC': 'the central North Pacific', 'HAWAIIAN WATERS': 'Hawaiian waters', 'KAUAʻI': 'Kauaʻi waters', 'NAWILIWILI': 'Nāwiliwili' };
+  var briefingShown = null; // the report object the overlay is showing right now, or null
+
+  function briefingPageVisible() { return document.visibilityState === 'visible'; }
+
+  // The handful of numbers the report compares. Read-only.
+  function briefingSnapshot(state) {
+    var b = state.boat, w = state.weather;
+    var seaFt = currentSeaFt(w);
+    return {
+      d: state.nav.distanceTraveled,
+      ws: w.windSpeed, wd: w.windDirection, sb: seaAudioRawTierForWaveHeight(seaFt), sf: seaFt,
+      bt: b.battery, dz: b.fuelGallons, ke: b.keroseneGallons,
+      sy: BOAT_FAIL_SYSTEMS.map(function (k) { return systemDamageKnown(state, k) ? 1 : 0; }), // sails, rudder, engine, electrical: DAMAGED and known (an undiscovered engine fault reads GOOD, as on STATUS)
+      rg: regionName(state),
+    };
+  }
+
+  // The player is here now: this moment is the start of any absence that follows.
+  function briefingStamp(state) {
+    try {
+      if (!state || !state.meta) return;
+      var bf = state.meta.briefing;
+      if (!bf || typeof bf !== 'object') bf = state.meta.briefing = { seenAt: null, snap: null, report: null };
+      bf.seenAt = Date.now();
+      bf.snap = briefingSnapshot(state);
+    } catch (e) { console.warn('Captain’s briefing stamp failed:', describeError(e)); }
+  }
+
+  // BEFORE the catch-up: is this a return after a real absence of an hour or more? Returns { awayMs, snap } or null. Only a visible page can be "returned to".
+  function briefingReturnCheck(state) {
+    try {
+      if (!briefingPageVisible() || introPending) return null;
+      var bf = state.meta && state.meta.briefing;
+      if (!bf || typeof bf !== 'object' || !Number.isFinite(bf.seenAt) || !bf.snap || typeof bf.snap !== 'object' || !Number.isFinite(bf.snap.d)) return null; // no record / a bad one: not an absence
+      var awayMs = Date.now() - bf.seenAt;
+      if (!(awayMs >= BRIEFING_MIN_AWAY_MS)) return null; // (also false for a clock that stepped backward)
+      return { awayMs: awayMs, snap: bf.snap };
+    } catch (e) { console.warn('Captain’s briefing check failed:', describeError(e)); return null; }
+  }
+
+  // The existing catch-up, once, with the readings around it. The ONLY thing it does besides calling catchUpFromRealTime is read the state and keep the briefing's own record.
+  function briefingCatchUp(state) {
+    var pre = briefingReturnCheck(state);
+    var ticks = catchUpFromRealTime(state);
+    try {
+      if (briefingPageVisible() && !introPending) {
+        var report = pre ? briefingBuildReport(state, pre) : null;
+        briefingStamp(state); // the player is here: a new absence starts now (this is also what makes short absences never add up)
+        if (report && state.meta.briefing) state.meta.briefing.report = report;
+      }
+    } catch (e) { console.warn('Captain’s briefing failed:', describeError(e)); }
+    return ticks;
+  }
+
+  function briefingAngleDiff(a, b) { var d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+
+  // What changed between the stored snapshot and now, as at most BRIEFING_NOTES_MAX plain lines, most important first:
+  // equipment failures, then fuel / battery, then the wind and sea, then anything else. (Critical survival problems are not notes: they are ATTENTION REQUIRED, shown once, below.)
+  function briefingBuildReport(state, pre) {
+    var s0 = pre.snap, s1 = briefingSnapshot(state), equip = [], fuel = [], env = [], other = [];
+    var failed = ['Sails damaged.', 'Rudder damaged.', 'Engine damaged.', 'Electrical system damaged.'];
+    if (Array.isArray(s0.sy)) failed.forEach(function (text, i) { if (s1.sy[i] && !s0.sy[i]) equip.push(text); });
+    [['dz', FUEL_STARTING_GALLONS, 'diesel'], ['ke', KEROSENE_STARTING_GALLONS, 'kerosene']].forEach(function (f) {
+      var before = s0[f[0]], now = s1[f[0]], low = f[1] * BRIEFING_LOW_FRACTION, name = f[2].charAt(0).toUpperCase() + f[2].slice(1);
+      if (!Number.isFinite(before) || !Number.isFinite(now)) return;
+      if (before > 0 && now <= 0) fuel.push('Out of ' + f[2] + '.');
+      else if (before >= low && now < low) fuel.push(name + ' is low.');
+    });
+    var batteryDead = state.boat.batteryRecovering && state.boat.battery < BATTERY_RESTART_THRESHOLD_PCT; // (that is ATTENTION REQUIRED, not repeated here)
+    if (!batteryDead && Number.isFinite(s0.bt) && Number.isFinite(s1.bt)) {
+      var drop = Math.floor(s0.bt) - Math.floor(s1.bt);
+      if (Math.abs(drop) >= BRIEFING_BATTERY_PTS) fuel.push('Battery charge ' + (drop > 0 ? 'decreased' : 'increased') + ' by ' + Math.abs(drop) + '%.');
+    }
+    if (Number.isFinite(s0.ws) && Number.isFinite(s1.ws) && Number.isFinite(s0.wd) && Number.isFinite(s1.wd) &&
+        (Math.abs(s1.ws - s0.ws) >= BRIEFING_WIND_SPEED_KT || (briefingAngleDiff(s1.wd, s0.wd) >= BRIEFING_WIND_SHIFT_DEG && Math.max(s0.ws, s1.ws) >= BRIEFING_WIND_SPEED_KT))) {
+      env.push('Wind conditions have changed since your last visit.'); // (the simulation keeps no timed weather events to quote, so no time is invented)
+    }
+    if (s0.sb && s1.sb && s0.sb !== s1.sb && Number.isFinite(s0.sf) && Number.isFinite(s1.sf) && Math.abs(s1.sf - s0.sf) >= BRIEFING_SEA_FT) env.push('Sea conditions have changed since your last visit.');
+    if (s0.rg && s1.rg && s0.rg !== s1.rg) other.push('Now in ' + (BRIEFING_REGION_WORDS[s1.rg] || String(s1.rg).toLowerCase()) + '.');
+    return {
+      away: Math.floor(pre.awayMs / 60000),
+      dist: Number.isFinite(s1.d) && Number.isFinite(s0.d) ? Math.max(0, s1.d - s0.d) : 0, // the odometer's growth: distance SAILED (tacking and all), not the straight line between the two positions
+      notes: equip.concat(fuel, env, other).slice(0, BRIEFING_NOTES_MAX),
+    };
+  }
+
+  // A real critical problem right now (read live, so it is never stale). The same thresholds the game's own final warnings use; nothing here repeats a VOYAGE NOTE.
+  function briefingAttention(state) {
+    var c = state.crew, b = state.boat, out = [];
+    if (state.nav.grounded) out.push('The boat is aground.');
+    if (c.hoursSinceWater >= THIRST_FINAL_HOURS) out.push('Thirst is critical.');
+    if (state.water && state.water.gallons <= 0) out.push('Out of water.');
+    if (c.hoursSinceMeal >= HUNGER_FINAL_HOURS) out.push('Hunger is critical.');
+    if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) out.push('Battery is dead. Systems are unavailable.');
+    return out;
+  }
+
+  function briefingDuration(minutes) { return Math.floor(minutes / 60) + 'H ' + Math.floor(minutes % 60) + 'M'; }
+  function briefingNm(nm) { return (nm < 10 ? nm.toFixed(1) : String(Math.round(nm))) + ' NM'; }
+
+  // The screen, built fresh from the report (time away, distance, notes) and from the state as it is NOW (conditions, vessel status, attention).
+  function briefingRender(state, rep) {
+    var body = briefingBodyEl;
+    body.innerHTML = '';
+    var line = function (text, cls) { var p = document.createElement('p'); p.className = 'line' + (cls ? ' ' + cls : ''); p.textContent = text; body.appendChild(p); };
+    var gap = function () { var p = document.createElement('p'); p.className = 'gap'; body.appendChild(p); };
+    var row = function (label, value) {
+      var r = document.createElement('div'); r.className = 'data-row data-row-md';
+      var l = document.createElement('span'); l.textContent = label;
+      var v = document.createElement('span'); v.textContent = value;
+      r.appendChild(l); r.appendChild(v); body.appendChild(r);
+    };
+    var b = state.boat, w = state.weather, now = new Date();
+    line('CAPTAIN’S BRIEFING', 'heading-label');
+    line('DAY ' + voyageDayNumber(state) + ' — ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'));
+    gap();
+    row('TIME AWAY', briefingDuration(rep.away));
+    row('DISTANCE SAILED', briefingNm(rep.dist));
+    gap();
+    line('CURRENT CONDITIONS', 'heading-label');
+    row('WIND', compassPoint(w.windDirection) + ' ' + Math.round(w.windSpeed) + ' KT');
+    row('SEA STATE', seaReadout(currentSeaFt(w)));
+    row('BOAT SPEED', (state.nav.grounded ? 0 : computeBoatSpeed(state, state.nav.heading)).toFixed(1) + ' KT');
+    gap();
+    line('VESSEL STATUS', 'heading-label');
+    row('SAILS', b.sails);
+    row('RUDDER', b.steering);
+    row('ENGINE', systemDamageKnown(state, 'engine') || b.engine !== 'DAMAGED' ? b.engine : 'GOOD'); // an undiscovered failure still reads GOOD, as on STATUS
+    row('ELECTRICAL', b.electrical);
+    row('BATTERY', (b.engineOn && b.battery < 100 ? 'CHARGING ' : '') + Math.floor(b.battery) + '%');
+    row('DIESEL', galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase());
+    row('KEROSENE', galCurrentOnly(keroseneLeft(state)).toUpperCase());
+    gap();
+    line('VOYAGE NOTES', 'heading-label');
+    (rep.notes.length ? rep.notes : ['No significant events reported.']).forEach(function (n) { line(n); });
+    var attention = briefingAttention(state);
+    if (attention.length) {
+      gap();
+      line('ATTENTION REQUIRED', 'heading-label');
+      attention.forEach(function (n) { line(n); });
+    }
+  }
+
+  function briefingShow(state, rep) {
+    briefingRender(state, rep);
+    briefingOverlayEl.hidden = false;
+    briefingBodyEl.scrollTop = 0;
+    briefingShown = rep;
+  }
+  function briefingHide() { briefingOverlayEl.hidden = true; briefingShown = null; }
+
+  // CONTINUE: closes the report and does nothing else -- the screen under it was never touched, so there is nothing to put back. A dismissed report never comes back (not on a reload either).
+  function briefingDismiss() {
+    briefingHide();
+    if (GAME && GAME.meta && GAME.meta.briefing) { GAME.meta.briefing.report = null; saveGameState(GAME); }
+  }
+  briefingContinueBtn.addEventListener('click', briefingDismiss);
+
+  // 'never': the voyage has not begun, or is over / ending (arrival, rescue) -- no briefing. 'later': an activity is in progress, or a scripted moment -- wait for it to end. null: safe.
+  function briefingBlock(state) {
+    var ve = state.voyageEnd, fi = state.finale;
+    if ((ve && ve.phase !== 'none') || (fi && fi.phase !== 'none')) return 'never';
+    if (state.departure && state.departure.stageIndex < DEPARTURE_STEPS.length) return 'never';
+    if (introPending || uiBusy || fishingSession || obsSession || activeMarineTransmission) return 'later';
+    if (state.crew.watchState === 'sleeping') return 'later';
+    if (state.nav.grounded && !state.nav.groundedShown) return 'later'; // (RUN AGROUND's own moment)
+    var id = state.pendingChoice && state.pendingChoice.id;
+    if (id && (BRIEFING_BLOCKING_CHOICES.indexOf(id) >= 0 || id.indexOf('fish-') === 0)) return 'later';
+    return null;
+  }
+
+  // Idempotent; called after boot, on becoming visible and on every live tick. Shows the waiting report at the first safe moment, drops it if the voyage is over, and never holds the player up.
+  function briefingKick(state) {
+    try {
+      var bf = state && state.meta && state.meta.briefing, rep = bf && bf.report;
+      var valid = rep && Number.isFinite(rep.away) && Number.isFinite(rep.dist) && Array.isArray(rep.notes);
+      if (!valid) {
+        if (rep) { bf.report = null; saveGameState(state); } // (a damaged record is dropped)
+        if (!briefingOverlayEl.hidden) briefingHide();
+        return;
+      }
+      var block = briefingBlock(state);
+      if (block === 'never') { bf.report = null; briefingHide(); saveGameState(state); return; }
+      if (!briefingOverlayEl.hidden) { if (briefingShown !== rep) briefingShow(state, rep); return; } // (open already; a newer report replaces it in place)
+      if (block || !briefingPageVisible()) return;
+      briefingShow(state, rep);
+    } catch (e) { // whatever went wrong, the player is never held up and the report is not retried forever
+      console.warn('Captain’s briefing could not be shown:', describeError(e));
+      try { briefingHide(); if (state && state.meta && state.meta.briefing) state.meta.briefing.report = null; } catch (e2) {}
+    }
   }
 
   // Fills in the nav fields a save from an earlier build of this simulation might not have. (Saves from other builds of the game live under their own
@@ -23243,7 +23468,7 @@
     restartBtn.hidden = false;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 ' + regionName(GAME)); // header now shows the current REGION, not a fixed "UNDERWAY" -- see updateNavStrip's own ongoing refresh for how this stays live as the voyage progresses
     resolveInterruptedEngineFailure(GAME); // a reload part-way through an engine failure sequence: the timers are gone, so settle it before any time is simulated
-    var ticks = catchUpFromRealTime(GAME);
+    var ticks = briefingCatchUp(GAME); // the one catch-up, with the CAPTAIN'S BRIEFING's before / after readings around it
     thunderSync(GAME); // THUNDER + LIGHTNING: a storm that is on at load is noticed even when less than a tick has passed
     alignGameClockIfNeeded(GAME); // once per older save, after the catch-up above -- see its notes
     saveGameState(GAME);
@@ -23258,6 +23483,7 @@
       saveGameState(GAME);
       scrollToBottom();
     }
+    briefingKick(GAME); // a report waiting from before a reload (or from this return): shown now if it is a safe moment
     startLiveLoop();
     setTimeout(function () { departureAutoKick(GAME); }, 300); // a reload on "Leaving the marina...": it begins again by itself
     updateClock();
@@ -23426,10 +23652,10 @@
       // simulation has been advanced, so whenever the game next loads
       // or resumes it catches up from there -- overwriting it with "now"
       // here would silently discard any time since the last live tick.
-      if (!introPending) saveGameState(GAME); // (not while the title page / opening story is up: nothing exists to save yet)
+      if (!introPending) { briefingStamp(GAME); saveGameState(GAME); } // (not while the title page / opening story is up: nothing exists to save yet) -- the stamp is when the absence BEGINS
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
-      var ticks = introPending ? 0 : catchUpFromRealTime(GAME);
+      var ticks = introPending ? 0 : briefingCatchUp(GAME);
       if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
@@ -23449,6 +23675,7 @@
       // this handler (save, clock) has no reason to wait on audio
       // recovery's own health-check delay or a possible hard rebuild.
       recoverLandfallAudio('visibility');
+      if (!introPending) briefingKick(GAME); // the welcome-back report, if this return earned one
       saveGameState(GAME);
       updateClock();
     }
@@ -23477,6 +23704,7 @@
 
   window.addEventListener('pagehide', function () {
     if (!GAME || introPending) return;
+    briefingStamp(GAME); // (a reload / navigation away is not an absence: the next boot sees only this moment's gap)
     saveGameState(GAME); // save only -- see the note in the visibilitychange handler on why lastTick is never touched here
   });
 
