@@ -3966,10 +3966,10 @@
   var REAL_WEATHER_CURRENT_BLEND_MS = 90 * 60 * 1000;      // the live "current" observation fades into the hourly series over this long
   var REAL_WEATHER_BRIDGE_BLEND_PER_HOUR = 0.85;           // how fast the live values ease toward real (only visible at a source switch / refresh jump)
   var REAL_WEATHER_SEA_STEP_MINUTES = 10;                  // seaState (an integer tier) moves at most one step per this many game minutes
-  // wave height (ft) -> the game's existing 0-6 seaState tier. The band edges at 3 / 6 / 10 ft are the SAME
-  // calm / moderate / rough / heavy edges the sea audio already uses (SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT), so
-  // a real wave height and the audio tier it produces always agree. 10.000001 keeps exactly 10 ft in "rough".
-  var RW_SEA_TIER_UPPER_FT = [1.5, 3, 4.5, 6, 8, 10.000001];
+  // wave height (ft) -> the game's existing 0-6 seaState tier. Upper edges 1.5 / 2.5 / 3.5 / 7.5 / 9.5 / 11.5 ft: the tiers 0-2 are CALM (up to 3.5 ft), 3 is MODERATE (to 7.5), 4 and 5 are ROUGH
+  // (to 11.5, split at 9.5) and 6 is HEAVY -- the same 3.5 / 7.5 / 11.5 edges as the sea audio and the readout (SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT), so a real wave height, the name beside it
+  // and the audio tier it produces always agree. (Patch 67; the edges were 1.5 / 3 / 4.5 / 6 / 8 / 10.)
+  var RW_SEA_TIER_UPPER_FT = [1.5, 2.5, 3.5, 7.5, 9.5, 11.5];
 
   // The only non-persisted weather bookkeeping, kept in ONE place.
   var realWeatherRuntime = { inFlight: false, failures: 0, nextAllowedMs: 0, fetchedThisSession: false, lastAttemptMs: null };
@@ -9190,15 +9190,11 @@
 
   var HATCH_BLEED_VOLUME_FRACTION = 0.3; // the one shared bleed-volume constant for marine ambience (sea + wind) and rain exterior bleed below deck -- see section 9/10 of the hatch spec
 
-  // Centralized, tunable thresholds (section 20 of the task this
-  // implements) -- wave height in feet, reusing the EXISTING
-  // seaStateWaveHeightFt(seaState) the WEATHER screen's SEAS line
-  // already computes, never a second wave-height source. Approximate
-  // real-world sea-state bands: CALM under 3ft, MODERATE 3-6ft, ROUGH
-  // 6-10ft, HEAVY above 10ft -- matching seaStateWaveHeightFt's own
-  // [1,2,3,4,8,10,12] table, this lands seaState 0-1 in CALM, 2-3 in
-  // MODERATE, 4-5 in ROUGH, and 6 in HEAVY.
-  var SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT = { calmMax: 3, moderateMax: 6, roughMax: 10 };
+  // Centralized, tunable thresholds (section 20 of the task this implements) -- wave height in feet, reusing the EXISTING seaStateWaveHeightFt(seaState) the WEATHER screen's
+  // SEAS line already computes, never a second wave-height source. The bands, in the whole feet the player reads (patch 67): CALM 1-3 ft, MODERATE 4-7, ROUGH 8-11, HEAVY 12 and over,
+  // so the edges on the real number are 3.5 / 7.5 / 11.5 ft (what rounds to 4, 8 and 12). They match seaStateWaveHeightFt's own [1,2,3,4,8,10,12] table: seaState 0-2 CALM,
+  // 3 MODERATE, 4-5 ROUGH, 6 HEAVY.
+  var SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT = { calmMax: 3.5, moderateMax: 7.5, roughMax: 11.5 };
   // Hysteresis margin (section 11): once a tier is committed, the
   // wave height must move this far PAST the next threshold -- not
   // just past it -- before the tier actually changes, so a value
@@ -9211,13 +9207,8 @@
     var t = SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT;
     if (ft < t.calmMax) return 'calm';
     if (ft < t.moderateMax) return 'moderate';
-    // <= here, not < -- the spec's own "ROUGH 6-10 FT" / "HEAVY > 10 FT"
-    // is a strict inequality for heavy, so 10ft itself is still rough;
-    // heavy only begins strictly past it. calmMax/moderateMax above are
-    // correctly exclusive as-is (moderate's own stated "3-6" and rough's
-    // "6-10" already overlap at 6, so 6 goes to rough, matching rough's
-    // own range starting there).
-    if (ft <= t.roughMax) return 'rough';
+    // each edge is exclusive: 3.5 ft is MODERATE (it reads 4), 7.5 is ROUGH (8), 11.5 is HEAVY (12)
+    if (ft < t.roughMax) return 'rough';
     return 'heavy';
   }
 
