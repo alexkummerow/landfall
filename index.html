@@ -3104,7 +3104,7 @@
     state.pendingChoice = { id: 'navlights-blocked', options: [{ label: 'BACK', action: backAction || 'cancel' }] };
   }
 
-  // THE AMBIENT OBSERVATION LIBRARY -- 24 lines, each grounded by a rule in AMBIENT_RULES below (a line with no rule is never picked). The 19 lines
+  // THE AMBIENT OBSERVATION LIBRARY -- each line grounded by a rule in AMBIENT_RULES below (a line with no rule is never picked). The 19 lines
   // that asserted an animal, a ship, a squall, a meteor, a splash, a swell period, land that was not there, or a moon the game does not model were
   // removed: wildlife and vessels now come from the encounter systems (see ENCOUNTERS), and the rest was simply not a fact the game knows.
   var OBSERVATIONS = {
@@ -3142,12 +3142,33 @@
         'Clouds stack on the horizon, building into something or nothing.',
         'The horizon is empty in every direction.',
         'The wake trails off pale behind the boat, then is gone.',
+        // (patch 66) each of these has its own rule in AMBIENT_RULES
+        'Whitecaps scatter across the swells, break, and are gone.',
+        'Rain hisses on the water and drums on the cabin top.',
+        'Low grey cloud over grey water, and no line where one becomes the other.',
+        'No stars tonight. The dark is complete, and the water is only a sound.',
+        'The moon is up and lays a pale track across the water.',
+        'A thin moon hangs low over the water.',
+        'The hull creaks softly as it rides up and over each swell.',
+        'The engine hums on, steady. After a while it stops being a sound at all.',
+        'The sails hold their curve, full and quiet.',
+        'The sails slat and fill, slat and fill, in the lazy swell.',
+        'The sea is nearly flat, and the sky sits in it.',
+        'The rigging hums with the wind.',
+        'Fog shortens the world to a few boat lengths of grey water.',
+        'The cold gets in through every layer and stays.',
       ],
       awe_night: [
         'The stars are absurd tonight, edge to edge, no city to dim them.',
       ],
-      sunrise: ['The sky goes from black to grey to a slow, deliberate orange.'],
-      sunset: ['The sun goes down into the sea, no clouds to catch it, just gone.'],
+      sunrise: [
+        'The sky goes from black to grey to a slow, deliberate orange.',
+        'The light comes slowly, grey on grey, with no sunrise to speak of.',
+      ],
+      sunset: [
+        'The sun goes down into the sea, no clouds to catch it, just gone.',
+        'The sun sinks into a bank of cloud, its edges lit, and the sea goes dark below.',
+      ],
     },
     tropics: {
       quiet: [
@@ -3170,7 +3191,11 @@
   // "fresh" set is exhausted rather than getting stuck with nothing to pick.
   function pickFromPoolAvoidingRecent(pool, recent) {
     var candidates = pool.filter(function (t) { return recent.indexOf(t) === -1; });
-    if (!candidates.length) candidates = pool;
+    if (!candidates.length) { // everything eligible was said lately: the one said longest ago (recent is oldest first), so a small set cycles instead of repeating (patch 66)
+      var oldest = Infinity;
+      pool.forEach(function (t) { var i = recent.lastIndexOf(t); if (i < oldest) oldest = i; });
+      candidates = pool.filter(function (t) { return recent.lastIndexOf(t) === oldest; });
+    }
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
@@ -7814,15 +7839,15 @@
     }
   }
 
-  var AMBIENT_MIN_GAP_MINUTES = 90;   // at least 1.5h between ambient events
-  var AMBIENT_MAX_GAP_MINUTES = 300;  // at most 5h — "substantial stretches" without one
+  var AMBIENT_MIN_GAP_MINUTES = 45;   // at least 45 minutes between ambient observations (patch 66; it was 90)
+  var AMBIENT_MAX_GAP_MINUTES = 150;  // at most 2.5h (patch 66; it was 5h)
   var AMBIENT_CATCHUP_CAP = 2;        // a long absence surfaces at most this many, never a backlog dump
   var AMBIENT_HISTORY_LENGTH = 6;     // how many recent picks to avoid repeating
 
-  function ambientEventsAllowed(state) {
+  function ambientEventsAllowed(state, ignoreMenu) {
     if (state.departure.stageIndex < DEPARTURE_STEPS.length) return false; // mid opening-sequence — no room for musing
     if (state.crew.watchState !== 'awake') return false;      // asleep — not noticing anything
-    if (state.pendingChoice) return false;                    // mid-decision, not the moment for a stray thought
+    if (state.pendingChoice && !ignoreMenu) return false;     // mid-decision, not the moment for a stray thought (checkAmbientEvent HOLDS the slot for this one)
     if (state.weather.condition === 'squall') return false;   // storms and emergencies dominate attention
     if (state.weather.seaState >= 5) return false;
     if (hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) return false;  // severe hunger/thirst — physical concerns dominate
@@ -7837,6 +7862,9 @@
       return;
     }
     if (state.meta.voyageMinutes < f.nextAmbientEventAt) return;
+    // HELD, NOT DROPPED (patch 66): a slot that comes due while a menu is open (the GPS, the galley, the helm ...) and is allowed in every other way stays due, and is tried again
+    // every minute, so the observation is written as soon as the player is back at the main controls. One slot only: nothing piles up.
+    if (state.pendingChoice && ambientEventsAllowed(state, true)) return;
     // Reschedule unconditionally, whether or not something actually fires —
     // a suppressed slot (danger, asleep, etc.) doesn't get "saved up" for
     // later; it just tries again at the next randomized interval.
@@ -18010,6 +18038,27 @@
     { match: 'The sea is a color it', topic: 'color', when: function (c) { return c.n.lat <= 36 && c.daytime && c.cloud <= 70 && !c.fog && !c.raining; } },
     { match: 'The stars are different here', topic: 'stars', when: function (c) { return c.n.lat <= 30 && c.tod.night && c.clear; } },
     { match: 'The cloud pattern ahead looks different', topic: 'land', when: function (c) { return c.distDest <= 60 && c.cloud >= 40 && c.daytime && !c.fog && !c.raining && c.onCourse; } },
+    // ---- offshore lines added in patch 66: each is said only when it is true of the real state ----
+    { match: 'Whitecaps scatter across the swells', topic: 'whitecaps', when: function (c) { return c.wind >= 15 && c.daytime && !c.fog; } },
+    { match: 'Rain hisses on the water', topic: 'rainsea', when: function (c) { return c.raining && !c.heavyRain; } },
+    { match: 'Low grey cloud over grey water', topic: 'overcast', when: function (c) { return c.cloud >= 85 && c.daytime && !c.raining && !c.fog; } },
+    { match: 'No stars tonight', topic: 'dark', when: function (c) { return c.tod.night && c.cloud >= 70; } },
+    { match: 'The moon is up and lays a pale track', topic: 'moon', when: function (c) {
+        if (!c.tod.night || c.fog || c.raining || c.cloud > 60) return false;
+        var mo = obsMoon(daylightInstantMs(c.s), c.n.lat, c.n.lon); return mo.alt >= 10 && mo.illum >= 0.4; } },
+    { match: 'A thin moon hangs low', topic: 'moon', when: function (c) {
+        if (!c.tod.night || c.fog || c.raining || c.cloud > 60) return false;
+        var mo = obsMoon(daylightInstantMs(c.s), c.n.lat, c.n.lon); return mo.alt >= 3 && mo.alt <= 30 && mo.illum >= 0.12 && mo.illum < 0.4; } },
+    { match: 'The hull creaks softly', topic: 'creak', when: function (c) { return c.waveFt != null && c.waveFt >= 3 && !c.engineOn; } },
+    { match: 'The engine hums on, steady', topic: 'engine', when: function (c) { return c.engineOn; } },
+    { match: 'The sails hold their curve', topic: 'sails', when: function (c) { return c.sailUp && !c.engineOn && c.wind >= 8 && c.wind <= 20 && c.boatSpeed >= 3; } },
+    { match: 'The sails slat and fill', topic: 'sails', when: function (c) { return c.sailUp && !c.engineOn && c.wind <= 6; } },
+    { match: 'The sea is nearly flat', topic: 'calmsea', when: function (c) { return c.sea <= 1 && c.wind <= 5 && c.daytime && c.cloud <= 70 && !c.fog && !c.raining; } },
+    { match: 'The rigging hums with the wind', topic: 'wind', when: function (c) { return c.wind >= 18; } },
+    { match: 'Fog shortens the world', topic: 'fog', when: function (c) { return c.fog; } },
+    { match: 'The cold gets in through every layer', topic: 'temp', when: function (c) { return c.tempF <= 48; } },
+    { match: 'The light comes slowly, grey on grey', topic: 'dawn', when: function (c) { return (c.phase === 'dawn' || c.phase === 'sunrise') && c.cloud >= 75 && !c.fog; } },
+    { match: 'The sun sinks into a bank of cloud', topic: 'sunset', when: function (c) { return (c.phase === 'sunset' || (c.phase === 'dusk' && c.snap.minutesSinceSunset < 15)) && c.cloud >= 40 && c.cloud <= 90 && !c.fog && !c.raining; } },
     { match: 'A smudge on the horizon', topic: 'land', when: function (c) { return c.distDest > 20 && c.distDest <= 55 && c.daytime && !c.fog && !c.s.flags.landOnHorizonShown; } },
   ];
   function ambientRuleFor(text) {
