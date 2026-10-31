@@ -12367,13 +12367,14 @@
     uiBusy = true;
     optionsEl.innerHTML = '';
     var choice = state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() }; // a sane screen if the page is reloaded mid-way
-    var tx = activeMarineTransmission = { left: false }; // clearTempView() sets .left if the screen is left before the typing ends
+    var tx = activeMarineTransmission = { left: false, cut: false, dotTimer: null }; // clearTempView() sets .left if the screen is left before the typing ends
 
     var labelEl = document.createElement('p'); labelEl.className = 'line heading-label'; labelEl.textContent = 'TUNING'; tempViewEl.appendChild(labelEl);
     var dotsEl = document.createElement('p'); dotsEl.className = 'line dim'; dotsEl.textContent = ACTIVITY_DOT_FRAMES[0]; tempViewEl.appendChild(dotsEl);
     scrollToBottom();
     var frame = 0;
     var dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
+    tx.dotTimer = dotTimer;
     playNavStationOneShot('radioStatic');
 
     function finish() {
@@ -12390,6 +12391,7 @@
     function typeLines() {
       var li = 0, ci = 0, p = null;
       (function step() {
+        if (tx.cut) return; // the power went: marineForecastPowerWatch has already put everything away
         if (li >= lines.length) { finish(); return; }
         var ln = lines[li];
         if (ln.gap) { printBlank(); li++; setTimeout(step, MARINE_FORECAST_CHAR_MS * 3); return; }
@@ -12408,13 +12410,37 @@
     }
     setTimeout(function () {
       clearInterval(dotTimer);
+      if (tx.cut) return; // the power went during TUNING
       [dotsEl, labelEl].forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
       stopRadioStatic();
       typeLines();
     }, MARINE_FORECAST_TUNING_SECONDS * 1000);
   }
 
+  // ---- the radio runs on the accessory circuit, like the GPS ----
+  function marineForecastNoPower(state) {
+    printBlank();
+    printLine(state.boat.accessoryOn ? 'The radio has no power.' : 'The radio has no power. Accessory power is off.');
+    state.pendingChoice = { id: 'marine-forecast-blocked', options: marineForecastBackOptions() };
+  }
+  // Called from the live loop (and on coming back to the page), like gpsPowerWatch: if a forecast is on the screen and the power has gone, the radio goes dark and the player is back at the NAV STATION.
+  function marineForecastPowerWatch(state) {
+    if (!state || introPending || gpsPowered(state)) return;
+    var pc = state.pendingChoice;
+    if (!pc || pc.id !== 'marine-forecast') return;
+    var tx = activeMarineTransmission;
+    if (tx) { tx.cut = true; if (tx.dotTimer) clearInterval(tx.dotTimer); activeMarineTransmission = null; uiBusy = false; } // a transmission still running is cut off (not received, so it will be sent again)
+    stopWeatherFax(); stopRadioStatic();
+    clearTempView();
+    state.pendingChoice = null;
+    log(state, 'The radio went dark.');
+    flushNewLogEntries(state);
+    cmdNavStation(state);
+    if (!uiBusy) renderOptions(state);
+  }
+
   function cmdMarineForecast(state) {
+    if (!gpsPowered(state)) { marineForecastNoPower(state); return; } // no accessory power: the radio stays dark
     if (!marineForecastAvailable(state)) { // listed from the start but locked until Pacific control: the same shape as blockedByCoastalLock (a message, then straight back to the screen it came from)
       printBlank();
       printLine("I still have cell service. I'll check the marine forecast once I'm offshore."); // an observation, in the ordinary text (not amber, not caps), and not logged
@@ -13224,8 +13250,7 @@
   }
 
   // SALOON — the quiet leisure/psychological center of the boat: READ
-  // and LISTEN (the existing tape player, renamed only at this access
-  // point). TIDY UP lands here as the most sensible home for general
+  // (there was a LISTEN here, the tape player, until patch 64 took the music out). TIDY UP lands here as the most sensible home for general
   // below-deck clutter, which comes from activity all over the boat (a
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
@@ -13235,7 +13260,6 @@
     climateRowEls = { temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)) }; // CABIN TEMP and HEATER, just under MORALE (kept current by refreshClimateRows)
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
-      { label: 'LISTEN', action: 'cmd:tape-player' },
       { label: 'SIT A WHILE', action: 'sit-a-while' },
       { label: b.heaterOn ? 'TURN HEATER OFF' : 'TURN HEATER ON', action: 'climate-heater' },
       b.hatchOpen ? { label: 'CLOSE HATCH', action: 'close-hatch' } : { label: 'OPEN HATCH', action: 'open-hatch' },
@@ -14710,6 +14734,7 @@
       id: 'handbook-marine-forecast', heading: 'MARINE FORECAST',
       blocks: [
         { p: 'Check the forecast before choosing a route, changing course, or turning in.' },
+        { p: 'ACCESSORY power and battery charge are required to use it.' },
         { p: 'Weather and wind affect your speed, sailing conditions, and the safety of the passage.' },
       ],
     },
@@ -14750,10 +14775,10 @@
         { p: 'Freshly caught fish can be cooked as a meal or eaten as sashimi without using kerosene. Fish does not keep indefinitely.' },
         { p: 'Wash dishes when needed.' },
         { term: 'CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
-        { term: 'SALOON', body: 'Read, listen to music, stretch, or SIT A WHILE. Control the heater and hatch here.' },
+        { term: 'SALOON', body: 'Read, stretch, or SIT A WHILE. Control the heater and hatch here.' },
         { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
-        { p: 'Reading, music, rest, and everyday care help maintain morale.' },
+        { p: 'Reading, rest, and everyday care help maintain morale.' },
         { p: 'SIT A WHILE and JUST EXIST allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
       ],
     },
@@ -18272,7 +18297,7 @@
     clothing: cmdClothing,
     bookshelf: cmdBookshelf,
     'tarot-cards': cmdTarotCards,
-    'tape-player': cmdTapePlayer,
+    'tape-player': cmdSaloon, // (the LISTEN section is gone -- patch 64: a stale button that still points here lands in the SALOON, and nothing plays)
     repair: cmdRepair,
     fish: cmdFish, // FISHING HOOK
     restart: cmdRestart,
@@ -21883,6 +21908,7 @@
       var ticks = catchUpFromRealTime(GAME); // same single clock as boot/resume -- see catchUpFromRealTime
       refreshComfortRows(GAME); // a rain shower starting or stopping updates an open CABIN / CHANGE CLOTHES read-out in place
       gpsPowerWatch(GAME); // the GPS goes dark if its (accessory) power is lost while it is open
+      marineForecastPowerWatch(GAME); // ... and so does the MARINE FORECAST radio
       fleetLiveTick(GAME); // reports this boat's position to the fleet database (does nothing unless one is set)
       lanternMenuWatch(GAME); // dusk, or the lights going out, brings LIGHT LANTERN onto the plain deck menu without waiting for the next tap
       // ticks > 0 covers the coarse simulation; the continuous systems
@@ -22653,6 +22679,10 @@
     if (state.pendingChoice && Array.isArray(state.pendingChoice.options) && state.pendingChoice.options.length === 0) {
       state.pendingChoice = null;
     }
+    if (state.pendingChoice && state.pendingChoice.id === 'tape-player-menu') { // a save made on the old LISTEN screen (patch 64 took the music out): the SALOON
+      cmdSaloon(state);
+      return;
+    }
     if (state.pendingChoice && (state.pendingChoice.id === 'galley-menu' || state.pendingChoice.id === 'provisions-menu')) { // the old GALLEY / EAT screens: the galley, as it is now
       cmdGalley(state);
       return;
@@ -23136,7 +23166,7 @@
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = introPending ? 0 : catchUpFromRealTime(GAME);
-      if (!introPending) { gpsPowerWatch(GAME); lanternMenuWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
+      if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
