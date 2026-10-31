@@ -1316,7 +1316,7 @@
       // section's fishingSession variable and its own comment for why).
       fishing: {
         keptFishOnDay: null,                     // voyageDayNumber() on which a fish was last kept, for the one-kept-fish-per-day rule
-        heldFish: null,                          // { speciesId, caughtDay, caughtAt (the voyage minute it was caught: a save from before patch 65 has none), weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set (and its sashimi in SNACKS); spoils 12 hours after caughtAt (a save with no caughtAt: at the next local midnight) — see checkSpoilage()
+        heldFish: null,                          // { speciesId, caughtDay, caughtAt (the voyage minute it was caught: a save from before patch 65 has none), weightLb } for the currently-held catch (weightLb is the weight that was shown; older saves have none), or null — its specialty meal (FISH_MEAL_BY_SPECIES) appears in MEALS while set (and its sashimi in SNACKS); each is marked eaten on the record (mealEaten / sashimiEaten, both optional) and the record is cleared when both are; spoils 12 hours after caughtAt (a save with no caughtAt: at the next local midnight) — see checkSpoilage()
       },
       books: newBooksState(),
       stats: newStatsState(), // the END-OF-GAME SUMMARY's counters -- see VOYAGE STATS
@@ -17594,7 +17594,7 @@
   // real FISH_SPECIES entry has one).
   function heldFishAsMealItem(state) {
     var held = state.fishing.heldFish;
-    if (!held) return null;
+    if (!held || held.mealEaten) return null; // (patch 69) its meal already eaten: nothing to cook
     var mealName = FISH_MEAL_BY_SPECIES[held.speciesId];
     if (!mealName) return null;
     return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true, fishName: fishSpeciesDisplayName(state, FISH_SPECIES_BY_ID[held.speciesId]) };
@@ -17612,7 +17612,7 @@
     var opts = FOOD_ITEMS.filter(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; })
       .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
     // a fresh catch's sashimi comes first while one is aboard (it will not keep); prepared as ever -- performSashimi
-    heldCatches(state).forEach(function (f) { opts.unshift({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' }); });
+    heldCatches(state).forEach(function (f) { if (f.sashimi) opts.unshift({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' }); });
     return pushBack(opts, 'cmd:galley');
   }
 
@@ -17927,18 +17927,14 @@
       var life = lifeCtx(s); // before hunger resets, so "I was starving" is only ever said of a sailor who was
       var c = s.crew;
       if (waterNeeded > 0) consumeWater(s, waterNeeded);
-      // FISHING HOOK -- the held catch is consumed whole, species and
-      // all, rather than decrementing a food[] count — only one can
-      // ever be held at a time. Clearing it here (rather than leaving
-      // it to checkSpoilage) is what stops an eaten fish from later
-      // being logged as spoiled.
+      // FISHING HOOK -- the held catch's cooked meal is marked eaten on the catch (patch 69), rather than the whole fish being deleted: its sashimi is still there
+      // until it is eaten too, and the catch is cleared (not later logged as spoiled) once both are. Everything else decrements a food[] count.
       if (isHeldFish) {
-        s.fishing.heldFish = null;
+        fishPortionEaten(s, 'meal');
       } else {
         s.food[key] -= 1;
       }
       if (isHeldFish || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks and chocolate are not meals
-      if (isHeldFish) statAdd(s, 'fishEaten', 1);
 
       // Hunger: a full meal resets to FULL; a snack is a smaller reset
       // (see HUNGER_RESET_HOURS_BY_TYPE).
@@ -18146,7 +18142,7 @@
   }
 
   /* --------------------------------------------------------------
-     FRESH CATCH -- the fish aboard, and what to make of it. Today a boat keeps one fish at a time (state.fishing.heldFish; it spoils 12 hours after it was caught -- checkSpoilage). Since patch 65 the cooked meal is listed under MEALS and the sashimi under SNACKS (buildMealsOptions / buildSnacksOptions); the separate FRESH CATCH screens below are no longer reached from the galley. The
+     FRESH CATCH -- the fish aboard, and what to make of it (both dishes can be had from the one fish: each is marked eaten on it, and it is gone when both are -- patch 69). Today a boat keeps one fish at a time (state.fishing.heldFish; it spoils 12 hours after it was caught -- checkSpoilage). Since patch 65 the cooked meal is listed under MEALS and the sashimi under SNACKS (buildMealsOptions / buildSnacksOptions); the separate FRESH CATCH screens below are no longer reached from the galley. The
      menu is built from a LIST so it would show several. Choosing a fish offers its species' specialty meal (FISH_MEAL_BY_SPECIES: cooked on the stove -- kerosene, dishes, hunger like a
      meal -- exactly performEat's held-fish path as before) and [FISH] SASHIMI (raw: nothing from the stove, no kerosene, no dishes; hunger like a snack, as a snack's reset and weight).
      -------------------------------------------------------------- */
@@ -18154,7 +18150,17 @@
     var h = state.fishing && state.fishing.heldFish;
     var sp = h && FISH_SPECIES_BY_ID[h.speciesId];
     if (!sp) return [];
-    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: FISH_MEAL_BY_SPECIES[h.speciesId] || null }];
+    // `meal` is the cooked dish's name while it is uneaten, `sashimi` is true while the sashimi is (patch 69: eating one no longer takes the other with it)
+    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: (!h.mealEaten && FISH_MEAL_BY_SPECIES[h.speciesId]) || null, sashimi: !h.sashimiEaten }];
+  }
+  // A dish of the held fish has been eaten: it is marked on the catch, and the catch is cleared only when every dish has been eaten (so a fish that is all eaten is never later logged as spoiled).
+  // The fish counts once in the voyage stats (FISH EATEN), when its first dish is eaten.
+  function fishPortionEaten(s, portion) {
+    var h = s.fishing.heldFish;
+    if (!h) return;
+    if (!h.mealEaten && !h.sashimiEaten) statAdd(s, 'fishEaten', 1);
+    h[portion + 'Eaten'] = true;
+    if ((h.mealEaten || !FISH_MEAL_BY_SPECIES[h.speciesId]) && h.sashimiEaten) s.fishing.heldFish = null;
   }
   function freshCatchBack(state) { var f = heldCatches(state)[0]; return f ? 'catch:' + f.speciesId : 'cmd:galley'; } // where BACK goes from a blocked preparation: the fish's own screen (the galley if it is gone)
   function freshCatchOptions(state) {
@@ -18170,7 +18176,7 @@
     if (!f) return { id: 'fresh-catch-menu', options: freshCatchOptions(state) };
     var opts = [];
     if (f.meal) opts.push({ label: f.meal.toUpperCase(), action: 'eat:' + HELD_FISH_KEY });
-    opts.push({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' });
+    if (f.sashimi) opts.push({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' });
     return { id: 'fresh-catch-fish', options: pushBack(opts, 'cmd:galley') };
   }
   function cmdFreshCatchFish(state, speciesId) {
@@ -18182,16 +18188,15 @@
     'Sliced up some of the [FISH] and ate it as it was. Not bad at all.', 'Ate the [FISH] raw, sliced thin. It tasted of the sea.', 'Made sashimi from the [FISH]. Quiet, quick and good.'];
   function performSashimi(state) {
     var fish = heldCatches(state)[0];
-    if (!fish) { printBlank(); printLine("That's already gone.", 'dim'); return; }
+    if (!fish || !fish.sashimi) { printBlank(); printLine("That's already gone.", 'dim'); return; }
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:snacks'); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
     runAudioSyncedAction(state, {
       label: 'PREPARING ' + fish.name.toUpperCase() + ' SASHIMI', transientLabel: true,
       playAudio: function (onEnded) { return playGalleyOneShot('sashimi', onEnded); }, // the dots last as long as sashimi.mp3 plays
       action: function (s) {
-        if (!s.fishing.heldFish) { printBlank(); printLine("That's already gone.", 'dim'); return; } // spoiled while it was being prepared
+        if (!s.fishing.heldFish || s.fishing.heldFish.sashimiEaten) { printBlank(); printLine("That's already gone.", 'dim'); return; } // spoiled while it was being prepared
         var life = lifeCtx(s), c = s.crew;
-        s.fishing.heldFish = null; // consumed whole, as the cooked meal does (so it is never later logged as spoiled)
-        statAdd(s, 'fishEaten', 1); // (it is a snack, not a meal: no 'meals' count)
+        fishPortionEaten(s, 'sashimi'); // the sashimi is marked eaten (patch 69); the cooked meal is still aboard until it is eaten too (it is a snack, not a meal: no 'meals' count)
         c.hoursSinceMeal = Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack); // hunger like a snack
         c.lastAteAt = s.meta.voyageMinutes;
         c.snackMealRatio = c.snackMealRatio * 0.7 + 1 * 0.3; // a snack's weight in the hidden meal-history monotony
