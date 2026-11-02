@@ -754,8 +754,7 @@
     margin: 0.35rem 0;
   }
   #options .indent-1 { padding-left: 2ch; }
-  #options .indent-2 { padding-left: 4ch; }
-  #options .data-row-lg.indent-2 { grid-template-columns: 19ch 1fr; } /* (the longest food name is 19 characters: the sailor’s counts still fit on the narrowest phones) */
+  #options .data-row-lg.indent-1 { grid-template-columns: 19ch 1fr; } /* (the rows of both dropdowns, one column for all of them: the longest food name is 19 characters, so the counts still fit on the narrowest phones) */
 
   /* CHANGE CLOTHES only: its eleven items plus BACK use exactly the same row gap, padding and group dividers as every other menu, which makes it taller than the usual
      48vh cap allows -- so here (and only here) #options is released from that cap and never becomes a scroll panel: the whole menu, BACK included, simply takes
@@ -12674,11 +12673,9 @@
     });
   }
 
-  // The old INVENTORY screens are gone (the AFT CABIN's INVENTORY dropdown shows all of it); a stale button for one lands there, with that part open.
+  // The old INVENTORY screens are gone (the AFT CABIN's INVENTORY dropdown shows all of it); a stale button for one lands there, with the list open.
   function showInventoryCategory(state, cat) {
     aftCabinOpen.inventory = true;
-    if (cat === 'provisions') aftCabinOpen.provisions = true;
-    if (cat === 'spares') aftCabinOpen.spares = true;
     cmdAftCabin(state);
   }
 
@@ -14740,9 +14737,9 @@
        > STATUS                          drops down: SAILS / RUDDER / ENGINE / ELECTRICAL (an undiscovered engine fault still reads GOOD, as it always did), and
                                          one line for each damaged system naming what did it -- WEATHER STRESS (storm wind on the sails: the only thing the
                                          weather damages) or MISSED MAINTENANCE (a calendar day with none)
-       > INVENTORY                       drops down: WATER / DIESEL / KEROSENE (what is left), then
-           > PROVISIONS                  drops down: the food, COFFEE, TEA (left / at the start)
-           > SPARE PARTS                 drops down: SAIL REPAIR KITS / RUDDER PARTS / ENGINE SPARES / SPARE FUSES (left / at the start)
+       > INVENTORY                       drops down one list, a gap between its groups: WATER / DIESEL / KEROSENE (what is left); the meals; the snacks (chocolate
+                                         last); COFFEE / TEA; SAIL REPAIR KITS / RUDDER PARTS / ENGINE SPARES / SPARE FUSES (the food and the spares:
+                                         left / at the start)
        > REPAIRS                         only while a system is known to be damaged
        > PERFORM MAINTENANCE             not offered once today's is done
        > PUT AWAY TOOLS                  only while the tools are out (after a repair, or the day's maintenance)
@@ -14751,7 +14748,7 @@
      never saved, and kept while the player moves between this room and its sub-screens).
      ============================================================== */
   var aftCabinSig = null; // (UI only, never saved) what the screen on show was drawn from
-  var aftCabinOpen = { status: false, inventory: false, provisions: false, spares: false }; // (UI only, never saved) which dropdowns are open
+  var aftCabinOpen = { status: false, inventory: false }; // (UI only, never saved) which dropdowns are open
 
   function aftCabinStatusModel(state) {
     var b = state.boat, m = maintenanceMemory(state);
@@ -14764,24 +14761,28 @@
         causes.push(REPAIR_SYSTEM_LABEL[k] + ' DAMAGED: ' + (FAILURE_CAUSE_LABEL[cause] || 'CAUSE UNKNOWN'));
       }
     });
-    var food = [];
-    FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) food.push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) }); });
-    var noFood = food.length === 0;
-    food.push({ label: 'COFFEE', value: countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE) });
-    food.push({ label: 'TEA', value: countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA) });
+    var supplies = [
+      { label: 'WATER', value: galCurrentOnly(Math.max(0, state.water.gallons)).toUpperCase() },
+      { label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase() },
+      { label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase() },
+    ];
+    var meals = [], snacks = []; // (the chocolate is listed last among the snacks, as it is in the galley)
+    FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) (f.type === 'meal' ? meals : snacks).push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) }); });
+    var drinks = [
+      { label: 'COFFEE', value: countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE) },
+      { label: 'TEA', value: countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA) },
+    ];
+    var spares = Object.keys(SPARES_NAMES).map(function (k) {
+      var left = state.supplies.spares[k];
+      return { label: SPARES_NAMES[k].toUpperCase(), value: countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL) };
+    });
+    var stores = [{ rows: supplies }, { rows: meals }, { rows: snacks }];
+    if (meals.length === 0 && snacks.length === 0) stores.splice(1, 2, { note: 'Nothing left aboard to eat.' });
+    stores.push({ rows: drinks }, { rows: spares });
     return {
       systems: systems,
       causes: causes,
-      supplies: [
-        { label: 'WATER', value: galCurrentOnly(Math.max(0, state.water.gallons)).toUpperCase() },
-        { label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase() },
-        { label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase() },
-      ],
-      provisions: { none: noFood, rows: food },
-      spares: Object.keys(SPARES_NAMES).map(function (k) {
-        var left = state.supplies.spares[k];
-        return { label: SPARES_NAMES[k].toUpperCase(), value: countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL) };
-      }),
+      stores: stores.filter(function (g) { return g.note || g.rows.length > 0; }),
       repairs: hasRepairableDamage(state),
       toolsOut: state.crew.toolsOutSinceMinutes != null,
       maintenanceDone: m.done === voyageDayNumber(state),
@@ -14800,16 +14801,15 @@
     function drop(key, label, level) { menu.push({ label: label, action: 'aft-toggle:' + key, indent: level }); return aftCabinOpen[key]; }
     function readings(list, widthCls, level) { list.forEach(function (r) { menu.push({ dataRow: true, label: r.label, value: r.value, widthCls: widthCls, indent: level }); }); }
     if (drop('status', 'STATUS', 0)) {
-      readings(model.systems, 'data-row-md', 1);
+      readings(model.systems, 'data-row-lg', 1); // (the same column as the inventory's counts)
       model.causes.forEach(function (t) { menu.push({ status: true, text: t, indent: 1 }); });
     }
     if (drop('inventory', 'INVENTORY', 0)) {
-      readings(model.supplies, 'data-row-md', 1);
-      if (drop('provisions', 'PROVISIONS', 1)) {
-        if (model.provisions.none) menu.push({ status: true, text: 'Nothing left aboard to eat.', indent: 2 });
-        readings(model.provisions.rows, 'data-row-lg', 2);
-      }
-      if (drop('spares', 'SPARE PARTS', 1)) readings(model.spares, 'data-row-lg', 2);
+      model.stores.forEach(function (g, i) {
+        if (i > 0) menu.push({ divider: true }); // a gap between the groups: the supplies, the meals, the snacks, the drinks, the spares
+        if (g.note) menu.push({ status: true, text: g.note, indent: 1 });
+        else readings(g.rows, 'data-row-lg', 1);
+      });
     }
     var work = [];
     if (model.repairs) work.push({ label: 'REPAIRS', action: 'cmd:repair' });
@@ -14821,8 +14821,8 @@
 
   function aftCabinToggle(state, key) {
     if (!Object.prototype.hasOwnProperty.call(aftCabinOpen, key)) return;
-    // The gauges (STATUS, the water / diesel / kerosene readings) can be read in the dark; looking through the provisions or the spares takes light, as the old INVENTORY did.
-    if ((key === 'provisions' || key === 'spares') && !aftCabinOpen[key] && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
+    // The status can be read in the dark; looking through the stores (the inventory) takes light, as it always has.
+    if (key === 'inventory' && !aftCabinOpen[key] && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
     aftCabinOpen[key] = !aftCabinOpen[key];
     cmdAftCabin(state);
   }
@@ -15206,7 +15206,7 @@
         { p: 'The AFT CABIN is the boat\u2019s workroom. Open STATUS to see the condition of:' },
         { list: ['SAILS', 'RUDDER', 'ENGINE', 'ELECTRICAL'] },
         { p: 'When a system is damaged, STATUS names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
-        { p: 'Open INVENTORY to see the water, diesel, and kerosene left aboard. PROVISIONS lists the food and drink, and SPARE PARTS the spares.' },
+        { p: 'Open INVENTORY to see the water, diesel, kerosene, food, drink, and spare parts left aboard.' },
         { p: 'REPAIRS appears when a system is damaged. Choose the damaged system. Each repair uses one spare part.' },
         { term: 'SOLID / GOOD', body: 'Longer-lasting repairs.' },
         { term: 'TEMPORARY / PATCHED', body: 'May require attention sooner.' },
