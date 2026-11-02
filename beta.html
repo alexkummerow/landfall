@@ -1319,7 +1319,7 @@
         tapeListenCount: 0,           // qualifying tape-listening sessions credited so far on tapeListenDay — resets whenever the current voyage day no longer matches
       },
       food: {
-        macCheese: 5, chiliRice: 5, chickenNoodleSoup: 5, oatmeal: 15, pancakes: 15,
+        macCheese: 5, chili: 5, chickenNoodleSoup: 5, oatmeal: 10, pancakes: 10, rice: 20, // (oats, pancake mix and rice are in CUPS)
         cupNoodles: 10, popcorn: 10, trailMix: 10, energyBar: 10,
         chocolate: 5,
       },
@@ -3240,7 +3240,7 @@
   // Hydration after drinking: 0-2h WELL HYDRATED, 2-4h HYDRATED, 4-6h
   // SLIGHTLY THIRSTY, 6-8h THIRSTY, 8h+ VERY THIRSTY. Morale/comfort and a
   // little fatigue only -- never dangerous by itself.
-  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'SLIGHTLY THIRSTY', 'THIRSTY', 'VERY THIRSTY'];
+  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'SLIGHTLY THIRSTY', 'THIRSTY', 'VERY THIRSTY', 'PARCHED']; // (8-10h VERY THIRSTY; 10h+ PARCHED, which wakes a sleeper)
   // Index 0 is the worst state, 5 the best (same direction as before).
   var ENERGY_LABELS = ['EXHAUSTED', 'VERY TIRED', 'TIRED', 'OKAY', 'GOOD', 'RESTED'];
 
@@ -3248,7 +3248,7 @@
   // elsewhere read as what they mean instead of a bare number that
   // silently means something different if the scale ever changes again.
   var HUNGER_PECKISH = 3, HUNGER_HUNGRY = 4, HUNGER_VERY_HUNGRY = 5, HUNGER_STARVING = 6;
-  var THIRST_SLIGHTLY = 2, THIRST_THIRSTY = 3, THIRST_VERY = 4;
+  var THIRST_SLIGHTLY = 2, THIRST_THIRSTY = 3, THIRST_VERY = 4, THIRST_PARCHED = 5;
 
   function hungerLevel(hoursSinceMeal) {
     if (hoursSinceMeal <= 2) return 0;
@@ -3264,7 +3264,8 @@
     if (hoursSinceWater <= 4) return 1;
     if (hoursSinceWater <= 6) return 2;
     if (hoursSinceWater <= 8) return 3;
-    return 4;
+    if (hoursSinceWater <= 10) return 4;
+    return 5;
   }
   // ENERGY is fatigue read the other way round (high fatigue = low
   // energy), not a second tracked number. After a proper night the day
@@ -3522,12 +3523,14 @@
   // with SNACKS in the EAT menu but is its own type so it can never
   // accidentally count as nourishment.
   var FOOD_ITEMS = [
-    // MEALS — 45 total
+    // MEALS -- cooked on the stove. The staples (oats, pancake mix, rice) are kept in cups, half a cup a serving; RICE is only ever cooked with a fresh fish
+    // (the FISH AND RICE), so it is not a meal of its own and never appears in MEALS or SNACKS.
     { key: 'macCheese', name: 'Mac & Cheese', type: 'meal', cooked: true, original: 5 },
-    { key: 'chiliRice', name: 'Chili Rice', type: 'meal', cooked: true, original: 5 },
+    { key: 'chili', name: 'Chili', type: 'meal', cooked: true, original: 5 },
     { key: 'chickenNoodleSoup', name: 'Chicken Noodle Soup', type: 'meal', cooked: true, original: 5 },
-    { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 15 },
-    { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 15 },
+    { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 10, staple: true, serving: 0.5, stockName: 'DRY OATS' },
+    { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 10, staple: true, serving: 0.5, stockName: 'PANCAKE MIX' },
+    { key: 'rice', name: 'Rice', type: 'staple', cooked: false, original: 20, staple: true, serving: 0.5, stockName: 'RICE' },
     // SNACKS — 40 total (chocolate, below, is counted separately). This exact order is what drives the SNACKS
     // menu (buildSnacksOptions) and the INVENTORY -> PROVISIONS listing
     // (showInventoryCategory) alike -- both simply iterate FOOD_ITEMS in
@@ -3544,29 +3547,29 @@
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
 
-  // Specialty meal for whichever fish is currently held (state.fishing.
-  // heldFish) — species-specific, so KEEP never produces a generic
-  // "Fresh Fish" anymore. Every entry is a cooked meal (see performEat's
-  // cooked gate) even where a real kitchen wouldn't need the stove
-  // (poke), by design. Pacific Herring is the one FISH_SPECIES entry
-  // with no distinct regional dish of its own -- HERRING RICE BOWL
-  // keeps it a real meal rather than a special case. Marlin never
-  // appears here — release-only, never kept, never a food item.
+  // Specialty meal for whichever fish is currently held (state.fishing.heldFish) -- species-specific, never a generic "Fresh Fish". Every entry is a cooked meal
+  // (see performEat's cooked gate) and needs rice (riceForFish).
+  // The best way of preparing each kept fish. Every one is cooked with rice into a FISH AND RICE, seared or grilled as suits it: the tunas and the lean,
+  // delicate fish are seared hot and quick; the oily, the rich and the firm ones are grilled. Marlin never appears here -- release-only, never kept.
   var FISH_MEAL_BY_SPECIES = {
-    coho: 'Salmon + Mashed Potatoes',
-    chinook: 'Salmon Rice Bowl',
-    pink: 'Salmon + Roasted Potatoes',
-    rockfish: 'Rockfish Stew',
-    lingcod: 'Lingcod Stew',
-    mackerel: 'Mackerel Rice Bowl',
-    bonito: 'Bonito Curry',
-    albacore: 'Albacore Tuna Over Pasta',
-    skipjack: 'Aku Poke Bowl',
-    mahimahi: 'Mahi Coconut Curry',
-    yellowfin: 'Ahi Poke Bowl',
-    wahoo: 'Ono Rice Bowl',
-    herring: 'Herring Rice Bowl',
+    coho: 'Seared Salmon and Rice',
+    chinook: 'Grilled Salmon and Rice',
+    pink: 'Seared Salmon and Rice',
+    rockfish: 'Seared Rockfish and Rice',
+    lingcod: 'Grilled Lingcod and Rice',
+    mackerel: 'Grilled Mackerel and Rice',
+    bonito: 'Seared Bonito and Rice',
+    albacore: 'Seared Albacore Tuna and Rice',
+    skipjack: 'Seared Aku and Rice',
+    mahimahi: 'Grilled Mahi and Rice',
+    yellowfin: 'Seared Ahi and Rice',
+    wahoo: 'Grilled Ono and Rice',
+    herring: 'Grilled Herring and Rice',
   };
+  // The rice that goes into fish and rice: one serving (half a cup), and a cup of water to cook it in. With no rice left the fish is sashimi only.
+  var RICE_SERVING_CUPS = 0.5;
+  var WATER_RICE_GAL = 0.0625;
+  function riceForFish(state) { return state.food.rice >= RICE_SERVING_CUPS - 1e-9; }
   // Reserved key for whatever fish is currently held — never a real
   // FOOD_ITEMS entry, since its name/existence depends entirely on
   // state.fishing.heldFish. performEat special-cases this key.
@@ -3584,7 +3587,7 @@
   // Bumped 4 -> 5: Cup Noodles' starting quantity raised 5 -> 10 (SNACKS
   // total 30 -> 35) -- no key changes this time, just the restock an
   // existing voyage gets rebased to.
-  var FOOD_INVENTORY_VERSION = 5;
+  var FOOD_INVENTORY_VERSION = 6;
 
   /* --------------------------------------------------------------
      EMERGENCY-FALLBACK TEMPERATURE (PHASE 5) -- the ONLY scripted temperature left. Real outside temperature is
@@ -5976,7 +5979,7 @@
       // Rougher seas make for shallower, less restorative sleep. Morale
       // nudges quality too, gently either way -- a steady mind rests
       // better, a low one rests worse.
-      var moraleFactor = clamp(0.88 + (c.morale / 100) * 0.24, 0.75, 1.12);
+      var moraleFactor = 1; // (morale no longer touches how well he sleeps)
       var quality = clamp((1 - w.seaState / 10) * moraleFactor, 0.3, 1.1);
       var qualityFactor = clamp(quality / 0.85, 0.35, 1.15); // ~1.0 in ordinary conditions
       var stillRecovering = c.sleepDebt > 0 || c.fatigue > SLEEP_FATIGUE_FLOOR;
@@ -6004,7 +6007,6 @@
       if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
       if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
       if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
-      if (c.morale < 30) fatigueRate += 0.3; // a discouraged crew tires faster
       // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
       // a good night's sleep it reads RESTED in the morning, GOOD by
       // midday, OKAY through the afternoon, TIRED by evening and VERY
@@ -6167,6 +6169,7 @@
     navCheckWarnings(state);
 
     updateCrew(state);
+    checkNeedsWake(state); // a sleeper who has become STARVING or PARCHED wakes
     checkFuel(state);
     updateBattery(state);
     checkScheduledFailures(state);
@@ -6617,23 +6620,6 @@
   var FAILURE_CHAIN_MIN_HOURS = 12;
   var FAILURE_CHAIN_MAX_HOURS = 36;
   var BOAT_FAIL_SYSTEMS = ['sails', 'steering', 'engine', 'electrical'];
-  // A successful repair shields that one system from the NORMAL draw
-  // for a span of hours that depends on the repair's own QUALITY (see
-  // computeRepairQuality/performSystemRepairAttempt below) -- SOLID
-  // repairs (a well-rested, high-morale sailor) hold the longest;
-  // PATCHED ones (severely impaired) barely hold at all. Replaces the
-  // old flat REPAIR_PROTECTION_MIN_HOURS/MAX_HOURS (96-120h for every
-  // repair regardless of condition) now that repair success itself is
-  // deterministic rather than a chance roll -- SOLID's own range is
-  // that exact old flat window, unchanged, since a well-rested repair
-  // was always meant to be reliable.
-  var REPAIR_QUALITY_PROTECTION_HOURS = {
-    SOLID: [96, 120],
-    GOOD: [60, 84],
-    TEMPORARY: [24, 48],
-    PATCHED: [8, 18],
-  };
-
   function scheduleNextFailure(state, chained) {
     var hrs = chained
       ? rand(FAILURE_CHAIN_MIN_HOURS, FAILURE_CHAIN_MAX_HOURS)
@@ -6687,8 +6673,7 @@
     if (w.seaState >= 4 || w.condition === 'rain' || w.condition === 'squall') weights.electrical += 0.5;
 
     function eligibleNow(key) {
-      var shieldedUntil = b.repairProtectedUntil ? b.repairProtectedUntil[key] : 0;
-      return b[key] === 'GOOD' && !(shieldedUntil && state.meta.voyageMinutes < shieldedUntil);
+      return b[key] === 'GOOD'; // (a system just repaired is eligible like any other: a repair holds until a maintenance day is skipped, then it is the luck of the draw)
     }
     // (a missed day's failure: the draw is among the systems that can actually fail, so the one failure is real whenever any system can)
     if (onlyEligible) BOAT_FAIL_SYSTEMS.forEach(function (key) { if (!eligibleNow(key)) weights[key] = 0; });
@@ -7014,28 +6999,33 @@
     return 'ordinary';
   }
 
-  // Chance PER 10 MINUTES of exposure at a given tier, before the sail
-  // configuration factor below — run through tickProbability() so it
-  // compounds correctly regardless of TICK_MINUTES. 'ordinary' is 0: full
-  // sail in unremarkable conditions carries no storm-driven risk at all.
-  // Calibrated against how driftWeather's own random walk actually
-  // behaves absent a real-weather anchor (no mean reversion, clamped at
-  // the edges) — it spends a large minority of all time in what
-  // sailRiskTier calls 'severe', in streaks of several continuous days,
-  // not the occasional squall these numbers might otherwise suggest. A
-  // careful player reducing sail through that has to stay safe across
-  // real cumulative WEEKS of exposure over a full crossing, not hours.
+  // THE SAILS ARE DAMAGED ONLY BY TOO MUCH SAIL FOR THE WIND (the handbook's own bands). The right setting for the wind -- or any smaller one -- carries no risk at
+  // all. More than the wind allows is the only exposure, at the chances per 10 minutes below, once the 30 minutes of grace have run: they start from the moment the
+  // wind moves up into a stronger band (setting too much sail into a wind that is already too strong has no grace). A sleeping sailor cannot reef, so it all runs on.
+  // Run through tickProbability() so it compounds correctly regardless of TICK_MINUTES. Calibrated against how driftWeather's own random walk actually
+  // behaves absent a real-weather anchor (no mean reversion, clamped at the edges) -- it spends a large minority of all time in what sailRiskTier calls
+  // 'severe', in streaks of several continuous days, so a player who keeps the right sail up through it is never at risk, and one who does not is, over weeks.
   var SAIL_STORM_P10_BY_TIER = { ordinary: 0, strong: 0.0005, severe: 0.0015 };
-  // How much carrying less canvas cuts that risk — FURLED is 0: no
-  // canvas up, nothing for the wind to tear.
-  var SAIL_STORM_CONFIG_FACTOR = { full: 1, reefed: 0.35, minimal: 0.08, furled: 0 };
+  var SAIL_REEF_GRACE_MINUTES = 30;
+  var SAIL_REEF_RANK = { furled: 0, minimal: 1, reefed: 2, full: 3 };
+  // The most sail the wind allows: FULL up to 22 knots, REEFED above that through 32, MINIMAL above 32 or in a squall.
+  function sailAreaAllowedFor(w) {
+    var tier = sailRiskTier(w);
+    return tier === 'severe' ? 'minimal' : (tier === 'strong' ? 'reefed' : 'full');
+  }
+  function sailsOverpowered(state) {
+    var rank = SAIL_REEF_RANK[state.boat.sailConfig];
+    if (rank == null) return false; // (an unrecognized config -- no exposure)
+    return rank > SAIL_REEF_RANK[sailAreaAllowedFor(state.weather)];
+  }
 
   function checkStormSailRisk(state) {
     var b = state.boat, w = state.weather;
+    if (!sailsOverpowered(state)) { b.sailOverSince = null; return; }
+    if (b.sailOverSince == null) b.sailOverSince = state.meta.voyageMinutes; // the wind rose past what she is set for: the time to reef starts now
     if (b.sails !== 'GOOD') return;
-    var configFactor = SAIL_STORM_CONFIG_FACTOR[b.sailConfig];
-    if (!configFactor) return; // furled, or an unrecognized config -- no exposure
-    var p10 = SAIL_STORM_P10_BY_TIER[sailRiskTier(w)] * configFactor;
+    if (state.meta.voyageMinutes - b.sailOverSince < SAIL_REEF_GRACE_MINUTES) return; // still time to reef
+    var p10 = SAIL_STORM_P10_BY_TIER[sailRiskTier(w)];
     if (p10 <= 0) return;
     if (Math.random() < tickProbability(p10)) {
       triggerFailure(state, 'sails', 'weather');
@@ -8098,6 +8088,7 @@
     return pickVariant(DAILY_COPY[key], key, ctx).split('{D}').join(describeSleepDuration(minutes));
   }
   function wakeUp(state, room) {
+    if (state.crew.watchState !== 'sleeping') return; // (he already woke by himself: checkNeedsWake)
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
     var capMinutes = sleepCapMinutes(state.crew), pastCap = minutesAsleep > capMinutes; // GET UP: he had stopped sleeping and was lying awake in the bunk
@@ -13079,6 +13070,12 @@
   // stored as the sleep start. The real-time clock is never touched.
   function cmdSleep(state) {
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
+    var wakefulLine = sleepBlockLine(state);
+    if (wakefulLine) { // starving, very thirsty or wired on coffee: sleep does not begin (food, water and time are all it takes)
+      cmdCabin(state);
+      printLine(wakefulLine, 'amber');
+      return;
+    }
     if (sleepTooHot(state)) { // clearly overdressed for this cabin: sleep does not begin. (Being underdressed is never a reason: the bedding supplies the warmth.)
       cmdCabin(state);
       printLine('Too hot to sleep. I should change clothes.', 'amber');
@@ -13368,7 +13365,6 @@
   function cmdSaloon(state) {
     var b = state.boat;
     printBlank();
-    printLine('MORALE: ' + moraleLevel(state.crew.morale));
     climateRowEls = { temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)) }; // CABIN TEMP and HEATER, just under MORALE (kept current by refreshClimateRows)
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
@@ -14766,8 +14762,12 @@
       { label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase() },
       { label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase() },
     ];
-    var meals = [], snacks = []; // (the chocolate is listed last among the snacks, as it is in the galley)
-    FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) (f.type === 'meal' ? meals : snacks).push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) }); });
+    var meals = [], staples = [], snacks = []; // (the chocolate is listed last among the snacks, as it is in the galley; rice, oats and pancake mix are kept in cups)
+    FOOD_ITEMS.forEach(function (f) {
+      if (!(state.food[f.key] > 0)) return;
+      if (f.staple) staples.push({ label: f.stockName + ' (CUPS)', value: formatGal(state.food[f.key]) + ' / ' + formatGal(f.original) });
+      else (f.type === 'meal' ? meals : snacks).push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) });
+    });
     var drinks = [
       { label: 'COFFEE', value: countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE) },
       { label: 'TEA', value: countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA) },
@@ -14776,8 +14776,8 @@
       var left = state.supplies.spares[k];
       return { label: SPARES_NAMES[k].toUpperCase(), value: countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL) };
     });
-    var stores = [{ rows: supplies }, { rows: meals }, { rows: snacks }];
-    if (meals.length === 0 && snacks.length === 0) stores.splice(1, 2, { note: 'Nothing left aboard to eat.' });
+    var stores = [{ rows: supplies }, { rows: meals }, { rows: staples }, { rows: snacks }];
+    if (meals.length === 0 && staples.length === 0 && snacks.length === 0) stores.splice(1, 3, { note: 'Nothing left aboard to eat.' });
     stores.push({ rows: drinks }, { rows: spares });
     return {
       systems: systems,
@@ -15083,6 +15083,7 @@
         { term: 'MINIMAL', body: 'Above 32 knots.' },
         { term: 'FURLED', body: 'Sails put away. No sailing power.' },
         { p: 'More sail does not always mean more speed. Reduce sail in worsening conditions. The engine can help in light winds and can run with sails raised.' },
+        { p: 'The sails are damaged only when too much sail is set for the wind. A squall counts as the strongest range. You have about half an hour to reduce sail once the wind rises into a stronger range. Furled sails are always safe.' },
       ],
     },
     {
@@ -15188,15 +15189,19 @@
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
         { p: 'Your physical condition affects your ability to manage the boat.' },
+        { p: 'EXHAUSTED, you cannot make repairs or cook. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work, except in rough seas. A STARVING sailor can always cook.' },
+        { p: 'STARVING or VERY THIRSTY, you cannot sleep or make repairs. A sleeping sailor wakes up when STARVING or PARCHED. Eat or drink first.' },
+        { term: 'COFFEE', body: 'Gets you through repairs and cooking while EXHAUSTED for 2 hours. You cannot sleep for those 2 hours. Tea does neither.' },
         { term: 'GALLEY', body: 'Prepare meals, eat snacks, and drink. Food and freshwater are limited. Coffee and tea also consume water.' },
-        { p: 'Freshly caught fish can be cooked as a meal or eaten as sashimi without using kerosene. Fish keeps for 12 hours after it is caught.' },
+        { p: 'Rice, oats, and pancake mix are kept in cups. Each serving uses half a cup.' },
+        { p: 'Freshly caught fish can be cooked with a half cup of rice with seared or grilled fish and rice, or eaten as sashimi without using kerosene or rice. Fish keeps for 12 hours after it is caught.' },
         { p: 'Wash dishes when needed.' },
         { term: 'FORWARD CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
         { term: 'AFT CABIN', body: 'Check the boat\u2019s status and inventory, make repairs, and perform the day\u2019s maintenance.' },
         { term: 'SALOON', body: 'Read, stretch, or SIT A WHILE. Control the heater and hatch here.' },
         { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
-        { p: 'Reading, rest, and everyday care help maintain morale.' },
+        { p: 'Reading, music, and quiet time are there when you want the company.' },
         { p: 'SIT A WHILE and BINOCULARS allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
       ],
     },
@@ -15208,15 +15213,14 @@
         { p: 'When a system is damaged, STATUS names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
         { p: 'Open INVENTORY to see the water, diesel, kerosene, food, drink, and spare parts left aboard.' },
         { p: 'REPAIRS appears when a system is damaged. Choose the damaged system. Each repair uses one spare part.' },
-        { term: 'SOLID / GOOD', body: 'Longer-lasting repairs.' },
-        { term: 'TEMPORARY / PATCHED', body: 'May require attention sooner.' },
-        { p: 'If you are both EXHAUSTED and DEPLETED, recover before attempting repairs.' },
+        { p: 'Repairs always work. You cannot make them while you are EXHAUSTED, STARVING, or VERY THIRSTY. Rest, eat, or drink first.' },
+        { p: 'A repaired system stays repaired as long as daily maintenance is done.' },
         { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
         { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
         { h3: 'DAILY MAINTENANCE' },
         { p: 'Select PERFORM MAINTENANCE once each day. Regular maintenance keeps ordinary, unexplained failures away.' },
-        { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Completing maintenance before then prevents it.' },
-        { p: 'Maintenance does not protect against weather. Strong wind can still damage the sails.' },
+        { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
+        { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
     },
     {
@@ -17794,7 +17798,7 @@
     var held = state.fishing.heldFish;
     if (!held || held.mealEaten) return null; // (patch 69) its meal already eaten: nothing to cook
     var mealName = FISH_MEAL_BY_SPECIES[held.speciesId];
-    if (!mealName) return null;
+    if (!mealName || !riceForFish(state)) return null; // (no rice: the fish is sashimi only)
     return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true, fishName: fishSpeciesDisplayName(state, FISH_SPECIES_BY_ID[held.speciesId]) };
   }
 
@@ -17985,30 +17989,27 @@
   // nothing else in performEat changes.
   var FOOD_PREP_AUDIO_KEY = {
     // THICK BOIL
-    'Chili Rice': 'thickBoil',
+    'Chili': 'thickBoil',
     'Oatmeal': 'thickBoil',
-    'Rockfish Stew': 'thickBoil',
-    'Lingcod Stew': 'thickBoil',
-    'Bonito Curry': 'thickBoil',
-    'Mahi Coconut Curry': 'thickBoil',
     // THIN BOIL
     'Mac & Cheese': 'thinBoil',
     'Chicken Noodle Soup': 'thinBoil',
-    // BOIL + SIZZLE
-    'Salmon + Mashed Potatoes': 'boilSizzle',
-    'Salmon Rice Bowl': 'boilSizzle',
-    'Mackerel Rice Bowl': 'boilSizzle',
-    'Albacore Tuna Over Pasta': 'boilSizzle',
-    'Ono Rice Bowl': 'boilSizzle',
-    'Herring Rice Bowl': 'boilSizzle',
-    'Salmon + Roasted Potatoes': 'boilSizzle',
+    // BOIL + SIZZLE (the fish and rice dishes: the rice boils, the fish sears or grills)
+    'Seared Salmon and Rice': 'boilSizzle',
+    'Grilled Salmon and Rice': 'boilSizzle',
+    'Seared Rockfish and Rice': 'boilSizzle',
+    'Grilled Lingcod and Rice': 'boilSizzle',
+    'Grilled Mackerel and Rice': 'boilSizzle',
+    'Seared Bonito and Rice': 'boilSizzle',
+    'Seared Albacore Tuna and Rice': 'boilSizzle',
+    'Seared Aku and Rice': 'boilSizzle',
+    'Grilled Mahi and Rice': 'boilSizzle',
+    'Seared Ahi and Rice': 'boilSizzle',
+    'Grilled Ono and Rice': 'boilSizzle',
+    'Grilled Herring and Rice': 'boilSizzle',
     // SIZZLE
     'Pancakes': 'sizzle',
-    // BOIL + CHOP
-    'Aku Poke Bowl': 'boilChop',
-    'Ahi Poke Bowl': 'boilChop',
     // POPCORN
-    'Popcorn': 'popcorn',
     // WRAPPER
     'Energy Bar': 'wrapper',
     'Chocolate': 'wrapper',
@@ -18036,7 +18037,13 @@
   function performEat(state, key) {
     var isHeldFish = key === HELD_FISH_KEY;
     var item = isHeldFish ? heldFishAsMealItem(state) : FOOD_ITEMS_BY_KEY[key];
-    if (!item || (!isHeldFish && state.food[key] <= 0)) {
+    if (isHeldFish && !item && state.fishing.heldFish && !state.fishing.heldFish.mealEaten && !riceForFish(state)) { // (a stale button: the rice has run out)
+      printBlank();
+      printLine('No rice left.', 'dim');
+      state.pendingChoice = freshCatchFishChoice(state, null);
+      return;
+    }
+    if (!item || item.type === 'staple' || (!isHeldFish && state.food[key] < (item.serving || 1) - 1e-9)) { // (rice is never eaten on its own)
       printBlank();
       printLine("That's already gone.", 'dim');
       return;
@@ -18084,6 +18091,13 @@
       return;
     }
 
+    var tiredLine = exhaustedFoodBlock(state, key, item);
+    if (tiredLine) {
+      printBlank();
+      printLine(tiredLine, 'amber');
+      state.pendingChoice = eatSubmenuPendingChoice(state, item);
+      return;
+    }
     if (item.cooked) {
       if (state.weather.seaState >= 5) {
         printBlank();
@@ -18104,7 +18118,7 @@
     // Cooking water: only items with a per-serving cost (item.waterGal,
     // currently just Oatmeal) draw any; everything else is 0 and this
     // check is simply skipped for them.
-    var waterNeeded = item.waterGal || 0;
+    var waterNeeded = isHeldFish ? WATER_RICE_GAL : (item.waterGal || 0); // (fish and rice cooks its rice in a cup of water)
     if (waterNeeded > 0 && !hasEnoughWater(state, waterNeeded)) {
       printBlank();
       printLine('Not enough water.', 'amber');
@@ -18128,9 +18142,10 @@
       // FISHING HOOK -- the held catch's cooked meal is marked eaten on the catch (patch 69), rather than the whole fish being deleted: its sashimi is still there
       // until it is eaten too, and the catch is cleared (not later logged as spoiled) once both are. Everything else decrements a food[] count.
       if (isHeldFish) {
+        s.food.rice = Math.max(0, s.food.rice - RICE_SERVING_CUPS); // the rice that went into the dish
         fishPortionEaten(s, 'meal');
       } else {
-        s.food[key] -= 1;
+        s.food[key] -= (item.serving || 1); // (oats and pancake mix: half a cup a serving)
       }
       if (isHeldFish || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks and chocolate are not meals
 
@@ -18259,6 +18274,13 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
+    var tiredCoffee = exhaustedDrinkBlock(state);
+    if (tiredCoffee) {
+      printBlank();
+      printLine(tiredCoffee, 'amber');
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
     if (state.drinks.coffee <= 0) {
       printBlank();
       printLine('No coffee left.', 'amber');
@@ -18300,6 +18322,13 @@
     if (needsCabinLight(state)) {
       printBlank();
       printLine("It's too dark to see. I need some light."); // an observation in the ordinary text (not amber, not caps)
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    var tiredTea = exhaustedDrinkBlock(state);
+    if (tiredTea) {
+      printBlank();
+      printLine(tiredTea, 'amber');
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
@@ -18350,7 +18379,7 @@
     var sp = h && FISH_SPECIES_BY_ID[h.speciesId];
     if (!sp) return [];
     // `meal` is the cooked dish's name while it is uneaten, `sashimi` is true while the sashimi is (patch 69: eating one no longer takes the other with it)
-    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: (!h.mealEaten && FISH_MEAL_BY_SPECIES[h.speciesId]) || null, sashimi: !h.sashimiEaten }];
+    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: (!h.mealEaten && riceForFish(state) && FISH_MEAL_BY_SPECIES[h.speciesId]) || null, sashimi: !h.sashimiEaten }];
   }
   // A dish of the held fish has been eaten: it is marked on the catch, and the catch is cleared only when every dish has been eaten (so a fish that is all eaten is never later logged as spoiled).
   // The fish counts once in the voyage stats (FISH EATEN), when its first dish is eaten.
@@ -18359,7 +18388,7 @@
     if (!h) return;
     if (!h.mealEaten && !h.sashimiEaten) statAdd(s, 'fishEaten', 1);
     h[portion + 'Eaten'] = true;
-    if ((h.mealEaten || !FISH_MEAL_BY_SPECIES[h.speciesId]) && h.sashimiEaten) s.fishing.heldFish = null;
+    if ((h.mealEaten || !FISH_MEAL_BY_SPECIES[h.speciesId] || !riceForFish(s)) && h.sashimiEaten) s.fishing.heldFish = null; // (no rice left: its meal can never be made, so the catch is gone with the sashimi)
   }
   function freshCatchBack(state) { var f = heldCatches(state)[0]; return f ? 'catch:' + f.speciesId : 'cmd:galley'; } // where BACK goes from a blocked preparation: the fish's own screen (the galley if it is gone)
   function freshCatchOptions(state) {
@@ -18532,109 +18561,85 @@
     electrical: ['Got the electrical system working again.'],
   };
 
-  // Repair quality's own four tiers, worst-first, matching the index
-  // computeRepairQuality's own finalTier (0-3) already lands on.
-  var REPAIR_QUALITIES = ['SOLID', 'GOOD', 'TEMPORARY', 'PATCHED'];
+  // NEEDS GATES -- morale is out of it: repairs always work, and what decides whether the sailor CAN repair, cook or sleep is how he is.
+  //   EXHAUSTED ................. no repairs, no cooked meals (the meals, popcorn, a fish); coffee, tea and Cup Noodles still, but not in a ROUGH sea
+  //   STARVING or VERY THIRSTY ... no repairs, no starting a sleep
+  // The cure is never behind the same gate: water and the cold snacks are always there, SLEEP is open to an exhausted sailor, and a STARVING sailor is never too
+  // tired to cook (food is the cure). COFFEE gets an exhausted sailor through the work for 2 hours, and keeps him from sleeping for the same 2 hours (a second
+  // coffee starts the 2 hours again); tea does neither. A sleeping sailor wakes by himself when he becomes STARVING or PARCHED (checkNeedsWake).
+  var COFFEE_BOOST_MINUTES = 120;
+  var ROUGH_SEA_STATE = 4;                // the game's ROUGH
 
-  // Repairs are deterministic -- ANY permitted repair always succeeds
-  // once its audio finishes (see performSystemRepairAttempt below).
-  // What the player's condition actually decides is QUALITY: how long
-  // the repaired system is then shielded from the NORMAL scheduled
-  // failure draw (REPAIR_QUALITY_PROTECTION_HOURS) -- never whether
-  // the repair itself works. ENERGY and MORALE are the primary
-  // inputs, each mapped onto the same four-tier ladder
-  // (0=SOLID-worthy .. 3=PATCHED-worthy) and then combined by taking
-  // the WORSE (max) of the two, so either one alone bottoming out is
-  // enough to drag the whole repair down to PATCHED -- matching
-  // "EXHAUSTED OR DEPLETED" (not AND) for that tier. HUNGER/THIRST/
-  // SEA STATE are secondary: any one of them being meaningfully bad
-  // can pull the result down by exactly one further tier, but never
-  // more than one combined, and never below PATCHED on their own --
-  // only the exact ENERGY:EXHAUSTED + MORALE:DEPLETED combination
-  // (checked first, separately, and never softened by anything else)
-  // blocks a repair outright. Thresholds for what counts as
-  // "meaningfully bad" reuse the same named level constants the rest
-  // of the game already defines (HUNGER_HUNGRY, THIRST_THIRSTY) or
-  // the same seaState>=4 (ROUGH+) cutoff computeRepairPenalties used
-  // to use, rather than inventing new ones. conditionLines is only
-  // ever the labels actually worth showing the player -- ENERGY/
-  // MORALE whenever they're not at their best tier (the primary
-  // drivers of the result), HUNGER/THIRST/SEA STATE only when they're
-  // the "meaningfully bad" secondary factor -- never a full readout
-  // of every input regardless of whether it's relevant.
-  function computeRepairQuality(state) {
-    var c = state.crew, w = state.weather;
-    var eLvl = energyLevel(c.fatigue);   // 0=EXHAUSTED..5=RESTED
-    var mLabel = moraleLevel(c.morale);  // DEPLETED/LOW/CONTENT/GOOD/UPBEAT
-    var hLvl = hungerLevel(c.hoursSinceMeal);
-    var tLvl = thirstLevel(c.hoursSinceWater);
+  function coffeeBoostActive(state) {
+    var last = state.crew.lastCoffeeAt;
+    if (last == null) return false;
+    var since = state.meta.voyageMinutes - last;
+    return since >= 0 && since < COFFEE_BOOST_MINUTES;
+  }
+  function isExhausted(state) { return energyLevel(state.crew.fatigue) === ENERGY_EXHAUSTED && !coffeeBoostActive(state); } // (coffee: wired enough to work)
+  function isStarving(state) { return hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_STARVING; }
+  function isVeryThirsty(state) { return thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY; } // VERY THIRSTY, or PARCHED
 
-    // The one exact hard-block state -- checked first and never
-    // overridden by anything else, including hunger/thirst/sea state.
-    if (eLvl === ENERGY_EXHAUSTED && mLabel === 'DEPLETED') {
-      return {
-        blocked: true,
-        conditionLines: [
-          { label: 'ENERGY', value: ENERGY_LABELS[eLvl] },
-          { label: 'MORALE', value: mLabel },
-        ],
-      };
-    }
-
-    var energyTier = eLvl >= 4 ? 0 : eLvl === 3 ? 1 : eLvl >= 1 ? 2 : 3;
-    var moraleTier = (mLabel === 'UPBEAT' || mLabel === 'GOOD') ? 0
-      : mLabel === 'CONTENT' ? 1
-      : mLabel === 'LOW' ? 2
-      : 3; // DEPLETED
-    var baseTier = Math.max(energyTier, moraleTier);
-
-    var hungerBad = hLvl >= HUNGER_HUNGRY;
-    var thirstBad = tLvl >= THIRST_THIRSTY;
-    // SEA STATE has two separate cutoffs, deliberately different: it's
-    // worth SHOWING to the player from ROUGH (4) upward -- the same
-    // point computeRepairPenalties used to start penalizing it at all
-    // -- but only counts toward the actual one-tier-down secondary
-    // penalty from VERY ROUGH (5) upward, matching section 4's own
-    // explicit example ("GOOD + very rough sea -> TEMPORARY") and the
-    // section 7 UI example (ENERGY: TIRED + MORALE: LOW, both already
-    // at TEMPORARY on their own, + SEA STATE: ROUGH shown alongside
-    // -> REPAIR QUALITY stays TEMPORARY, not pushed down to PATCHED).
-    // A plain seaState>=4 cutoff for the penalty itself would silently
-    // contradict that exact example.
-    var seaDisplay = w.seaState >= 4;   // ROUGH or worse -- shown
-    var seaBad = w.seaState >= 5;       // VERY ROUGH or worse -- penalized
-    var secondaryPenalty = (hungerBad || thirstBad || seaBad) ? 1 : 0;
-    var finalTier = Math.min(baseTier + secondaryPenalty, 3);
-
-    var conditionLines = [];
-    if (energyTier > 0) conditionLines.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl] });
-    if (moraleTier > 0) conditionLines.push({ label: 'MORALE', value: mLabel });
-    if (hungerBad) conditionLines.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl] });
-    if (thirstBad) conditionLines.push({ label: 'THIRST', value: THIRST_LABELS[tLvl] });
-    if (seaDisplay) conditionLines.push({ label: 'SEA STATE', value: seaReadout(currentSeaFt(w)) }); // the same readout as the WEATHER screen and the forecast (patch 52)
-
-    return { blocked: false, quality: REPAIR_QUALITIES[finalTier], conditionLines: conditionLines };
+  // Why he cannot repair just now: a line for each reason ([] when he can).
+  function repairBlockers(state) {
+    var out = [];
+    if (isExhausted(state)) out.push('TOO EXHAUSTED TO REPAIR.');
+    if (isStarving(state)) out.push('TOO HUNGRY TO REPAIR.');
+    if (isVeryThirsty(state)) out.push('TOO THIRSTY TO REPAIR.');
+    return out;
+  }
+  // Why he will not sleep just now (null when he will).
+  function sleepBlockLine(state) {
+    if (isStarving(state)) return 'Too hungry to sleep. I need to eat something.';
+    if (isVeryThirsty(state)) return 'Too thirsty to sleep. I need water.';
+    if (coffeeBoostActive(state)) return 'Too wired to sleep. Maybe in a while.';
+    return null;
+  }
+  // Why an exhausted sailor will not make this (null when he will). Meals, popcorn and a fish are cooking; Cup Noodles, tea and coffee are only hot water.
+  var STOVE_SEA_LINE = 'TOO EXHAUSTED TO MANAGE THE STOVE IN THIS SEA.';
+  function exhaustedFoodBlock(state, key, item) {
+    if (!isExhausted(state) || isStarving(state)) return null; // (food is the cure: a starving sailor always cooks)
+    if (key === 'cupNoodles') return state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
+    return item.cooked ? 'TOO EXHAUSTED TO COOK.' : null;
+  }
+  function exhaustedDrinkBlock(state) {
+    return isExhausted(state) && !isStarving(state) && state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
   }
 
-  // The decision screen for one damaged system: the condition lines
-  // actually relevant right now, then either the resulting REPAIR
-  // QUALITY and its action button, or -- in the one hard-block state
-  // -- a plain blocked message and no button at all. No confirmation
-  // beyond this screen itself.
+  // A sleeping sailor wakes by himself when hunger reaches STARVING or thirst reaches PARCHED. Run every tick, so a reload or an offline catch-up wakes him at
+  // exactly the minute he would have. He keeps the sleep he got (energy and sleep debt are repaid tick by tick) and cannot lie back down until he has eaten or drunk.
+  function checkNeedsWake(state) {
+    var c = state.crew;
+    if (c.watchState !== 'sleeping' || c.sleepStartedAt == null) return;
+    var hungry = isStarving(state), parched = thirstLevel(c.hoursSinceWater) >= THIRST_PARCHED;
+    if (!hungry && !parched) return;
+    var minutesAsleep = state.meta.voyageMinutes - c.sleepStartedAt;
+    c.watchState = 'awake';
+    c.sleepStartedAt = null;
+    c.sleepCapMinutes = null;
+    c.sleepRoom = null;
+    if (c.bunkUnmadeSinceMinutes == null) c.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
+    c.bunkUnmadeRoom = 'cabin';
+    momentNoteWake(state, minutesAsleep);
+    log(state, hungry && parched ? 'Woke up starving and parched. I need food and water.'
+      : (hungry ? 'Woke up starving. I need to eat something.' : 'Woke up parched. I need water.'));
+    flushNewLogEntries(state);
+  }
+
+  // The decision screen for one damaged system: how he is, only where it matters, then either the spare and its action button or why he cannot.
   function cmdRepairSystem(state, systemKey) {
     printBlank();
-    printLine('REPAIR \u2014 ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
-    var q = computeRepairQuality(state);
-    q.conditionLines.forEach(function (f) {
-      printLine(f.label + ': ' + f.value);
-    });
+    printLine('REPAIR — ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
+    var c = state.crew, blockers = repairBlockers(state);
+    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED) printLine('ENERGY: ' + ENERGY_LABELS[ENERGY_EXHAUSTED]);
+    if (isStarving(state)) printLine('HUNGER: ' + HUNGER_LABELS[HUNGER_STARVING]);
+    if (isVeryThirsty(state)) printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
+    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED && coffeeBoostActive(state)) printLine('COFFEE: ACTIVE');
     var options = [];
-    if (q.blocked) {
-      printBlank();
-      printLine('TOO EXHAUSTED TO REPAIR.', 'amber');
+    printBlank();
+    if (blockers.length > 0) {
+      blockers.forEach(function (t) { printLine(t, 'amber'); });
     } else {
-      printBlank();
-      printLine('REPAIR QUALITY: ' + q.quality);
       // The repair needs a spare part (the one for this system); with none left the system stays as it is.
       if (REPAIRS_USE_SPARES) printLine(SPARES_NAMES[REPAIR_SPARE_KEY[systemKey]].toUpperCase() + ': ' + spareCount(state, systemKey));
       if (REPAIRS_USE_SPARES && spareCount(state, systemKey) <= 0) {
@@ -18657,10 +18662,8 @@
   // in that state to begin with -- see cmdRepairSystem) against a
   // stale or replayed action slipping through.
   function performSystemRepairAttempt(state, systemKey) {
-    var q = computeRepairQuality(state);
-    if (q.blocked) { cmdRepairSystem(state, systemKey); return; }
+    if (repairBlockers(state).length > 0) { cmdRepairSystem(state, systemKey); return; } // (a stale button: he cannot just now)
     if (REPAIRS_USE_SPARES && spareCount(state, systemKey) <= 0) { cmdRepairSystem(state, systemKey); return; } // (a stale button: no part to use)
-    var hours = REPAIR_QUALITY_PROTECTION_HOURS[q.quality];
     runAudioSyncedAction(state, {
       label: REPAIR_WORKING_LABEL[systemKey],
       playAudio: function (onEnded) { return playRepairAudio(systemKey, onEnded); },
@@ -18673,8 +18676,6 @@
         setFailureCause(s, systemKey, null);
         if (REPAIRS_USE_SPARES) s.supplies.spares[REPAIR_SPARE_KEY[systemKey]] = Math.max(0, spareCount(s, systemKey) - 1); // the part is used up
         if (systemKey === 'engine') { s.boat.engineFaultHidden = false; s.boat.engineFailureStage = null; }
-        if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
-        s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(hours[0], hours[1]) * 60;
         log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
         logVesselLogRepair(s, systemKey);
         flushNewLogEntries(s);
@@ -20709,6 +20710,7 @@
       action: function (s) {
         var before = s.boat.sailConfig; // what she actually had set at the moment of the change
         s.boat.sailConfig = targetConfig;
+        s.boat.sailOverSince = sailsOverpowered(s) ? s.meta.voyageMinutes - SAIL_REEF_GRACE_MINUTES : null; // too much sail raised into this wind: no grace; the right amount clears it
         var sailLine = sailChangeLogLine(before, targetConfig);
         if (sailLine) { log(s, sailLine); flushNewLogEntries(s); }
         cmdSails(s);
@@ -23111,12 +23113,28 @@
     // save has been rebased here its version marker prevents it from
     // ever happening again on a later load.
     if (state.meta.foodInventoryVersion === undefined) state.meta.foodInventoryVersion = 0;
-    if (state.meta.foodInventoryVersion < FOOD_INVENTORY_VERSION) {
+    if (state.meta.foodInventoryVersion < 5) { // (a save older than the MEALS/SNACKS lineup is restocked as it always was; one that is already on it is NOT -- see the carry-over below)
       var oldFoodKeys = ['pasta', 'rice', 'soup', 'chili', 'tuna', 'crackers', 'peanutButter',
         'nuts', 'driedFruit', 'energyBars', 'freshFruit', 'freshBread', 'freshFish', 'comfort',
         'tunaCrackers']; // retired when Cup Noodles (cupNoodles) replaced it at FOOD_INVENTORY_VERSION 4
       oldFoodKeys.forEach(function (k) { delete state.food[k]; });
       FOOD_ITEMS.forEach(function (f) { state.food[f.key] = f.original; });
+      state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
+    }
+    // THE NEW FOOD SYSTEM (version 6): a save from before carries over exactly what it has left -- NOTHING is replenished. Chili Rice becomes Chili (same count);
+    // the oatmeal and pancakes left (servings) become cups of oats and pancake mix at half a cup a serving; rice is new, so it is given as a SHARE of the 20 cups: the
+    // fraction of the meals and snacks still left. Runs once per save (the version marker).
+    if (state.meta.foodInventoryVersion === 5) {
+      var fd = state.food;
+      var OLD_FOOD = { macCheese: 5, chiliRice: 5, chickenNoodleSoup: 5, oatmeal: 15, pancakes: 15, cupNoodles: 10, popcorn: 10, trailMix: 10, energyBar: 10 };
+      var foodLeft = 0, foodTotal = 0;
+      Object.keys(OLD_FOOD).forEach(function (k) { foodLeft += Math.min(Math.max(0, Number.isFinite(fd[k]) ? fd[k] : 0), OLD_FOOD[k]); foodTotal += OLD_FOOD[k]; });
+      var foodShare = foodTotal > 0 ? foodLeft / foodTotal : 0;
+      if (fd.chiliRice !== undefined) { fd.chili = Number.isFinite(fd.chiliRice) ? fd.chiliRice : 0; delete fd.chiliRice; }
+      if (!Number.isFinite(fd.chili)) fd.chili = 0;
+      fd.oatmeal = (Number.isFinite(fd.oatmeal) ? fd.oatmeal : 0) * 0.5;
+      fd.pancakes = (Number.isFinite(fd.pancakes) ? fd.pancakes : 0) * 0.5;
+      if (!Number.isFinite(fd.rice)) fd.rice = Math.round(20 * foodShare * 2) / 2;
       state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
     }
     // FISHING HOOK -- ensure the whole fishing bucket exists first (a
