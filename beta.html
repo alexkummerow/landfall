@@ -753,6 +753,9 @@
   .option-divider {
     margin: 0.35rem 0;
   }
+  #options .indent-1 { padding-left: 2ch; }
+  #options .indent-2 { padding-left: 4ch; }
+  #options .data-row-lg.indent-2 { grid-template-columns: 19ch 1fr; } /* (the longest food name is 19 characters: the sailor’s counts still fit on the narrowest phones) */
 
   /* CHANGE CLOTHES only: its eleven items plus BACK use exactly the same row gap, padding and group dividers as every other menu, which makes it taller than the usual
      48vh cap allows -- so here (and only here) #options is released from that cap and never becomes a scroll panel: the whole menu, BACK included, simply takes
@@ -12650,7 +12653,7 @@
      are about a choice right now, not a supply audit.
      -------------------------------------------------------------- */
   var SPARES_NAMES = {
-    sailRepairKit: 'Sail Patch Kits', steeringParts: 'Rudder Parts', engineParts: 'Engine Parts', fuses: 'Fuses',
+    sailRepairKit: 'Sail Repair Kits', steeringParts: 'Rudder Parts', engineParts: 'Engine Spares', fuses: 'Spare Fuses',
   };
 
   function inventoryLine(name, valueText) {
@@ -12671,70 +12674,15 @@
     });
   }
 
-  // The categories of the full inventory (the AFT CABIN's INVENTORY): everything aboard.
+  // The old INVENTORY screens are gone (the AFT CABIN's INVENTORY dropdown shows all of it); a stale button for one lands there, with that part open.
   function showInventoryCategory(state, cat) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
-    printBlank();
-    switch (cat) {
-      case 'provisions':
-        printLine('PROVISIONS', 'heading-label');
-        var anyFood = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
-        if (!anyFood) {
-          printLine('Nothing left aboard to eat.', 'amber');
-        } else {
-          FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printDataRow(f.name.toUpperCase(), countCurrentOriginal(state.food[f.key], f.original), 'data-row-lg'); });
-        }
-        printDataRow('COFFEE', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE), 'data-row-lg');
-        printDataRow('TEA', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA), 'data-row-lg');
-        break;
-      case 'water':
-        printLine('WATER', 'heading-label');
-        printDataRow('WATER', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS).toUpperCase(), 'data-row-lg');
-        break;
-      case 'fuel':
-        printLine('DIESEL', 'heading-label');
-        printDataRow('DIESEL', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS).toUpperCase(), 'data-row-lg');
-        break;
-      case 'kerosene':
-        printLine('KEROSENE', 'heading-label');
-        printDataRow('KEROSENE', galCurrentOriginal(keroseneLeft(state), KEROSENE_STARTING_GALLONS).toUpperCase(), 'data-row-lg');
-        break;
-      case 'spares':
-        printLine('SPARE PARTS', 'heading-label');
-        // What is left of each (3 of each at the start of a voyage); a repair uses one -- see performSystemRepairAttempt.
-        Object.keys(SPARES_NAMES).forEach(function (k) {
-          var left = state.supplies.spares[k];
-          printDataRow(SPARES_NAMES[k].toUpperCase(), countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL), 'data-row-lg');
-        });
-        break;
-      case 'tools':
-        printLine('TOOLS', 'heading-label');
-        printDataRow('TOOLBOX', state.crew.toolsOutSinceMinutes != null ? 'OUT' : 'STOWED', 'data-row-lg'); // out after a repair, until the tools are put away
-        break;
-      default:
-        printLine('Nothing there.', 'dim');
-    }
-    state.pendingChoice = { id: 'inventory-category', options: [{ label: 'BACK', action: 'inventory:back' }] };
+    aftCabinOpen.inventory = true;
+    if (cat === 'provisions') aftCabinOpen.provisions = true;
+    if (cat === 'spares') aftCabinOpen.spares = true;
+    cmdAftCabin(state);
   }
 
-  function cmdInventory(state) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
-    printBlank();
-    printLine('INVENTORY', 'heading-label');
-    state.pendingChoice = {
-      id: 'inventory-menu',
-      options: [
-        { label: 'PROVISIONS', action: 'inventory:provisions' },
-        { label: 'WATER', action: 'inventory:water' },
-        { label: 'DIESEL', action: 'inventory:fuel' },
-        { label: 'KEROSENE', action: 'inventory:kerosene' },
-        { label: 'SPARE PARTS', action: 'inventory:spares' },
-        { label: 'TOOLS', action: 'inventory:tools' },
-        { divider: true },
-        { label: 'BACK', action: 'cmd:aft-cabin' },
-      ],
-    };
-  }
+  function cmdInventory(state) { showInventoryCategory(state, null); }
 
   // RESCUE -- the ending (see RESCUE ENDING below). The closing diary entry once help has been called, worded for the actual cause (voyageEnd.reason: 'water' after 72 hours without a drink, 'food'
   // after 168 hours without a meal; anything older / unknown gets the plain form). First person, restrained, no narrator addressing the player.
@@ -13360,12 +13308,12 @@
   // choreOptionIfDue call sites: dishes from GALLEY, tidy from SALOON,
   // bunk/air from CABIN, tools from NAV STATION), so this is also the
   // correct BACK/darkness-block destination while mid-chore.
-  var CHORE_ROOM_CMD = { dishes: 'cmd:galley', tidy: 'cmd:saloon', bunk: 'cmd:forward-cabin', air: 'cmd:forward-cabin', tools: 'cmd:nav-station' };
+  var CHORE_ROOM_CMD = { dishes: 'cmd:galley', tidy: 'cmd:saloon', bunk: 'cmd:forward-cabin', air: 'cmd:forward-cabin', tools: 'cmd:aft-cabin' };
   function chorePendingReturn(kind) {
     if (kind === 'dishes') return cmdGalley;
     if (kind === 'tidy') return cmdSaloon;
     if (kind === 'bunk' || kind === 'air') return cmdCabin;
-    if (kind === 'tools') return cmdNavStation;
+    if (kind === 'tools') return cmdAftCabin;
     return null;
   }
 
@@ -14787,17 +14735,23 @@
      AFT CABIN -- the boat's status, inventory, repairs and daily maintenance.
 
      The last room on the BELOW DECK menu. It is entered and left through its door (the same sounds as the FORWARD CABIN's), and the other screens that return
-     here (INVENTORY, REPAIRS, PERFORM MAINTENANCE) come back without it. The screen is the ship-status display that used to be on the NAV STATION's STATUS:
-       SAILS / RUDDER / ENGINE / ELECTRICAL         their condition; an undiscovered engine fault still reads GOOD (as it always did)
-       "<SYSTEM> DAMAGED: <CAUSE>"                  one line for each damaged system, naming what did it -- WEATHER STRESS (storm wind on the sails: the only
-                                                    thing the weather damages) or MISSED MAINTENANCE (a calendar day with none)
-       WATER / DIESEL / KEROSENE                    what is left
-       MAINTENANCE  DUE | OVERDUE                   or, once it is done: MAINTENANCE COMPLETE FOR TODAY
-     and the buttons INVENTORY, REPAIRS, PERFORM MAINTENANCE (not offered once today's is done), BACK.
+     here (REPAIRS, PERFORM MAINTENANCE, PUT AWAY TOOLS) come back without it. What it shows:
+       MAINTENANCE  DUE | OVERDUE        or, once it is done: MAINTENANCE COMPLETE FOR TODAY
+       > STATUS                          drops down: SAILS / RUDDER / ENGINE / ELECTRICAL (an undiscovered engine fault still reads GOOD, as it always did), and
+                                         one line for each damaged system naming what did it -- WEATHER STRESS (storm wind on the sails: the only thing the
+                                         weather damages) or MISSED MAINTENANCE (a calendar day with none)
+       > INVENTORY                       drops down: WATER / DIESEL / KEROSENE (what is left), then
+           > PROVISIONS                  drops down: the food, COFFEE, TEA (left / at the start)
+           > SPARE PARTS                 drops down: SAIL REPAIR KITS / RUDDER PARTS / ENGINE SPARES / SPARE FUSES (left / at the start)
+       > REPAIRS                         only while a system is known to be damaged
+       > PERFORM MAINTENANCE             not offered once today's is done
+       > PUT AWAY TOOLS                  only while the tools are out (after a repair, or the day's maintenance)
      aftCabinStatusModel is the one place the screen is worked out: the screen is drawn from it, and the live loop (aftCabinWatch) redraws the open room when
-     anything in it has changed (a system failing in the small hours while the player is standing there, say).
+     anything in it has changed (a system failing in the small hours while the player is standing there, say). Which dropdowns are open is UI only (aftCabinOpen:
+     never saved, and kept while the player moves between this room and its sub-screens).
      ============================================================== */
   var aftCabinSig = null; // (UI only, never saved) what the screen on show was drawn from
+  var aftCabinOpen = { status: false, inventory: false, provisions: false, spares: false }; // (UI only, never saved) which dropdowns are open
 
   function aftCabinStatusModel(state) {
     var b = state.boat, m = maintenanceMemory(state);
@@ -14810,6 +14764,11 @@
         causes.push(REPAIR_SYSTEM_LABEL[k] + ' DAMAGED: ' + (FAILURE_CAUSE_LABEL[cause] || 'CAUSE UNKNOWN'));
       }
     });
+    var food = [];
+    FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) food.push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) }); });
+    var noFood = food.length === 0;
+    food.push({ label: 'COFFEE', value: countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE) });
+    food.push({ label: 'TEA', value: countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA) });
     return {
       systems: systems,
       causes: causes,
@@ -14818,6 +14777,13 @@
         { label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase() },
         { label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase() },
       ],
+      provisions: { none: noFood, rows: food },
+      spares: Object.keys(SPARES_NAMES).map(function (k) {
+        var left = state.supplies.spares[k];
+        return { label: SPARES_NAMES[k].toUpperCase(), value: countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL) };
+      }),
+      repairs: hasRepairableDamage(state),
+      toolsOut: state.crew.toolsOutSinceMinutes != null,
       maintenanceDone: m.done === voyageDayNumber(state),
       maintenance: m.pending.length > 0 ? 'OVERDUE' : 'DUE',
     };
@@ -14827,23 +14793,38 @@
     printRoomHeader('AFT CABIN');
     printBlank();
     var model = aftCabinStatusModel(state);
-    model.systems.forEach(function (r) { printDataRow(r.label, r.value, 'data-row-md'); });
-    if (model.causes.length) {
-      printBlank();
-      model.causes.forEach(function (t) { printLine(t, 'amber'); });
-    }
-    printBlank();
-    model.supplies.forEach(function (r) { printDataRow(r.label, r.value, 'data-row-md'); });
-    printBlank();
     if (model.maintenanceDone) printLine('MAINTENANCE COMPLETE FOR TODAY');
     else printDataRow('MAINTENANCE', model.maintenance, 'data-row-md');
-    var options = [
-      { label: 'INVENTORY', action: 'cmd:inventory' },
-      { label: 'REPAIRS', action: 'cmd:repair' },
-    ];
-    if (!model.maintenanceDone) options.push({ label: 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
+    // The dropdowns are rows of the options panel itself (the way the NAV STATION's STATUS used to open): a toggle button, and its readings directly beneath it.
+    var menu = [];
+    function drop(key, label, level) { menu.push({ label: label, action: 'aft-toggle:' + key, indent: level }); return aftCabinOpen[key]; }
+    function readings(list, widthCls, level) { list.forEach(function (r) { menu.push({ dataRow: true, label: r.label, value: r.value, widthCls: widthCls, indent: level }); }); }
+    if (drop('status', 'STATUS', 0)) {
+      readings(model.systems, 'data-row-md', 1);
+      model.causes.forEach(function (t) { menu.push({ status: true, text: t, indent: 1 }); });
+    }
+    if (drop('inventory', 'INVENTORY', 0)) {
+      readings(model.supplies, 'data-row-md', 1);
+      if (drop('provisions', 'PROVISIONS', 1)) {
+        if (model.provisions.none) menu.push({ status: true, text: 'Nothing left aboard to eat.', indent: 2 });
+        readings(model.provisions.rows, 'data-row-lg', 2);
+      }
+      if (drop('spares', 'SPARE PARTS', 1)) readings(model.spares, 'data-row-lg', 2);
+    }
+    var work = [];
+    if (model.repairs) work.push({ label: 'REPAIRS', action: 'cmd:repair' });
+    if (!model.maintenanceDone) work.push({ label: 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
+    if (model.toolsOut) work.push({ label: CHORE_LABELS.tools, action: 'chore:tools' });
     aftCabinSig = JSON.stringify(model);
-    state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(options, 'leave-aft-cabin') };
+    state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(groupedOptions([menu, work]), 'leave-aft-cabin') };
+  }
+
+  function aftCabinToggle(state, key) {
+    if (!Object.prototype.hasOwnProperty.call(aftCabinOpen, key)) return;
+    // The gauges (STATUS, the water / diesel / kerosene readings) can be read in the dark; looking through the provisions or the spares takes light, as the old INVENTORY did.
+    if ((key === 'provisions' || key === 'spares') && !aftCabinOpen[key] && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
+    aftCabinOpen[key] = !aftCabinOpen[key];
+    cmdAftCabin(state);
   }
 
   // The live loop: the open room is drawn again the moment anything it shows has changed.
@@ -14869,7 +14850,7 @@
 
   // PERFORM MAINTENANCE: once per in-game calendar day. PERFORMING MAINTENANCE stays up for exactly as long as one of the four repair sounds (picked at random)
   // plays -- the same audio-synced action every repair uses, so no game-time duration is added; when the sound ends the day is recorded as done (which also
-  // cancels the failure a missed day had scheduled) and the room shows MAINTENANCE COMPLETE FOR TODAY.
+  // cancels the failure a missed day had scheduled), the tools are out (PUT AWAY TOOLS, as after a repair) and the room shows MAINTENANCE COMPLETE FOR TODAY.
   function performMaintenance(state) {
     if (uiBusy) return;
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
@@ -14880,6 +14861,7 @@
       playAudio: function (onEnded) { return playRepairAudio(soundKey, onEnded); },
       action: function (s) {
         completeMaintenance(s);
+        if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
         cmdAftCabin(s);
       },
     });
@@ -14931,13 +14913,13 @@
   // else. Groups are separated by blank vertical spacing ALONE
   // (groupedOptions' plain invisible spacer) -- no horizontal rule of
   // any kind anywhere on this screen.
-  // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER. SOLACE HANDBOOK and
-  // STATUS form the next group (see cmdNavStation).
+  // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER, SOLACE HANDBOOK.
   function navStationToolRows(state) {
     var rows = [];
     rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
     rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
+    rows.push({ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' });
     return rows;
   }
 
@@ -14974,9 +14956,7 @@
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
     }
-    var toolsOpt = choreOptionIfDue(state, 'tools');
-    var extraGroup = [];
-    if (toolsOpt) extraGroup.push(toolsOpt);
+    // (PUT AWAY TOOLS used to be offered here; the tools come out in the AFT CABIN now, and are put away there.)
 
     // The electrical panel itself: no ELECTRICAL heading (the controls
     // are self-explanatory), no divider line bracketing it -- just its
@@ -15007,8 +14987,6 @@
     var options = groupedOptions([
       electricalRows,
       navStationToolRows(state),
-      [{ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
-      extraGroup,
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
@@ -15225,14 +15203,16 @@
     {
       id: 'handbook-repairs', heading: 'REPAIRS AND MAINTENANCE',
       blocks: [
-        { p: 'The AFT CABIN is the boat\u2019s workroom. Its status display shows the condition of:' },
+        { p: 'The AFT CABIN is the boat\u2019s workroom. Open STATUS to see the condition of:' },
         { list: ['SAILS', 'RUDDER', 'ENGINE', 'ELECTRICAL'] },
-        { p: 'When a system is damaged, the status names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
-        { p: 'Select REPAIRS and choose the damaged system. Each repair uses one spare part.' },
+        { p: 'When a system is damaged, STATUS names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
+        { p: 'Open INVENTORY to see the water, diesel, and kerosene left aboard. PROVISIONS lists the food and drink, and SPARE PARTS the spares.' },
+        { p: 'REPAIRS appears when a system is damaged. Choose the damaged system. Each repair uses one spare part.' },
         { term: 'SOLID / GOOD', body: 'Longer-lasting repairs.' },
         { term: 'TEMPORARY / PATCHED', body: 'May require attention sooner.' },
         { p: 'If you are both EXHAUSTED and DEPLETED, recover before attempting repairs.' },
-        { p: 'SOLACE carries three of each spare: sail patch kits, rudder parts, engine parts, and fuses. INVENTORY shows what is left. They are not replenished during this passage.' },
+        { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
+        { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
         { h3: 'DAILY MAINTENANCE' },
         { p: 'Select PERFORM MAINTENANCE once each day. Regular maintenance keeps ordinary, unexplained failures away.' },
         { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Completing maintenance before then prevents it.' },
@@ -21480,6 +21460,7 @@
         var statusDiv = document.createElement('div');
         statusDiv.className = 'option-status';
         statusDiv.textContent = opt.text;
+        if (opt.indent) statusDiv.classList.add('indent-' + opt.indent);
         optionsEl.appendChild(statusDiv);
         return;
       }
@@ -21498,6 +21479,7 @@
         dataRowValue.textContent = opt.value;
         dataRowDiv.appendChild(dataRowLabel);
         dataRowDiv.appendChild(dataRowValue);
+        if (opt.indent) dataRowDiv.classList.add('indent-' + opt.indent);
         optionsEl.appendChild(dataRowDiv);
         return;
       }
@@ -21574,6 +21556,7 @@
           handleAction(state, opt.action);
         }
       });
+      if (opt.indent) btn.classList.add('indent-' + opt.indent);
       optionsEl.appendChild(btn);
     });
   }
@@ -21841,6 +21824,8 @@
       cmdEnterAftCabin(state);
     } else if (action === 'leave-aft-cabin') {
       cmdLeaveAftCabin(state);
+    } else if (action.indexOf('aft-toggle:') === 0) {
+      aftCabinToggle(state, action.slice(11));
     } else if (action === 'perform-maintenance') {
       performMaintenance(state);
     } else if (action === 'toggle-autopilot') {
