@@ -752,6 +752,8 @@
   .option-divider {
     margin: 0.35rem 0;
   }
+  #options .indent-1 { padding-left: 2ch; }
+  #options .data-row-lg.indent-1 { grid-template-columns: 19ch 1fr; } /* (the rows of both dropdowns, one column for all of them: the longest food name is 19 characters, so the counts still fit on the narrowest phones) */
 
   /* CHANGE CLOTHES only: its eleven items plus BACK use exactly the same row gap, padding and group dividers as every other menu, which makes it taller than the usual
      48vh cap allows -- so here (and only here) #options is released from that cap and never becomes a scroll panel: the whole menu, BACK included, simply takes
@@ -1232,7 +1234,8 @@
         steering: 'GOOD',
         engine: 'GOOD',
         electrical: 'GOOD',        // physical wiring/fuse CONDITION, separate from battery charge below
-        nextFailureAt: rand(48, 96) * 60, // voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
+        failCause: { sails: null, steering: null, engine: null, electrical: null }, // why each system last failed: 'weather' (storm wind -- the sails only) or 'neglect' (a day without maintenance) -- shown in the AFT CABIN status
+        nextFailureAt: rand(48, 96) * 60, // (retired: no longer drives anything -- see checkScheduledFailures) voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
         engineRunningMinutes: 0,   // continuous current runtime, resets to 0 the moment the engine stops — see checkFuel/engineRuntimeWeightBonus
         repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
         battery: 100,               // 0-100% charge — see BATTERY_DRAIN_PER_HOUR/BATTERY_CHARGE_PER_HOUR, never affected by electrical condition or repairs
@@ -1305,21 +1308,22 @@
         tapeListenCount: 0,           // qualifying tape-listening sessions credited so far on tapeListenDay — resets whenever the current voyage day no longer matches
       },
       food: {
-        macCheese: 5, chiliRice: 5, chickenNoodleSoup: 5, oatmeal: 15, pancakes: 15,
+        macCheese: 5, chili: 5, chickenNoodleSoup: 5, oatmeal: 10, pancakes: 10, rice: 20, // (oats, pancake mix and rice are in CUPS)
         cupNoodles: 10, popcorn: 10, trailMix: 10, energyBar: 10,
         chocolate: 5,
       },
       drinks: {
-        coffee: 24, tea: 24,
+        coffee: 25, tea: 25,
       },
       water: {
         gallons: 60.0, // ONE authoritative potable-water supply for the whole boat -- drinking, coffee, tea, washing, dishes, and cooking all draw from this same value. See WATER_* constants and hasEnoughWater/consumeWater.
       },
       supplies: {
         spares: {
-          sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
+          sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3, // 3 spare sail patch kits, rudder parts, engine parts and fuses at the start of a voyage; a repair uses one (REPAIRS_USE_SPARES)
         },
       },
+      maintenance: { done: null, grace: 1, seen: 1, pending: [] }, // DAILY MAINTENANCE -- day 1 is a part day: it can never count as a missed one
       // FISHING HOOK -- the only persisted fishing state; the in-progress
       // cast/bite/reaction session itself is NOT here (see the FISHING
       // section's fishingSession variable and its own comment for why).
@@ -2698,7 +2702,7 @@
       { label: 'MEALS EATEN', value: n(st.meals) }, { label: 'COFFEES MADE', value: n(state.crew.coffeeCount) }, { label: 'TEAS MADE', value: n(st.teas) },
       { label: 'TIMES WASHED', value: n(st.washes) }, { label: 'CHORES COMPLETED', value: n(st.chores), gap: true },
       { label: 'FISH CAUGHT', value: n(st.fishCaught) }, { label: 'BIGGEST FISH', value: big }, { label: 'SPECIES CAUGHT', value: n(st.fishSpecies.length) }, { label: 'FISH EATEN', value: n(st.fishEaten), gap: true },
-      { label: 'TIME WITH BINOCULARS', value: statsDuration(st.existMin) }, { label: 'TIME SITTING A WHILE', value: statsDuration(st.sitMin) },
+      { label: 'TIME WITH BINOCULARS', value: statsDuration(st.existMin) }, { label: 'TIME RELAXING', value: statsDuration(st.sitMin) },
       { label: 'NOVELS READ', value: n(novels) }, { label: 'TAROT CARDS PULLED', value: n(st.tarot) },
       { label: 'PONG GAMES PLAYED', value: n(st.pongPlayed) }, { label: 'PONG GAMES WON', value: n(st.pongWon) },
     ];
@@ -3225,7 +3229,7 @@
   // Hydration after drinking: 0-2h WELL HYDRATED, 2-4h HYDRATED, 4-6h
   // SLIGHTLY THIRSTY, 6-8h THIRSTY, 8h+ VERY THIRSTY. Morale/comfort and a
   // little fatigue only -- never dangerous by itself.
-  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'SLIGHTLY THIRSTY', 'THIRSTY', 'VERY THIRSTY'];
+  var THIRST_LABELS = ['WELL HYDRATED', 'HYDRATED', 'SLIGHTLY THIRSTY', 'THIRSTY', 'VERY THIRSTY', 'PARCHED']; // (8-10h VERY THIRSTY; 10h+ PARCHED, which wakes a sleeper)
   // Index 0 is the worst state, 5 the best (same direction as before).
   var ENERGY_LABELS = ['EXHAUSTED', 'VERY TIRED', 'TIRED', 'OKAY', 'GOOD', 'RESTED'];
 
@@ -3233,7 +3237,7 @@
   // elsewhere read as what they mean instead of a bare number that
   // silently means something different if the scale ever changes again.
   var HUNGER_PECKISH = 3, HUNGER_HUNGRY = 4, HUNGER_VERY_HUNGRY = 5, HUNGER_STARVING = 6;
-  var THIRST_SLIGHTLY = 2, THIRST_THIRSTY = 3, THIRST_VERY = 4;
+  var THIRST_SLIGHTLY = 2, THIRST_THIRSTY = 3, THIRST_VERY = 4, THIRST_PARCHED = 5;
 
   function hungerLevel(hoursSinceMeal) {
     if (hoursSinceMeal <= 2) return 0;
@@ -3249,7 +3253,8 @@
     if (hoursSinceWater <= 4) return 1;
     if (hoursSinceWater <= 6) return 2;
     if (hoursSinceWater <= 8) return 3;
-    return 4;
+    if (hoursSinceWater <= 10) return 4;
+    return 5;
   }
   // ENERGY is fatigue read the other way round (high fatigue = low
   // energy), not a second tracked number. After a proper night the day
@@ -3402,38 +3407,8 @@
     var c = state.crew;
     var target = MORALE_BASELINE;
 
-    // Hunger/thirst/energy/hygiene/sleep debt all lean on morale gently --
-    // a small dip for mild neglect, a noticeably larger one only when it's
-    // been left a long time -- and all of them naturally relax back as
-    // soon as the underlying condition is fixed (morale just drifts
-    // toward this target; see updateCrew).
-    var hLevel = hungerLevel(c.hoursSinceMeal);
-    if (hLevel === 0) target += 8;
-    else if (hLevel === 1) target += 5;
-    else if (hLevel === 2) target += 2;
-    else if (hLevel === 3) target += 0;
-    else if (hLevel === 4) target -= 4;
-    else if (hLevel === 5) target -= 8;
-    else target -= clamp(20 + (c.hoursSinceMeal - 14) * 0.8, 20, 34);
-
-    var tLevel = thirstLevel(c.hoursSinceWater);
-    if (tLevel === 0) target += 8;
-    else if (tLevel === 1) target += 3;
-    else if (tLevel === 2) target -= 2;
-    else if (tLevel === 3) target -= 6;
-    else target -= clamp(12 + (c.hoursSinceWater - 8) * 1.0, 12, 30);
-
-    var eLevel = energyLevel(c.fatigue);
-    if (eLevel === 5) target += 6;
-    else if (eLevel === 4) target += 3;
-    else if (eLevel === 3) target += 0;
-    else if (eLevel === 2) target -= 3;
-    else if (eLevel === 1) target -= 9;
-    else target -= 18;
-
-    // Sleep debt carried into today: a slight extra drag on top of
-    // whatever the energy state itself already costs.
-    target -= clamp(sleepDebtCarry(state) * 0.6, 0, 5);
+    // Hunger, thirst, tiredness and sleep debt are NOT in here: they have their own gates and warnings. Morale is how well he looks after himself and the boat,
+    // and what the weather does to him -- and it matters only at the bottom (DEPLETED: no repairs, no maintenance).
 
     // Hygiene: no consequence while FRESH/CLEAN, then a gentle, capped
     // drag as it's left.
@@ -3507,12 +3482,14 @@
   // with SNACKS in the EAT menu but is its own type so it can never
   // accidentally count as nourishment.
   var FOOD_ITEMS = [
-    // MEALS — 45 total
+    // MEALS -- cooked on the stove. The staples (oats, pancake mix, rice) are kept in cups, half a cup a serving; RICE is only ever cooked with a fresh fish
+    // (the FISH AND RICE), so it is not a meal of its own and never appears in MEALS or SNACKS.
     { key: 'macCheese', name: 'Mac & Cheese', type: 'meal', cooked: true, original: 5 },
-    { key: 'chiliRice', name: 'Chili Rice', type: 'meal', cooked: true, original: 5 },
+    { key: 'chili', name: 'Chili', type: 'meal', cooked: true, original: 5 },
     { key: 'chickenNoodleSoup', name: 'Chicken Noodle Soup', type: 'meal', cooked: true, original: 5 },
-    { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 15 },
-    { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 15 },
+    { key: 'oatmeal', name: 'Oatmeal', type: 'meal', cooked: true, waterGal: 0.0625, original: 10, staple: true, serving: 0.5, stockName: 'DRY OATS' },
+    { key: 'pancakes', name: 'Pancakes', type: 'meal', cooked: true, original: 10, staple: true, serving: 0.5, stockName: 'PANCAKE MIX' },
+    { key: 'rice', name: 'Rice', type: 'staple', cooked: false, original: 20, staple: true, serving: 0.5, stockName: 'RICE' },
     // SNACKS — 40 total (chocolate, below, is counted separately). This exact order is what drives the SNACKS
     // menu (buildSnacksOptions) and the INVENTORY -> PROVISIONS listing
     // (showInventoryCategory) alike -- both simply iterate FOOD_ITEMS in
@@ -3529,29 +3506,29 @@
   var FOOD_ITEMS_BY_KEY = {};
   FOOD_ITEMS.forEach(function (f) { FOOD_ITEMS_BY_KEY[f.key] = f; });
 
-  // Specialty meal for whichever fish is currently held (state.fishing.
-  // heldFish) — species-specific, so KEEP never produces a generic
-  // "Fresh Fish" anymore. Every entry is a cooked meal (see performEat's
-  // cooked gate) even where a real kitchen wouldn't need the stove
-  // (poke), by design. Pacific Herring is the one FISH_SPECIES entry
-  // with no distinct regional dish of its own -- HERRING RICE BOWL
-  // keeps it a real meal rather than a special case. Marlin never
-  // appears here — release-only, never kept, never a food item.
+  // Specialty meal for whichever fish is currently held (state.fishing.heldFish) -- species-specific, never a generic "Fresh Fish". Every entry is a cooked meal
+  // (see performEat's cooked gate) and needs rice (riceForFish).
+  // The best way of preparing each kept fish. Every one is cooked with rice into a FISH AND RICE, seared or grilled as suits it: the tunas and the lean,
+  // delicate fish are seared hot and quick; the oily, the rich and the firm ones are grilled. Marlin never appears here -- release-only, never kept.
   var FISH_MEAL_BY_SPECIES = {
-    coho: 'Salmon + Mashed Potatoes',
-    chinook: 'Salmon Rice Bowl',
-    pink: 'Salmon + Roasted Potatoes',
-    rockfish: 'Rockfish Stew',
-    lingcod: 'Lingcod Stew',
-    mackerel: 'Mackerel Rice Bowl',
-    bonito: 'Bonito Curry',
-    albacore: 'Albacore Tuna Over Pasta',
-    skipjack: 'Aku Poke Bowl',
-    mahimahi: 'Mahi Coconut Curry',
-    yellowfin: 'Ahi Poke Bowl',
-    wahoo: 'Ono Rice Bowl',
-    herring: 'Herring Rice Bowl',
+    coho: 'Seared Salmon and Rice',
+    chinook: 'Grilled Salmon and Rice',
+    pink: 'Seared Salmon and Rice',
+    rockfish: 'Seared Rockfish and Rice',
+    lingcod: 'Grilled Lingcod and Rice',
+    mackerel: 'Grilled Mackerel and Rice',
+    bonito: 'Seared Bonito and Rice',
+    albacore: 'Seared Albacore Tuna and Rice',
+    skipjack: 'Seared Aku and Rice',
+    mahimahi: 'Grilled Mahi and Rice',
+    yellowfin: 'Seared Ahi and Rice',
+    wahoo: 'Grilled Ono and Rice',
+    herring: 'Grilled Herring and Rice',
   };
+  // The rice that goes into fish and rice: one serving (half a cup), and a cup of water to cook it in. With no rice left the fish is sashimi only.
+  var RICE_SERVING_CUPS = 0.5;
+  var WATER_RICE_GAL = 0.0625;
+  function riceForFish(state) { return state.food.rice >= RICE_SERVING_CUPS - 1e-9; }
   // Reserved key for whatever fish is currently held — never a real
   // FOOD_ITEMS entry, since its name/existence depends entirely on
   // state.fishing.heldFish. performEat special-cases this key.
@@ -3569,7 +3546,7 @@
   // Bumped 4 -> 5: Cup Noodles' starting quantity raised 5 -> 10 (SNACKS
   // total 30 -> 35) -- no key changes this time, just the restock an
   // existing voyage gets rebased to.
-  var FOOD_INVENTORY_VERSION = 5;
+  var FOOD_INVENTORY_VERSION = 6;
 
   /* --------------------------------------------------------------
      EMERGENCY-FALLBACK TEMPERATURE (PHASE 5) -- the ONLY scripted temperature left. Real outside temperature is
@@ -4827,7 +4804,7 @@
         if (nav.autopilotWobble == null) nav.autopilotWobble = 0;
         nav.autopilotWobble = clamp(nav.autopilotWobble + (Math.random() - 0.5) * oscStep, -oscBound, oscBound);
         steered = normalizeDeg(steered + nav.autopilotWobble);
-      } else if (state.crew.atHelm && state.boat.steering !== 'DAMAGED') {
+      } else if (state.crew.atHelm) {
         // AT THE HELM: the player is actively holding SET COURSE by
         // hand -- a plain compass heading, held exactly like the
         // autopilot's own (neither navigates, neither auto-tacks). Same
@@ -5155,25 +5132,10 @@
   var CABIN_COOL_BELOW_F = 65;      // 55-64: COOL
   var CABIN_WARM_FROM_F = 75;       // 65-74: PLEASANT; 75 and up: WARM
   var CABIN_STUFFY_ABOVE_F = 73;    // above 73 with the hatch CLOSED: STUFFY (overrides the band)
-  // HEATER TARGET TABLE -- centralized here (not scattered through
-  // syncCabinTemperature or anywhere else) so these seven thresholds
-  // stay easy to retune in one place. A real boat heater reads as a
-  // handful of discrete settings tied to how cold it is outside, not a
-  // smoothly interpolated dial -- these are deliberately hard steps,
-  // not a lerpTable curve: the TARGET can jump when outside crosses a
-  // threshold, but the CABIN itself never jumps (it still only ever
-  // blends gradually toward whatever the current target is -- see
-  // syncCabinTemperature's own unchanged change-rate logic). 55F is
-  // the floor (anything at or below 45F outside), 68F is the ceiling
-  // (anything at or above 61F outside, which folds the 61-65F and
-  // 66F+ bands together since they share the same value).
-  function getHeatedCabinTarget(outsideTemp) {
-    if (outsideTemp < 46) return 55;  // below 40F, and 40-45F
-    if (outsideTemp < 51) return 58;  // 46-50F
-    if (outsideTemp < 56) return 61;  // 51-55F
-    if (outsideTemp < 61) return 65;  // 56-60F
-    return 68;                        // 61-65F, and 66F+
-  }
+  // THE HEATER holds the cabin at one temperature: 65 F, the bottom of PLEASANT. It works only against air colder than that (below), warming a closed cabin at
+  // HEATER_WARM_PER_MINUTE_F; the cabin itself never jumps -- syncCabinTemperature still moves it gradually, and the heater only ever pulls UP.
+  var HEATER_HOLDS_F = 65;
+  function getHeatedCabinTarget(outsideTemp) { return HEATER_HOLDS_F; }
   // Rate the actual cabin temperature moves toward its current target,
   // warming or cooling alike — see syncCabinTemperature. Now hatch-
   // dependent: a closed hatch insulates the cabin heavily (slow
@@ -5251,8 +5213,8 @@
   var CLOTHING_PERIPHERAL_WARMTH = { socks: 0.4, deckShoes: 0.5, beanie: 0.5, gloves: 0.5 };                               // all four together (1.9) stay below the COLD tolerance
   var WET_WARMTH_FRACTION = 0.4;       // a wet garment keeps this share of its warmth
   var COMFORT_COLD_MARGIN = 3.5;       // warmth short of what the conditions call for by more than this reads COLD
-  var COMFORT_HOT_MARGIN = 4.5;        // warmth above it by more than this reads HOT
-  var SLEEP_TOO_HOT_MARGIN = 7;        // sleeping: bedding supplies warmth, so only CLEAR overdressing for the cabin matters (underdressing is ignored)
+  var COMFORT_HOT_MARGIN = 1.5;        // warmth above it by more than this reads HOT (T-shirt and shorts: GOOD 68-89 F; with pants it reads HOT from 81 F)
+  var SLEEP_TOO_HOT_MARGIN = 4;        // sleeping: bedding supplies warmth, so only CLEAR overdressing for the cabin matters (underdressing is ignored)
   var COMFORT_EXPOSURE_GATE_MIN = 1;   // 60 continuous seconds before any consequence of being COLD / HOT
   var RAIN_WET_GATE_MIN = 1;           // 60 continuous seconds above deck in rain, shell off, before the clothes get wet
   var COMFORT_MORALE_DRAIN_PER_MIN = 0.07; // after the gate: ~0.4 at 5 min, ~1.4 at 20 min, ~4 at an hour, ~12 over three (morale's own drift keeps it bounded)
@@ -5412,7 +5374,7 @@
   var KEROSENE_STOVE_MEAL_GAL = 0.012;      // warming a meal: about ten minutes of burner
   var KEROSENE_STOVE_DRINK_GAL = 0.008;     // coffee, tea, hot water for cup noodles, popping popcorn: about six minutes
   var KEROSENE_STOVE_FISH_GAL = 0.015;      // cooking a fresh catch's specialty meal
-  var HEATER_COLD_BELOW_F = 68;             // the heater works (and so burns) only against air colder than the warmest cabin it ever aims for (getHeatedCabinTarget's ceiling)
+  var HEATER_COLD_BELOW_F = HEATER_HOLDS_F; // the heater works (and so burns) only against air colder than the cabin it holds
   var KEROSENE_PLAN = { days: 32, coldDays: 20, mealsPerDay: 2.5, drinksPerDay: 1, lanternHours: 40 };
   function keroseneBudget() { // the calibration above, as numbers (also what the tests check)
     var P = KEROSENE_PLAN;
@@ -5420,8 +5382,8 @@
     var total = heater + stove + lantern;
     return { heater: heater, stove: stove, lantern: lantern, total: total, buffer: KEROSENE_STARTING_GALLONS - total };
   }
-  var ORIGINAL_COFFEE = 24;
-  var ORIGINAL_TEA = 24;
+  var ORIGINAL_COFFEE = 25;
+  var ORIGINAL_TEA = 25;
   var ORIGINAL_SPARES = {
     sailRepairKit: 3, steeringParts: 3, engineParts: 3, fuses: 3,
   };
@@ -5648,14 +5610,15 @@
     console.warn('[SAILING SPEED ERROR]', context);
   }
 
+  var SAIL_DAMAGED_SPEED_FACTOR = 0.5; // torn sails still pull, at half the speed; a repair kit makes them whole
   function computeSailSpeed(state, heading) {
     var w = state.weather, b = state.boat, c = state.crew;
     if (b.sailConfig === 'furled') return 0; // furled = no canvas up = no sail propulsion, full stop
-    if (b.sails === 'DAMAGED') return 0; // torn/collapsed — no sail propulsion until repaired; the boat can still drift
     var speed = baseSpeedForWind(w.windSpeed)
       * pointOfSailFactor(heading, w.windDirection)
       * sailConfigFactor(b.sailConfig, w.windSpeed);
     if (c.fatigue > 80 || thirstLevel(c.hoursSinceWater) >= THIRST_VERY) speed *= 0.9; // poor trim, wandering helm
+    if (b.sails === 'DAMAGED') speed *= SAIL_DAMAGED_SPEED_FACTOR;
     if (c.watchState !== 'awake') speed *= 0.85;                            // unattended — asleep
     if (!Number.isFinite(speed)) {
       warnInvalidSpeedValue({ issue: 'computeSailSpeed produced a non-finite value', value: speed, windSpeed: w.windSpeed, windDirection: w.windDirection, heading: heading, sailConfig: b.sailConfig });
@@ -5790,6 +5753,8 @@
      -------------------------------------------------------------- */
   var headingTurnActive = false;
   var HEADING_TURN_RATE_DEG_PER_SEC = 4;
+  var HEADING_TURN_RATE_DAMAGED_FACTOR = 0.5; // a broken rudder: she comes round on the sails alone, and a turn takes twice as long
+  function headingTurnRate(state) { return HEADING_TURN_RATE_DEG_PER_SEC * (state.boat.steering === 'DAMAGED' ? HEADING_TURN_RATE_DAMAGED_FACTOR : 1); }
   var HEADING_TURN_TICK_MS = 100; // real-time cadence for both the heading interpolation and its continuous wind/luffing/speed feed -- smoother than the "at least once a second" the spec calls for
   var activeTurn = null; // non-null only while beginCourseTurn's own real-time loop is running -- lets a second call (course changed again mid-turn) retarget the SAME loop in place rather than starting a second, competing one; see this function's own top
 
@@ -5873,7 +5838,7 @@
     var rotationTimer = setInterval(function () {
       var target = currentOpts.targetHeading;
       var remaining = signedAngleDiff(target, nav.heading);
-      var step = HEADING_TURN_RATE_DEG_PER_SEC * (HEADING_TURN_TICK_MS / 1000);
+      var step = headingTurnRate(state) * (HEADING_TURN_TICK_MS / 1000);
       if (Math.abs(remaining) <= step) {
         nav.heading = normalizeDeg(target);
       } else {
@@ -5941,6 +5906,38 @@
     return ALL_GARMENT_KEYS.some(function (k) { return isGarmentWorn(state, k) && isGarmentWet(state, k); });
   }
 
+  // COLD COSTS REST. Being cold while awake tires him faster; sleeping cold restores less, and a cold sleeper wakes early. Wet clothes make either worse.
+  var COLD_FATIGUE_FACTOR = 1.25, COLD_WET_FATIGUE_FACTOR = 1.5;
+  var COLD_SLEEP_FACTOR = 0.7, COLD_WET_SLEEP_FACTOR = 0.5;
+  var COLD_WAKE_MINUTES = 180;            // this long cold in one sleep and he wakes: "Woke up cold."
+  function wearingWetClothes(state) {
+    var c = state.crew;
+    return ALL_GARMENT_KEYS.some(function (k) { return c.clothing[k] && isGarmentWet(state, k); });
+  }
+  // awake: the cold reading that has already lasted its gate (the one that prints the "I'm getting cold" line)
+  function coldAwake(state) {
+    var c = state.crew;
+    return c.watchState === 'awake' && c.comfortExposureKind === 'cold' && c.comfortExposureSinceMin != null && currentGameMinutes(state) - c.comfortExposureSinceMin >= COMFORT_EXPOSURE_GATE_MIN;
+  }
+  // asleep: underdressed for the cabin as it is right now (the bedding does not count here, so the heater and the clothes both matter)
+  function coldAsleep(state) { return evaluateOutfit(state, state.crew.clothing, 'below').verdict === 'underdressed'; }
+
+  // TOO HOT COSTS WATER. The same 'hot' reading that prints "I'm getting too warm" (past its gate): he is thirsty faster while he stays that way.
+  var HOT_THIRST_FACTOR = 1.25;
+  function hotAwake(state) {
+    var c = state.crew;
+    return c.watchState === 'awake' && c.comfortExposureKind === 'hot' && c.comfortExposureSinceMin != null && currentGameMinutes(state) - c.comfortExposureSinceMin >= COMFORT_EXPOSURE_GATE_MIN;
+  }
+
+  // RELAX (the SALOON's open-ended do-nothing): while the screen is open he does not tire and sleep debt stands still; energy slowly comes back (not while cold), never past GOOD.
+  var RELAX_ENERGY_PER_HOUR = 1.5;   // fatigue points an hour (the awake build is 3.2, early sleep gives back 4 and up)
+  var RELAX_FATIGUE_FLOOR = 12.5;    // GOOD is 13-28: relaxing stops here, RESTED (12 and under) takes real sleep
+  function relaxingNow(state) {
+    return !inCatchUpPass && !!sitSession && sitSession.state === state && !!state.pendingChoice && state.pendingChoice.id === 'sitting' && state.crew.watchState === 'awake';
+  }
+  // MORALE AS A FLOOR: DEPLETED (under 20) blocks repairs and the daily maintenance. Nothing else.
+  function isDepleted(state) { return moraleLevel(state.crew.morale) === 'DEPLETED'; }
+
   function updateCrew(state) {
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
@@ -5961,9 +5958,13 @@
       // Rougher seas make for shallower, less restorative sleep. Morale
       // nudges quality too, gently either way -- a steady mind rests
       // better, a low one rests worse.
-      var moraleFactor = clamp(0.88 + (c.morale / 100) * 0.24, 0.75, 1.12);
+      var moraleFactor = 1; // (morale no longer touches how well he sleeps)
       var quality = clamp((1 - w.seaState / 10) * moraleFactor, 0.3, 1.1);
       var qualityFactor = clamp(quality / 0.85, 0.35, 1.15); // ~1.0 in ordinary conditions
+      var chilled = coldAsleep(state);
+      if (chilled) qualityFactor *= wearingWetClothes(state) ? COLD_WET_SLEEP_FACTOR : COLD_SLEEP_FACTOR;
+      if (c.coldSleepFor !== c.sleepStartedAt) { c.coldSleepFor = c.sleepStartedAt; c.coldSleepMin = 0; } // (a new sleep starts the count again)
+      if (chilled) c.coldSleepMin = (c.coldSleepMin || 0) + TICK_MINUTES;
       var stillRecovering = c.sleepDebt > 0 || c.fatigue > SLEEP_FATIGUE_FLOOR;
 
       // ENERGY: restored on the back-loaded curve, never below the floor
@@ -5989,7 +5990,6 @@
       if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
       if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
       if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
-      if (c.morale < 30) fatigueRate += 0.3; // a discouraged crew tires faster
       // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
       // a good night's sleep it reads RESTED in the morning, GOOD by
       // midday, OKAY through the afternoon, TIRED by evening and VERY
@@ -5997,9 +5997,15 @@
       fatigueRate *= FATIGUE_RATE_SCALE;
       // Carried sleep debt makes energy fall a little faster all day.
       fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
-      c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
-      c.hoursSinceRest += hrs;
-      c.sleepDebt = Math.min(SLEEP_DEBT_MAX, c.sleepDebt + SLEEP_DEBT_PER_AWAKE_HOUR * hrs);
+      if (coldAwake(state)) fatigueRate *= wearingWetClothes(state) ? COLD_WET_FATIGUE_FACTOR : COLD_FATIGUE_FACTOR;
+      if (relaxingNow(state)) {
+        // RELAX: nothing builds (no tiredness, sleep debt stands still); energy slowly comes back unless he is cold, and never past GOOD
+        if (!coldAwake(state) && c.fatigue > RELAX_FATIGUE_FLOOR) c.fatigue = Math.max(RELAX_FATIGUE_FLOOR, c.fatigue - RELAX_ENERGY_PER_HOUR * hrs);
+      } else {
+        c.fatigue = clamp(c.fatigue + fatigueRate * hrs, 0, 100);
+        c.hoursSinceRest += hrs;
+        c.sleepDebt = Math.min(SLEEP_DEBT_MAX, c.sleepDebt + SLEEP_DEBT_PER_AWAKE_HOUR * hrs);
+      }
     }
 
     // HUNGER: real elapsed time only, asleep or awake alike -- going to
@@ -6014,6 +6020,7 @@
     else if (w.temperatureF >= 72) waterRate += 0.2;
     if (w.seaState >= 4) waterRate += 0.3;
     if (!asleep && c.location === 'above' && w.condition === 'clear' && w.temperatureF >= 68) waterRate += 0.2; // sun and no shade
+    if (hotAwake(state)) waterRate *= HOT_THIRST_FACTOR; // too warm: thirstier
     if (asleep) waterRate *= SLEEP_WATER_RATE_FACTOR;
     c.hoursSinceWater += hrs * waterRate;
 
@@ -6105,7 +6112,7 @@
     b.battery = clamp(b.battery, 0, 100);
     c.fatigue = clamp(c.fatigue, 0, 100);
     c.morale = clamp(c.morale, 0, 100);
-    state.nav.positionConfidence = b.electrical === 'DAMAGED' ? 'uncertain' : 'good';
+    state.nav.positionConfidence = 'good'; // (the HANDHELD GPS always knows where she is, whatever the boat's electrics are doing)
   }
 
   function simTick(state) {
@@ -6152,6 +6159,7 @@
     navCheckWarnings(state);
 
     updateCrew(state);
+    checkNeedsWake(state); // a sleeper who has become STARVING or PARCHED wakes
     checkFuel(state);
     updateBattery(state);
     checkScheduledFailures(state);
@@ -6531,6 +6539,32 @@
     });
   }
 
+  // THE SUNNY CABIN. With the hatch CLOSED, sun on the boat warms the cabin above the outside air: up to CABIN_SUN_GAIN_F at full sun (the sun well up, a clear sky).
+  // It scales with how high the sun is (nothing at night, a little at sunrise and sunset) and with how clear the sky is (full under 20% cloud, none from 60%, none in rain).
+  // An OPEN hatch ventilates: no sun gain, the cabin settles to the outside air. Read per step, at that step's own moment, so a gap folded in after a sleep is no different.
+  var CABIN_SUN_GAIN_F = 8;
+  function cabinSolarGainF(state, instantMs, nowMs) {
+    var w = state.weather, rw = state.realWeather;
+    var cloud = w.cloudPct, wet = isRaining(state);
+    var useLive = !!(rw && rw.environment && rw.environment.temp === 'real' && Number.isFinite(w.temperatureF)) && nowMs - instantMs <= CABIN_LIVE_READING_WINDOW_MS; // (the same test cabinOutsideTempF makes)
+    if (!useLive) {
+      var hours = rw && rw.forecast && rw.forecast.hours;
+      if (rw && rw.current && Array.isArray(hours) && hours.length && Number.isFinite(rw.fetchedAt)) {
+        var t = rwTarget(rw, instantMs);
+        if (t) { if (Number.isFinite(t.cloudPct)) cloud = t.cloudPct; wet = Number.isFinite(t.precipMm) && t.precipMm > 0.1; }
+      }
+    }
+    if (!Number.isFinite(cloud)) cloud = w.condition === 'clear' ? 10 : 100; // (no cloud figure: the four-word sky decides)
+    if (wet || w.condition === 'squall') return 0;
+    var sky = clamp((60 - cloud) / 40, 0, 1);
+    if (sky <= 0) return 0;
+    var above = solarElevationDeg(instantMs, state.nav.lat, state.nav.lon) - SUN_HORIZON_DEG;
+    if (!(above > 0)) return 0;
+    var sun = clamp(Math.sin(above * Math.PI / 180) / Math.sin(SOLAR_FULL_ELEVATION_DEG * Math.PI / 180), 0, 1);
+    return CABIN_SUN_GAIN_F * sun * sky;
+  }
+  var HEATER_WARM_PER_MINUTE_F = 0.2; // the heater lifts a closed cabin this fast (a closed cabin on its own moves at 0.1)
+
   function syncCabinTemperature(state) {
     var b = state.boat;
     var now = currentGameMinutes(state);
@@ -6545,24 +6579,24 @@
     // The real instant each simulated minute corresponds to (the game clock equals the real clock: departedAt + minutes).
     var departed = Number.isFinite(state.meta.departedAt) ? state.meta.departedAt : Date.now() - now * 60000;
     var nowMs = departed + now * 60000;
-    // Fold the gap in as short steps. Each step moves the cabin toward the outside temperature AT THAT MOMENT, by at most rate x step, and
-    // never past it -- so however long the gap, the cabin can only ever lie between where it started and what the outside actually was.
+    // Fold the gap in as short steps. Each step moves the cabin toward its target AT THAT MOMENT, by at most rate x step, and
+    // never past it -- so however long the gap, the cabin can only ever lie between where it started and what the outside (and the sun) allowed.
     var steps = Math.max(1, Math.ceil(elapsed / CABIN_TEMP_STEP_MINUTES)), dt = elapsed / steps;
     for (var i = 0; i < steps; i++) {
-      var outside = cabinOutsideTempF(state, departed + (from + (i + 0.5) * dt) * 60000, nowMs);
+      var instant = departed + (from + (i + 0.5) * dt) * 60000;
+      var outside = cabinOutsideTempF(state, instant, nowMs);
       keroseneBurnStep(state, dt, Number.isFinite(outside) ? outside : state.weather.temperatureF); // the heater and the lantern burn kerosene for this stretch of time; if it runs dry they go out HERE, before the cabin is moved
       if (!Number.isFinite(outside)) continue; // never write a bad number into the cabin
-      // HEATER -- OFF: the cabin simply tracks outside. ON: it moves toward getHeatedCabinTarget(outside), but the heater only ever pulls the
-      // cabin UP toward that target, never down: once the cabin is at or above it the target falls back to outside -- exactly the unheated
-      // behavior, never a cooling device pulling the cabin back down to the heated target.
-      var cabinTarget;
-      if (b.heaterOn) {
+      // Unheated: the cabin follows the outside air, plus the sun's gain while the hatch is shut. HEATER ON against air under 65 F: it lifts the cabin toward
+      // getHeatedCabinTarget (65 F), but only ever UP: once the cabin is at or above it (or the sun already carries it higher) the target is the unheated one.
+      var cabinTarget = outside + (b.hatchOpen ? 0 : cabinSolarGainF(state, instant, nowMs));
+      var heating = false;
+      if (b.heaterOn && outside < HEATER_COLD_BELOW_F) {
         var heatedTarget = getHeatedCabinTarget(outside);
-        cabinTarget = b.cabinTemperatureF > heatedTarget ? outside : heatedTarget;
-      } else {
-        cabinTarget = outside;
+        if (heatedTarget > cabinTarget && b.cabinTemperatureF <= heatedTarget) { cabinTarget = heatedTarget; heating = true; }
       }
-      var maxCabinChange = changeRate * dt;
+      var stepRate = heating ? Math.max(changeRate, HEATER_WARM_PER_MINUTE_F) : changeRate;
+      var maxCabinChange = stepRate * dt;
       if (b.cabinTemperatureF < cabinTarget) {
         b.cabinTemperatureF = Math.min(cabinTarget, b.cabinTemperatureF + maxCabinChange);
       } else if (b.cabinTemperatureF > cabinTarget) {
@@ -6602,23 +6636,6 @@
   var FAILURE_CHAIN_MIN_HOURS = 12;
   var FAILURE_CHAIN_MAX_HOURS = 36;
   var BOAT_FAIL_SYSTEMS = ['sails', 'steering', 'engine', 'electrical'];
-  // A successful repair shields that one system from the NORMAL draw
-  // for a span of hours that depends on the repair's own QUALITY (see
-  // computeRepairQuality/performSystemRepairAttempt below) -- SOLID
-  // repairs (a well-rested, high-morale sailor) hold the longest;
-  // PATCHED ones (severely impaired) barely hold at all. Replaces the
-  // old flat REPAIR_PROTECTION_MIN_HOURS/MAX_HOURS (96-120h for every
-  // repair regardless of condition) now that repair success itself is
-  // deterministic rather than a chance roll -- SOLID's own range is
-  // that exact old flat window, unchanged, since a well-rested repair
-  // was always meant to be reliable.
-  var REPAIR_QUALITY_PROTECTION_HOURS = {
-    SOLID: [96, 120],
-    GOOD: [60, 84],
-    TEMPORARY: [24, 48],
-    PATCHED: [8, 18],
-  };
-
   function scheduleNextFailure(state, chained) {
     var hrs = chained
       ? rand(FAILURE_CHAIN_MIN_HOURS, FAILURE_CHAIN_MAX_HOURS)
@@ -6658,7 +6675,7 @@
   // each) would otherwise inflate SAILS/STEERING's effective share for
   // the rest of the voyage — exactly what BASE_FAILURE_WEIGHT is trying
   // to keep low.
-  function pickFailureSystem(state) {
+  function pickFailureSystem(state, onlyEligible) {
     var b = state.boat, w = state.weather;
     var weights = {};
     BOAT_FAIL_SYSTEMS.forEach(function (k) { weights[k] = BASE_FAILURE_WEIGHT[k]; });
@@ -6671,17 +6688,21 @@
     // own modest risk.
     if (w.seaState >= 4 || w.condition === 'rain' || w.condition === 'squall') weights.electrical += 0.5;
 
+    function eligibleNow(key) {
+      return b[key] === 'GOOD'; // (a system just repaired is eligible like any other: a repair holds until a maintenance day is skipped, then it is the luck of the draw)
+    }
+    // (a missed day's failure: the draw is among the systems that can actually fail, so the one failure is real whenever any system can)
+    if (onlyEligible) BOAT_FAIL_SYSTEMS.forEach(function (key) { if (!eligibleNow(key)) weights[key] = 0; });
     var total = BOAT_FAIL_SYSTEMS.reduce(function (sum, k) { return sum + weights[k]; }, 0);
+    if (total <= 0) return null;
     var r = Math.random() * total;
     for (var i = 0; i < BOAT_FAIL_SYSTEMS.length; i++) {
       var k = BOAT_FAIL_SYSTEMS[i];
+      if (weights[k] <= 0) continue;
       r -= weights[k];
-      if (r <= 0) {
-        var shieldedUntil = b.repairProtectedUntil ? b.repairProtectedUntil[k] : 0;
-        var eligible = b[k] === 'GOOD' && !(shieldedUntil && state.meta.voyageMinutes < shieldedUntil);
-        return eligible ? k : null;
-      }
+      if (r <= 0) return eligibleNow(k) ? k : null;
     }
+    if (onlyEligible) for (var j = BOAT_FAIL_SYSTEMS.length - 1; j >= 0; j--) if (weights[BOAT_FAIL_SYSTEMS[j]] > 0) return BOAT_FAIL_SYSTEMS[j];
     return null;
   }
 
@@ -6735,8 +6756,10 @@
     if (b.engine !== 'DAMAGED' || !b.engineFaultHidden) return; // already known, or repaired meanwhile: never written twice
     b.engineFaultHidden = false;
     log(state, pickFromPool(FAILURE_NARRATIVES.engine));
+    var engineCause = b.failCause ? b.failCause.engine : null, engineCauseLine = failureCauseLine('engine', engineCause);
+    if (engineCauseLine) log(state, engineCauseLine);
     flushNewLogEntries(state);
-    logVesselLogEvent(state, REPAIR_SYSTEM_LABEL.engine + ' FAILURE');
+    logVesselLogEvent(state, failureEventText('engine', engineCause));
   }
 
   // A programmatic shutdown takes over the screen exactly like a STOP ENGINE click would, so it only starts when that is safe: nothing else
@@ -6800,9 +6823,10 @@
     discoverEngineFailure(state);
   }
 
-  function triggerEngineFailure(state) {
+  function triggerEngineFailure(state, cause) {
     var b = state.boat;
     b.engine = 'DAMAGED';
+    setFailureCause(state, 'engine', cause);
     b.engineFaultHidden = true;                  // broken, and she does not know
     if (!b.engineOn) return;                     // OFF: latent -- nothing is shown, played or written
     if (inCatchUpPass || state.crew.watchState !== 'awake') {
@@ -6815,18 +6839,15 @@
     requestEngineFailureShutdown(state);
   }
 
-  function triggerFailure(state, systemKey) {
+  function triggerFailure(state, systemKey, cause) {
     var b = state.boat;
-    if (systemKey === 'engine') { triggerEngineFailure(state); return; } // its own path: breaking and discovering are separate events
+    if (systemKey === 'engine') { triggerEngineFailure(state, cause); return; } // its own path: breaking and discovering are separate events
     b[systemKey] = 'DAMAGED';
+    setFailureCause(state, systemKey, cause);
+    var autopilotDropped = false;
     if (systemKey === 'steering') {
-      // The helm itself is gone -- can't still be manually steering it.
-      // Autopilot is deliberately left alone here (its own ON/OFF flag
-      // stays whatever it was): computeHeading already treats damaged
-      // steering as unattended drift regardless of that flag, and
-      // restoring steering should resume whichever mode the flag says,
-      // exactly like it always has.
-      state.crew.atHelm = false;
+      // The wheel spins free, but she can still be steered with the sails; only the autopilot cannot run without the rudder.
+      if (b.autopilotOn) { b.autopilotOn = false; autopilotDropped = true; }
     }
     if (systemKey === 'electrical') {
       // A fuse problem, not a dead battery — battery charge itself is
@@ -6838,28 +6859,135 @@
       b.cabinLightsOn = false;
     }
     log(state, pickFromPool(FAILURE_NARRATIVES[systemKey]));
+    if (autopilotDropped) log(state, "The autopilot can't steer without the rudder.");
+    var causeLine = failureCauseLine(systemKey, cause);
+    if (causeLine) log(state, causeLine);
     flushNewLogEntries(state);
     // VESSEL LOG -- a genuine mechanical/system failure, same
     // terminology map as repairs (steering -> RUDDER), whichever of
     // the two paths above triggered it (scheduled or storm-driven risk
     // -- both funnel through this one shared function).
-    logVesselLogEvent(state, REPAIR_SYSTEM_LABEL[systemKey] + ' FAILURE');
+    logVesselLogEvent(state, failureEventText(systemKey, cause));
   }
 
-  function checkScheduledFailures(state) {
+
+  /* --------------------------------------------------------------
+     DAILY MAINTENANCE (see PERFORM MAINTENANCE in the AFT CABIN)
+
+     The ordinary, otherwise-unexplained failures of the four systems are no longer a random timer: they happen only when a whole in-game calendar day
+     (midnight to midnight, by the same clock the date and the DAY count use) goes by with no maintenance. Then ONE failure is scheduled for a random time
+     between 00:01 and 06:00 on the next day (never exactly at midnight). Completing maintenance before that time cancels it, and the daily protection simply
+     carries on. Maintenance gives NO protection from the weather: checkStormSailRisk (strong wind on the sails) ignores it, as it always ignored a repair's
+     protection. Weather stress damages the SAILS only; the rudder, the engine and the electrical system are damaged only by a missed day.
+       state.maintenance = { done: day of the last completed maintenance | null, grace: last day that can not count as missed,
+                             seen: last day the check has looked at, pending: [voyage minutes of failures waiting for their time] }
+     -------------------------------------------------------------- */
+  var REPAIRS_USE_SPARES = true;                  // each repair uses up one spare part (the one tunable for it: false puts the old unlimited repairs back)
+  var SPARE_PARTS_ORIGINAL = 3;                   // 3 of each aboard at the start of a voyage (newGameState)
+  var REPAIR_SPARE_KEY = { sails: 'sailRepairKit', steering: 'steeringParts', engine: 'engineParts', electrical: 'fuses' };
+  var FAILURE_CAUSE_LABEL = { weather: 'WEATHER STRESS', neglect: 'MISSED MAINTENANCE' };
+  var FAILURE_CAUSE_LINES = {
+    weather: { sails: 'It was too much wind for her.' },
+    neglect: 'I had let the daily maintenance go, and it showed.',
+  };
+
+  function spareCount(state, systemKey) {
+    var n = state.supplies && state.supplies.spares ? state.supplies.spares[REPAIR_SPARE_KEY[systemKey]] : 0;
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  }
+
+  // The day number the game's own clock gives to any instant (the same arithmetic as voyageDayNumber, which reads the voyage's present).
+  function voyageDayNumberAt(state, ts) {
+    var departure = new Date(state.meta.departureDateAnchor != null ? state.meta.departureDateAnchor : state.meta.departedAt);
+    var current = new Date(ts);
+    var a = new Date(departure.getFullYear(), departure.getMonth(), departure.getDate());
+    var b = new Date(current.getFullYear(), current.getMonth(), current.getDate());
+    return Math.round((b - a) / 86400000) + 1;
+  }
+
+  function maintenanceMemory(state) {
+    if (!state.maintenance || typeof state.maintenance !== 'object') migrateMaintenanceIfNeeded(state);
+    return state.maintenance;
+  }
+  function maintenanceDoneToday(state) { return maintenanceMemory(state).done === voyageDayNumber(state); }
+  function maintenanceOverdue(state) { return maintenanceMemory(state).pending.length > 0; } // a missed day's failure is still waiting for its time
+
+  // A save from before maintenance existed: it had no way to do it, so no day up to NOW can count as missed (the first possible missed day is
+  // the first full day after this). Spares are only ever filled in where a save has none recorded at all -- a number that is there, 0 included, is kept.
+  function migrateMaintenanceIfNeeded(state) {
     var b = state.boat;
-    if (state.meta.voyageMinutes < b.nextFailureAt) return;
-    var sys = pickFailureSystem(state);
-    if (!sys) {
-      // Either everything's already DAMAGED/protected, or the draw simply
-      // landed on a system that currently isn't eligible (see
-      // pickFailureSystem) — either way, nothing happens this cycle. Push
-      // the schedule out so this doesn't re-check every single tick.
-      scheduleNextFailure(state, false);
-      return;
+    if (!b.failCause || typeof b.failCause !== 'object') b.failCause = {};
+    BOAT_FAIL_SYSTEMS.forEach(function (k) { if (b.failCause[k] === undefined) b.failCause[k] = null; });
+    if (!state.supplies || typeof state.supplies !== 'object') state.supplies = {};
+    if (!state.supplies.spares || typeof state.supplies.spares !== 'object') state.supplies.spares = {};
+    ['sailRepairKit', 'steeringParts', 'engineParts', 'fuses'].forEach(function (k) {
+      var n = state.supplies.spares[k];
+      if (n === undefined || n === null || !Number.isFinite(n)) state.supplies.spares[k] = SPARE_PARTS_ORIGINAL;
+    });
+    var m = state.maintenance;
+    if (!m || typeof m !== 'object') {
+      var today = voyageDayNumber(state);
+      m = state.maintenance = { done: null, grace: Math.max(today, voyageDayNumberAt(state, Date.now())), seen: today, pending: [] };
     }
-    triggerFailure(state, sys);
-    scheduleNextFailure(state, Math.random() < FAILURE_CHAIN_CHANCE);
+    if (m.done === undefined) m.done = null;
+    if (!Number.isFinite(m.grace)) m.grace = voyageDayNumber(state);
+    if (!Number.isFinite(m.seen)) m.seen = voyageDayNumber(state);
+    if (!Array.isArray(m.pending)) m.pending = [];
+    m.pending = m.pending.filter(function (t) { return Number.isFinite(t); });
+  }
+
+  function localMinutesSinceMidnight(ts) {
+    var d = new Date(ts);
+    return d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60 + d.getMilliseconds() / 60000;
+  }
+
+  // Called every tick (live, and while time is replayed after an absence, minute by minute -- so every midnight in between is seen in order).
+  function checkMaintenanceLapse(state) {
+    var m = maintenanceMemory(state), vm = state.meta.voyageMinutes;
+    var day = voyageDayNumber(state);
+    if (m.seen < day) {
+      var ended = day - 1; // the calendar day that has just ended
+      if (ended > m.grace && m.done !== ended) {
+        var midnight = vm - localMinutesSinceMidnight(state.meta.departedAt + vm * 60000);
+        var due = midnight + 1 + Math.random() * 359; // 00:01 .. 06:00 on the new day: never exactly at midnight
+        if (due <= vm && localMinutesSinceMidnight(state.meta.departedAt + vm * 60000) < 360) due = vm + 1; // (the new day was noticed late -- a jump of the clock -- and it is still the small hours: the next minute)
+        if (due > vm) m.pending.push(due);
+      }
+      m.seen = day;
+    }
+    for (var i = 0; i < m.pending.length;) {
+      if (vm < m.pending[i]) { i++; continue; }
+      m.pending.splice(i, 1);
+      var sys = pickFailureSystem(state, true); // a system that can actually fail; none left to fail: the day costs nothing
+      if (sys) triggerFailure(state, sys, 'neglect');
+    }
+  }
+
+  // Completing maintenance: today is done, and any failure the last missed day had scheduled is cancelled.
+  function completeMaintenance(state) {
+    var m = maintenanceMemory(state);
+    m.done = voyageDayNumber(state);
+    m.pending = [];
+  }
+
+  function setFailureCause(state, systemKey, cause) {
+    if (!state.boat.failCause) state.boat.failCause = {};
+    state.boat.failCause[systemKey] = cause || null;
+  }
+  // The words for a failure's cause, for the diary line (the aft-cabin status and the Vessel Log use FAILURE_CAUSE_LABEL).
+  function failureCauseLine(systemKey, cause) {
+    if (cause === 'weather') return FAILURE_CAUSE_LINES.weather[systemKey] || null;
+    if (cause === 'neglect') return FAILURE_CAUSE_LINES.neglect;
+    return null;
+  }
+  function failureEventText(systemKey, cause) {
+    return REPAIR_SYSTEM_LABEL[systemKey] + ' FAILURE' + (cause && FAILURE_CAUSE_LABEL[cause] ? ' — ' + FAILURE_CAUSE_LABEL[cause] : '');
+  }
+
+  // The ordinary failures: only from a calendar day without maintenance (see DAILY MAINTENANCE above). The old random 48-96 hour timer is retired --
+  // state.boat.nextFailureAt stays in a save, unused.
+  function checkScheduledFailures(state) {
+    checkMaintenanceLapse(state);
   }
 
   /* --------------------------------------------------------------
@@ -6884,31 +7012,37 @@
     return 'ordinary';
   }
 
-  // Chance PER 10 MINUTES of exposure at a given tier, before the sail
-  // configuration factor below — run through tickProbability() so it
-  // compounds correctly regardless of TICK_MINUTES. 'ordinary' is 0: full
-  // sail in unremarkable conditions carries no storm-driven risk at all.
-  // Calibrated against how driftWeather's own random walk actually
-  // behaves absent a real-weather anchor (no mean reversion, clamped at
-  // the edges) — it spends a large minority of all time in what
-  // sailRiskTier calls 'severe', in streaks of several continuous days,
-  // not the occasional squall these numbers might otherwise suggest. A
-  // careful player reducing sail through that has to stay safe across
-  // real cumulative WEEKS of exposure over a full crossing, not hours.
-  var SAIL_STORM_P10_BY_TIER = { ordinary: 0, strong: 0.0005, severe: 0.0015 };
-  // How much carrying less canvas cuts that risk — FURLED is 0: no
-  // canvas up, nothing for the wind to tear.
-  var SAIL_STORM_CONFIG_FACTOR = { full: 1, reefed: 0.35, minimal: 0.08, furled: 0 };
+  // THE SAILS ARE DAMAGED ONLY BY TOO MUCH SAIL FOR THE WIND (the handbook's own bands). The right setting for the wind -- or any smaller one -- carries no risk at
+  // all. More than the wind allows is the only exposure, at the chances per 10 minutes below, once the 30 minutes of grace have run: they start from the moment the
+  // wind moves up into a stronger band (setting too much sail into a wind that is already too strong has no grace). A sleeping sailor cannot reef, so it all runs on.
+  // Run through tickProbability() so it compounds correctly regardless of TICK_MINUTES. Calibrated against how driftWeather's own random walk actually
+  // behaves absent a real-weather anchor (no mean reversion, clamped at the edges) -- it spends a large minority of all time in what sailRiskTier calls
+  // 'severe', in streaks of several continuous days, so a player who keeps the right sail up through it is never at risk, and one who does not is, within days.
+  // (Per 10 minutes while overpowered, after the grace: about 25% over an 8-hour sleep in strong wind and 52% in severe wind; all three repair kits in ~3.5 / ~1.4 days.)
+  var SAIL_STORM_P10_BY_TIER = { ordinary: 0, strong: 0.006, severe: 0.015 };
+  var SAIL_REEF_GRACE_MINUTES = 30;
+  var SAIL_REEF_RANK = { furled: 0, minimal: 1, reefed: 2, full: 3 };
+  // The most sail the wind allows: FULL up to 22 knots, REEFED above that through 32, MINIMAL above 32 or in a squall.
+  function sailAreaAllowedFor(w) {
+    var tier = sailRiskTier(w);
+    return tier === 'severe' ? 'minimal' : (tier === 'strong' ? 'reefed' : 'full');
+  }
+  function sailsOverpowered(state) {
+    var rank = SAIL_REEF_RANK[state.boat.sailConfig];
+    if (rank == null) return false; // (an unrecognized config -- no exposure)
+    return rank > SAIL_REEF_RANK[sailAreaAllowedFor(state.weather)];
+  }
 
   function checkStormSailRisk(state) {
     var b = state.boat, w = state.weather;
+    if (!sailsOverpowered(state)) { b.sailOverSince = null; return; }
+    if (b.sailOverSince == null) b.sailOverSince = state.meta.voyageMinutes; // the wind rose past what she is set for: the time to reef starts now
     if (b.sails !== 'GOOD') return;
-    var configFactor = SAIL_STORM_CONFIG_FACTOR[b.sailConfig];
-    if (!configFactor) return; // furled, or an unrecognized config -- no exposure
-    var p10 = SAIL_STORM_P10_BY_TIER[sailRiskTier(w)] * configFactor;
+    if (state.meta.voyageMinutes - b.sailOverSince < SAIL_REEF_GRACE_MINUTES) return; // still time to reef
+    var p10 = SAIL_STORM_P10_BY_TIER[sailRiskTier(w)];
     if (p10 <= 0) return;
     if (Math.random() < tickProbability(p10)) {
-      triggerFailure(state, 'sails');
+      triggerFailure(state, 'sails', 'weather');
     }
   }
 
@@ -6941,8 +7075,7 @@
   }
 
   function checkStormRisk(state) {
-    checkStormSailRisk(state);
-    checkStormSteeringRisk(state);
+    checkStormSailRisk(state); // (checkStormSteeringRisk is retired: weather stress damages the sails only)
   }
 
   /* --------------------------------------------------------------
@@ -7839,6 +7972,7 @@
     var m = momentMemory(state), t = state.meta.voyageMinutes, start = t - minutesAsleep, then = null;
     for (var i = m.samp.length - 1; i >= 0; i--) if (m.samp[i].t <= start) { then = m.samp[i].wind; break; }
     m.lastWake = { t: t, len: minutesAsleep, windThen: then };
+    if (!state.boat.autopilotOn && minutesAsleep >= 30 && state.nav.heading != null && state.nav.setCourse != null && Math.abs(signedAngleDiff(state.nav.heading, state.nav.setCourse)) >= 15) log(state, "She's fallen off course while I slept.");
   }
   function momentNoteMeal(state, item) {
     var m = momentMemory(state), t = state.meta.voyageMinutes;
@@ -7969,6 +8103,7 @@
     return pickVariant(DAILY_COPY[key], key, ctx).split('{D}').join(describeSleepDuration(minutes));
   }
   function wakeUp(state, room) {
+    if (state.crew.watchState !== 'sleeping') return; // (he already woke by himself: checkNeedsWake)
     var start = state.crew.sleepStartedAt;
     var minutesAsleep = start == null ? 0 : state.meta.voyageMinutes - start;
     var capMinutes = sleepCapMinutes(state.crew), pastCap = minutesAsleep > capMinutes; // GET UP: he had stopped sleeping and was lying awake in the bunk
@@ -12022,10 +12157,7 @@
   // itself, which now shows it expanded -- arguably a small
   // improvement over the old behavior, since the player sees the
   // system they just dealt with immediately, with no extra click.
-  function cmdStatus(state) {
-    navStationExpanded.status = true;
-    cmdNavStation(state);
-  }
+  function cmdStatus(state) { cmdAftCabin(state); } // (the ship status moved from the NAV STATION to the AFT CABIN; a stale button lands there)
 
   var ELECTRICAL_TOGGLE_FIELDS = {
     cabinLights: 'cabinLightsOn',
@@ -12181,6 +12313,12 @@
   function performAutopilotToggle(state, returnTo) {
     var render = returnTo || cmdHelm;
     var b = state.boat;
+    if (!b.autopilotOn && b.steering === 'DAMAGED') {
+      printBlank();
+      printLine("The autopilot can't steer without the rudder.", 'amber');
+      render(state);
+      return;
+    }
     if (!b.autopilotOn && b.electrical === 'DAMAGED') {
       printBlank();
       printLine('Electrical system damaged.', 'amber');
@@ -12457,7 +12595,7 @@
   }
   // Called from the live loop (and on coming back to the page), like gpsPowerWatch: if a forecast is on the screen and the power has gone, the radio goes dark and the player is back at the NAV STATION.
   function marineForecastPowerWatch(state) {
-    if (!state || introPending || gpsPowered(state)) return;
+    if (!state || introPending || accessoryPowered(state)) return;
     var pc = state.pendingChoice;
     if (!pc || pc.id !== 'marine-forecast') return;
     var tx = activeMarineTransmission;
@@ -12472,7 +12610,7 @@
   }
 
   function cmdMarineForecast(state) {
-    if (!gpsPowered(state)) { marineForecastNoPower(state); return; } // no accessory power: the radio stays dark
+    if (!accessoryPowered(state)) { marineForecastNoPower(state); return; } // no accessory power: the radio stays dark
     if (!marineForecastAvailable(state)) { // listed from the start but locked until Pacific control: the same shape as blockedByCoastalLock (a message, then straight back to the screen it came from)
       printBlank();
       printLine("I still have cell service. I'll check the marine forecast once I'm offshore."); // an observation, in the ordinary text (not amber, not caps), and not logged
@@ -12526,7 +12664,7 @@
      are about a choice right now, not a supply audit.
      -------------------------------------------------------------- */
   var SPARES_NAMES = {
-    sailRepairKit: 'Sail Repair Kit', steeringParts: 'Rudder Parts', engineParts: 'Engine Parts', fuses: 'Fuses',
+    sailRepairKit: 'Sail Repair Kits', steeringParts: 'Rudder Parts', engineParts: 'Engine Spares', fuses: 'Spare Fuses',
   };
 
   function inventoryLine(name, valueText) {
@@ -12547,58 +12685,13 @@
     });
   }
 
+  // The old INVENTORY screens are gone (the AFT CABIN's INVENTORY dropdown shows all of it); a stale button for one lands there, with the list open.
   function showInventoryCategory(state, cat) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:inventory'); return; }
-    printBlank();
-    switch (cat) {
-      case 'provisions':
-        printLine('PROVISIONS', 'heading-label');
-        var anyFood = FOOD_ITEMS.some(function (f) { return state.food[f.key] > 0; });
-        if (!anyFood) {
-          printLine('Nothing left aboard to eat.', 'amber');
-        } else {
-          FOOD_ITEMS.forEach(function (f) { if (state.food[f.key] > 0) printDataRow(f.name.toUpperCase(), countCurrentOriginal(state.food[f.key], f.original), 'data-row-lg'); });
-        }
-        printDataRow('COFFEE', countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE), 'data-row-lg');
-        printDataRow('TEA', countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA), 'data-row-lg');
-        break;
-      case 'water':
-        printLine('WATER', 'heading-label');
-        printDataRow('WATER', galCurrentOriginal(state.water.gallons, WATER_STARTING_GALLONS).toUpperCase(), 'data-row-lg');
-        break;
-      case 'fuel':
-        printLine('DIESEL', 'heading-label');
-        printDataRow('DIESEL', galCurrentOriginal(state.boat.fuelGallons, FUEL_STARTING_GALLONS).toUpperCase(), 'data-row-lg');
-        break;
-      case 'spares':
-        printLine('SPARES', 'heading-label');
-        // Informational only -- these are never consumed (repairs are
-        // unlimited), so this is simply a list of what's aboard, not a
-        // quantity/count display. See performSystemRepairAttempt.
-        Object.keys(SPARES_NAMES).forEach(function (k) { printLine(SPARES_NAMES[k]); });
-        break;
-      default:
-        printLine('Nothing there.', 'dim');
-    }
-    state.pendingChoice = { id: 'inventory-category', options: [{ label: 'BACK', action: 'inventory:back' }] };
+    aftCabinOpen.inventory = true;
+    cmdAftCabin(state);
   }
 
-  function cmdInventory(state) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
-    printBlank();
-    printLine('INVENTORY', 'heading-label');
-    state.pendingChoice = {
-      id: 'inventory-menu',
-      options: [
-        { label: 'PROVISIONS', action: 'inventory:provisions' },
-        { label: 'WATER', action: 'inventory:water' },
-        { label: 'DIESEL', action: 'inventory:fuel' },
-        { label: 'SPARES', action: 'inventory:spares' },
-        { divider: true },
-        { label: 'BACK', action: 'cmd:nav-station' },
-      ],
-    };
-  }
+  function cmdInventory(state) { showInventoryCategory(state, null); }
 
   // RESCUE -- the ending (see RESCUE ENDING below). The closing diary entry once help has been called, worded for the actual cause (voyageEnd.reason: 'water' after 72 hours without a drink, 'food'
   // after 168 hours without a meal; anything older / unknown gets the plain form). First person, restrained, no narrator addressing the player.
@@ -12876,24 +12969,6 @@
     // read each time the helm is drawn; when they're fine there is no row at all (no placeholder, no gap).
     var trimRows = helmTrimNeeded(state) ? [{ label: 'TRIM SAILS', action: 'trim-sails' }] : [];
     var autopilotRow = { label: 'AUTOPILOT', action: 'toggle-autopilot', indicator: state.boat.autopilotOn ? 'on' : 'off' };
-    var gpsRow = { label: 'GPS', action: 'cmd:gps-helm' };
-
-    if (state.boat.steering === 'DAMAGED') {
-      // The helm itself is gone -- physically taking it isn't possible
-      // (matches the pre-existing rule; see performRandomFailure's own
-      // steering-damage hook, which forces atHelm false) -- so no CHANGE
-      // COURSE, but AUTOPILOT (gated only on electrical damage,
-      // unchanged) and TRIM SAILS (an unrelated physical action) remain.
-      printHelmAtHelmHeader(state, true);
-      if (nav.landWarningLevel !== 'none') {
-        printBlank();
-        printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
-      }
-      printBlank();
-      printLine('Rudder is damaged. Course cannot be changed until it\u2019s repaired.', 'amber');
-      state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([gpsRow, autopilotRow]), 'cancel') };
-      return;
-    }
 
     if (!state.crew.atHelm) {
       // Fresh entry -- the exact same transition TAKE THE HELM always
@@ -12911,7 +12986,8 @@
       printBlank();
       printLine(LAND_WARNING_TEXT[nav.landWarningLevel], 'amber');
     }
-    state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([{ label: 'CHANGE COURSE', action: 'cmd:change-course' }, gpsRow, autopilotRow]), 'leave-helm') };
+    if (state.boat.steering === 'DAMAGED') { printBlank(); printLine('The wheel spins free. I can still steer with the sails.', 'amber'); }
+    state.pendingChoice = { id: 'helm-menu', options: pushBack(trimRows.concat([{ label: 'CHANGE COURSE', action: 'cmd:change-course' }, autopilotRow]), 'leave-helm') };
   }
 
   // The helm is drawn once, so when the sails start (or stop) needing trim while it is open -- a course turn crossing into another
@@ -12973,7 +13049,6 @@
   // The instrument block stays visible above the dial controls.
   function cmdChangeCourse(state) {
     var nav = state.nav;
-    if (state.boat.steering === 'DAMAGED') { cmdHelm(state); return; } // shouldn't be reachable — button isn't shown otherwise
     if (nav.courseDraft == null) nav.courseDraft = Math.round(nav.setCourse);
     printBlank();
     printHelmAtHelmHeader(state);
@@ -12998,6 +13073,12 @@
   // stored as the sleep start. The real-time clock is never touched.
   function cmdSleep(state) {
     if (state.crew.watchState !== 'awake') return; // shouldn't be reachable — button isn't shown otherwise
+    var wakefulLine = sleepBlockLine(state);
+    if (wakefulLine) { // starving, very thirsty or wired on coffee: sleep does not begin (food, water and time are all it takes)
+      cmdCabin(state);
+      printLine(wakefulLine, 'amber');
+      return;
+    }
     if (sleepTooHot(state)) { // clearly overdressed for this cabin: sleep does not begin. (Being underdressed is never a reason: the bedding supplies the warmth.)
       cmdCabin(state);
       printLine('Too hot to sleep. I should change clothes.', 'amber');
@@ -13224,12 +13305,12 @@
   // choreOptionIfDue call sites: dishes from GALLEY, tidy from SALOON,
   // bunk/air from CABIN, tools from NAV STATION), so this is also the
   // correct BACK/darkness-block destination while mid-chore.
-  var CHORE_ROOM_CMD = { dishes: 'cmd:galley', tidy: 'cmd:saloon', bunk: 'cmd:cabin', air: 'cmd:cabin', tools: 'cmd:nav-station' };
+  var CHORE_ROOM_CMD = { dishes: 'cmd:galley', tidy: 'cmd:saloon', bunk: 'cmd:forward-cabin', air: 'cmd:forward-cabin', tools: 'cmd:aft-cabin' };
   function chorePendingReturn(kind) {
     if (kind === 'dishes') return cmdGalley;
     if (kind === 'tidy') return cmdSaloon;
     if (kind === 'bunk' || kind === 'air') return cmdCabin;
-    if (kind === 'tools') return cmdNavStation;
+    if (kind === 'tools') return cmdAftCabin;
     return null;
   }
 
@@ -13287,11 +13368,10 @@
   function cmdSaloon(state) {
     var b = state.boat;
     printBlank();
-    printLine('MORALE: ' + moraleLevel(state.crew.morale));
-    climateRowEls = { temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)) }; // CABIN TEMP and HEATER, just under MORALE (kept current by refreshClimateRows)
+    climateRowEls = { morale: printLine(climateMoraleLine(state)), temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)), hatch: printLine(climateHatchLine(state)) }; // CABIN TEMP, HEATER and HATCH (kept current by refreshClimateRows)
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
-      { label: 'SIT A WHILE', action: 'sit-a-while' },
+      { label: 'RELAX', action: 'sit-a-while' },
       { label: b.heaterOn ? 'TURN HEATER OFF' : 'TURN HEATER ON', action: 'climate-heater' },
       b.hatchOpen ? { label: 'CLOSE HATCH', action: 'close-hatch' } : { label: 'OPEN HATCH', action: 'open-hatch' },
     ];
@@ -13341,13 +13421,17 @@
   // menu itself, under SIT A WHILE (there is no CLIMATE menu). Nothing here is gated by darkness, as the hatch never was; the heater will not light on an empty kerosene reserve.
   var climateRowEls = null;
   function climateCabinTempText(state) { var f = state.boat.cabinTemperatureF; return f != null ? Math.round(f) + '\u00B0F' : '\u2014'; }
+  function climateMoraleLine(state) { return 'MORALE: ' + moraleLevel(state.crew.morale); }
   function climateTempLine(state) { return 'CABIN TEMP: ' + climateCabinTempText(state); }
   function climateHeaterLine(state) { return 'HEATER: ' + (state.boat.heaterOn ? 'ON' : 'OFF'); }
+  function climateHatchLine(state) { return 'HATCH: ' + (state.boat.hatchOpen ? 'OPEN' : 'CLOSED'); }
   function refreshClimateRows(state) {
     if (!climateRowEls || !state || !tempViewEl.contains(climateRowEls.temp)) { climateRowEls = null; return; }
-    var t = climateTempLine(state), h = climateHeaterLine(state);
+    var t = climateTempLine(state), h = climateHeaterLine(state), ha = climateHatchLine(state), mo = climateMoraleLine(state);
+    if (climateRowEls.morale && climateRowEls.morale.textContent !== mo) climateRowEls.morale.textContent = mo;
     if (climateRowEls.temp.textContent !== t) climateRowEls.temp.textContent = t;
     if (climateRowEls.heater.textContent !== h) climateRowEls.heater.textContent = h;
+    if (climateRowEls.hatch && climateRowEls.hatch.textContent !== ha) climateRowEls.hatch.textContent = ha;
   }
   // The heater switch. Switching it on needs kerosene; switching it off always works. The cabin only ever moves through syncCabinTemperature's own gradual blend.
   function performHeaterToggle(state) {
@@ -13761,7 +13845,7 @@
     sitSession = null;
     if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
     sitRemoveObservation(s);
-    if (activityDotsCurrentLabel === 'SITTING A WHILE') stopActivityDots();
+    if (activityDotsCurrentLabel === 'RELAXING') stopActivityDots();
     var el = s.entryEl;
     if (el && !el.paused) { el.onended = null; fadeSaloonVolume(el, 0, 0.12, function () { el.pause(); }); } // getting up straight away: the settling-in sound does not play on over it
   }
@@ -13788,7 +13872,7 @@
   // the Saloon returns -- the same audio-synced action every other physical action uses, so SOUND OFF or a blocked sound can never trap her here.
   function performGetUp(state) {
     if (!sitSession) { keepScreen(state); return; } // not sitting (a stray or repeated press): nothing to do, and the screen stays as it is
-    awardQuietMorale(state, (Date.now() - sitSession.startedAt) / 60000); // getting up by choice after a while of quiet: a little morale (see awardQuietMorale)
+    // (RELAX gives energy, not morale: READ lifts the spirits. The bow, BINOCULARS, keeps its small bonus.)
     sitEndSession();
     state.pendingChoice = null;
     runAudioSyncedAction(state, {
@@ -14646,12 +14730,161 @@
     });
   }
 
-  // CABIN — sleep, clothing, and their related chores. COMFORT is a
+
+  /* ==============================================================
+     AFT CABIN -- the boat's status, inventory, repairs and daily maintenance.
+
+     The last room on the BELOW DECK menu. It is entered and left through its door (the same sounds as the FORWARD CABIN's), and the other screens that return
+     here (REPAIRS, PERFORM MAINTENANCE, PUT AWAY TOOLS) come back without it. What it shows:
+       MAINTENANCE  DUE | OVERDUE        or, once it is done: MAINTENANCE COMPLETE FOR TODAY
+       > STATUS                          drops down: SAILS / RUDDER / ENGINE / ELECTRICAL (an undiscovered engine fault still reads GOOD, as it always did), and
+                                         one line for each damaged system naming what did it -- WEATHER STRESS (storm wind on the sails: the only thing the
+                                         weather damages) or MISSED MAINTENANCE (a calendar day with none)
+       > INVENTORY                       drops down one list, a gap between its groups: WATER / DIESEL / KEROSENE (what is left); the meals; the snacks (chocolate
+                                         last); COFFEE / TEA; SAIL REPAIR KITS / RUDDER PARTS / ENGINE SPARES / SPARE FUSES (the food and the spares:
+                                         left / at the start)
+       > REPAIRS                         only while a system is known to be damaged
+       > PERFORM MAINTENANCE             not offered once today's is done
+       > PUT AWAY TOOLS                  only while the tools are out (after a repair, or the day's maintenance)
+     aftCabinStatusModel is the one place the screen is worked out: the screen is drawn from it, and the live loop (aftCabinWatch) redraws the open room when
+     anything in it has changed (a system failing in the small hours while the player is standing there, say). Which dropdowns are open is UI only (aftCabinOpen:
+     never saved, and kept while the player moves between this room and its sub-screens).
+     ============================================================== */
+  var aftCabinSig = null; // (UI only, never saved) what the screen on show was drawn from
+  var aftCabinOpen = { status: false, inventory: false }; // (UI only, never saved) which dropdowns are open
+
+  function aftCabinStatusModel(state) {
+    var b = state.boat, m = maintenanceMemory(state);
+    var systems = [], causes = [];
+    BOAT_FAIL_SYSTEMS.forEach(function (k) {
+      var known = systemDamageKnown(state, k);
+      systems.push({ label: REPAIR_SYSTEM_LABEL[k], value: (b[k] === 'DAMAGED' && !known) ? 'GOOD' : b[k] });
+      if (known) {
+        var cause = b.failCause ? b.failCause[k] : null;
+        causes.push(REPAIR_SYSTEM_LABEL[k] + ' DAMAGED: ' + (FAILURE_CAUSE_LABEL[cause] || 'CAUSE UNKNOWN'));
+      }
+    });
+    var supplies = [
+      { label: 'WATER', value: galCurrentOnly(Math.max(0, state.water.gallons)).toUpperCase() },
+      { label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase() },
+      { label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase() },
+    ];
+    var meals = [], staples = [], snacks = []; // (the chocolate is listed last among the snacks, as it is in the galley; rice, oats and pancake mix are kept in cups)
+    FOOD_ITEMS.forEach(function (f) {
+      if (!(state.food[f.key] > 0)) return;
+      if (f.staple) staples.push({ label: f.stockName + ' (CUPS)', value: formatGal(state.food[f.key]) + ' / ' + formatGal(f.original) });
+      else (f.type === 'meal' ? meals : snacks).push({ label: f.name.toUpperCase(), value: countCurrentOriginal(state.food[f.key], f.original) });
+    });
+    var drinks = [
+      { label: 'COFFEE', value: countCurrentOriginal(state.drinks.coffee, ORIGINAL_COFFEE) },
+      { label: 'TEA', value: countCurrentOriginal(state.drinks.tea, ORIGINAL_TEA) },
+    ];
+    var spares = Object.keys(SPARES_NAMES).map(function (k) {
+      var left = state.supplies.spares[k];
+      return { label: SPARES_NAMES[k].toUpperCase(), value: countCurrentOriginal(Number.isFinite(left) ? left : 0, SPARE_PARTS_ORIGINAL) };
+    });
+    var stores = [{ rows: supplies }, { rows: meals }, { rows: staples }, { rows: snacks }];
+    if (meals.length === 0 && staples.length === 0 && snacks.length === 0) stores.splice(1, 3, { note: 'Nothing left aboard to eat.' });
+    stores.push({ rows: drinks }, { rows: spares });
+    return {
+      systems: systems,
+      causes: causes,
+      stores: stores.filter(function (g) { return g.note || g.rows.length > 0; }),
+      repairs: hasRepairableDamage(state),
+      toolsOut: state.crew.toolsOutSinceMinutes != null,
+      maintenanceDone: m.done === voyageDayNumber(state),
+      maintenance: m.pending.length > 0 ? 'OVERDUE' : 'DUE',
+    };
+  }
+
+  function cmdAftCabin(state) {
+    printRoomHeader('AFT CABIN');
+    printBlank();
+    var model = aftCabinStatusModel(state);
+    if (model.maintenanceDone) printLine('MAINTENANCE COMPLETE FOR TODAY');
+    else printDataRow('MAINTENANCE', model.maintenance, 'data-row-md');
+    // The dropdowns are rows of the options panel itself (the way the NAV STATION's STATUS used to open): a toggle button, and its readings directly beneath it.
+    var menu = [];
+    function drop(key, label, level) { menu.push({ label: label, action: 'aft-toggle:' + key, indent: level }); return aftCabinOpen[key]; }
+    function readings(list, widthCls, level) { list.forEach(function (r) { menu.push({ dataRow: true, label: r.label, value: r.value, widthCls: widthCls, indent: level }); }); }
+    if (drop('status', 'STATUS', 0)) {
+      readings(model.systems, 'data-row-lg', 1); // (the same column as the inventory's counts)
+      model.causes.forEach(function (t) { menu.push({ status: true, text: t, indent: 1 }); });
+    }
+    if (drop('inventory', 'INVENTORY', 0)) {
+      model.stores.forEach(function (g, i) {
+        if (i > 0) menu.push({ divider: true }); // a gap between the groups: the supplies, the meals, the snacks, the drinks, the spares
+        if (g.note) menu.push({ status: true, text: g.note, indent: 1 });
+        else readings(g.rows, 'data-row-lg', 1);
+      });
+    }
+    var work = [];
+    if (model.repairs) work.push({ label: 'REPAIRS', action: 'cmd:repair' });
+    if (!model.maintenanceDone) work.push({ label: 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
+    if (model.toolsOut) work.push({ label: CHORE_LABELS.tools, action: 'chore:tools' });
+    aftCabinSig = JSON.stringify(model);
+    state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(groupedOptions([menu, work]), 'leave-aft-cabin') };
+  }
+
+  function aftCabinToggle(state, key) {
+    if (!Object.prototype.hasOwnProperty.call(aftCabinOpen, key)) return;
+    // The status can be read in the dark; looking through the stores (the inventory) takes light, as it always has.
+    if (key === 'inventory' && !aftCabinOpen[key] && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
+    aftCabinOpen[key] = !aftCabinOpen[key];
+    cmdAftCabin(state);
+  }
+
+  // The live loop: the open room is drawn again the moment anything it shows has changed.
+  function aftCabinWatch(state) {
+    if (!state || introPending || uiBusy) return;
+    var pc = state.pendingChoice;
+    if (!pc || pc.id !== 'aft-cabin-menu') return;
+    if (JSON.stringify(aftCabinStatusModel(state)) === aftCabinSig) return;
+    clearTempView();
+    cmdAftCabin(state);
+    renderOptions(state);
+  }
+
+  function cmdEnterAftCabin(state) {
+    runAudioSyncedAction(state, {
+      label: 'OPENING THE DOOR',
+      transientLabel: true,
+      playAudio: function (onEnded) { return playDoorOneShot('open', onEnded); },
+      action: function (s) { cmdAftCabin(s); },
+    });
+  }
+  function cmdLeaveAftCabin(state) { cmdLeaveCabin(state); } // (the same door, the same sound, the same plain return to BELOW DECK)
+
+  // PERFORM MAINTENANCE: once per in-game calendar day. PERFORMING MAINTENANCE stays up for exactly as long as one of the four repair sounds (picked at random)
+  // plays -- the same audio-synced action every repair uses, so no game-time duration is added; when the sound ends the day is recorded as done (which also
+  // cancels the failure a missed day had scheduled), the tools are out (PUT AWAY TOOLS, as after a repair) and the room shows MAINTENANCE COMPLETE FOR TODAY.
+  function performMaintenance(state) {
+    if (uiBusy) return;
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
+    if (maintenanceDoneToday(state)) { cmdAftCabin(state); return; } // (a stale button: today's is already done)
+    if (isDepleted(state)) { // morale is the floor: at DEPLETED he cannot face the work (a walk, a book, a wash, a tape or sleep will bring it back)
+      cmdAftCabin(state);
+      printLine('TOO DEPLETED TO PERFORM MAINTENANCE.', 'amber');
+      return;
+    }
+    var soundKey = BOAT_FAIL_SYSTEMS[Math.floor(Math.random() * BOAT_FAIL_SYSTEMS.length)];
+    runAudioSyncedAction(state, {
+      label: 'PERFORMING MAINTENANCE',
+      playAudio: function (onEnded) { return playRepairAudio(soundKey, onEnded); },
+      action: function (s) {
+        completeMaintenance(s);
+        if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
+        cmdAftCabin(s);
+      },
+    });
+  }
+
+  // FORWARD CABIN — sleep, clothing, and their related chores. COMFORT is a
   // pure read of the existing clothing-comfort system (comfortLabel,
   // defined near HUNGER/THIRST/ENERGY above) — never a second
   // temperature calculation.
   function cmdCabin(state) {
-    printRoomHeader('CABIN');
+    printRoomHeader('FORWARD CABIN');
     printBlank();
     var c = state.crew;
     renderComfortRows(state, 'worn'); // ENERGY / COMFORT ABOVE / COMFORT BELOW (+ RAIN PROTECTION only while it is raining and the shell is off), all on the standard grid
@@ -14674,45 +14907,7 @@
     state.pendingChoice = { id: 'cabin-menu', options: pushBack(options, 'leave-cabin') };
   }
 
-  // NAV STATION COLLAPSIBLE SECTION -- STATUS expands/collapses in
-  // place within NAV STATION itself (never navigating to a separate
-  // screen the way SOLACE HANDBOOK/SHIP'S COMPUTER/INVENTORY still do):
-  // the toggle button's own label stays "> STATUS" in both states, with
-  // its rows appearing directly beneath it when expanded, collapsing
-  // back to just the button on a second click. UI-only, like openInfoPanel/
-  // uiBusy elsewhere in this file -- never part of state, never saved
-  // (a collapsed state after reload is harmless, expected, and exactly
-  // how every other UI-only flag in this file already behaves).
-  var navStationExpanded = { status: false };
-
-  // NAV STATION STATUS -- vessel systems / repair state, the same
-  // collapsible treatment as INSTRUMENTS just above (see
-  // navStationExpanded's own notes). The supplies -- WATER, DIESEL and KEROSENE, in gallons -- are read here. CABIN TEMP/BATTERY no longer
-  // appear here at all -- information-architecture pass, section 5:
-  // those readings already have a home (the three rows at the top of
-  // this same screen), and duplicating them here served no purpose.
-  // REPAIR/RESCUE stay as real, clickable buttons (never passive data
-  // rows) when relevant, exactly as STATUS always offered them -- the
-  // one place this expanded block still contains an actual action, not
-  // just a reading.
-  function statusDataRows(state) {
-    var rows = [{ label: 'STATUS', action: 'toggle-status' }];
-    if (!navStationExpanded.status) return rows;
-    var b = state.boat;
-    rows = rows.concat([
-      { dataRow: true, label: 'SAILS', value: b.sails, widthCls: 'data-row-md' },
-      { dataRow: true, label: 'RUDDER', value: b.steering, widthCls: 'data-row-md' },
-      { dataRow: true, label: 'ENGINE', value: systemDamageKnown(state, 'engine') || b.engine !== 'DAMAGED' ? b.engine : 'GOOD', widthCls: 'data-row-md' }, // an undiscovered failure still reads GOOD
-      { dataRow: true, label: 'ELECTRICAL', value: b.electrical, widthCls: 'data-row-md' },
-      { dataRow: true, label: 'WATER', value: galCurrentOnly(Math.max(0, state.water.gallons)).toUpperCase(), widthCls: 'data-row-md' },
-      { dataRow: true, label: 'DIESEL', value: galCurrentOnly(Math.max(0, b.fuelGallons)).toUpperCase(), widthCls: 'data-row-md' },
-      { dataRow: true, label: 'KEROSENE', value: galCurrentOnly(keroseneLeft(state)).toUpperCase(), widthCls: 'data-row-md' },
-    ]);
-    if (hasRepairableDamage(state)) {
-      rows.push({ label: 'REPAIR', action: 'cmd:repair' });
-    }
-    return rows;
-  }
+  // (STATUS used to expand in place here, with its REPAIR button; the ship status is in the AFT CABIN now.)
 
   // NAV STATION -- the boat's operational center: cabin/power status at
   // a glance, the electrical panel embedded directly (no heading of its
@@ -14730,13 +14925,13 @@
   // else. Groups are separated by blank vertical spacing ALONE
   // (groupedOptions' plain invisible spacer) -- no horizontal rule of
   // any kind anywhere on this screen.
-  // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER. SOLACE HANDBOOK and
-  // STATUS form the next group (see cmdNavStation).
+  // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER, SOLACE HANDBOOK.
   function navStationToolRows(state) {
     var rows = [];
-    rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
+    rows.push({ label: 'HANDHELD GPS', action: 'cmd:gps-nav' });
     rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
+    rows.push({ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' });
     return rows;
   }
 
@@ -14773,9 +14968,7 @@
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
     }
-    var toolsOpt = choreOptionIfDue(state, 'tools');
-    var extraGroup = [];
-    if (toolsOpt) extraGroup.push(toolsOpt);
+    // (PUT AWAY TOOLS used to be offered here; the tools come out in the AFT CABIN now, and are put away there.)
 
     // The electrical panel itself: no ELECTRICAL heading (the controls
     // are self-explanatory), no divider line bracketing it -- just its
@@ -14806,8 +14999,6 @@
     var options = groupedOptions([
       electricalRows,
       navStationToolRows(state),
-      [{ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }].concat(statusDataRows(state)),
-      extraGroup,
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
@@ -14904,6 +15095,8 @@
         { term: 'MINIMAL', body: 'Above 32 knots.' },
         { term: 'FURLED', body: 'Sails put away. No sailing power.' },
         { p: 'More sail does not always mean more speed. Reduce sail in worsening conditions. The engine can help in light winds and can run with sails raised.' },
+        { p: 'The sails are damaged only when too much sail is set for the wind. A squall counts as the strongest range. You have about half an hour to reduce sail once the wind rises into a stronger range.' },
+        { p: 'After that, every hour under too much sail risks a tear, and the stronger the wind, the worse the odds. You cannot reef in your sleep, so the risk does not pause while you rest. Sails that are already torn cannot tear again until you repair them. Furled sails are always safe.' },
       ],
     },
     {
@@ -14937,15 +15130,14 @@
         { term: 'VELOCITY MADE GOOD', body: 'How quickly you are approaching your destination. A negative value means you are moving farther away.' },
         { p: 'Use CHANGE COURSE to select a heading. SET COURSE FOR WAYPOINT or SET COURSE FOR N\u0100WILIWILI turns SOLACE toward the current bearing.' },
         { p: 'These commands set a heading only. They do not continuously steer toward the target.' },
-        { term: 'AUTOPILOT', body: 'Autopilot holds your current heading. It does not follow waypoints, navigate around land, or compensate for changing winds.' },
+        { term: 'AUTOPILOT', body: 'Autopilot holds your current heading. It does not follow waypoints, navigate around land, or compensate for changing winds. It needs power and a working rudder.' },
         { p: 'While at the helm, you can hold course manually. Switch on autopilot before leaving the helm if you want SOLACE to maintain her heading.' },
       ],
     },
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The GPS is accessible from the HELM and NAV STATION. Both open the same chart and share the same route.' },
-        { p: 'ACCESSORY power and battery charge are required to use it.' },
+        { p: 'The HANDHELD GPS is at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
         { p: 'The chart shows SOLACE\u2019s position, her traveled track, the planned route, and the destination.' },
         { term: 'SOLID LINE', body: 'Where SOLACE has sailed.' },
         { term: 'DASHED LINE', body: 'Your planned route through numbered waypoints.' },
@@ -14999,49 +15191,63 @@
       id: 'handbook-kerosene', heading: 'KEROSENE',
       blocks: [
         { p: 'SOLACE carries 20 gallons of kerosene shared by the heater, stove, and lantern.' },
-        { term: 'HEATER', body: 'Controlled from the SALOON. Warms the cabin when conditions are cold. Does not use battery power.' },
+        { term: 'HEATER', body: 'Controlled from the SALOON. Holds the cabin at 65\u00B0F when it is colder outside. Does not use battery power.' },
         { term: 'STOVE', body: 'Used for hot meals, coffee, and tea.' },
         { term: 'LANTERN', body: 'Provides light above and below deck. Extinguish it when no longer needed.' },
-        { p: 'Heating uses substantially more kerosene than cooking. Monitor the remaining supply in STATUS.' },
+        { p: 'Heating uses substantially more kerosene than cooking. Monitor the remaining supply in the AFT CABIN.' },
       ],
     },
     {
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
         { p: 'Your physical condition affects your ability to manage the boat.' },
+        { p: 'EXHAUSTED, you cannot make repairs or cook. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work, except in rough seas. A STARVING sailor can always cook.' },
+        { p: 'STARVING or VERY THIRSTY, you cannot sleep or make repairs. A sleeping sailor wakes up when STARVING or PARCHED. Eat or drink first.' },
+        { term: 'COFFEE', body: 'Gets you through repairs and cooking while EXHAUSTED for 2 hours. You cannot sleep for those 2 hours. Tea does neither.' },
+        { p: 'When you are COLD, you tire faster and sleep less well, and a cold sleeper wakes early. Wet clothes make it worse. Warm clothes, dry clothes, and the cabin heater help.' },
+        { p: 'MORALE is how well you are looking after yourself and the boat. Reading, music, a wash, chores, a good meal, and time at the bow lift it. Going unwashed, a dirty galley or bunk, wet gear left hanging, rough seas, and living on snacks wear it down. At DEPLETED you cannot make repairs or perform maintenance until it recovers.' },
+        { p: 'When you are too HOT, you get thirsty faster. Dress for the temperature: light clothes in the warm, layers in the cold. A T-shirt and shorts suit the warm; pants are too much above about 80\u00B0F.' },
         { term: 'GALLEY', body: 'Prepare meals, eat snacks, and drink. Food and freshwater are limited. Coffee and tea also consume water.' },
-        { p: 'Freshly caught fish can be cooked as a meal or eaten as sashimi without using kerosene. Fish keeps for 12 hours after it is caught.' },
+        { p: 'Rice, oats, and pancake mix are kept in cups. Each serving uses half a cup.' },
+        { p: 'Freshly caught fish can be cooked with a half cup of rice with seared or grilled fish and rice, or eaten as sashimi without using kerosene or rice. Fish keeps for 12 hours after it is caught.' },
         { p: 'Wash dishes when needed.' },
-        { term: 'CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
-        { term: 'SALOON', body: 'Read, stretch, or SIT A WHILE. Control the heater and hatch here.' },
-        { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth.' },
+        { term: 'FORWARD CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
+        { term: 'AFT CABIN', body: 'Check the boat\u2019s status and inventory, make repairs, and perform the day\u2019s maintenance.' },
+        { term: 'SALOON', body: 'Read, stretch, or RELAX. Control the heater and hatch here.' },
+        { p: 'Reading lifts your spirits. RELAX rests your body: while you do it you do not tire, and your energy slowly comes back, though never past GOOD. It does nothing for you if you are cold.' },
+        { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth, and in the sun a closed cabin runs hotter than the air outside. Open the hatch to cool it.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
-        { p: 'Reading, rest, and everyday care help maintain morale.' },
-        { p: 'SIT A WHILE and BINOCULARS allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
+        { p: 'Reading, music, and quiet time are there when you want the company.' },
+        { p: 'RELAX and BINOCULARS allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
       ],
     },
     {
-      id: 'handbook-repairs', heading: 'REPAIRS',
+      id: 'handbook-repairs', heading: 'REPAIRS AND MAINTENANCE',
       blocks: [
-        { p: 'At the NAV STATION, open STATUS to inspect:' },
+        { p: 'The AFT CABIN is the boat\u2019s workroom. Open STATUS to see the condition of:' },
         { list: ['SAILS', 'RUDDER', 'ENGINE', 'ELECTRICAL'] },
-        { p: 'When a system is damaged, select REPAIR and choose the affected system.' },
-        { p: 'Repair quality depends on energy, morale, hunger, thirst, and sea conditions.' },
-        { term: 'SOLID / GOOD', body: 'Longer-lasting repairs.' },
-        { term: 'TEMPORARY / PATCHED', body: 'May require attention sooner.' },
-        { p: 'If you are both EXHAUSTED and DEPLETED, recover before attempting repairs.' },
-        { p: 'Repair materials are carried aboard and do not need replenishing during this passage.' },
+        { p: 'When a system is damaged, STATUS names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
+        { p: 'Open INVENTORY to see the water, diesel, kerosene, food, drink, and spare parts left aboard.' },
+        { p: 'REPAIRS appears when a system is damaged. Choose the damaged system. Each repair uses one spare part.' },
+        { p: 'Repairs always work. You cannot make them while you are EXHAUSTED, STARVING, VERY THIRSTY, or DEPLETED. Rest, eat, drink, or lift your spirits first.' },
+        { p: 'A repaired system stays repaired as long as daily maintenance is done.' },
+        { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
+        { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
+        { h3: 'DAILY MAINTENANCE' },
+        { p: 'Select PERFORM MAINTENANCE once each day. Regular maintenance keeps ordinary, unexplained failures away.' },
+        { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
+        { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
     },
     {
       id: 'handbook-when-something-stops-working', heading: 'WHEN SOMETHING STOPS WORKING',
       blocks: [
         { term: 'NO SAILING SPEED', body: 'Check the wind, point of sail, sail area, trim, and sail condition.' },
-        { term: 'DAMAGED SAILS', body: 'Repair them or use the engine if available.' },
-        { term: 'DAMAGED RUDDER', body: 'Repair it before changing course.' },
+        { term: 'DAMAGED SAILS', body: 'They give half their speed. Repair them, or use the engine if available.' },
+        { term: 'DAMAGED RUDDER', body: 'You can still change course with the sails, but each turn takes twice as long and the autopilot will not run. Repair the rudder to steer normally.' },
         { term: 'ENGINE FAILURE', body: 'Check its condition and repair it. Continue under sail if possible.' },
-        { term: 'ELECTRICAL FAILURE', body: 'Replace the fuse and switch needed systems back on.' },
-        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The GPS, autopilot, and electric lights will be unavailable.' },
+        { term: 'ELECTRICAL FAILURE', body: 'The boat has no power until you replace the fuse. The HANDHELD GPS still works. Steer by hand, then switch needed systems back on.' },
+        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The autopilot and electric lights will be unavailable. The HANDHELD GPS still works.' },
         { term: 'RUN AGROUND', body: 'Select FREE SOLACE, then adjust your course.' },
         { term: 'TOO DARK TO SEE', body: 'Use the appropriate electric lights or light the lantern. If neither is available, wait for daylight.' },
         { term: 'OUT OF KEROSENE', body: 'The heater, stove, and lantern cannot operate. Cold food, water, and sashimi remain available.' },
@@ -16799,10 +17005,11 @@
   }
 
   // ---- the GPS runs on the accessory circuit ----
-  function gpsPowered(state) {
+  function accessoryPowered(state) { // the accessory circuit (the radio): the switch on, and the battery not dead
     var b = state.boat;
     return !!b.accessoryOn && !(b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT);
   }
+  function gpsPowered(state) { return true; } // the HANDHELD GPS runs on its own batteries: it works whatever the boat's power is doing
   function gpsNoPower(state, from) {
     printBlank();
     printLine(state.boat.accessoryOn ? 'The GPS has no power.' : 'The GPS has no power. Accessory power is off.');
@@ -17123,7 +17330,7 @@
   }
 
   function performHangWetClothes(state) {
-    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:cabin'); return; }
+    if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:forward-cabin'); return; }
     if (!hasHangableWetClothes(state)) return; // shouldn't be reachable -- button isn't offered otherwise
     runAudioSyncedAction(state, {
       label: 'HANGING CLOTHES',
@@ -17608,13 +17815,13 @@
     var held = state.fishing.heldFish;
     if (!held || held.mealEaten) return null; // (patch 69) its meal already eaten: nothing to cook
     var mealName = FISH_MEAL_BY_SPECIES[held.speciesId];
-    if (!mealName) return null;
+    if (!mealName || !riceForFish(state)) return null; // (no rice: the fish is sashimi only)
     return { key: HELD_FISH_KEY, name: mealName, type: 'meal', cooked: true, fishName: fishSpeciesDisplayName(state, FISH_SPECIES_BY_ID[held.speciesId]) };
   }
 
   function buildMealsOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return f.type === 'meal' && state.food[f.key] > 0; })
-      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+      .map(function (f) { return { label: f.name.toUpperCase(), action: 'eat:' + f.key }; });
     // a fresh catch's specialty meal comes first while one is aboard (it will not keep); cooked as ever -- performEat's held-fish path
     heldCatches(state).forEach(function (f) { if (f.meal) opts.unshift({ label: f.meal.toUpperCase(), action: 'eat:' + HELD_FISH_KEY }); });
     return pushBack(opts, 'cmd:galley');
@@ -17622,7 +17829,7 @@
 
   function buildSnacksOptions(state) {
     var opts = FOOD_ITEMS.filter(function (f) { return (f.type === 'snack' || f.type === 'chocolate') && state.food[f.key] > 0; })
-      .map(function (f) { return { label: f.name.toUpperCase() + ' (' + state.food[f.key] + ')', action: 'eat:' + f.key }; });
+      .map(function (f) { return { label: f.name.toUpperCase(), action: 'eat:' + f.key }; });
     // a fresh catch's sashimi comes first while one is aboard (it will not keep); prepared as ever -- performSashimi
     heldCatches(state).forEach(function (f) { if (f.sashimi) opts.unshift({ label: f.name.toUpperCase() + ' SASHIMI', action: 'catch-sashimi' }); });
     return pushBack(opts, 'cmd:galley');
@@ -17799,30 +18006,27 @@
   // nothing else in performEat changes.
   var FOOD_PREP_AUDIO_KEY = {
     // THICK BOIL
-    'Chili Rice': 'thickBoil',
+    'Chili': 'thickBoil',
     'Oatmeal': 'thickBoil',
-    'Rockfish Stew': 'thickBoil',
-    'Lingcod Stew': 'thickBoil',
-    'Bonito Curry': 'thickBoil',
-    'Mahi Coconut Curry': 'thickBoil',
     // THIN BOIL
     'Mac & Cheese': 'thinBoil',
     'Chicken Noodle Soup': 'thinBoil',
-    // BOIL + SIZZLE
-    'Salmon + Mashed Potatoes': 'boilSizzle',
-    'Salmon Rice Bowl': 'boilSizzle',
-    'Mackerel Rice Bowl': 'boilSizzle',
-    'Albacore Tuna Over Pasta': 'boilSizzle',
-    'Ono Rice Bowl': 'boilSizzle',
-    'Herring Rice Bowl': 'boilSizzle',
-    'Salmon + Roasted Potatoes': 'boilSizzle',
+    // BOIL + SIZZLE (the fish and rice dishes: the rice boils, the fish sears or grills)
+    'Seared Salmon and Rice': 'boilSizzle',
+    'Grilled Salmon and Rice': 'boilSizzle',
+    'Seared Rockfish and Rice': 'boilSizzle',
+    'Grilled Lingcod and Rice': 'boilSizzle',
+    'Grilled Mackerel and Rice': 'boilSizzle',
+    'Seared Bonito and Rice': 'boilSizzle',
+    'Seared Albacore Tuna and Rice': 'boilSizzle',
+    'Seared Aku and Rice': 'boilSizzle',
+    'Grilled Mahi and Rice': 'boilSizzle',
+    'Seared Ahi and Rice': 'boilSizzle',
+    'Grilled Ono and Rice': 'boilSizzle',
+    'Grilled Herring and Rice': 'boilSizzle',
     // SIZZLE
     'Pancakes': 'sizzle',
-    // BOIL + CHOP
-    'Aku Poke Bowl': 'boilChop',
-    'Ahi Poke Bowl': 'boilChop',
     // POPCORN
-    'Popcorn': 'popcorn',
     // WRAPPER
     'Energy Bar': 'wrapper',
     'Chocolate': 'wrapper',
@@ -17850,7 +18054,13 @@
   function performEat(state, key) {
     var isHeldFish = key === HELD_FISH_KEY;
     var item = isHeldFish ? heldFishAsMealItem(state) : FOOD_ITEMS_BY_KEY[key];
-    if (!item || (!isHeldFish && state.food[key] <= 0)) {
+    if (isHeldFish && !item && state.fishing.heldFish && !state.fishing.heldFish.mealEaten && !riceForFish(state)) { // (a stale button: the rice has run out)
+      printBlank();
+      printLine('No rice left.', 'dim');
+      state.pendingChoice = freshCatchFishChoice(state, null);
+      return;
+    }
+    if (!item || item.type === 'staple' || (!isHeldFish && state.food[key] < (item.serving || 1) - 1e-9)) { // (rice is never eaten on its own)
       printBlank();
       printLine("That's already gone.", 'dim');
       return;
@@ -17898,6 +18108,13 @@
       return;
     }
 
+    var tiredLine = exhaustedFoodBlock(state, key, item);
+    if (tiredLine) {
+      printBlank();
+      printLine(tiredLine, 'amber');
+      state.pendingChoice = eatSubmenuPendingChoice(state, item);
+      return;
+    }
     if (item.cooked) {
       if (state.weather.seaState >= 5) {
         printBlank();
@@ -17918,7 +18135,7 @@
     // Cooking water: only items with a per-serving cost (item.waterGal,
     // currently just Oatmeal) draw any; everything else is 0 and this
     // check is simply skipped for them.
-    var waterNeeded = item.waterGal || 0;
+    var waterNeeded = isHeldFish ? WATER_RICE_GAL : (item.waterGal || 0); // (fish and rice cooks its rice in a cup of water)
     if (waterNeeded > 0 && !hasEnoughWater(state, waterNeeded)) {
       printBlank();
       printLine('Not enough water.', 'amber');
@@ -17942,9 +18159,10 @@
       // FISHING HOOK -- the held catch's cooked meal is marked eaten on the catch (patch 69), rather than the whole fish being deleted: its sashimi is still there
       // until it is eaten too, and the catch is cleared (not later logged as spoiled) once both are. Everything else decrements a food[] count.
       if (isHeldFish) {
+        s.food.rice = Math.max(0, s.food.rice - RICE_SERVING_CUPS); // the rice that went into the dish
         fishPortionEaten(s, 'meal');
       } else {
-        s.food[key] -= 1;
+        s.food[key] -= (item.serving || 1); // (oats and pancake mix: half a cup a serving)
       }
       if (isHeldFish || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks and chocolate are not meals
 
@@ -18028,17 +18246,18 @@
   // made with. Current-quantity only, like EAT — DRINK is about a choice
   // right now, not a supply audit; CURRENT/ORIGINAL is INVENTORY's job.
   function drinkMenuOptions(state) {
-    return [
-      { label: instrumentLine('WATER', galCurrentOnly(state.water.gallons).toUpperCase()), action: 'drink:water' },
-      { label: instrumentLine('COFFEE', String(state.drinks.coffee)), action: 'drink:coffee' },
-      { label: instrumentLine('TEA', String(state.drinks.tea)), action: 'drink:tea' },
-      { divider: true },
-      { label: 'BACK', action: 'cmd:galley' },
-    ];
+    // only what can be made from what is aboard (no quantities: they are in the AFT CABIN's INVENTORY)
+    var opts = [];
+    if (hasEnoughWater(state, WATER_DRINK_GAL)) opts.push({ label: 'WATER', action: 'drink:water' });
+    if (state.drinks.coffee > 0) opts.push({ label: 'COFFEE', action: 'drink:coffee' });
+    if (state.drinks.tea > 0) opts.push({ label: 'TEA', action: 'drink:tea' });
+    return pushBack(opts, 'cmd:galley');
   }
 
   function cmdDrink(state) {
-    state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+    var drinks = drinkMenuOptions(state);
+    if (drinks.length === 1) { printBlank(); printLine('There is nothing left to drink.'); } // (BACK alone)
+    state.pendingChoice = { id: 'drink-menu', options: drinks };
   }
 
   function performDrinkWater(state) {
@@ -18069,6 +18288,13 @@
     if (needsCabinLight(state)) {
       printBlank();
       printLine("It's too dark to see. I need some light."); // an observation in the ordinary text (not amber, not caps)
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    var tiredCoffee = exhaustedDrinkBlock(state);
+    if (tiredCoffee) {
+      printBlank();
+      printLine(tiredCoffee, 'amber');
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
@@ -18113,6 +18339,13 @@
     if (needsCabinLight(state)) {
       printBlank();
       printLine("It's too dark to see. I need some light."); // an observation in the ordinary text (not amber, not caps)
+      state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
+      return;
+    }
+    var tiredTea = exhaustedDrinkBlock(state);
+    if (tiredTea) {
+      printBlank();
+      printLine(tiredTea, 'amber');
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
@@ -18163,7 +18396,7 @@
     var sp = h && FISH_SPECIES_BY_ID[h.speciesId];
     if (!sp) return [];
     // `meal` is the cooked dish's name while it is uneaten, `sashimi` is true while the sashimi is (patch 69: eating one no longer takes the other with it)
-    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: (!h.mealEaten && FISH_MEAL_BY_SPECIES[h.speciesId]) || null, sashimi: !h.sashimiEaten }];
+    return [{ speciesId: h.speciesId, name: fishSpeciesDisplayName(state, sp), meal: (!h.mealEaten && riceForFish(state) && FISH_MEAL_BY_SPECIES[h.speciesId]) || null, sashimi: !h.sashimiEaten }];
   }
   // A dish of the held fish has been eaten: it is marked on the catch, and the catch is cleared only when every dish has been eaten (so a fish that is all eaten is never later logged as spoiled).
   // The fish counts once in the voyage stats (FISH EATEN), when its first dish is eaten.
@@ -18172,7 +18405,7 @@
     if (!h) return;
     if (!h.mealEaten && !h.sashimiEaten) statAdd(s, 'fishEaten', 1);
     h[portion + 'Eaten'] = true;
-    if ((h.mealEaten || !FISH_MEAL_BY_SPECIES[h.speciesId]) && h.sashimiEaten) s.fishing.heldFish = null;
+    if ((h.mealEaten || !FISH_MEAL_BY_SPECIES[h.speciesId] || !riceForFish(s)) && h.sashimiEaten) s.fishing.heldFish = null; // (no rice left: its meal can never be made, so the catch is gone with the sashimi)
   }
   function freshCatchBack(state) { var f = heldCatches(state)[0]; return f ? 'catch:' + f.speciesId : 'cmd:galley'; } // where BACK goes from a blocked preparation: the fish's own screen (the galley if it is gone)
   function freshCatchOptions(state) {
@@ -18345,115 +18578,95 @@
     electrical: ['Got the electrical system working again.'],
   };
 
-  // Repair quality's own four tiers, worst-first, matching the index
-  // computeRepairQuality's own finalTier (0-3) already lands on.
-  var REPAIR_QUALITIES = ['SOLID', 'GOOD', 'TEMPORARY', 'PATCHED'];
+  // NEEDS GATES -- morale is out of it: repairs always work, and what decides whether the sailor CAN repair, cook or sleep is how he is.
+  //   EXHAUSTED ................. no repairs, no cooked meals (the meals, popcorn, a fish); coffee, tea and Cup Noodles still, but not in a ROUGH sea
+  //   STARVING or VERY THIRSTY ... no repairs, no starting a sleep
+  // The cure is never behind the same gate: water and the cold snacks are always there, SLEEP is open to an exhausted sailor, and a STARVING sailor is never too
+  // tired to cook (food is the cure). COFFEE gets an exhausted sailor through the work for 2 hours, and keeps him from sleeping for the same 2 hours (a second
+  // coffee starts the 2 hours again); tea does neither. A sleeping sailor wakes by himself when he becomes STARVING or PARCHED (checkNeedsWake).
+  var COFFEE_BOOST_MINUTES = 120;
+  var ROUGH_SEA_STATE = 4;                // the game's ROUGH
 
-  // Repairs are deterministic -- ANY permitted repair always succeeds
-  // once its audio finishes (see performSystemRepairAttempt below).
-  // What the player's condition actually decides is QUALITY: how long
-  // the repaired system is then shielded from the NORMAL scheduled
-  // failure draw (REPAIR_QUALITY_PROTECTION_HOURS) -- never whether
-  // the repair itself works. ENERGY and MORALE are the primary
-  // inputs, each mapped onto the same four-tier ladder
-  // (0=SOLID-worthy .. 3=PATCHED-worthy) and then combined by taking
-  // the WORSE (max) of the two, so either one alone bottoming out is
-  // enough to drag the whole repair down to PATCHED -- matching
-  // "EXHAUSTED OR DEPLETED" (not AND) for that tier. HUNGER/THIRST/
-  // SEA STATE are secondary: any one of them being meaningfully bad
-  // can pull the result down by exactly one further tier, but never
-  // more than one combined, and never below PATCHED on their own --
-  // only the exact ENERGY:EXHAUSTED + MORALE:DEPLETED combination
-  // (checked first, separately, and never softened by anything else)
-  // blocks a repair outright. Thresholds for what counts as
-  // "meaningfully bad" reuse the same named level constants the rest
-  // of the game already defines (HUNGER_HUNGRY, THIRST_THIRSTY) or
-  // the same seaState>=4 (ROUGH+) cutoff computeRepairPenalties used
-  // to use, rather than inventing new ones. conditionLines is only
-  // ever the labels actually worth showing the player -- ENERGY/
-  // MORALE whenever they're not at their best tier (the primary
-  // drivers of the result), HUNGER/THIRST/SEA STATE only when they're
-  // the "meaningfully bad" secondary factor -- never a full readout
-  // of every input regardless of whether it's relevant.
-  function computeRepairQuality(state) {
-    var c = state.crew, w = state.weather;
-    var eLvl = energyLevel(c.fatigue);   // 0=EXHAUSTED..5=RESTED
-    var mLabel = moraleLevel(c.morale);  // DEPLETED/LOW/CONTENT/GOOD/UPBEAT
-    var hLvl = hungerLevel(c.hoursSinceMeal);
-    var tLvl = thirstLevel(c.hoursSinceWater);
+  function coffeeBoostActive(state) {
+    var last = state.crew.lastCoffeeAt;
+    if (last == null) return false;
+    var since = state.meta.voyageMinutes - last;
+    return since >= 0 && since < COFFEE_BOOST_MINUTES;
+  }
+  function isExhausted(state) { return energyLevel(state.crew.fatigue) === ENERGY_EXHAUSTED && !coffeeBoostActive(state); } // (coffee: wired enough to work)
+  function isStarving(state) { return hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_STARVING; }
+  function isVeryThirsty(state) { return thirstLevel(state.crew.hoursSinceWater) >= THIRST_VERY; } // VERY THIRSTY, or PARCHED
 
-    // The one exact hard-block state -- checked first and never
-    // overridden by anything else, including hunger/thirst/sea state.
-    if (eLvl === ENERGY_EXHAUSTED && mLabel === 'DEPLETED') {
-      return {
-        blocked: true,
-        conditionLines: [
-          { label: 'ENERGY', value: ENERGY_LABELS[eLvl] },
-          { label: 'MORALE', value: mLabel },
-        ],
-      };
-    }
-
-    var energyTier = eLvl >= 4 ? 0 : eLvl === 3 ? 1 : eLvl >= 1 ? 2 : 3;
-    var moraleTier = (mLabel === 'UPBEAT' || mLabel === 'GOOD') ? 0
-      : mLabel === 'CONTENT' ? 1
-      : mLabel === 'LOW' ? 2
-      : 3; // DEPLETED
-    var baseTier = Math.max(energyTier, moraleTier);
-
-    var hungerBad = hLvl >= HUNGER_HUNGRY;
-    var thirstBad = tLvl >= THIRST_THIRSTY;
-    // SEA STATE has two separate cutoffs, deliberately different: it's
-    // worth SHOWING to the player from ROUGH (4) upward -- the same
-    // point computeRepairPenalties used to start penalizing it at all
-    // -- but only counts toward the actual one-tier-down secondary
-    // penalty from VERY ROUGH (5) upward, matching section 4's own
-    // explicit example ("GOOD + very rough sea -> TEMPORARY") and the
-    // section 7 UI example (ENERGY: TIRED + MORALE: LOW, both already
-    // at TEMPORARY on their own, + SEA STATE: ROUGH shown alongside
-    // -> REPAIR QUALITY stays TEMPORARY, not pushed down to PATCHED).
-    // A plain seaState>=4 cutoff for the penalty itself would silently
-    // contradict that exact example.
-    var seaDisplay = w.seaState >= 4;   // ROUGH or worse -- shown
-    var seaBad = w.seaState >= 5;       // VERY ROUGH or worse -- penalized
-    var secondaryPenalty = (hungerBad || thirstBad || seaBad) ? 1 : 0;
-    var finalTier = Math.min(baseTier + secondaryPenalty, 3);
-
-    var conditionLines = [];
-    if (energyTier > 0) conditionLines.push({ label: 'ENERGY', value: ENERGY_LABELS[eLvl] });
-    if (moraleTier > 0) conditionLines.push({ label: 'MORALE', value: mLabel });
-    if (hungerBad) conditionLines.push({ label: 'HUNGER', value: HUNGER_LABELS[hLvl] });
-    if (thirstBad) conditionLines.push({ label: 'THIRST', value: THIRST_LABELS[tLvl] });
-    if (seaDisplay) conditionLines.push({ label: 'SEA STATE', value: seaReadout(currentSeaFt(w)) }); // the same readout as the WEATHER screen and the forecast (patch 52)
-
-    return { blocked: false, quality: REPAIR_QUALITIES[finalTier], conditionLines: conditionLines };
+  // Why he cannot repair just now: a line for each reason ([] when he can).
+  function repairBlockers(state) {
+    var out = [];
+    if (isExhausted(state)) out.push('TOO EXHAUSTED TO REPAIR.');
+    if (isStarving(state)) out.push('TOO HUNGRY TO REPAIR.');
+    if (isVeryThirsty(state)) out.push('TOO THIRSTY TO REPAIR.');
+    if (isDepleted(state)) out.push('TOO DEPLETED TO REPAIR.');
+    return out;
+  }
+  // Why he will not sleep just now (null when he will).
+  function sleepBlockLine(state) {
+    if (isStarving(state)) return 'Too hungry to sleep. I need to eat something.';
+    if (isVeryThirsty(state)) return 'Too thirsty to sleep. I need water.';
+    if (coffeeBoostActive(state)) return 'Too wired to sleep. Maybe in a while.';
+    return null;
+  }
+  // Why an exhausted sailor will not make this (null when he will). Meals, popcorn and a fish are cooking; Cup Noodles, tea and coffee are only hot water.
+  var STOVE_SEA_LINE = 'TOO EXHAUSTED TO MANAGE THE STOVE IN THIS SEA.';
+  function exhaustedFoodBlock(state, key, item) {
+    if (!isExhausted(state) || isStarving(state)) return null; // (food is the cure: a starving sailor always cooks)
+    if (key === 'cupNoodles') return state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
+    return item.cooked ? 'TOO EXHAUSTED TO COOK.' : null;
+  }
+  function exhaustedDrinkBlock(state) {
+    return isExhausted(state) && !isStarving(state) && state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
   }
 
-  // The decision screen for one damaged system: the condition lines
-  // actually relevant right now, then either the resulting REPAIR
-  // QUALITY and its action button, or -- in the one hard-block state
-  // -- a plain blocked message and no button at all. No confirmation
-  // beyond this screen itself.
+  // A sleeping sailor wakes by himself when hunger reaches STARVING or thirst reaches PARCHED. Run every tick, so a reload or an offline catch-up wakes him at
+  // exactly the minute he would have. He keeps the sleep he got (energy and sleep debt are repaid tick by tick) and cannot lie back down until he has eaten or drunk.
+  function checkNeedsWake(state) {
+    var c = state.crew;
+    if (c.watchState !== 'sleeping' || c.sleepStartedAt == null) return;
+    var hungry = isStarving(state), parched = thirstLevel(c.hoursSinceWater) >= THIRST_PARCHED;
+    var chilled = c.coldSleepFor === c.sleepStartedAt && (c.coldSleepMin || 0) >= COLD_WAKE_MINUTES;
+    if (!hungry && !parched && !chilled) return;
+    var minutesAsleep = state.meta.voyageMinutes - c.sleepStartedAt;
+    c.watchState = 'awake';
+    c.sleepStartedAt = null;
+    c.sleepCapMinutes = null;
+    c.sleepRoom = null;
+    if (c.bunkUnmadeSinceMinutes == null) c.bunkUnmadeSinceMinutes = state.meta.voyageMinutes;
+    c.bunkUnmadeRoom = 'cabin';
+    momentNoteWake(state, minutesAsleep);
+    log(state, (!hungry && !parched) ? 'Woke up cold.' : hungry && parched ? 'Woke up starving and parched. I need food and water.'
+      : (hungry ? 'Woke up starving. I need to eat something.' : 'Woke up parched. I need water.'));
+    flushNewLogEntries(state);
+  }
+
+  // The decision screen for one damaged system: how he is, only where it matters, then either the spare and its action button or why he cannot.
   function cmdRepairSystem(state, systemKey) {
     printBlank();
-    printLine('REPAIR \u2014 ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
-    var q = computeRepairQuality(state);
-    q.conditionLines.forEach(function (f) {
-      printLine(f.label + ': ' + f.value);
-    });
+    printLine('REPAIR — ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
+    var c = state.crew, blockers = repairBlockers(state);
+    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED) printLine('ENERGY: ' + ENERGY_LABELS[ENERGY_EXHAUSTED]);
+    if (isStarving(state)) printLine('HUNGER: ' + HUNGER_LABELS[HUNGER_STARVING]);
+    if (isVeryThirsty(state)) printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
+    if (isDepleted(state)) printLine('MORALE: ' + moraleLevel(c.morale));
+    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED && coffeeBoostActive(state)) printLine('COFFEE: ACTIVE');
     var options = [];
-    if (q.blocked) {
-      printBlank();
-      printLine('TOO EXHAUSTED TO REPAIR.', 'amber');
+    printBlank();
+    if (blockers.length > 0) {
+      blockers.forEach(function (t) { printLine(t, 'amber'); });
     } else {
-      printBlank();
-      printLine('REPAIR QUALITY: ' + q.quality);
-      // Spares are unlimited -- the repair action is always offered
-      // here whenever the player's condition permits it at all
-      // (subject only to this screen even being reachable, which
-      // already requires the system to be DAMAGED -- see
-      // buildDamagedSystemsList/cmdRepair).
-      options.push({ label: REPAIR_ACTION_LABEL[systemKey], action: 'attempt-repair:' + systemKey });
+      // The repair needs a spare part (the one for this system); with none left the system stays as it is.
+      if (REPAIRS_USE_SPARES) printLine(SPARES_NAMES[REPAIR_SPARE_KEY[systemKey]].toUpperCase() + ': ' + spareCount(state, systemKey));
+      if (REPAIRS_USE_SPARES && spareCount(state, systemKey) <= 0) {
+        printLine('NO SPARE PARTS LEFT FOR THIS.', 'amber');
+      } else {
+        options.push({ label: REPAIR_ACTION_LABEL[systemKey], action: 'attempt-repair:' + systemKey });
+      }
     }
     state.pendingChoice = { id: 'repair-decision', options: pushBack(options, 'cmd:repair') };
   }
@@ -18469,9 +18682,8 @@
   // in that state to begin with -- see cmdRepairSystem) against a
   // stale or replayed action slipping through.
   function performSystemRepairAttempt(state, systemKey) {
-    var q = computeRepairQuality(state);
-    if (q.blocked) { cmdRepairSystem(state, systemKey); return; }
-    var hours = REPAIR_QUALITY_PROTECTION_HOURS[q.quality];
+    if (repairBlockers(state).length > 0) { cmdRepairSystem(state, systemKey); return; } // (a stale button: he cannot just now)
+    if (REPAIRS_USE_SPARES && spareCount(state, systemKey) <= 0) { cmdRepairSystem(state, systemKey); return; } // (a stale button: no part to use)
     runAudioSyncedAction(state, {
       label: REPAIR_WORKING_LABEL[systemKey],
       playAudio: function (onEnded) { return playRepairAudio(systemKey, onEnded); },
@@ -18481,9 +18693,9 @@
         s.crew.hoursSinceWater += 0.4;  // strenuous -- thirst arrives a little sooner
         if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
         s.boat[systemKey] = 'GOOD';
+        setFailureCause(s, systemKey, null);
+        if (REPAIRS_USE_SPARES) s.supplies.spares[REPAIR_SPARE_KEY[systemKey]] = Math.max(0, spareCount(s, systemKey) - 1); // the part is used up
         if (systemKey === 'engine') { s.boat.engineFaultHidden = false; s.boat.engineFailureStage = null; }
-        if (!s.boat.repairProtectedUntil) s.boat.repairProtectedUntil = { sails: 0, steering: 0, engine: 0, electrical: 0 };
-        s.boat.repairProtectedUntil[systemKey] = s.meta.voyageMinutes + rand(hours[0], hours[1]) * 60;
         log(s, pickFromPool(REPAIR_SUCCESS_LINES[systemKey]));
         logVesselLogRepair(s, systemKey);
         flushNewLogEntries(s);
@@ -18509,17 +18721,17 @@
   }
 
   function cmdRepair(state) {
-    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:status'); return; }
+    if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
     var items = buildDamagedSystemsList(state);
     if (items.length === 0) {
       printBlank();
       printLine('Nothing aboard needs repair.', 'dim');
-      cmdStatus(state); // e.g. just-completed the last repair on the list -- back to STATUS (REPAIR's real parent), not the generic deck menu
+      cmdAftCabin(state); // e.g. just-completed the last repair on the list -- back to the AFT CABIN (REPAIRS' real parent), not the generic deck menu
       return;
     }
     printBlank();
     printLine('REPAIR', 'heading-label');
-    state.pendingChoice = { id: 'repair-menu', options: pushBack(items, 'cmd:status') };
+    state.pendingChoice = { id: 'repair-menu', options: pushBack(items, 'cmd:aft-cabin') };
   }
 
   function cmdRestart(state) {
@@ -18551,7 +18763,9 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
-    cabin: cmdCabin,
+    cabin: cmdCabin,                 // (a stale 'cmd:cabin' button: the FORWARD CABIN)
+    'forward-cabin': cmdCabin,
+    'aft-cabin': cmdAftCabin,
     'nav-station': cmdNavStation,
     handbook: cmdHandbook,
     sleep: cmdSleep,
@@ -20516,6 +20730,7 @@
       action: function (s) {
         var before = s.boat.sailConfig; // what she actually had set at the moment of the change
         s.boat.sailConfig = targetConfig;
+        s.boat.sailOverSince = sailsOverpowered(s) ? s.meta.voyageMinutes - SAIL_REEF_GRACE_MINUTES : null; // too much sail raised into this wind: no grace; the right amount clears it
         var sailLine = sailChangeLogLine(before, targetConfig);
         if (sailLine) { log(s, sailLine); flushNewLogEntries(s); }
         cmdSails(s);
@@ -21019,11 +21234,12 @@
       // the door-open sound; see those two cases in handleAction.
       return groupedOptions([
         [
-          { label: 'CABIN', action: 'enter-cabin' },
+          { label: 'FORWARD CABIN', action: 'enter-cabin' },
           { label: 'HEAD', action: 'enter-head' },
           { label: 'SALOON', action: 'cmd:saloon' },
           { label: 'GALLEY', action: 'cmd:galley' },
           { label: 'NAV STATION', action: 'cmd:nav-station' },
+          { label: 'AFT CABIN', action: 'enter-aft-cabin' },
         ],
         lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
       ]);
@@ -21266,6 +21482,7 @@
         var statusDiv = document.createElement('div');
         statusDiv.className = 'option-status';
         statusDiv.textContent = opt.text;
+        if (opt.indent) statusDiv.classList.add('indent-' + opt.indent);
         optionsEl.appendChild(statusDiv);
         return;
       }
@@ -21284,6 +21501,7 @@
         dataRowValue.textContent = opt.value;
         dataRowDiv.appendChild(dataRowLabel);
         dataRowDiv.appendChild(dataRowValue);
+        if (opt.indent) dataRowDiv.classList.add('indent-' + opt.indent);
         optionsEl.appendChild(dataRowDiv);
         return;
       }
@@ -21346,7 +21564,7 @@
             return;
           }
           openInfoPanel = INFO_COMMANDS[cmdName] ? cmdName : null;
-          printEcho(cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName === 'drink' ? 'drinks' : cmdName === 'fish' ? 'fishing rod' : cmdName.indexOf('gps-') === 0 ? 'gps' : cmdName);
+          printEcho(cmdName === 'cabin' ? 'forward cabin' : cmdName === 'status' ? 'aft cabin' : cmdName === 'repair' ? 'repairs' : cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName === 'drink' ? 'drinks' : cmdName === 'fish' ? 'fishing rod' : cmdName.indexOf('gps-') === 0 ? 'gps' : cmdName);
           runCommand(state, cmdName);
         } else {
           clearTempView();
@@ -21360,6 +21578,7 @@
           handleAction(state, opt.action);
         }
       });
+      if (opt.indent) btn.classList.add('indent-' + opt.indent);
       optionsEl.appendChild(btn);
     });
   }
@@ -21427,7 +21646,7 @@
 
   function activityDotsInfo(state) {
     if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
-    if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'SITTING A WHILE' }; // for the whole of the sitting; the observations appear beneath it
+    if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'RELAXING' }; // for the whole of the sitting; the observations appear beneath it
     if (state.crew.watchState === 'sleeping') return { active: true, label: sleepPastCap(state) ? 'LYING DOWN' : 'SLEEPING' }; // (SLEEP CAP: past the cap he is awake in the bunk)
     return { active: false, label: null };
   }
@@ -21623,6 +21842,14 @@
       cmdLeaveCabin(state);
     } else if (action === 'leave-head') {
       cmdLeaveHead(state);
+    } else if (action === 'enter-aft-cabin') {
+      cmdEnterAftCabin(state);
+    } else if (action === 'leave-aft-cabin') {
+      cmdLeaveAftCabin(state);
+    } else if (action.indexOf('aft-toggle:') === 0) {
+      aftCabinToggle(state, action.slice(11));
+    } else if (action === 'perform-maintenance') {
+      performMaintenance(state);
     } else if (action === 'toggle-autopilot') {
       performAutopilotToggle(state);
     } else if (action === 'toggle-autopilot-nav') {
@@ -21719,11 +21946,8 @@
         case 'commit-clothing':
           performClothingCommit(state);
           break;
-        case 'toggle-status':
-          // NAV STATION's own in-place expand/collapse (see navStationExpanded's
-          // own notes): flips the flag and redraws the same screen in place.
-          navStationExpanded.status = !navStationExpanded.status;
-          cmdNavStation(state);
+        case 'toggle-status': // (a stale NAV STATION button from before STATUS moved to the AFT CABIN)
+          cmdAftCabin(state);
           break;
         case 'wake-up':
           // The physical act of getting out of the bunk (wake_up.mp3) is
@@ -21962,6 +22186,7 @@
         state.nav.autopilotHeading = state.nav.setCourse; // the player's newest explicit heading — what AUTOPILOT (if on) now holds
         state.nav.courseDraft = null;
         log(state, 'Changed course to ' + Math.round(state.nav.setCourse) + '\u00B0.');
+        if (state.boat.steering === 'DAMAGED') log(state, 'Easing the sheets. She comes round slowly.');
         statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
         beginCourseTurn(state, {
@@ -21976,12 +22201,12 @@
         break;
       case 'set-for-waypoint': {
         var wg = routeGuidance(state);
-        if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable -- button isn't shown otherwise
         if (!wg.point || wg.complete) { cmdChangeCourse(state); break; }
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, wg.point.lat, wg.point.lon)); // a deliberate PLAYER command: the bearing to the active waypoint as it is now. Nothing keeps it pointed there.
         state.nav.courseDraft = null;
         state.nav.autopilotHeading = state.nav.setCourse; // what AUTOPILOT (if on) then holds -- it just holds it, it never chooses it
         log(state, 'Set a course for waypoint ' + wg.number + '. ' + routeBearingText(state.nav.setCourse) + '.');
+        if (state.boat.steering === 'DAMAGED') log(state, 'Easing the sheets. She comes round slowly.');
         statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
         beginCourseTurn(state, {
@@ -21992,11 +22217,11 @@
         break;
       }
       case 'set-for-nawiliwili':
-        if (state.boat.steering === 'DAMAGED') { cmdHelm(state); break; } // shouldn't be reachable — button isn't shown otherwise
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)); // a deliberate PLAYER command — the only place a destination bearing becomes a heading
         state.nav.courseDraft = null; // reached from the CHANGE COURSE screen now -- its half-dialled draft is moot
         state.nav.autopilotHeading = state.nav.setCourse; // ...and, like CHANGE COURSE, what AUTOPILOT (if on) then holds — it just holds it, it never chooses it
         log(state, 'Set a course for N\u0101wiliwili. ' + state.nav.setCourse + '\u00B0.');
+        if (state.boat.steering === 'DAMAGED') log(state, 'Easing the sheets. She comes round slowly.');
         statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
         beginCourseTurn(state, {
@@ -22181,6 +22406,7 @@
       marineForecastPowerWatch(GAME); // ... and so does the MARINE FORECAST radio
       fleetLiveTick(GAME); // reports this boat's position to the fleet database (does nothing unless one is set)
       lanternMenuWatch(GAME); // dusk, or the lights going out, brings LIGHT LANTERN onto the plain deck menu without waiting for the next tap
+      aftCabinWatch(GAME); // ... and the open AFT CABIN is drawn again if anything it shows has changed (a failure, the day's maintenance)
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
@@ -22908,12 +23134,24 @@
     // save has been rebased here its version marker prevents it from
     // ever happening again on a later load.
     if (state.meta.foodInventoryVersion === undefined) state.meta.foodInventoryVersion = 0;
-    if (state.meta.foodInventoryVersion < FOOD_INVENTORY_VERSION) {
+    if (state.meta.foodInventoryVersion < 5) { // (a save older than the MEALS/SNACKS lineup is restocked as it always was; one that is already on it is NOT -- see the carry-over below)
       var oldFoodKeys = ['pasta', 'rice', 'soup', 'chili', 'tuna', 'crackers', 'peanutButter',
         'nuts', 'driedFruit', 'energyBars', 'freshFruit', 'freshBread', 'freshFish', 'comfort',
         'tunaCrackers']; // retired when Cup Noodles (cupNoodles) replaced it at FOOD_INVENTORY_VERSION 4
       oldFoodKeys.forEach(function (k) { delete state.food[k]; });
       FOOD_ITEMS.forEach(function (f) { state.food[f.key] = f.original; });
+      state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
+    }
+    // THE NEW FOOD SYSTEM (version 6): a save from before carries over exactly what it has left -- NOTHING is replenished. Chili Rice becomes Chili (same count);
+    // the oatmeal and pancakes left (servings) become cups of oats and pancake mix at half a cup a serving; rice is new, so it starts at 20 cups less half a cup (the rice that would have gone with it)
+    // for each fish the voyage has already eaten. Runs once per save (the version marker).
+    if (state.meta.foodInventoryVersion === 5) {
+      var fd = state.food;
+      if (fd.chiliRice !== undefined) { fd.chili = Number.isFinite(fd.chiliRice) ? fd.chiliRice : 0; delete fd.chiliRice; }
+      if (!Number.isFinite(fd.chili)) fd.chili = 0;
+      fd.oatmeal = (Number.isFinite(fd.oatmeal) ? fd.oatmeal : 0) * 0.5;
+      fd.pancakes = (Number.isFinite(fd.pancakes) ? fd.pancakes : 0) * 0.5;
+      if (!Number.isFinite(fd.rice)) fd.rice = Math.max(0, 20 - RICE_SERVING_CUPS * Math.max(0, Math.floor(Number(state.stats && state.stats.fishEaten) || 0))); // 20 cups, less half a cup for each fish already eaten
       state.meta.foodInventoryVersion = FOOD_INVENTORY_VERSION;
     }
     // FISHING HOOK -- ensure the whole fishing bucket exists first (a
@@ -23180,6 +23418,10 @@
     }
     if (state.pendingChoice && state.pendingChoice.id === 'meals-menu') state.pendingChoice.options = buildMealsOptions(state); // drawn afresh: a fish aboard is in it now
     if (state.pendingChoice && state.pendingChoice.id === 'snacks-menu') state.pendingChoice.options = buildSnacksOptions(state);
+    if (state.pendingChoice && state.pendingChoice.id === 'aft-cabin-menu') { // the AFT CABIN as it is now (its readings are not saved with the menu)
+      cmdAftCabin(state);
+      return;
+    }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
       cmdSaloon(state);
       return;
@@ -23266,6 +23508,7 @@
     s.crew.lastAteAt = V - 90;
     s.boat.nextFailureAt = V + 4320;                // no random breakdown for the first three days of a scenario
     s.vesselLog.currentDay = newVesselLogDay(1, vesselLogMonthDayLabel(s.meta.departedAt), 0);
+    s.maintenance.grace = s.maintenance.seen = voyageDayNumber(s); // (no missed day to charge to a test scenario that begins days in)
     return s;
   }
   // The chart's track: from where the passage began to wherever the boat is.
@@ -23452,6 +23695,7 @@
     migrateNavIfNeeded(GAME);
     migrateRouteIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
+    migrateMaintenanceIfNeeded(GAME); // DAILY MAINTENANCE -- no missed day can be charged to a save from before it existed; the spare parts a save has are kept as they are
     migrateRescueIfNeeded(GAME); // RESCUE -- drop the retired mechanics, start the two timers from the existing hunger/thirst record
     migrateNavGeoIfNeeded(GAME); // NAVIGATION -- the new grounding / warning / finale state; a save in invalid water is moved the minimum distance back into it
     migrateWeatherStateIfNeeded(GAME); // PHASE 5 -- retire any old scripted-weather state, keep what the player is experiencing
@@ -23656,7 +23900,7 @@
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = introPending ? 0 : briefingCatchUp(GAME);
-      if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
+      if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); aftCabinWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
         if (!uiBusy) renderOptions(GAME); // a short action owns the options panel while its dots are animating
