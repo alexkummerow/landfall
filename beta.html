@@ -903,7 +903,7 @@
   }
   #horizon { flex-shrink: 0; position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
   #horizon[hidden], body.title-mode #horizon { display: none; }
-  #hz-strip { position: relative; aspect-ratio: 633 / 86; border-bottom: 1px solid var(--rule); } /* the same proportions at every width: the picture simply scales down on a phone */
+  #hz-strip { position: relative; height: 86px; border-bottom: 1px solid var(--rule); } /* the mockup's size: 86 px tall, as wide as the screen */
   #hz-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #hz-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
   #hz-fog, #hz-dark, #hz-glass { position: absolute; inset: 0; pointer-events: none; }
@@ -21461,6 +21461,7 @@
     var factor = lightsOverrideOn ? 1 : naturalLightBrightness(state);
     if (!lightsOverrideOn && lanternLit(state)) factor = Math.max(factor, LANTERN_TEXT_BRIGHTNESS); // a lit lantern holds the text at a steady level (powered light is still full brightness; daylight still wins)
     factor = Math.max(factor, NIGHT_TEXT_BRIGHTNESS); // never dimmer than the no-light level: the text stays legible in darkness
+    try { if (window.landfallHorizon && window.landfallHorizon.paintText(factor, getNaturalLightBaseColors(), dimHexColor)) return; } catch (e) {} // (the hour's colours, while the horizon strip is up; otherwise the game's own, below)
     if (factor >= 1) {
       NATURAL_LIGHT_TEXT_VARS.forEach(function (name) { document.documentElement.style.removeProperty(name); });
       document.documentElement.style.removeProperty('--output-glow');
@@ -23962,12 +23963,11 @@
   const inPoly = (x, y, P) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const a = P[i], b = P[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
   const inWin = (x, y) => WIN.some(P => inPoly(x, y, P));
   const winPath = g => { g.beginPath(); WIN.forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); };
-  const STRIP_VW = 633; // the width the picture is drawn at; everything below is in that picture's own pixels
   function drawStrip(ts, dt) {
     const { g } = hz; if (!g) return;
     g.clearRect(0, 0, hz.W, hz.H);
-    const sc = hz.W / STRIP_VW, W = STRIP_VW, H = hz.H / sc, lw = 1 / sc; // lw: lines stay a pixel thick however far the picture is scaled
-    g.save(); g.scale(sc, sc);
+    const W = hz.W, H = hz.H, lw = 1; // (one picture pixel is one screen pixel)
+    g.save();
     if (V.loc === 'above') {
       drawScene(g, W, H, ts, lw);
       g.restore();
@@ -24185,15 +24185,38 @@
   if (!broken && typeof ResizeObserver === 'function') new ResizeObserver(fitAll).observe(crtEl);
   window.addEventListener('resize', fitAll);
 
-  /* ---------- the palette of the hour (the strip and the portholes only; the game's own text colours are left to its own light system) ---------- */
+  /* ---------- the palette of the hour: the strip and the portholes, and (TXT) the colour of the game's text while the strip is up ---------- */
+  let TXT = null, txtKey = '';
   function palettes() {
     const th = themeFor(V.e);
     let ph = th.ph.map(v => v * th.lum), br = th.br.map(v => v * th.lum);
     OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the cabin lamp never changes it
+    // the text: as the mockup had it -- the hour's colour; below with the lamp out only the porthole's light; the lamp warms it; fog greys it
+    let tph = ph.slice(), tbr = br.slice(), tdim = th.dim.slice();
+    if (V.loc === 'below' && !V.lamp) { const f = lerp(.6, .95, dayFactor()); tph = tph.map(v => v * f); tbr = tbr.map(v => v * f); }
+    if (V.lamp) { tph = mix(tph, LAMP, .5); tbr = mix(tbr, [255, 226, 170], .5); tdim = mix(tdim, [140, 105, 60], .5); }
+    if (V.loc === 'above' && cur.fog > .01) tph = mix(tph, [185, 201, 192], cur.fog * .35);
+    TXT = { ph: tph, br: tbr, dim: tdim, glow: th.glow };
     if (V.lamp) { ph = mix(ph, LAMP, .5); br = mix(br, [255, 226, 170], .5); } // the porthole frames take the lamp's light
     if (V.loc === 'above' && cur.fog > .01) ph = mix(ph, [185, 201, 192], cur.fog * .35);
     COL = { ph, br, dim: th.dim, bg: th.bg };
+    // the game's own light code paints the text: ask it to do so again whenever the hour's colour has moved
+    const key = [tph, tbr, tdim].map(c => c.map(v => v | 0).join()).join('|') + th.glow.toFixed(2);
+    if (key !== txtKey) { txtKey = key; repaintText(); }
   }
+  function repaintText() { try { if (typeof GAME === 'object' && GAME && GAME.crew && GAME.boat) applyNaturalLightDimming(GAME); } catch (e) { /* the next screen draw does it */ } }
+  // Called by the game's own applyNaturalLightDimming with the brightness it has worked out (1 = full, dimmer at night until a light is on).  Returns true if it painted the text.
+  function paintText(factor, base, dimHex) {
+    if (broken || !visibleNow || !TXT) return false;
+    const rs = document.documentElement.style, f = clamp(factor, 0, 1), c = a => 'rgb(' + a.map(v => Math.round(v * f)).join(', ') + ')';
+    rs.setProperty('--phosphor', c(TXT.ph)); rs.setProperty('--phosphor-bright', c(TXT.br)); rs.setProperty('--phosphor-dim', c(TXT.dim));
+    ['--amber', '--danger'].forEach(n => { if (f >= 1) rs.removeProperty(n); else rs.setProperty(n, dimHex(base[n], f)); }); // (the game's own warning colours: dimmed as it always did)
+    rs.setProperty('--rule', rgba(TXT.ph, .14));
+    rs.setProperty('--output-glow', f >= 1 ? '0 0 6px ' + rgba(TXT.ph, TXT.glow) : 'none');
+    return true;
+  }
+  // the strip is gone (title page, switched off): the game's own colours come back
+  function unpaintText() { try { document.documentElement.style.removeProperty('--rule'); } catch (e) {} txtKey = ''; repaintText(); }
 
   /* ---------- the light the weather lets into the cabin, and the lamp's own ---------- */
   let lampA = 0, spillA = 0, spillCol = [150, 185, 215], cssKey = '';
@@ -24261,7 +24284,7 @@
       if (show !== visibleNow) {
         visibleNow = show; horizonEl.hidden = !show;
         if (show) { snapNext = true; sampledAt = -1e9; }
-        else { crtEl.style.setProperty('--hz-lamp-a', '0'); crtEl.style.setProperty('--hz-spill-a', '0'); cssKey = ''; fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; beads.length = streaks.length = spray.length = 0; if (gl.g) gl.g.clearRect(0, 0, gl.W, gl.H); glassWas = false; }
+        else { crtEl.style.setProperty('--hz-lamp-a', '0'); crtEl.style.setProperty('--hz-spill-a', '0'); cssKey = ''; fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; beads.length = streaks.length = spray.length = 0; if (gl.g) gl.g.clearRect(0, 0, gl.W, gl.H); glassWas = false; unpaintText(); }
         fitAll();
       }
       if (!show) return;
@@ -24281,7 +24304,7 @@
       glassWas = glassNow;
       stats.strip += ((t1 - t0) - stats.strip) * .1; stats.glass += ((performance.now() - t1) - stats.glass) * .1; stats.frames++;
     } catch (err) {
-      broken = true; horizonEl.hidden = true;
+      broken = true; horizonEl.hidden = true; unpaintText();
       console.warn('[Landfall horizon] switched off:', err && err.message ? err.message : err);
     }
   }
@@ -24291,6 +24314,7 @@
   //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
+    paintText: paintText,
     force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
     clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
     state: function () { return { V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats }; },
