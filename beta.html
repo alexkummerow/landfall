@@ -896,10 +896,10 @@
 
   /* THE HORIZON (beta 11): a band under the top bar -- the horizon above deck, two portholes below -- with fog and squall dark on the screen glass. Nothing here takes a tap. */
   #scanlines { display: none; } /* no terminal scanlines */
-  body.hz-on #topbar, body.hz-on #navstrip { border-bottom-color: transparent; } /* no lines between the top bar, the voyage line and the windows */
+  body.hz-on #topbar { border-bottom-color: transparent; } /* no line between the top bar and the window; the voyage line under the window keeps the game's own */
   #horizon { flex-shrink: 0; position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
   #horizon[hidden], body.title-mode #horizon { display: none; }
-  #hz-strip { position: relative; height: 86px; border-bottom: 1px solid var(--rule); touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; } /* a sideways drag turns your head; up and down still scrolls */ /* the mockup's size: 86 px tall, as wide as the screen */
+  #hz-strip { position: relative; height: 108px; border-bottom: 1px solid transparent; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; } /* a sideways drag turns your head; up and down still scrolls */ /* the mockup's size: 108 px tall (25% taller than v19's 86), as wide as the screen */
   #hz-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #hz-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
   #hz-fog, #hz-dark { position: absolute; inset: 0; pointer-events: none; }
@@ -928,15 +928,14 @@
         <span id="clock">—</span>
       </div>
     </header>
+    <div id="horizon" hidden>
+      <div id="hz-strip"><canvas id="hz" aria-hidden="true"></canvas><div id="hz-fade"></div></div>
+    </div>
     <div id="navstrip" hidden>
       <span id="nav-day"></span>
       <span id="nav-speed"></span>
       <span id="nav-heading"></span>
       <span id="nav-condition"></span>
-    </div>
-
-    <div id="horizon" hidden>
-      <div id="hz-strip"><canvas id="hz" aria-hidden="true"></canvas><div id="hz-fade"></div></div>
     </div>
 
     <main id="output" aria-live="polite"><div id="temp-view"></div></main>
@@ -21455,7 +21454,6 @@
     var factor = lightsOverrideOn ? 1 : naturalLightBrightness(state);
     if (!lightsOverrideOn && lanternLit(state)) factor = Math.max(factor, LANTERN_TEXT_BRIGHTNESS); // a lit lantern holds the text at a steady level (powered light is still full brightness; daylight still wins)
     factor = Math.max(factor, NIGHT_TEXT_BRIGHTNESS); // never dimmer than the no-light level: the text stays legible in darkness
-    try { if (window.landfallHorizon && window.landfallHorizon.paintText(factor, getNaturalLightBaseColors(), dimHexColor)) return; } catch (e) {} // (the hour's colours, while the horizon strip is up; otherwise the game's own, below)
     if (factor >= 1) {
       NATURAL_LIGHT_TEXT_VARS.forEach(function (name) { document.documentElement.style.removeProperty(name); });
       document.documentElement.style.removeProperty('--output-glow');
@@ -23810,19 +23808,19 @@
       const x = W / 2 + wrap180(b - vb) * ppd; xs.push(x);
       if (x < 8 || x > W - 8) return;
       const isN = L === 'N';
-      g.strokeStyle = rgba(COL.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
-      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? COL.br : COL.ph, isN ? .95 : .8); g.fillText(L, x, yb);
+      g.strokeStyle = rgba(SCN.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
+      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? SCN.br : SCN.ph, isN ? .95 : .8); g.fillText(L, x, yb);
     });
     { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
       if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
-        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(COL.ph, .5); g.fillText('BOW', x, yb);
-        g.strokeStyle = rgba(COL.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(SCN.ph, .5); g.fillText('BOW', x, yb);
+        g.strokeStyle = rgba(SCN.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
       } }
     g.restore();
   }
   // below deck: which side the windows face (tap the windows to switch)
   function drawSide(g, W, yb) {
-    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `700 8px ${FONT}`; g.fillStyle = rgba(COL.ph, .6);
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `700 8px ${FONT}`; g.fillStyle = rgba(OUT.ph, .75);
     g.fillText(V.side === 'port' ? 'PORT SIDE' : 'STARBOARD SIDE', W / 2, yb); g.restore();
   }
 
@@ -23851,24 +23849,39 @@
   const ROLL = [0, .6, 1.4, 2.6, 4, 5.5, 7];        // how far she rolls each way around that lean, in degrees: she swings past level to the other side
   const PITCH = [0, .3, .8, 1.6, 3, 5, 7.5];        // how far the bow lifts and drops, as pixels of horizon
 
-  const KF = [
-    { e: -10, ph: hex('#8fb4c9'), br: hex('#d4e8f2'), dim: hex('#4a6575'), bg: hex('#04070b'), glow: .14, lum: .8 },
-    { e: -3,  ph: hex('#a3bfb4'), br: hex('#e0eadb'), dim: hex('#5a7466'), bg: hex('#060808'), glow: .18, lum: .92 },
-    { e: 5,   ph: hex('#d3c98a'), br: hex('#f4e8b6'), dim: hex('#8b7b4b'), bg: hex('#0a0805'), glow: .26, lum: 1 },
-    { e: 20,  ph: hex('#8fd7ac'), br: hex('#c9f5da'), dim: hex('#4d7a5e'), bg: hex('#050806'), glow: .22, lum: 1 },
+  // the scene (sky, sea, sun, moon, the window outline, the compass marks): blue at night, orange at dusk and dawn, white by day. Keyed by the sun's height.
+  const SKF = [
+    { e: -12, ph: hex('#6f97dc'), br: hex('#b8d0fb'), dim: hex('#40619a'), bg: hex('#04070e') },   // night: blue
+    { e: -5,  ph: hex('#cf8660'), br: hex('#f5b890'), dim: hex('#80513a'), bg: hex('#0a0706') },   // the last of the dusk (or the first of the dawn): the blue has turned to orange
+    { e: 0,   ph: hex('#ea9650'), br: hex('#ffcb92'), dim: hex('#925c2e'), bg: hex('#0a0705') },   // the sun on the horizon: orange
+    { e: 7,   ph: hex('#eeb274'), br: hex('#ffdcb8'), dim: hex('#9a6e44'), bg: hex('#0a0806') },   // low sun: pale orange
+    { e: 18,  ph: hex('#e3e6ea'), br: hex('#ffffff'), dim: hex('#8a9098'), bg: hex('#07090b') },   // day: white
   ];
-  const LAMP = hex('#eed098'), LAMPB = [255, 236, 196], LAMPD = [152, 128, 90], LAMPBG = [22, 17, 10]; // any light on the boat: the text, its bright and dim shades, and the warm screen background
-  let COL = { ph: KF[3].ph, br: KF[3].br, dim: KF[3].dim, bg: KF[3].bg };
-  let OUT = COL; // the colours of the world outside: the cabin lamp never changes these, so a night sea stays dark through the portholes
-  let SCN = COL; // the picture above deck (sky and sea): the nav lights never change it either
-  function themeFor(e) {
-    if (e <= KF[0].e) return KF[0];
-    if (e >= KF[3].e) return KF[3];
-    for (let i = 0; i < 3; i++) if (e <= KF[i + 1].e) {
-      const a = KF[i], b = KF[i + 1], f = (e - a.e) / (b.e - a.e);
-      return { ph: mix(a.ph, b.ph, f), br: mix(a.br, b.br, f), dim: mix(a.dim, b.dim, f), bg: mix(a.bg, b.bg, f), glow: lerp(a.glow, b.glow, f), lum: lerp(a.lum, b.lum, f) };
-    }
+  // the same, when the sky is overcast, raining, foggy or in a squall: the dusk and the dawn stay GREY, not orange (the blue night and the white day are the same)
+  const SKFG = [
+    SKF[0],
+    { e: -5,  ph: hex('#9a9ea8'), br: hex('#cfd3da'), dim: hex('#585c66'), bg: hex('#07080a') },
+    { e: 0,   ph: hex('#b4b8c0'), br: hex('#e2e5ea'), dim: hex('#6c7078'), bg: hex('#08090b') },
+    { e: 7,   ph: hex('#c8ccd2'), br: hex('#eff1f4'), dim: hex('#7c8088'), bg: hex('#08090b') },
+    SKF[4],
+  ];
+  let GREYK = 0; // how much of the sky is heavy: 0 for clear and partly cloudy (orange), 1 for overcast, rain, fog and squall (grey)
+  function sceneFor(e, greyK) {
+    const at = (K, e) => {
+      if (e <= K[0].e) return K[0];
+      const L = K.length - 1;
+      if (e >= K[L].e) return K[L];
+      for (let i = 0; i < L; i++) if (e <= K[i + 1].e) {
+        const a = K[i], b = K[i + 1], f = (e - a.e) / (b.e - a.e);
+        return { ph: mix(a.ph, b.ph, f), br: mix(a.br, b.br, f), dim: mix(a.dim, b.dim, f), bg: mix(a.bg, b.bg, f) };
+      }
+    }, o = at(SKF, e);
+    if (!(greyK > 0.001)) return o;
+    const g = at(SKFG, e);
+    return { ph: mix(o.ph, g.ph, greyK), br: mix(o.br, g.br, greyK), dim: mix(o.dim, g.dim, greyK), bg: mix(o.bg, g.bg, greyK) };
   }
+
+  let COL = { ph: SKF[4].ph, br: SKF[4].br, dim: SKF[4].dim, bg: SKF[4].bg }, OUT = COL, SCN = COL; // (the glue sets all three every frame)
 
   const R = mulberry(7);
   const STARS = Array.from({ length: 150 }, () => ({ x: R(), y: R() * .82, r: .5 + R() * .8, p: R() * 6 }));
@@ -23916,7 +23929,7 @@
     LW = lw;
     const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
     const pal = V.loc === 'below' ? OUT : SCN, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
-    const nk = true ? lerp(.38, 1, clamp((e + 8) / 12, 0, 1)) : 1; // at night the world outside is darker: its lines dim, while the moon and the stars keep their own light
+    const nk = true ? lerp(.62, 1, clamp((e + 8) / 12, 0, 1)) : 1; // at night the world outside is darker: its lines dim, while the moon and the stars keep their own light
     const ph = pal.ph.map(v => v * nk), br = br0.map(v => v * nk);
     const y0 = H * .56, m = W * .18;
     const ppd = W / FOV, vb = viewBearing(), yawPx = vb * ppd; // pixels to a degree, which way the window points, and how far round the circle that is in pixels
@@ -23948,7 +23961,7 @@
     const sunP = V.sun;
     glint = null;
     if (sunP.el > -7 && bodyY(sunP.el) > -26 && Math.abs(wrap180(sunP.az - vb)) < FOV / 2 + 20) {
-      const p = { x: bodyX(sunP.az), y: bodyY(sunP.el) }, warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8) : br0;
+      const p = { x: bodyX(sunP.az), y: bodyY(sunP.el) }, warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8 * (1 - GREYK)) : br0;
       const a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA);
       const gl = 26 + warm * 16, hot = mix(col, [255, 255, 255], .55);
       const rg = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, gl);
@@ -24032,10 +24045,11 @@
     const yT = y0 + 2, yB = y0 + (H - y0) * .58, contrast = clamp(near / 6, .3, 1);
     const heave = Math.sin(WPH[0]) * near * .13;        // the boat lifts and drops with the swell, so the water seems to sink and rise by more the closer it is
     const x0 = -m, nPts = Math.min(599, Math.ceil((W + 2 * m) / 3) + 1);
+    const wdir = (V.loc === 'below' && V.side === 'starboard') ? -1 : 1; // the water passes the other way out of the starboard side
     for (let k = 0; k < NL; k++) {
       const d = k / (NL - 1), by = lerp(yT, yB, Math.pow(d, 1.15)) + heave * d, a = near * (.07 + .93 * Math.pow(d, 1.6)) / PK, L = Ln * (.4 + .6 * d), sp = .55 + .45 * d, off = (NL - 1 - k) * 2.1;
       for (let q = 0; q < nPts; q++) {
-        const x = x0 + q * 3, u = (x - W / 2 + yawPx) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
+        const x = x0 + q * 3, u = wdir * (x - W / 2 + yawPx) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
         const env = .78 + .22 * Math.sin(u / 2.3 + k * 1.7 + WPH[0] * .2);
         const p = env * (wshape(f1 + SKEW * Math.sin(f1)) + .42 * wshape(u / .61 + WPH[1] * sp + k * 5.3) + (d > .35 ? .14 * wshape(u / .23 + WPH[2] * sp + k * 2.9) : 0));
         RX[q] = x; RP[q] = p; RY[q] = by - a * p;
@@ -24103,14 +24117,12 @@
       drawCompass(g, W, 9);
       return;
     }
-    const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors; the frames below use the cabin's own colours
-    // two windows in the handbook's shape: the outer side leans out toward the bottom, the inner side is upright. They fill the band.
-    const mx = 5, my = 12, top = my, bot = H - my, fw = FW;
-    const hw = (W - 2 * mx) / 2, hh = (bot - top) / 2, cx0 = W / 2, cy0 = H / 2; // one long pill; the glass is the inner pill, the frame is the band round it
-    WIN = [pillOutline(cx0, cy0, hw - fw, hh - fw, 20)]; WIN[0].x0 = cx0 - (hw - fw); WIN[0].w = 2 * (hw - fw);
-    if (!true && V.lamp) { const lg = g.createRadialGradient(W / 2, -10, 4, W / 2, -10, W * .6); lg.addColorStop(0, 'rgba(255,184,96,.2)'); lg.addColorStop(1, 'rgba(255,184,96,0)'); g.fillStyle = lg; g.fillRect(0, 0, W, H);
-    }
-    // the view through the glass: one wide sea and sky, seen through both windows, so the horizon runs straight across
+    const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors
+    // two pills side by side, both looking out of the same side: one wide view seen through both. Across the width: 10% edge, 35% window, 10% between, 35% window, 10% edge.
+    const my = 12, top = my, bot = H - my, fw = FW;
+    const pw = W * .35, hh = (bot - top) / 2, cy0 = H / 2, cxL = W * .10 + pw / 2, cxR = W * .90 - pw / 2;
+    WIN = [pillOutline(cxL, cy0, pw / 2 - fw, hh - fw, 20), pillOutline(cxR, cy0, pw / 2 - fw, hh - fw, 20)];
+    WIN[0].x0 = cxL - pw / 2 + fw; WIN[0].w = pw - 2 * fw; WIN[1].x0 = cxR - pw / 2 + fw; WIN[1].w = pw - 2 * fw;
     g.save(); winPath(g); g.clip();
     g.fillStyle = rgb(OUT.bg); g.fillRect(0, 0, W, H);
     drawScene(g, W, H, ts, 1);
@@ -24120,7 +24132,7 @@
     while (pAcc > 1) {
       pAcc--; if (pb.length >= 40) continue;
       for (let tries = 0; tries < 6; tries++) {
-        const P = WIN[0], x = P.x0 + Math.random() * P.w, y = top + fw + Math.random() * (bot - top - 2 * fw);
+        const P = WIN[Math.random() < .5 ? 0 : 1], x = P.x0 + Math.random() * P.w, y = top + fw + Math.random() * (bot - top - 2 * fw);
         if (inPoly(x, y, P)) { pb.push({ x, y, r: 1 + Math.random() * 2.4, vy: 0, age: 0, hold: .6 + Math.random() * 2.6, tr: [] }); break; }
       }
     }
@@ -24148,7 +24160,7 @@
     if (cur.sea >= 3.6 && !V.reduce) {
       nextPSpray -= dt * (cur.sea - 3);
       if (nextPSpray <= 0) {
-        nextPSpray = 2.5 + Math.random() * 4.5; const P = WIN[0], sx = P.x0 + P.w * (.1 + Math.random() * .8);
+        nextPSpray = 2.5 + Math.random() * 4.5; const P = WIN[Math.random() < .5 ? 0 : 1], sx = P.x0 + P.w * (.1 + Math.random() * .8);
         for (let i = 0; i < 22; i++) pspray.push({ x: sx + (Math.random() - .5) * 26, y: bot - 6 + Math.random() * 6, vx: (Math.random() - .5) * 50, vy: -40 - Math.random() * 80, r: .5 + Math.random() * 1.3, life: 1 });
       }
     }
@@ -24157,21 +24169,10 @@
       if (p.life <= 0) { pspray.splice(i, 1); continue; }
       g.fillStyle = rgba(br, .8 * p.life); g.beginPath(); g.arc(p.x, p.y, p.r, 0, 6.2832); g.fill();
     }
-    // a soft sheen along each outer edge
-    if (false) { // (the old look's sheen along the two outer edges: there is one window now)
-      g.strokeStyle = rgba(br, .2); g.lineWidth = 1.6; g.beginPath();
-      g.moveTo(WIN[0][0][0] + 8, top + 7); g.lineTo(WIN[0][3][0] + 8, top + (bot - top) * .5);
-      g.moveTo(WIN[1][1][0] - 8, top + 7); g.lineTo(WIN[1][2][0] - 8, top + (bot - top) * .5);
-      g.stroke();
-    }
     g.restore();
-    // the frames: a soft outer line and a bright core, like the outline in the handbook
+    // the outline: one thin line round each window, in the scene's colour
     g.lineJoin = 'round';
-    if (true) { winPath(g); g.strokeStyle = rgba(COL.ph, .14); g.lineWidth = 1; g.stroke(); } // the same thin, faint line that goes round the SOUND box
-    else {
-      winPath(g); g.strokeStyle = rgba(COL.ph, .4); g.lineWidth = 2.3; g.stroke();
-      winPath(g); g.strokeStyle = rgba(COL.br, .92); g.lineWidth = 1; g.stroke();
-    }
+    winPath(g); g.strokeStyle = rgba(OUT.ph, .38); g.lineWidth = 1; g.stroke();
     drawSide(g, W, 9);
   }
 
@@ -24312,59 +24313,18 @@
   if (!broken && typeof ResizeObserver === 'function') new ResizeObserver(fitAll).observe(crtEl);
   window.addEventListener('resize', fitAll);
 
-  /* ---------- the palette of the hour: the strip and the window, and (TXT) the colour of the game's text while the strip is up ---------- */
-  // As the mockup has it: the hour's colour; below deck with no light on, only the window's light reaches the cabin; ANY LIGHT ON THE BOAT -- the cabin lights below deck, the nav lights
-  // on deck, the kerosene lamp in either place -- gives the same thing: warm, bright, slightly cool amber text on a warm dark screen, with no glow.  The sky and the sea keep their own
-  // colours and their own dark background (SCN above deck, OUT through the window), so the night sky never takes up the warm screen.  Fog greys the deck.
-  let TXT = null, txtKey = '', bgKey = '';
+  /* ---------- the colour of the picture: the strip and the windows only.  The TEXT and the SCREEN are the game's own (its green, its natural-light dimming, --bg and --bg-lit): nothing here paints them ---------- */
+  // The picture is WHITE by day, BLUE at night, and ORANGE while the sun is low (sceneFor, by the sun's height) -- but GREY, not orange, when the sky is heavy (overcast, rain, fog, squall:
+  // GREYK).  The lights on the boat never change it (OUT is the world outside, SCN the picture above deck, COL the outline and the compass marks), and fog greys the deck.
   function palettes(ts) {
-    const th = themeFor(V.e), below = V.loc === 'below';
-    let ph = th.ph.map(v => v * th.lum), br = th.br.map(v => v * th.lum), dim = th.dim.slice();
-    const scnPh = ph.slice(), scnBr = br.slice();
-    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the lights on the boat never change it
-    if (below && !V.cabin) { const f = lerp(.6, .95, dayFactor()); ph = ph.map(v => v * f); br = br.map(v => v * f); }
-    const lit = (below && V.cabin) || V.lantern || (!below && V.nav);
-    if (lit) { ph = LAMP.slice(); br = LAMPB.slice(); dim = LAMPD.slice(); }
-    const fogK = !below && cur.fog > .01 ? cur.fog * .35 : 0;
-    if (fogK) ph = mix(ph, [185, 201, 192], fogK);
-    COL = { ph, br, dim, bg: th.bg };
-    SCN = { ph: fogK ? mix(scnPh, [185, 201, 192], fogK) : scnPh, br: scnBr, dim: th.dim, bg: th.bg };
-    TXT = { ph, br, dim, glow: th.glow };
-    // the screen behind the text: a warm dark while a light is on, the game's own otherwise.  When the kerosene lamp is the light (no cabin or nav lights on as well), the warm dark
-    // flickers very subtly with the flame (about two or three shades either way, at about twenty times a second); a powered light, or reduced motion, holds it steady.
-    let bgc = null;
-    if (lit) {
-      bgc = LAMPBG;
-      if (V.lantern && !(below && V.cabin) && !(!below && V.nav) && !V.reduce) {
-        const n = Math.floor(ts / 50), q = n * .05;
-        const f = 1 + .06 * Math.sin(q * 9.1) + .045 * Math.sin(q * 23.7 + 1.3) + .03 * Math.sin(q * 41 + 4) + (hash(n, 7.7) - .5) * .04; // the flame: about 0.85 to 1.15
-        const k = 1 + (f - 1) * 1.6;
-        bgc = LAMPBG.map(v => v * k);
-      }
-    }
-    const lk = bgc ? bgc.map(v => Math.round(v)).join() : '';
-    if (lk !== bgKey) { bgKey = lk; setScreenBg(bgc); }
-    // the game's own light code paints the text: ask it to do so again whenever the colour has moved
-    const key = [ph, br, dim].map(c => c.map(v => v | 0).join()).join('|') + th.glow.toFixed(2);
-    if (key !== txtKey) { txtKey = key; repaintText(); }
+    GREYK = clamp((cur.cloud - 50) / 25, 0, 1); // (partly cloudy is 42, fog 70, overcast 92, rain 96, squall 100)
+    const th = sceneFor(V.e, GREYK);
+    const ph = th.ph.slice(), br = th.br.slice();
+    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like
+    const fogK = V.loc === 'above' && cur.fog > .01 ? cur.fog * .35 : 0;
+    SCN = { ph: fogK ? mix(ph, [185, 201, 192], fogK) : ph, br: br, dim: th.dim, bg: th.bg };
+    COL = SCN;
   }
-  function setScreenBg(c) { // c: the warm dark as [r, g, b], or null to give the game's own back
-    const rs = document.documentElement.style;
-    if (c) { const v = 'rgb(' + c.map(x => Math.round(x)).join(',') + ')'; rs.setProperty('--bg', v); rs.setProperty('--bg-lit', v); } else { rs.removeProperty('--bg'); rs.removeProperty('--bg-lit'); }
-  }
-  function repaintText() { try { if (typeof GAME === 'object' && GAME && GAME.crew && GAME.boat) applyNaturalLightDimming(GAME); } catch (e) { /* the next screen draw does it */ } }
-  // Called by the game's own applyNaturalLightDimming with the brightness it has worked out (1 = full, dimmer at night until a light is on).  Returns true if it painted the text.
-  function paintText(factor, base, dimHex) {
-    if (broken || !visibleNow || !TXT) return false;
-    const rs = document.documentElement.style, f = clamp(factor, 0, 1), c = a => 'rgb(' + a.map(v => Math.round(v * f)).join(', ') + ')';
-    rs.setProperty('--phosphor', c(TXT.ph)); rs.setProperty('--phosphor-bright', c(TXT.br)); rs.setProperty('--phosphor-dim', c(TXT.dim));
-    ['--amber', '--danger'].forEach(n => { if (f >= 1) rs.removeProperty(n); else rs.setProperty(n, dimHex(base[n], f)); }); // (the game's own warning colours: dimmed as it always did)
-    rs.setProperty('--rule', rgba(TXT.ph, .14));
-    rs.setProperty('--output-glow', f >= 1 ? '0 0 6px ' + rgba(TXT.ph, TXT.glow) : 'none');
-    return true;
-  }
-  // the strip is gone (title page, switched off): the game's own colours come back
-  function unpaintText() { try { document.documentElement.style.removeProperty('--rule'); setScreenBg(null); } catch (e) {} txtKey = ''; bgKey = ''; repaintText(); }
 
   function dayFactor() { return clamp((V.e + 6) / 20, 0, 1) * (1 - cur.cloud / 100 * .4); }
   let fxKey = '';
@@ -24383,7 +24343,7 @@
   function wantLoc(loc) {
     if (loc === V.loc || loc === pendingLoc) return;
     pendingLoc = loc;
-    const swap = () => { V.loc = loc; pendingLoc = null; pb.length = pspray.length = 0; }; // (nothing from the other view is left on the glass)
+    const swap = () => { V.loc = loc; pendingLoc = null; if (loc === 'above') { V.yaw = 0; V.yawV = 0; } pb.length = pspray.length = 0; }; // (coming up on deck, she always starts facing the bow) // (nothing from the other view is left on the glass)
     if (V.reduce || !visibleNow || !fadeEl.animate) { swap(); return; }
     fadeEl.getAnimations().forEach(a => a.cancel());
     fadeEl.animate([{ opacity: 0 }, { opacity: .92 }], { duration: 150, fill: 'forwards' }).onfinish = () => { swap(); fadeEl.animate([{ opacity: .92 }, { opacity: 0 }], { duration: 300, fill: 'forwards' }); };
@@ -24451,7 +24411,7 @@
       if (show !== visibleNow) {
         visibleNow = show; horizonEl.hidden = !show; document.body.classList.toggle('hz-on', show);
         if (show) { snapNext = true; sampledAt = -1e9; }
-        else { fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; unpaintText(); }
+        else { fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; }
         fitAll();
       }
       if (!show) return;
@@ -24473,7 +24433,7 @@
       const t1 = performance.now();
       stats.strip += ((t1 - t0) - stats.strip) * .1; stats.frames++;
     } catch (err) {
-      broken = true; horizonEl.hidden = true; document.body.classList.remove('hz-on'); unpaintText();
+      broken = true; horizonEl.hidden = true; document.body.classList.remove('hz-on');
       console.warn('[Landfall horizon] switched off:', err && err.message ? err.message : err);
     }
   }
@@ -24483,10 +24443,9 @@
   //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true, hdg: 237, yaw: 0, side: 'port', sunAz: 270, moonAz: 100, moonAlt: 20, moonP: .5 })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
-    paintText: paintText,
     force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
     clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
-    state: function () { return { V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
+    state: function () { return { pal: { scn: SCN, out: OUT, greyK: GREYK }, V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
   };
 
   })(); } catch (horizonErr) { console.warn('[Landfall horizon] could not start:', horizonErr && horizonErr.message ? horizonErr.message : horizonErr); }
