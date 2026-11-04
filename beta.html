@@ -23763,35 +23763,36 @@
     let hi = 0; for (let i = 1; i < 720; i++) if (t2[i] > t2[hi]) hi = i;
     return { top: t2, dst, any, hi: hi / 2 };
   }
+  const LAND_MIX = .16; // how far the fill is from the background toward the hour's colour: just a touch lighter than the sky
 
   function drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl) {
     const Ld = LAND; if (!Ld || !Ld.any || haze < .02) return;
-    const pxMax = y0 - (V.loc === 'below' ? 15 : 5), P = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step);
+    const pxMax = y0 - (V.loc === 'below' ? 15 : 5), P = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step), visKm = V.visKm, SINK = visKm * .74; // (visKm: how far land shows; the game sets it from the weather)
     const col = [];
     for (let q = 0; q <= n; q++) {
       const x = -m + q * step, bq = (vb + (x - W / 2) / ppd) * 2, i0 = Math.floor(bq), f = bq - i0, a0 = ((i0 % 720) + 720) % 720, a1 = (a0 + 1) % 720;
       const t0 = Ld.top[a0], t1 = Ld.top[a1];
-      if ((t0 <= 0 && t1 <= 0) || Math.min(Ld.dst[a0], Ld.dst[a1]) > V.visKm) { col.push(null); continue; }
-      col.push({ x, h: Math.max(1.4, P(lerp(Math.max(t0, 0), Math.max(t1, 0), f))), d: Math.min(Ld.dst[a0], Ld.dst[a1]) });
+      if (t0 <= 0 && t1 <= 0) { col.push(null); continue; }
+      const d = Math.min(Ld.dst[a0], Ld.dst[a1]);
+      if (d >= visKm) { col.push(null); continue; } // beyond what can be seen
+      const sink = 1 - Math.pow(clamp((d - SINK) / (visKm - SINK), 0, 1), 2); // the far end of what can be seen sinks into the sea, as land does over the edge of the world
+      col.push({ x, h: Math.max(1.4, P(lerp(Math.max(t0, 0), Math.max(t1, 0), f)) * sink) });
     }
-    const fillC = mix(bg, ph, .05), vis = haze * (1 - cl * .2);
+    // ONE fill: a medium tone of the hour's colour, fully opaque (so no cloud or line behind it shows through); in fog it pales toward the haze
+    const fogMix = clamp((1 - haze) * .9, 0, 1), fillC = mix(mix(bg, ph, LAND_MIX), mix(bg, ph, .12), fogMix);
     g.save(); g.lineJoin = 'round'; g.lineCap = 'round'; g.lineWidth = lw;
     for (let q = 0; q <= n;) {
       if (!col[q]) { q++; continue; }
       let e = q; while (e + 1 <= n && col[e + 1]) e++;
       if (e > q) {
+        const hh = k => (k === q || k === e) ? 0 : col[k].h; // each run starts and ends at the sea, so an island's ends slope down with no lip
         g.beginPath(); g.moveTo(col[q].x, y0 + 2);
-        for (let k = q; k <= e; k++) g.lineTo(col[k].x, y0 - col[k].h);
-        g.lineTo(col[e].x, y0 + 2); g.closePath(); g.fillStyle = rgba(fillC, .97 * vis); g.fill();
-        for (let k = q; k < e; k++) { // the ridge line: strong where the land is near, faint where it is far, gone at the edge of what can be seen
-          const A = col[k], B = col[k + 1], v0 = Math.min(20, V.visKm * .43), fade = 1 - clamp((A.d - v0) / Math.max(.1, V.visKm - v0), 0, 1), al = (.9 - .45 * clamp(A.d / V.visKm, 0, 1)) * fade * vis;
-          if (al < .02) continue;
-          g.strokeStyle = rgba(ph, al); g.beginPath(); g.moveTo(A.x, y0 - A.h); g.lineTo(B.x, y0 - B.h); g.stroke();
-          if (A.h > 7) for (const [dy, kk] of [[5, .3], [10, .16]]) { // two contour lines under the ridge, so a mountain has some body
-            if (A.h - dy < 2) continue;
-            g.strokeStyle = rgba(ph, al * kk); g.beginPath(); g.moveTo(A.x, y0 - A.h + dy); g.lineTo(B.x, y0 - B.h + dy); g.stroke();
-          }
-        }
+        for (let k = q; k <= e; k++) g.lineTo(col[k].x, y0 - hh(k));
+        g.lineTo(col[e].x, y0 + 2); g.closePath(); g.fillStyle = rgb(fillC); g.fill();
+        // ONE outline: the skyline, in one line of the hour's colour, down to the sea at each end
+        g.strokeStyle = rgba(ph, .92 * haze); g.beginPath(); g.moveTo(col[q].x, y0 - hh(q));
+        for (let k = q + 1; k <= e; k++) g.lineTo(col[k].x, y0 - hh(k));
+        g.stroke();
       }
       q = e + 1;
     }
@@ -23947,7 +23948,7 @@
     const fogTint = mix(ph, [205, 218, 210], .5), hazeCol = mix(bg, fogTint, .17 * fogF);
     if (fogF > .01) { g.fillStyle = rgba(fogTint, .17 * fogF); g.fillRect(-m, -60, W + 2 * m, H + 200); }
 
-    const ceilA = clamp((cl - .55) / .35, 0, 1); // how much of an overcast ceiling there is; under a full ceiling there is no sun, moon or star to see
+    const ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1); // how much of an overcast ceiling there is; under a full ceiling there is no sun, moon or star to see
     const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
     if (starA > .02) STARS.forEach(s => {
       const tw = .6 + .4 * Math.sin(tt * .0016 + s.p);
@@ -24013,7 +24014,7 @@
       if (i >= n) return;
       const x = W / 2 + wrap180((((c.x + drift * c.v) % 1) + 1) % 1 * 360 - vb) * ppd - c.n * c.s * 1.55;
       const sc = Math.min(c.s * 3.1 * (1 + cl * .2), (y0 - 5 - skyTop) / c.hmax), by = lerp(y0 - 5, skyTop + c.hmax * sc, c.y);
-      if (haze * (1 - ceilA) > .03) drawCloud(g, c, x, by, sc, c.flip, lw, ph, (.7 - .2 * sq) * haze * (1 - ceilA), bg, haze * (1 - ceilA));
+      if (haze * cloudK > .03) drawCloud(g, c, x, by, sc, c.flip, lw, ph, (.7 - .2 * sq) * haze * cloudK, bg, haze * cloudK);
     });
     if (cl > .8) {
       const a = (cl - .8) / .2;
@@ -24022,12 +24023,12 @@
       g.setLineDash([]);
       gr = g.createLinearGradient(0, 0, 0, y0 * .6); gr.addColorStop(0, rgba(bg, .65 * a)); gr.addColorStop(1, rgba(bg, 0)); g.fillStyle = gr; g.fillRect(-m, -60, W + 2 * m, y0 * .6 + 60);
     }
-    drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl);
     if (sq > .02) {
       g.beginPath(); g.moveTo(-m, -60); g.lineTo(W + m, -60); g.lineTo(W + m, 18);
       for (let x = W + m; x > -m; x -= 16) g.quadraticCurveTo(x - 8, 18 + 9 * Math.sin(x * .13 + (V.reduce ? 0 : ts * .0006)), x - 16, 18);
       g.closePath(); g.fillStyle = rgba(hex('#020403'), .9 * sq); g.fill(); g.strokeStyle = rgba(ph, .5 * sq); g.lineWidth = lw; g.stroke();
     }
+    drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl);
     if (rain > .02) {
       g.strokeStyle = rgba(ph, .15 + rain * .15); g.lineWidth = lw; g.beginPath();
       const cnt = Math.round(30 + rain * 40), off = V.reduce ? 0 : (ts * .06) % 14;
@@ -24408,7 +24409,7 @@
         if (V.loc === 'below') V.side = V.side === 'port' ? 'starboard' : 'port'; // tap the window: look out of the other side
         else if (now - lastTap < 350) { V.yaw = 0; V.yawV = 0; lastTap = 0; } else lastTap = now; // double-tap: face the bow again
       }
-      if (now - drag.vt > 80) V.yawV = 0;
+      if (now - drag.vt > 80 || Math.abs(drag.x - drag.x0) < 6) V.yawV = 0; // (no coast unless the finger really travelled sideways: an up-and-down scroll with a pixel of wobble must not turn the view)
       drag = null;
     };
     stripEl.addEventListener('pointerup', endDrag); stripEl.addEventListener('pointercancel', endDrag);
