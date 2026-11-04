@@ -895,19 +895,11 @@
   #lightning-flash { position: fixed; inset: 0; z-index: 9000; display: none; opacity: 0; pointer-events: none; background: #e9f1ff; transition: none; }
 
   /* THE HORIZON (beta 11): a band under the top bar -- the horizon above deck, two portholes below -- with fog and squall dark on the screen glass. Nothing here takes a tap. */
-  @property --hz-lamp-a { syntax: '<number>'; inherits: false; initial-value: 0; }
-  @property --hz-lamp-r { syntax: '<length>'; inherits: false; initial-value: 200px; }
-  @property --hz-lamp-y { syntax: '<length>'; inherits: false; initial-value: 120px; }
-  #crt {
-    /* the kerosene lamp: a round glow behind everything (centred between the two windows below deck), flickering a little; the cabin lights have none */
-    background-image: radial-gradient(circle var(--hz-lamp-r) at 50% var(--hz-lamp-y), rgba(255, 184, 96, calc(0.32 * var(--hz-lamp-a))), rgba(255, 184, 96, calc(0.13 * var(--hz-lamp-a))) 45%, rgba(255, 184, 96, 0));
-    background-repeat: no-repeat;
-  }
   #scanlines { display: none; } /* no terminal scanlines */
   body.hz-on #topbar, body.hz-on #navstrip { border-bottom-color: transparent; } /* no lines between the top bar, the voyage line and the windows */
   #horizon { flex-shrink: 0; position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
   #horizon[hidden], body.title-mode #horizon { display: none; }
-  #hz-strip { position: relative; height: 86px; border-bottom: 1px solid var(--rule); } /* the mockup's size: 86 px tall, as wide as the screen */
+  #hz-strip { position: relative; height: 86px; border-bottom: 1px solid var(--rule); touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; } /* a sideways drag turns your head; up and down still scrolls */ /* the mockup's size: 86 px tall, as wide as the screen */
   #hz-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #hz-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
   #hz-fog, #hz-dark { position: absolute; inset: 0; pointer-events: none; }
@@ -23730,6 +23722,122 @@
 
   const lerpTable = (tab, v) => { const i = clamp(Math.floor(v), 0, tab.length - 2), f = clamp(v - i, 0, 1); return lerp(tab[i], tab[i + 1], f); };
 
+  const RAD = Math.PI / 180, SYN = 29.530588853, FOV = 110, RANGE_KM = 60, VIS_KM = 46, EYE = 3, REFF = 7.4e6;
+
+  const wrap180 = a => ((a % 360) + 540) % 360 - 180;
+
+  function sunCalc(ms, lat, lon) {
+    const d = ms / 864e5 - 10957.5, g = RAD * (357.529 + .98560028 * d), L = RAD * (280.459 + .98564736 * d + 1.915 * Math.sin(g) + .02 * Math.sin(2 * g)), ob = RAD * (23.439 - 4e-7 * d);
+    const ra = Math.atan2(Math.cos(ob) * Math.sin(L), Math.cos(L)), dec = Math.asin(Math.sin(ob) * Math.sin(L));
+    const H = RAD * (280.16 + 360.9856235 * d + lon) - ra, phi = RAD * lat;
+    const el = Math.asin(clamp(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(H), -1, 1)) / RAD;
+    const az = ((Math.atan2(Math.sin(H), Math.cos(H) * Math.sin(phi) - Math.tan(dec) * Math.cos(phi)) + Math.PI) / RAD % 360 + 360) % 360;
+    return { el, az };
+  }
+
+  const SAMPLES = [0, .25, .6, 1, 1.6, 2.5, 4, 6, 9, 13, 18, 25, 35, 48];
+
+  function buildLand(rays, rel) {
+    const P = { rays }, top = new Float32Array(720).fill(-1), dst = new Float32Array(720).fill(999), seed = 7.3;
+    const sm = x => x * x * (3 - 2 * x), vn = x => { const i = Math.floor(x), f = x - i; return lerp(hash(i, seed), hash(i + 1, seed), sm(f)); };
+    let any = false;
+    for (let i = 0; i < 720; i++) {
+      for (const [dIn, dOut] of P.rays[i]) {
+        const open = dOut > RANGE_KM, ext = open ? 99 : dOut - dIn, big = clamp((Math.min(ext, 30) - 1) / 9, .05, 1); // small islands are low, big land is high
+        for (const s of SAMPLES) {
+          if (s > ext) break;
+          const u = Math.min(1, s / Math.min(ext, 26)), shape = ext > 26 ? sm(clamp(s / rel.ramp, 0, 1)) : Math.pow(Math.sin(Math.PI * u), .8);
+          const nz = .5 * vn(i / 10 + s / 9) + .3 * vn(i / 3.5 + s / 3.2 + 17) + .2 * vn(i / 1.3 + s / 1.2 + 41);
+          const h = rel.H * big * shape * (.3 + .7 * nz), d = Math.max(.15, dIn + s) * 1000;
+          const ang = ((h - d * d / (2 * REFF)) / d + Math.sqrt(2 * EYE / REFF)) / RAD; // how far it stands above the sea horizon, allowing for the curve of the earth
+          if (ang > 0 && ang > top[i]) { top[i] = ang; dst[i] = dIn + s; any = true; }
+        }
+      }
+    }
+    // smooth the outline (about 1.5 degrees either side), so the ends of an island slope down into the sea instead of dropping off a cliff
+    const KER = [1, 2, 3, 4, 3, 2, 1], t2 = new Float32Array(720), d2 = new Float32Array(720).fill(999);
+    for (let i = 0; i < 720; i++) {
+      let sum = 0, w = 0, dm = 999;
+      for (let k = -3; k <= 3; k++) { const j = (i + k + 720) % 720, wt = KER[k + 3]; sum += Math.max(top[j], 0) * wt; w += wt; if (top[j] > 0 && dst[j] < dm) dm = dst[j]; }
+      const v = sum / w; if (v > .06 && dm < 999) { t2[i] = v; d2[i] = dm; } else t2[i] = -1;
+    }
+    for (let i = 0; i < 720; i++) dst[i] = d2[i];
+    let hi = 0; for (let i = 1; i < 720; i++) if (t2[i] > t2[hi]) hi = i;
+    return { top: t2, dst, any, hi: hi / 2 };
+  }
+
+  function drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl) {
+    const Ld = LAND; if (!Ld || !Ld.any || haze < .02) return;
+    const pxMax = y0 - (V.loc === 'below' ? 15 : 5), P = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step);
+    const col = [];
+    for (let q = 0; q <= n; q++) {
+      const x = -m + q * step, bq = (vb + (x - W / 2) / ppd) * 2, i0 = Math.floor(bq), f = bq - i0, a0 = ((i0 % 720) + 720) % 720, a1 = (a0 + 1) % 720;
+      const t0 = Ld.top[a0], t1 = Ld.top[a1];
+      if ((t0 <= 0 && t1 <= 0) || Math.min(Ld.dst[a0], Ld.dst[a1]) > V.visKm) { col.push(null); continue; }
+      col.push({ x, h: Math.max(1.4, P(lerp(Math.max(t0, 0), Math.max(t1, 0), f))), d: Math.min(Ld.dst[a0], Ld.dst[a1]) });
+    }
+    const fillC = mix(bg, ph, .05), vis = haze * (1 - cl * .2);
+    g.save(); g.lineJoin = 'round'; g.lineCap = 'round'; g.lineWidth = lw;
+    for (let q = 0; q <= n;) {
+      if (!col[q]) { q++; continue; }
+      let e = q; while (e + 1 <= n && col[e + 1]) e++;
+      if (e > q) {
+        g.beginPath(); g.moveTo(col[q].x, y0 + 2);
+        for (let k = q; k <= e; k++) g.lineTo(col[k].x, y0 - col[k].h);
+        g.lineTo(col[e].x, y0 + 2); g.closePath(); g.fillStyle = rgba(fillC, .97 * vis); g.fill();
+        for (let k = q; k < e; k++) { // the ridge line: strong where the land is near, faint where it is far, gone at the edge of what can be seen
+          const A = col[k], B = col[k + 1], v0 = Math.min(20, V.visKm * .43), fade = 1 - clamp((A.d - v0) / Math.max(.1, V.visKm - v0), 0, 1), al = (.9 - .45 * clamp(A.d / V.visKm, 0, 1)) * fade * vis;
+          if (al < .02) continue;
+          g.strokeStyle = rgba(ph, al); g.beginPath(); g.moveTo(A.x, y0 - A.h); g.lineTo(B.x, y0 - B.h); g.stroke();
+          if (A.h > 7) for (const [dy, kk] of [[5, .3], [10, .16]]) { // two contour lines under the ridge, so a mountain has some body
+            if (A.h - dy < 2) continue;
+            g.strokeStyle = rgba(ph, al * kk); g.beginPath(); g.moveTo(A.x, y0 - A.h + dy); g.lineTo(B.x, y0 - B.h + dy); g.stroke();
+          }
+        }
+      }
+      q = e + 1;
+    }
+    g.restore();
+  }
+
+  // N, E, S, W (and the bow and stern) as small marks along the top of the view
+  let FONT = 'monospace';
+  function drawCompass(g, W, yb) {
+    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg;
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    const cards = [['N', 0], ['E', 90], ['S', 180], ['W', 270]], xs = [];
+    cards.forEach(([L, b]) => {
+      const x = W / 2 + wrap180(b - vb) * ppd; xs.push(x);
+      if (x < 8 || x > W - 8) return;
+      const isN = L === 'N';
+      g.strokeStyle = rgba(COL.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
+      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? COL.br : COL.ph, isN ? .95 : .8); g.fillText(L, x, yb);
+    });
+    { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
+      if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(COL.ph, .5); g.fillText('BOW', x, yb);
+        g.strokeStyle = rgba(COL.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+      } }
+    g.restore();
+  }
+  // below deck: which side the windows face (tap the windows to switch)
+  function drawSide(g, W, yb) {
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `700 8px ${FONT}`; g.fillStyle = rgba(COL.ph, .6);
+    g.fillText(V.side === 'port' ? 'PORT SIDE' : 'STARBOARD SIDE', W / 2, yb); g.restore();
+  }
+
+  const FW = 0; // (no frame band round the glass: the window is one outline)
+
+  // a pill (a rectangle with fully rounded ends): a dense closed outline, so points can be spaced equally along it
+  function pillOutline(cx, cy, hw, hh, steps) {
+    const r = hh, x1 = cx + hw - r, x0 = cx - hw + r, pts = [], seg = Math.max(2, Math.round((x1 - x0) / 6));
+    for (let i = 0; i < steps; i++) { const a = -Math.PI / 2 + Math.PI * i / steps; pts.push([x1 + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    for (let i = 0; i < seg; i++) pts.push([x1 - (x1 - x0) * i / seg, cy + r]);
+    for (let i = 0; i < steps; i++) { const a = Math.PI / 2 + Math.PI * i / steps; pts.push([x0 + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    for (let i = 0; i < seg; i++) pts.push([x0 + (x1 - x0) * i / seg, cy - r]);
+    return pts;
+  }
+
   const NEAR_AMP = [1, 2.4, 4.5, 8, 15, 24, 34];        // height of the nearest swell in px
   const NEAR_LEN = [95, 105, 115, 125, 140, 155, 170];   // and its length in px: bigger seas are longer swells
   const LAM = [8, 11, 16, 26, 42, 66, 100];              // the swell's length in metres: only used to set how fast it travels (deep water waves: longer is faster but slower to repeat)
@@ -23749,9 +23857,10 @@
     { e: 5,   ph: hex('#d3c98a'), br: hex('#f4e8b6'), dim: hex('#8b7b4b'), bg: hex('#0a0805'), glow: .26, lum: 1 },
     { e: 20,  ph: hex('#8fd7ac'), br: hex('#c9f5da'), dim: hex('#4d7a5e'), bg: hex('#050806'), glow: .22, lum: 1 },
   ];
-  const LAMP = hex('#e6b86e');
+  const LAMP = hex('#eed098'), LAMPB = [255, 236, 196], LAMPD = [152, 128, 90], LAMPBG = [22, 17, 10]; // any light on the boat: the text, its bright and dim shades, and the warm screen background
   let COL = { ph: KF[3].ph, br: KF[3].br, dim: KF[3].dim, bg: KF[3].bg };
   let OUT = COL; // the colours of the world outside: the cabin lamp never changes these, so a night sea stays dark through the portholes
+  let SCN = COL; // the picture above deck (sky and sea): the nav lights never change it either
   function themeFor(e) {
     if (e <= KF[0].e) return KF[0];
     if (e >= KF[3].e) return KF[3];
@@ -23762,7 +23871,7 @@
   }
 
   const R = mulberry(7);
-  const STARS = Array.from({ length: 52 }, () => ({ x: R(), y: R() * .82, r: .5 + R() * .8, p: R() * 6 }));
+  const STARS = Array.from({ length: 150 }, () => ({ x: R(), y: R() * .82, r: .5 + R() * .8, p: R() * 6 }));
   // The six cloud silhouettes, traced from the reference picture: low and wide, flat underneath, one main hump with shoulders and a thin tail.
   // Each list is how thick the cloud is, in cells, down its length. They are smoothed and drawn as an outline with a solid inside.
   const CLOUD_SHAPES = [
@@ -23778,7 +23887,7 @@
     for (let pass = 0; pass < 3; pass++) { const o = h; h = o.map((v, j) => j === 0 || j === o.length - 1 ? 0 : (o[j - 1] + 2 * v + o[j + 1]) / 4); }
     return { h, n: h.length, hmax: Math.max(...h) };
   }
-  const CLOUDS = [0, 1, 2, 3, 4, 5, 0, 1].map((shape, i) => Object.assign(makeCloud(shape), { x: R(), y: R(), s: .85 + R() * .45, v: .6 + R() * .8, flip: i > 5 || R() < .35 }));
+  const CLOUDS = [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3].map((shape, i) => Object.assign(makeCloud(shape), { x: R(), y: R(), s: .85 + R() * .45, v: .6 + R() * .8, flip: i > 5 || R() < .35 }));
   function drawCloud(g, c, x, y, s, flip, lw, col, a, bg, fa) {
     g.save(); g.translate(x, y); g.scale(flip ? -s : s, s);
     g.beginPath(); g.moveTo(0, 0);
@@ -23806,10 +23915,11 @@
   function drawScene(g, W, H, ts, lw) {
     LW = lw;
     const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
-    const pal = V.loc === 'below' ? OUT : COL, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
+    const pal = V.loc === 'below' ? OUT : SCN, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
     const nk = true ? lerp(.38, 1, clamp((e + 8) / 12, 0, 1)) : 1; // at night the world outside is darker: its lines dim, while the moon and the stars keep their own light
     const ph = pal.ph.map(v => v * nk), br = br0.map(v => v * nk);
     const y0 = H * .56, m = W * .18;
+    const ppd = W / FOV, vb = viewBearing(), yawPx = vb * ppd; // pixels to a degree, which way the window points, and how far round the circle that is in pixels
     g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
     // Roll: a small steady lean plus a swing that goes through level and out the other side. Pitch: the bow climbs the front of each swell, then drops over the crest.
     const rr = tt * .0011 * (1 + sea * .12);
@@ -23828,18 +23938,17 @@
     const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
     if (starA > .02) STARS.forEach(s => {
       const tw = .6 + .4 * Math.sin(tt * .0016 + s.p);
-      g.fillStyle = rgba(br0, starA * tw); g.beginPath(); g.arc(s.x * W, s.y * y0, s.r, 0, 6.2832); g.fill();
+      g.fillStyle = rgba(br0, starA * tw); g.beginPath(); g.arc(W / 2 + wrap180(s.x * 360 - vb) * ppd, s.y * y0, s.r, 0, 6.2832); g.fill();
     });
 
     g.save(); g.beginPath(); g.rect(-m, -60, W + 2 * m, y0 + 60); g.clip();
-    // below deck, the post between the two windows would hide the sun at noon, so the arc is bent a little: midday sun sits in the right window, the moon passes the post in the small hours
-    const warp = (u, gm) => !gm ? u : u < 0 ? u : u > 1 ? u : Math.pow(u, gm);
+    // the sun and the moon stand at their real compass bearing and height, at the same scale up as across: the picture shows only the first dozen degrees of sky, so a high sun is out of sight overhead and comes back into view as it sets
     const peak = V.loc === 'below' ? 24 : 10; // how high the arc climbs: lower below deck so the sun stays inside the window frames
-    const body = (u, gm) => ({ x: W * (.08 + .84 * warp(u, gm)), y: y0 - Math.sin(Math.PI * u) * (y0 - peak) });
-    const us = V.us;
+    const bodyY = el => y0 - el * ppd, bodyX = az => W / 2 + wrap180(az - vb) * ppd;
+    const sunP = V.sun;
     glint = null;
-    if (us > -.09 && us < 1.09) {
-      const p = body(us, V.loc === 'below' ? .7 : 0), warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8) : br0;
+    if (sunP.el > -7 && bodyY(sunP.el) > -26 && Math.abs(wrap180(sunP.az - vb)) < FOV / 2 + 20) {
+      const p = { x: bodyX(sunP.az), y: bodyY(sunP.el) }, warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8) : br0;
       const a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA);
       const gl = 26 + warm * 16, hot = mix(col, [255, 255, 255], .55);
       const rg = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, gl);
@@ -23847,14 +23956,14 @@
       g.fillStyle = rg; g.fillRect(p.x - gl, p.y - gl, 2 * gl, 2 * gl);
       glint = { x: p.x, a: a * clamp(e / 6, 0, 1) * (cl < .75 ? 1 : 0), col };
     }
-    const um = V.um;
-    if (um <= 1.05 && um >= -.05) {
-      const p = body(um, V.loc === 'below' ? 1.4 : 0), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+    const mnow = V.mn;
+    if (mnow.alt > -3 && bodyY(mnow.alt) > -20 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 20) {
+      const p = { x: bodyX(mnow.az), y: bodyY(mnow.alt) }, a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
       if (a > .02) {
-        const mp = V.moonP, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br0, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br0, 0));
+        const mp = mnow.p, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br0, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br0, 0));
         g.fillStyle = rg; g.fillRect(p.x - 30, p.y - 30, 60, 60);
         drawMoon(g, p.x, p.y, 8, mp, br0, .96 * a);
-        if (!glint) glint = { x: p.x, a: a * (.25 + .6 * moonLit(V.moonP)), col: br0 };
+        if (!glint) glint = { x: p.x, a: a * (.25 + .6 * moonLit(mp)), col: br0 };
       }
     }
     g.restore();
@@ -23878,28 +23987,29 @@
       for (let r = 0; r < OC.length; r++) {
         const R = OC[r], f = r / (OC.length - 1), yy = lerp(yTop, yBot, Math.pow(f, 1.45));
         g.strokeStyle = rgba(ph, ceilA * haze * (.16 + .34 * f) * (1 - sq * .3));
-        g.setLineDash(R.pat); g.lineDashOffset = -dpx * R.sp * 3;
+        g.setLineDash(R.pat); g.lineDashOffset = yawPx - dpx * R.sp * 3;
         g.beginPath();
-        for (let x = -m, q = 0; x <= W + m + 8; x += 8, q++) { const y = yy + Math.sin(x * .021 + R.p + wob) * 1.3 * (1 - f * .55) + Math.sin(x * .009 + R.p * 2) * .9; q ? g.lineTo(x, y) : g.moveTo(x, y); }
+        for (let x = -m, q = 0; x <= W + m + 8; x += 8, q++) { const y = yy + Math.sin((x + yawPx) * .021 + R.p + wob) * 1.3 * (1 - f * .55) + Math.sin((x + yawPx) * .009 + R.p * 2) * .9; q ? g.lineTo(x, y) : g.moveTo(x, y); }
         g.stroke();
       }
       g.setLineDash([]); g.restore();
     }
-    const n = Math.round(cl * 7.2), drift = V.reduce ? 0 : ts * .0000017 * (1 + sea * .06); // clouds drift slowly: about a pixel a second
+    const n = Math.round(cl * 14.4), drift = V.reduce ? 0 : ts * .0000007 * (1 + sea * .06); // clouds drift slowly: about a pixel a second
     const skyTop = V.loc === 'below' ? 15 : 2;
     CLOUDS.forEach((c, i) => {
       if (i >= n) return;
-      const x = (((c.x + drift * c.v) % 1.35) + 1.35) % 1.35 * (W + 2 * m) - m - 20;
+      const x = W / 2 + wrap180((((c.x + drift * c.v) % 1) + 1) % 1 * 360 - vb) * ppd - c.n * c.s * 1.55;
       const sc = Math.min(c.s * 3.1 * (1 + cl * .2), (y0 - 5 - skyTop) / c.hmax), by = lerp(y0 - 5, skyTop + c.hmax * sc, c.y);
       if (haze * (1 - ceilA) > .03) drawCloud(g, c, x, by, sc, c.flip, lw, ph, (.7 - .2 * sq) * haze * (1 - ceilA), bg, haze * (1 - ceilA));
     });
     if (cl > .8) {
       const a = (cl - .8) / .2;
       g.strokeStyle = rgba(ph, .22 * a * haze); g.lineWidth = lw;
-      for (let i = 0; i < 5 && deckB > 10; i++) { const yy = 4 + i * (deckB - 8) / 4; g.beginPath(); g.setLineDash([26 + i * 9, 5 + i * 3]); g.lineDashOffset = -(V.reduce ? 0 : ts * .004 * (1 + i * .3)); g.moveTo(-m, yy); g.lineTo(W + m, yy); g.stroke(); }
+      for (let i = 0; i < 5 && deckB > 10; i++) { const yy = 4 + i * (deckB - 8) / 4; g.beginPath(); g.setLineDash([26 + i * 9, 5 + i * 3]); g.lineDashOffset = yawPx - (V.reduce ? 0 : ts * .004 * (1 + i * .3)); g.moveTo(-m, yy); g.lineTo(W + m, yy); g.stroke(); }
       g.setLineDash([]);
       gr = g.createLinearGradient(0, 0, 0, y0 * .6); gr.addColorStop(0, rgba(bg, .65 * a)); gr.addColorStop(1, rgba(bg, 0)); g.fillStyle = gr; g.fillRect(-m, -60, W + 2 * m, y0 * .6 + 60);
     }
+    drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl);
     if (sq > .02) {
       g.beginPath(); g.moveTo(-m, -60); g.lineTo(W + m, -60); g.lineTo(W + m, 18);
       for (let x = W + m; x > -m; x -= 16) g.quadraticCurveTo(x - 8, 18 + 9 * Math.sin(x * .13 + (V.reduce ? 0 : ts * .0006)), x - 16, 18);
@@ -23925,7 +24035,7 @@
     for (let k = 0; k < NL; k++) {
       const d = k / (NL - 1), by = lerp(yT, yB, Math.pow(d, 1.15)) + heave * d, a = near * (.07 + .93 * Math.pow(d, 1.6)) / PK, L = Ln * (.4 + .6 * d), sp = .55 + .45 * d, off = (NL - 1 - k) * 2.1;
       for (let q = 0; q < nPts; q++) {
-        const x = x0 + q * 3, u = (x - W / 2) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
+        const x = x0 + q * 3, u = (x - W / 2 + yawPx) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
         const env = .78 + .22 * Math.sin(u / 2.3 + k * 1.7 + WPH[0] * .2);
         const p = env * (wshape(f1 + SKEW * Math.sin(f1)) + .42 * wshape(u / .61 + WPH[1] * sp + k * 5.3) + (d > .35 ? .14 * wshape(u / .23 + WPH[2] * sp + k * 2.9) : 0));
         RX[q] = x; RP[q] = p; RY[q] = by - a * p;
@@ -23985,32 +24095,32 @@
   const winPath = g => { g.beginPath(); WIN.forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); };
   function drawStrip(ts, dt) {
     const { g } = hz; if (!g) return;
-    g.clearRect(0, 0, hz.W, hz.H);
-    const W = hz.W, H = hz.H, lw = 1; // (one picture pixel is one screen pixel)
+    const W = hz.W, H = hz.H;
+    g.clearRect(0, 0, W, H);
     if (V.loc === 'above') {
-      drawScene(g, W, H, ts, lw);
+      g.fillStyle = rgb(SCN.bg); g.fillRect(0, 0, W, H); // the sky has its own dark background: the lit screen behind it never shows through
+      drawScene(g, W, H, ts, 1);
+      drawCompass(g, W, 9);
       return;
     }
     const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors; the frames below use the cabin's own colours
     // two windows in the handbook's shape: the outer side leans out toward the bottom, the inner side is upright. They fill the band.
-    const mx = 5, my = 10, gap = Math.max(22, W * .10), ww = (W - 2 * mx - gap) / 2, top = my, bot = H - my, ins = ww * .235, xr = mx + ww + gap;
-    WIN = [
-      [[mx + ins, top], [mx + ww, top], [mx + ww, bot], [mx, bot]],
-      [[xr, top], [W - mx - ins, top], [W - mx, bot], [xr, bot]],
-    ];
+    const mx = 5, my = 12, top = my, bot = H - my, fw = FW;
+    const hw = (W - 2 * mx) / 2, hh = (bot - top) / 2, cx0 = W / 2, cy0 = H / 2; // one long pill; the glass is the inner pill, the frame is the band round it
+    WIN = [pillOutline(cx0, cy0, hw - fw, hh - fw, 20)]; WIN[0].x0 = cx0 - (hw - fw); WIN[0].w = 2 * (hw - fw);
     if (!true && V.lamp) { const lg = g.createRadialGradient(W / 2, -10, 4, W / 2, -10, W * .6); lg.addColorStop(0, 'rgba(255,184,96,.2)'); lg.addColorStop(1, 'rgba(255,184,96,0)'); g.fillStyle = lg; g.fillRect(0, 0, W, H);
     }
     // the view through the glass: one wide sea and sky, seen through both windows, so the horizon runs straight across
     g.save(); winPath(g); g.clip();
     g.fillStyle = rgb(OUT.bg); g.fillRect(0, 0, W, H);
-    drawScene(g, W, H, ts, lw);
+    drawScene(g, W, H, ts, 1);
     // rain on the window glass (the screen glass above deck is covered separately)
     const rain = cur.rain;
     pAcc += dt * rain * 14;
     while (pAcc > 1) {
       pAcc--; if (pb.length >= 40) continue;
       for (let tries = 0; tries < 6; tries++) {
-        const P = WIN[Math.random() < .5 ? 0 : 1], x = Math.min(P[0][0], P[3][0]) + Math.random() * ww, y = top + 2 + Math.random() * (bot - top - 4);
+        const P = WIN[0], x = P.x0 + Math.random() * P.w, y = top + fw + Math.random() * (bot - top - 2 * fw);
         if (inPoly(x, y, P)) { pb.push({ x, y, r: 1 + Math.random() * 2.4, vy: 0, age: 0, hold: .6 + Math.random() * 2.6, tr: [] }); break; }
       }
     }
@@ -24038,7 +24148,7 @@
     if (cur.sea >= 3.6 && !V.reduce) {
       nextPSpray -= dt * (cur.sea - 3);
       if (nextPSpray <= 0) {
-        nextPSpray = 2.5 + Math.random() * 4.5; const P = WIN[Math.random() < .5 ? 0 : 1], sx = Math.min(P[0][0], P[3][0]) + ww * (.2 + Math.random() * .6);
+        nextPSpray = 2.5 + Math.random() * 4.5; const P = WIN[0], sx = P.x0 + P.w * (.1 + Math.random() * .8);
         for (let i = 0; i < 22; i++) pspray.push({ x: sx + (Math.random() - .5) * 26, y: bot - 6 + Math.random() * 6, vx: (Math.random() - .5) * 50, vy: -40 - Math.random() * 80, r: .5 + Math.random() * 1.3, life: 1 });
       }
     }
@@ -24048,7 +24158,7 @@
       g.fillStyle = rgba(br, .8 * p.life); g.beginPath(); g.arc(p.x, p.y, p.r, 0, 6.2832); g.fill();
     }
     // a soft sheen along each outer edge
-    if (!true) {
+    if (false) { // (the old look's sheen along the two outer edges: there is one window now)
       g.strokeStyle = rgba(br, .2); g.lineWidth = 1.6; g.beginPath();
       g.moveTo(WIN[0][0][0] + 8, top + 7); g.lineTo(WIN[0][3][0] + 8, top + (bot - top) * .5);
       g.moveTo(WIN[1][1][0] - 8, top + 7); g.lineTo(WIN[1][2][0] - 8, top + (bot - top) * .5);
@@ -24062,6 +24172,7 @@
       winPath(g); g.strokeStyle = rgba(COL.ph, .4); g.lineWidth = 2.3; g.stroke();
       winPath(g); g.strokeStyle = rgba(COL.br, .92); g.lineWidth = 1; g.stroke();
     }
+    drawSide(g, W, 9);
   }
 
 
@@ -24076,7 +24187,8 @@
 
   /* ---------- the game's world, as the drawing code wants it ---------- */
   // V: where she is and what the light is doing.  cur: the weather as drawn (eased toward tgt, the weather as it is).
-  const V = { loc: 'above', lamp: false, cabin: false, lantern: false, nav: false, reduce: false, e: 30, us: .5, um: -9, moonP: .5, sailK: 1 };
+  const V = { loc: 'above', lamp: false, cabin: false, lantern: false, nav: false, reduce: false, e: 30, moonP: .5, sailK: 1,
+              hdg: 0, yaw: 0, yawV: 0, side: 'port', visKm: 46, sun: { el: 30, az: 180 }, mn: { alt: -30, az: 0, p: .5 } };
   const cur = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
   const tgt = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
   let glint = null, LW = 1;
@@ -24103,24 +24215,25 @@
   }
 
   /* ---------- the sun and the moon where the game says they are ---------- */
-  const RAD = Math.PI / 180;
-  // 0 at the horizon where it rises, 1 where it sets, in between by the hour angle; the same sun the game's daylight system uses.
-  function arcFraction(haDeg, halfDayDeg) { let H = ((haDeg + 540) % 360) - 180; return .5 + H / (2 * Math.max(20, halfDayDeg)); }
+  // The sun's height is the game's own (the one its daylight system uses); its compass bearing is worked out for the same instant and place. The moon is the game's obsMoon: its
+  // true bearing and height, and which part of it is lit.  The drawing code (the mockup's) puts each at that bearing and height in the 110-degree window.
   function sampleSky(st) {
     const tMs = daylightInstantMs(st), lat = st.nav.lat, lon = st.nav.lon;
     V.e = solarElevationDeg(tMs, lat, lon);
-    const sun = sunDeclinationAndEqTime(tMs);
-    const utcMin = (((tMs / 60000) % 1440) + 1440) % 1440;
-    const haSun = (utcMin + sun.eqTime + 4 * lon) / 4 - 180;
-    const cosH0 = (Math.sin(-.833 * RAD) - Math.sin(lat * RAD) * Math.sin(sun.decl)) / (Math.cos(lat * RAD) * Math.cos(sun.decl));
-    V.us = arcFraction(haSun, Math.acos(clamp(cosH0, -1, 1)) / RAD);
+    V.sun = { el: V.e, az: sunCalc(tMs, lat, lon).az };
     const mo = obsMoon(tMs, lat, lon);
-    const cosM = -Math.tan(lat * RAD) * Math.tan(mo.dec);
-    V.um = arcFraction(mo.ha / RAD, Math.acos(clamp(cosM, -1, 1)) / RAD);
     const c = 1 - 2 * mo.illum, ang = Math.acos(clamp(c, -1, 1)) / (2 * Math.PI); // 0 new .. .5 full, as the drawing code counts the phase
     V.moonP = mo.waxing ? ang : 1 - ang;
+    V.mn = { alt: mo.alt, az: mo.az, p: V.moonP };
   }
   const moonLit = p => (1 - Math.cos(p * 6.2832)) / 2;
+  // which way she points and how far you can see land: how far the weather lets you see (the game's own table), no further than the game lets her see that coast from the sea
+  const viewBearing = () => (((V.hdg + (V.loc === 'below' ? (V.side === 'port' ? -90 : 90) : V.yaw)) % 360) + 360) % 360;
+  function sampleView(st) {
+    let vis = OBS_VIS_NM[sitWeatherCategory(st)]; if (!isFinite(vis)) vis = OBS_COAST_VISIBLE_NM;
+    const cap = obsRegion(st) === 'hawaii' ? NAV_SIGHT_NM : OBS_COAST_VISIBLE_NM;
+    V.visKm = Math.min(cap, vis) * 1.852;
+  }
 
   /* ---------- the weather the game has, in the drawing code's terms ---------- */
   function sampleWeather(st) {
@@ -24141,6 +24254,45 @@
     V.sailK = sc === 'full' ? 1 : sc === 'reefed' ? .8 : sc === 'minimal' ? .55 : .25;
   }
 
+  /* ---------- the land: the game's own coastline, traced as she moves ---------- */
+  // Every half degree of bearing, the stretches of land along a straight run out to RANGE_KM (the same trace the game's own collision uses).  It is worked out a few milliseconds a
+  // frame (never in one go) and again whenever she has moved far enough to matter: sooner the closer the land.  The game has no heights, so the mountains' heights are estimated
+  // (see RELIEF in the drawing code): the outline's SHAPE is the real coast's, the heights are not.
+  let LAND = null;
+  const landSt = { lat: 0, lon: 0, near: 999, has: false, job: null };
+  const KMLAT = 110.57;
+  function landRelief(lat) { return lat < 35 ? { H: 1450, ramp: 11 } : { H: 1150, ramp: 5 }; } // the Hawaiian islands' high ground, or Alaska's
+  function landStart(lat, lon) { landSt.job = { lat: lat, lon: lon, i: 0, rays: new Array(720), kmlon: Math.max(1, 111.32 * Math.cos(lat * RAD)) }; }
+  function landStep(budgetMs) {
+    const J = landSt.job; if (!J) return;
+    const t0 = performance.now();
+    while (J.i < 720) {
+      const b = J.i * .5 * RAD, dx = Math.sin(b) / J.kmlon, dy = Math.cos(b) / KMLAT, segs = []; // degrees per kilometre
+      let d0 = 0, guard = 0;
+      while (d0 < RANGE_KM && guard++ < 8) {
+        const x2 = J.lon + dx * RANGE_KM, y2 = J.lat + dy * RANGE_KM;
+        const h = worldFirstHit(J.lon + dx * d0, J.lat + dy * d0, x2, y2, true);
+        if (!h) break;
+        const dIn = d0 + h.t * (RANGE_KM - d0), e = dIn + .02;
+        const o = worldFirstHit(J.lon + dx * e, J.lat + dy * e, x2, y2, false); // where it comes off the land again
+        const dOut = o ? e + o.t * (RANGE_KM - e) : RANGE_KM + 1;
+        segs.push([Math.round(dIn * 100) / 100, Math.round(Math.min(dOut, RANGE_KM + 1) * 100) / 100]);
+        d0 = dOut + .02;
+      }
+      J.rays[J.i++] = segs;
+      if (performance.now() - t0 > budgetMs) return;
+    }
+    let near = 999; for (let i = 0; i < 720; i++) if (J.rays[i].length && J.rays[i][0][0] < near) near = J.rays[i][0][0];
+    LAND = buildLand(J.rays, landRelief(J.lat));
+    landSt.lat = J.lat; landSt.lon = J.lon; landSt.near = near; landSt.has = true; landSt.job = null;
+  }
+  function landCheck(lat, lon) { // once a second: has she moved far enough that the land has changed shape?
+    if (landSt.job || !isFinite(lat) || !isFinite(lon)) return;
+    if (!landSt.has) { landStart(lat, lon); return; }
+    const dkm = Math.hypot((lat - landSt.lat) * KMLAT, lonDiffDeg(lon, landSt.lon) * 111.32 * Math.cos(lat * RAD));
+    if (dkm > clamp(landSt.near * .05, .08, 2.5)) landStart(lat, lon);
+  }
+
   /* ---------- the elements ---------- */
   const horizonEl = document.getElementById('horizon'), stripEl = document.getElementById('hz-strip');
   const fadeEl = document.getElementById('hz-fade');
@@ -24156,33 +24308,49 @@
     o.W = W; o.H = H; o.d = d; o.cv.width = W * d; o.cv.height = H * d;
     o.g = o.cv.getContext('2d'); o.g.setTransform(d, 0, 0, d, 0, 0);
   }
-  const geo = { mid: 120, deck: 190 }; // where the kerosene lamp's glow is centred (px from the top of the screen): between the two windows below deck, a little under the band on deck
-  function fitAll() {
-    if (broken) return;
-    fit(hz);
-    const sr = stripEl.getBoundingClientRect(), top = sr.top - crtEl.getBoundingClientRect().top;
-    if (isFinite(top) && sr.height > 0) { geo.mid = Math.round(top + sr.height / 2); geo.deck = Math.round(top + sr.height + 70); }
-  }
+  function fitAll() { if (!broken) fit(hz); }
   if (!broken && typeof ResizeObserver === 'function') new ResizeObserver(fitAll).observe(crtEl);
   window.addEventListener('resize', fitAll);
 
-  /* ---------- the palette of the hour: the strip and the portholes, and (TXT) the colour of the game's text while the strip is up ---------- */
-  // As the mockup has it: the hour's colour; below deck with the cabin lights out only the porthole's light reaches the cabin; CABIN LIGHTS make everything amber except what is
-  // outside; NAV LIGHTS make the text white while the sky is dark; fog greys the deck.  The kerosene lamp changes no colour, it only glows (see applyLight).
-  let TXT = null, txtKey = '';
-  function palettes() {
+  /* ---------- the palette of the hour: the strip and the window, and (TXT) the colour of the game's text while the strip is up ---------- */
+  // As the mockup has it: the hour's colour; below deck with no light on, only the window's light reaches the cabin; ANY LIGHT ON THE BOAT -- the cabin lights below deck, the nav lights
+  // on deck, the kerosene lamp in either place -- gives the same thing: warm, bright, slightly cool amber text on a warm dark screen, with no glow.  The sky and the sea keep their own
+  // colours and their own dark background (SCN above deck, OUT through the window), so the night sky never takes up the warm screen.  Fog greys the deck.
+  let TXT = null, txtKey = '', bgKey = '';
+  function palettes(ts) {
     const th = themeFor(V.e), below = V.loc === 'below';
     let ph = th.ph.map(v => v * th.lum), br = th.br.map(v => v * th.lum), dim = th.dim.slice();
-    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the lights in the cabin never change it
+    const scnPh = ph.slice(), scnBr = br.slice();
+    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the lights on the boat never change it
     if (below && !V.cabin) { const f = lerp(.6, .95, dayFactor()); ph = ph.map(v => v * f); br = br.map(v => v * f); }
-    if (below && V.cabin) { ph = LAMP.slice(); br = [255, 226, 170]; dim = [140, 105, 60]; }
-    else if (!below && V.nav) { const k = clamp((2 - V.e) / 8, 0, 1); ph = mix(ph, [228, 236, 238], k); br = mix(br, [252, 253, 253], k); dim = mix(dim, [130, 142, 146], k); }
-    if (!below && cur.fog > .01) ph = mix(ph, [185, 201, 192], cur.fog * .35);
+    const lit = (below && V.cabin) || V.lantern || (!below && V.nav);
+    if (lit) { ph = LAMP.slice(); br = LAMPB.slice(); dim = LAMPD.slice(); }
+    const fogK = !below && cur.fog > .01 ? cur.fog * .35 : 0;
+    if (fogK) ph = mix(ph, [185, 201, 192], fogK);
     COL = { ph, br, dim, bg: th.bg };
+    SCN = { ph: fogK ? mix(scnPh, [185, 201, 192], fogK) : scnPh, br: scnBr, dim: th.dim, bg: th.bg };
     TXT = { ph, br, dim, glow: th.glow };
+    // the screen behind the text: a warm dark while a light is on, the game's own otherwise.  When the kerosene lamp is the light (no cabin or nav lights on as well), the warm dark
+    // flickers very subtly with the flame (about two or three shades either way, at about twenty times a second); a powered light, or reduced motion, holds it steady.
+    let bgc = null;
+    if (lit) {
+      bgc = LAMPBG;
+      if (V.lantern && !(below && V.cabin) && !(!below && V.nav) && !V.reduce) {
+        const n = Math.floor(ts / 50), q = n * .05;
+        const f = 1 + .06 * Math.sin(q * 9.1) + .045 * Math.sin(q * 23.7 + 1.3) + .03 * Math.sin(q * 41 + 4) + (hash(n, 7.7) - .5) * .04; // the flame: about 0.85 to 1.15
+        const k = 1 + (f - 1) * 1.6;
+        bgc = LAMPBG.map(v => v * k);
+      }
+    }
+    const lk = bgc ? bgc.map(v => Math.round(v)).join() : '';
+    if (lk !== bgKey) { bgKey = lk; setScreenBg(bgc); }
     // the game's own light code paints the text: ask it to do so again whenever the colour has moved
     const key = [ph, br, dim].map(c => c.map(v => v | 0).join()).join('|') + th.glow.toFixed(2);
     if (key !== txtKey) { txtKey = key; repaintText(); }
+  }
+  function setScreenBg(c) { // c: the warm dark as [r, g, b], or null to give the game's own back
+    const rs = document.documentElement.style;
+    if (c) { const v = 'rgb(' + c.map(x => Math.round(x)).join(',') + ')'; rs.setProperty('--bg', v); rs.setProperty('--bg-lit', v); } else { rs.removeProperty('--bg'); rs.removeProperty('--bg-lit'); }
   }
   function repaintText() { try { if (typeof GAME === 'object' && GAME && GAME.crew && GAME.boat) applyNaturalLightDimming(GAME); } catch (e) { /* the next screen draw does it */ } }
   // Called by the game's own applyNaturalLightDimming with the brightness it has worked out (1 = full, dimmer at night until a light is on).  Returns true if it painted the text.
@@ -24196,22 +24364,9 @@
     return true;
   }
   // the strip is gone (title page, switched off): the game's own colours come back
-  function unpaintText() { try { document.documentElement.style.removeProperty('--rule'); } catch (e) {} txtKey = ''; repaintText(); }
+  function unpaintText() { try { document.documentElement.style.removeProperty('--rule'); setScreenBg(null); } catch (e) {} txtKey = ''; bgKey = ''; repaintText(); }
 
-  /* ---------- the kerosene lamp: a round glow, from between the two windows below deck and over the deck above, with a slight flicker ---------- */
-  let lampA = 0, lampKey = '';
   function dayFactor() { return clamp((V.e + 6) / 20, 0, 1) * (1 - cur.cloud / 100 * .4); }
-  function applyLight(dt, ts) {
-    lampA += ((V.lantern ? 1 : 0) - lampA) * Math.min(1, dt * 6);
-    let f = 1, r = 1;
-    if (V.lantern && !V.reduce) { const q = ts * .001; f = 1 + .06 * Math.sin(q * 9.1) + .045 * Math.sin(q * 23.7 + 1.3) + .03 * Math.sin(q * 41 + 4) + (Math.random() - .5) * .04; r = 1 + (f - 1) * .35; } // the flame
-    const a = (lampA * f).toFixed(3), y = (V.loc === 'below' ? geo.mid : geo.deck) + 'px', rad = (200 * r).toFixed(1) + 'px';
-    const key = a + '|' + y + '|' + rad;
-    if (key === lampKey) return;
-    lampKey = key;
-    const st = crtEl.style;
-    st.setProperty('--hz-lamp-a', a); st.setProperty('--hz-lamp-y', y); st.setProperty('--hz-lamp-r', rad);
-  }
   let fxKey = '';
   function applyWeatherLayers() {
     const above = V.loc === 'above', fog = above ? cur.fog : 0, sq = above ? cur.sq : 0;
@@ -24237,7 +24392,8 @@
   /* ---------- sampling the game (once a second, never inside the drawing) ---------- */
   function sample() {
     const st = GAME;
-    sampleSky(st); sampleWeather(st);
+    sampleSky(st); sampleWeather(st); sampleView(st);
+    landCheck(st.nav.lat, st.nav.lon);
     const where = (forced && forced.loc) ? forced.loc : (st.crew && st.crew.location === 'below' ? 'below' : 'above');
     V.cabin = !!(st.boat && st.boat.cabinLightsOn) && where === 'below';    // CABIN LIGHTS: below deck only
     V.nav = !!(st.boat && st.boat.navLightsOn) && where === 'above';        // NAV LIGHTS: on deck only
@@ -24246,11 +24402,40 @@
     wantLoc((forced && forced.loc) || (st.crew && st.crew.location === 'below' ? 'below' : 'above'));
     if (forced) {
       ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(k => { if (forced[k] != null) tgt[k] = forced[k]; });
-      ['e', 'us', 'um', 'moonP', 'sailK'].forEach(k => { if (forced[k] != null) V[k] = forced[k]; });
+      ['e', 'moonP', 'sailK', 'visKm'].forEach(k => { if (forced[k] != null) V[k] = forced[k]; });
+      V.sun = { el: V.e, az: forced.sunAz != null ? forced.sunAz : V.sun.az };
+      V.mn = { alt: forced.moonAlt != null ? forced.moonAlt : V.mn.alt, az: forced.moonAz != null ? forced.moonAz : V.mn.az, p: V.moonP };
       if (forced.lamp != null) V.cabin = V.lamp = !!forced.lamp && where === 'below';
       if (forced.nav != null) V.nav = !!forced.nav && where === 'above';
       if (forced.lantern != null) V.lantern = !!forced.lantern;
     }
+  }
+
+  /* ---------- look around: drag the picture to turn your head all the way round; below deck, tap the window to look out of the other side ---------- */
+  let drag = null, lastTap = 0;
+  FONT = getComputedStyle(document.body).fontFamily || 'monospace';
+  if (!broken) {
+    stripEl.addEventListener('pointerdown', e => {
+      if (!visibleNow) return;
+      drag = { id: e.pointerId, x: e.clientX, x0: e.clientX, y0: e.clientY, t0: e.timeStamp, vt: e.timeStamp }; V.yawV = 0; // (all the gesture's timing is the input events' own, so a slow frame never changes what a flick feels like)
+      try { stripEl.setPointerCapture(e.pointerId); } catch (_) { /* a pointer that cannot be captured still works while it stays over the picture */ }
+    });
+    stripEl.addEventListener('pointermove', e => {
+      if (!drag || e.pointerId !== drag.id || V.loc === 'below') return;
+      const dx = e.clientX - drag.x, dyaw = -dx / (hz.W / FOV); drag.x = e.clientX; V.yaw = wrap180(V.yaw + dyaw);
+      const now = e.timeStamp, dtm = Math.max(8, now - drag.vt); drag.vt = now; V.yawV = clamp(V.yawV * .6 + (dyaw / dtm * 1000) * .4, -540, 540);
+    });
+    const endDrag = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const now = e.timeStamp, tap = e.type === 'pointerup' && Math.abs(e.clientX - drag.x0) < 5 && Math.abs(e.clientY - drag.y0) < 8 && now - drag.t0 < 300;
+      if (tap) {
+        if (V.loc === 'below') V.side = V.side === 'port' ? 'starboard' : 'port'; // tap the window: look out of the other side
+        else if (now - lastTap < 350) { V.yaw = 0; V.yawV = 0; lastTap = 0; } else lastTap = now; // double-tap: face the bow again
+      }
+      if (now - drag.vt > 80) V.yawV = 0;
+      drag = null;
+    };
+    stripEl.addEventListener('pointerup', endDrag); stripEl.addEventListener('pointercancel', endDrag);
   }
 
   /* ---------- the loop ---------- */
@@ -24266,18 +24451,23 @@
       if (show !== visibleNow) {
         visibleNow = show; horizonEl.hidden = !show; document.body.classList.toggle('hz-on', show);
         if (show) { snapNext = true; sampledAt = -1e9; }
-        else { crtEl.style.setProperty('--hz-lamp-a', '0'); lampKey = ''; lampA = 0; fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; unpaintText(); }
+        else { fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; unpaintText(); }
         fitAll();
       }
       if (!show) return;
       if (ts - lastDraw < 30) return; // about thirty frames a second: plenty for water, and kinder to a phone's battery
       const dt = Math.min(.1, (ts - lastDraw) / 1000); lastDraw = ts;
       if (ts - sampledAt > 1000) { sampledAt = ts; sample(); fitAll(); }
+      if (forced && forced.hdg != null) V.hdg = forced.hdg; else if (GAME.nav && isFinite(GAME.nav.heading)) V.hdg = GAME.nav.heading; // (every frame: when she turns, the view turns smoothly)
+      if (forced && forced.yaw != null) V.yaw = forced.yaw;
+      if (forced && forced.side != null) V.side = forced.side;
+      if (Math.abs(V.yawV) > .05 && !drag && V.loc === 'above' && !V.reduce) { V.yaw = wrap180(V.yaw + V.yawV * dt); V.yawV *= Math.pow(.03, dt); } else if (!drag) V.yawV = 0; // a flick keeps turning, then settles
+      if (landSt.job) landStep(4); // the coastline, a few milliseconds a frame
       if (snapNext) { snapNext = false; ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(k => { cur[k] = tgt[k]; }); }
       const k = Math.min(1, dt * 3);
       ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(key => { cur[key] += (tgt[key] - cur[key]) * k; });
       if (!V.reduce) { const Lm = lerpTable(LAM, cur.sea); for (let i = 0; i < 3; i++) WPH[i] += dt * Math.sqrt(GRAV * 6.2832 / (Lm * WCOMP[i].f)); }
-      palettes(); applyLight(dt, ts); applyWeatherLayers();
+      palettes(ts); applyWeatherLayers();
       const t0 = performance.now();
       drawStrip(ts, dt);
       const t1 = performance.now();
@@ -24290,13 +24480,13 @@
   requestAnimationFrame(frame);
 
   // A developer aid, like landfallDaylight: from the console, hold the weather and the light in place to look at them.
-  //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true })   landfallHorizon.clear()   landfallHorizon.strike(1500)
+  //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true, hdg: 237, yaw: 0, side: 'port', sunAz: 270, moonAz: 100, moonAlt: 20, moonP: .5 })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
     paintText: paintText,
     force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
     clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
-    state: function () { return { V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats }; },
+    state: function () { return { V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
   };
 
   })(); } catch (horizonErr) { console.warn('[Landfall horizon] could not start:', horizonErr && horizonErr.message ? horizonErr.message : horizonErr); }
