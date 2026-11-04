@@ -894,22 +894,25 @@
      Below the ending overlay (99999): nothing flashes over the final black. */
   #lightning-flash { position: fixed; inset: 0; z-index: 9000; display: none; opacity: 0; pointer-events: none; background: #e9f1ff; transition: none; }
 
-  /* THE HORIZON (beta 11): a band under the top bar -- the horizon above deck, two portholes below -- with the weather on the screen glass. Nothing here takes a tap. */
+  /* THE HORIZON (beta 11): a band under the top bar -- the horizon above deck, two portholes below -- with fog and squall dark on the screen glass. Nothing here takes a tap. */
+  @property --hz-lamp-a { syntax: '<number>'; inherits: false; initial-value: 0; }
+  @property --hz-lamp-r { syntax: '<length>'; inherits: false; initial-value: 200px; }
+  @property --hz-lamp-y { syntax: '<length>'; inherits: false; initial-value: 120px; }
   #crt {
-    background-image:
-      radial-gradient(ellipse 90% 200px at 50% var(--hz-top, 0px), rgba(255, 184, 96, var(--hz-lamp-a, 0)), transparent 70%),
-      radial-gradient(ellipse 75% 200px at 50% var(--hz-top, 0px), rgba(var(--hz-spill-rgb, 150, 185, 215), var(--hz-spill-a, 0)), transparent 72%);
+    /* the kerosene lamp: a round glow behind everything (centred between the two windows below deck), flickering a little; the cabin lights have none */
+    background-image: radial-gradient(circle var(--hz-lamp-r) at 50% var(--hz-lamp-y), rgba(255, 184, 96, calc(0.32 * var(--hz-lamp-a))), rgba(255, 184, 96, calc(0.13 * var(--hz-lamp-a))) 45%, rgba(255, 184, 96, 0));
     background-repeat: no-repeat;
   }
+  #scanlines { display: none; } /* no terminal scanlines */
+  body.hz-on #topbar, body.hz-on #navstrip { border-bottom-color: transparent; } /* no lines between the top bar, the voyage line and the windows */
   #horizon { flex-shrink: 0; position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
   #horizon[hidden], body.title-mode #horizon { display: none; }
   #hz-strip { position: relative; height: 86px; border-bottom: 1px solid var(--rule); } /* the mockup's size: 86 px tall, as wide as the screen */
   #hz-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #hz-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
-  #hz-fog, #hz-dark, #hz-glass { position: absolute; inset: 0; pointer-events: none; }
+  #hz-fog, #hz-dark { position: absolute; inset: 0; pointer-events: none; }
   #hz-fog { z-index: 4; opacity: 0; background-color: rgba(176, 198, 186, 0.16); }
   #hz-dark { z-index: 5; opacity: 0; background: radial-gradient(ellipse 120% 90% at 50% 40%, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.85)); }
-  #hz-glass { z-index: 6; width: 100%; height: 100%; }
   #beta-strip {
     flex-shrink: 0;
     padding: 0.2rem 1.1rem;
@@ -951,7 +954,6 @@
     </footer>
     <div id="hz-fog" aria-hidden="true"></div>
     <div id="hz-dark" aria-hidden="true"></div>
-    <canvas id="hz-glass" aria-hidden="true"></canvas>
   </div>
 
   <!-- SHIP'S PLAN -- a true full-viewport image viewer, deliberately
@@ -23796,12 +23798,17 @@
     g.closePath(); g.fillStyle = rgba(col, a); g.fill(); g.restore();
   }
 
+  // OVERCAST AS LINES: ten rows of long dashes (a different pattern in each, so the gaps never line up) laid from the top of the sky to the horizon
+  const OC = Array.from({ length: 10 }, (_, r) => { const pat = []; for (let i = 0; i < 6; i++) pat.push(55 + hash(r + 1, i) * 200, 8 + hash(r + 11, i) * 26); return { pat, sp: .6 + hash(r, 3) * .9, p: hash(r, 7) * 6.28 }; });
+
 
   /* the outside world: sky, sun and moon, clouds, rain, sea. Drawn at any size, so the strip above and the porthole below share it. */
   function drawScene(g, W, H, ts, lw) {
     LW = lw;
     const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
-    const pal = V.loc === 'below' ? OUT : COL, e = V.e, ph = pal.ph, br = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
+    const pal = V.loc === 'below' ? OUT : COL, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
+    const nk = true ? lerp(.38, 1, clamp((e + 8) / 12, 0, 1)) : 1; // at night the world outside is darker: its lines dim, while the moon and the stars keep their own light
+    const ph = pal.ph.map(v => v * nk), br = br0.map(v => v * nk);
     const y0 = H * .56, m = W * .18;
     g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
     // Roll: a small steady lean plus a swing that goes through level and out the other side. Pitch: the bow climbs the front of each swell, then drops over the crest.
@@ -23821,7 +23828,7 @@
     const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
     if (starA > .02) STARS.forEach(s => {
       const tw = .6 + .4 * Math.sin(tt * .0016 + s.p);
-      g.fillStyle = rgba(br, starA * tw); g.beginPath(); g.arc(s.x * W, s.y * y0, s.r, 0, 6.2832); g.fill();
+      g.fillStyle = rgba(br0, starA * tw); g.beginPath(); g.arc(s.x * W, s.y * y0, s.r, 0, 6.2832); g.fill();
     });
 
     g.save(); g.beginPath(); g.rect(-m, -60, W + 2 * m, y0 + 60); g.clip();
@@ -23832,7 +23839,7 @@
     const us = V.us;
     glint = null;
     if (us > -.09 && us < 1.09) {
-      const p = body(us, V.loc === 'below' ? .7 : 0), warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br, [245, 170, 80], warm * .8) : br;
+      const p = body(us, V.loc === 'below' ? .7 : 0), warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8) : br0;
       const a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA);
       const gl = 26 + warm * 16, hot = mix(col, [255, 255, 255], .55);
       const rg = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, gl);
@@ -23844,10 +23851,10 @@
     if (um <= 1.05 && um >= -.05) {
       const p = body(um, V.loc === 'below' ? 1.4 : 0), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
       if (a > .02) {
-        const mp = V.moonP, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br, 0));
+        const mp = V.moonP, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br0, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br0, 0));
         g.fillStyle = rg; g.fillRect(p.x - 30, p.y - 30, 60, 60);
-        drawMoon(g, p.x, p.y, 8, mp, br, .96 * a);
-        if (!glint) glint = { x: p.x, a: a * (.25 + .6 * moonLit(V.moonP)), col: br };
+        drawMoon(g, p.x, p.y, 8, mp, br0, .96 * a);
+        if (!glint) glint = { x: p.x, a: a * (.25 + .6 * moonLit(V.moonP)), col: br0 };
       }
     }
     g.restore();
@@ -23856,7 +23863,7 @@
     // and its scallops drift slowly. A squall's black shelf hangs in front of it. The sky under it stays dark.
     const dpx = V.reduce ? 0 : ts * .0000017 * (1 + sea * .06) * (W + 2 * m) * .8;
     let deckB = 0;
-    if (ceilA > .02 && haze > .02) {
+    if (!true && ceilA > .02 && haze > .02) {
       const Bc = lerp(2, y0 * .44, Math.pow(ceilA, .8)) + sq * 12, dk = clamp(ceilA * 1.4, 0, 1) * haze, sw = 18, amp = 8 * ceilA, wob = V.reduce ? 0 : ts * .00018, off = dpx % sw;
       deckB = Bc;
       g.beginPath(); g.moveTo(-m - 2 * sw, -60); g.lineTo(W + m + sw + off, -60); g.lineTo(W + m + sw + off, Bc);
@@ -23864,6 +23871,19 @@
       g.closePath();
       gr = g.createLinearGradient(0, 0, 0, Bc + 8); gr.addColorStop(0, rgba(mix(bg, ph, .03 * (1 - sq * .8)), .95 * dk)); gr.addColorStop(1, rgba(mix(bg, ph, .065 * (1 - sq * .8)), .95 * dk)); // a dark ceiling: only the outline and a faint tint set it apart from the sky g.fillStyle = gr; g.fill();
       g.lineJoin = 'round'; g.lineWidth = lw; g.strokeStyle = rgba(ph, .55 * dk * (1 - sq * .3)); g.stroke();
+    }
+    if (true && ceilA > .02 && haze > .02) { // OVERCAST, AS LINES ONLY: full cloud cover is rows of long, slightly wavy dashes across the whole sky, closer together toward the horizon, drifting at a crawl. No shelf, no cloud shapes, no sun, moon or stars.
+      const yTop = V.loc === 'below' ? 15 : 3, yBot = y0 - 3, wob = tt * .00018;
+      g.save(); g.lineCap = 'round'; g.lineJoin = 'round'; g.lineWidth = lw;
+      for (let r = 0; r < OC.length; r++) {
+        const R = OC[r], f = r / (OC.length - 1), yy = lerp(yTop, yBot, Math.pow(f, 1.45));
+        g.strokeStyle = rgba(ph, ceilA * haze * (.16 + .34 * f) * (1 - sq * .3));
+        g.setLineDash(R.pat); g.lineDashOffset = -dpx * R.sp * 3;
+        g.beginPath();
+        for (let x = -m, q = 0; x <= W + m + 8; x += 8, q++) { const y = yy + Math.sin(x * .021 + R.p + wob) * 1.3 * (1 - f * .55) + Math.sin(x * .009 + R.p * 2) * .9; q ? g.lineTo(x, y) : g.moveTo(x, y); }
+        g.stroke();
+      }
+      g.setLineDash([]); g.restore();
     }
     const n = Math.round(cl * 7.2), drift = V.reduce ? 0 : ts * .0000017 * (1 + sea * .06); // clouds drift slowly: about a pixel a second
     const skyTop = V.loc === 'below' ? 15 : 2;
@@ -23967,10 +23987,8 @@
     const { g } = hz; if (!g) return;
     g.clearRect(0, 0, hz.W, hz.H);
     const W = hz.W, H = hz.H, lw = 1; // (one picture pixel is one screen pixel)
-    g.save();
     if (V.loc === 'above') {
       drawScene(g, W, H, ts, lw);
-      g.restore();
       return;
     }
     const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors; the frames below use the cabin's own colours
@@ -23980,7 +23998,8 @@
       [[mx + ins, top], [mx + ww, top], [mx + ww, bot], [mx, bot]],
       [[xr, top], [W - mx - ins, top], [W - mx, bot], [xr, bot]],
     ];
-    if (V.lamp) { const lg = g.createRadialGradient(W / 2, -10, 4, W / 2, -10, W * .6); lg.addColorStop(0, 'rgba(255,184,96,.2)'); lg.addColorStop(1, 'rgba(255,184,96,0)'); g.fillStyle = lg; g.fillRect(0, 0, W, H); }
+    if (!true && V.lamp) { const lg = g.createRadialGradient(W / 2, -10, 4, W / 2, -10, W * .6); lg.addColorStop(0, 'rgba(255,184,96,.2)'); lg.addColorStop(1, 'rgba(255,184,96,0)'); g.fillStyle = lg; g.fillRect(0, 0, W, H);
+    }
     // the view through the glass: one wide sea and sky, seen through both windows, so the horizon runs straight across
     g.save(); winPath(g); g.clip();
     g.fillStyle = rgb(OUT.bg); g.fillRect(0, 0, W, H);
@@ -24008,9 +24027,12 @@
       }
       if (b.y > bot + 3 || b.r < .7 || !inWin(b.x, Math.min(b.y, bot - 1))) { pb.splice(i, 1); continue; }
       if (b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
-      g.fillStyle = rgba(ph, .1); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
-      g.strokeStyle = rgba(ph, .6); g.lineWidth = lw; g.stroke();
-      g.fillStyle = rgba(br, .9); g.beginPath(); g.arc(b.x - b.r * .35, b.y - b.r * .38, Math.max(.5, b.r * .28), 0, 6.2832); g.fill();
+      if (true) streakDrop(g, b, ph, br, .55, .85);
+      else {
+        g.fillStyle = rgba(ph, .1); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
+        g.strokeStyle = rgba(ph, .6); g.lineWidth = 1; g.stroke();
+        g.fillStyle = rgba(br, .9); g.beginPath(); g.arc(b.x - b.r * .35, b.y - b.r * .38, Math.max(.5, b.r * .28), 0, 6.2832); g.fill();
+      }
     }
     // spray slapping the glass in a rough sea
     if (cur.sea >= 3.6 && !V.reduce) {
@@ -24026,81 +24048,40 @@
       g.fillStyle = rgba(br, .8 * p.life); g.beginPath(); g.arc(p.x, p.y, p.r, 0, 6.2832); g.fill();
     }
     // a soft sheen along each outer edge
-    g.strokeStyle = rgba(br, .2); g.lineWidth = 1.6 * lw; g.beginPath();
-    g.moveTo(WIN[0][0][0] + 8, top + 7); g.lineTo(WIN[0][3][0] + 8, top + (bot - top) * .5);
-    g.moveTo(WIN[1][1][0] - 8, top + 7); g.lineTo(WIN[1][2][0] - 8, top + (bot - top) * .5);
-    g.stroke();
+    if (!true) {
+      g.strokeStyle = rgba(br, .2); g.lineWidth = 1.6; g.beginPath();
+      g.moveTo(WIN[0][0][0] + 8, top + 7); g.lineTo(WIN[0][3][0] + 8, top + (bot - top) * .5);
+      g.moveTo(WIN[1][1][0] - 8, top + 7); g.lineTo(WIN[1][2][0] - 8, top + (bot - top) * .5);
+      g.stroke();
+    }
     g.restore();
     // the frames: a soft outer line and a bright core, like the outline in the handbook
     g.lineJoin = 'round';
-    winPath(g); g.strokeStyle = rgba(COL.ph, .4); g.lineWidth = 2.3 * lw; g.stroke();
-    winPath(g); g.strokeStyle = rgba(COL.br, .92); g.lineWidth = lw; g.stroke();
-    g.restore();
+    if (true) { winPath(g); g.strokeStyle = rgba(COL.ph, .14); g.lineWidth = 1; g.stroke(); } // the same thin, faint line that goes round the SOUND box
+    else {
+      winPath(g); g.strokeStyle = rgba(COL.ph, .4); g.lineWidth = 2.3; g.stroke();
+      winPath(g); g.strokeStyle = rgba(COL.br, .92); g.lineWidth = 1; g.stroke();
+    }
   }
 
 
 
-  /* ---------- weather on the glass: above deck only ---------- */
-  const beads = [], streaks = [], spray = [];
+  // a drop on the glass: a short streak (a faint body and a brighter head at the bottom), not a round bubble
+  function streakDrop(g, b, ph, br, a, k) {
+    const len = (3.5 + b.r * 3.4) * k, sl = len * .1; g.lineCap = 'round';
+    g.strokeStyle = rgba(ph, a); g.lineWidth = Math.max(.9, b.r * .38 * k); g.beginPath(); g.moveTo(b.x - sl, b.y - len); g.lineTo(b.x, b.y); g.stroke();
+    g.strokeStyle = rgba(br, Math.min(1, a * 1.7)); g.beginPath(); g.moveTo(b.x - sl * .35, b.y - len * .38); g.lineTo(b.x, b.y); g.stroke(); g.lineCap = 'butt';
+  }
   let spawnAcc = 0, nextSpray = 4;
-  function drawGlass(dt) {
-    const { g, W, H } = gl; if (!g) return;
-    g.clearRect(0, 0, W, H);
-    const on = V.loc === 'above';
-    const rain = on ? cur.rain : 0, sq = on ? cur.sq : 0, fog = on ? cur.fog : 0, seaF = on ? cur.sea : 0, ph = COL.ph, br = COL.br;
-    if (!on) { beads.length = 0; streaks.length = 0; spray.length = 0; return; }
-
-    spawnAcc += dt * rain * 10;
-    while (spawnAcc > 1) { spawnAcc--; if (beads.length >= 52) beads.shift(); beads.push({ x: Math.random() * W, y: Math.random() * H * .96, r: 1.4 + Math.random() * 3.2, vy: 0, age: 0, hold: .8 + Math.random() * 3.6, tr: [] }); }
-    for (let i = beads.length - 1; i >= 0; i--) {
-      const b = beads[i];
-      if (rain < .02) b.r -= dt * 1.1;
-      if (!V.reduce) {
-        b.age += dt;
-        if (b.age > b.hold && b.r > 1.9) {
-          b.vy = Math.min(b.vy + 140 * dt, 70 + b.r * 14); b.y += b.vy * dt; b.x += Math.sin(b.y * .05) * .15; b.r -= dt * .07;
-          if (!b.tr.length || b.y - b.tr[b.tr.length - 1][1] > 3) { b.tr.push([b.x, b.y]); if (b.tr.length > 16) b.tr.shift(); }
-          if (Math.random() < dt * .9) { b.vy = 0; b.age = 0; b.hold = .3 + Math.random() * 1.6; }
-        }
-      }
-      if (b.y > H + 6 || b.r < .8) { beads.splice(i, 1); continue; }
-      if (b.tr.length > 1) { g.strokeStyle = rgba(ph, .13); g.lineWidth = Math.max(.8, b.r * .55); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
-      g.fillStyle = rgba(ph, .06); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
-      g.strokeStyle = rgba(ph, .42); g.lineWidth = 1; g.stroke();
-      g.fillStyle = rgba(br, .85); g.beginPath(); g.arc(b.x - b.r * .35, b.y - b.r * .38, Math.max(.5, b.r * .26), 0, 6.2832); g.fill();
-    }
-    const want = rain > .75 ? Math.round((rain - .6) * 140) : 0;
-    while (streaks.length < want) streaks.push({ x: Math.random() * (W + 80), y: Math.random() * H, l: 10 + Math.random() * 18, v: 700 + Math.random() * 500 });
-    while (streaks.length > want) streaks.pop();
-    if (streaks.length) {
-      g.strokeStyle = rgba(br, .16); g.lineWidth = 1; g.beginPath();
-      streaks.forEach(s => { if (!V.reduce) { s.y += s.v * dt; s.x -= s.v * dt * .35; } if (s.y > H + 20 || s.x < -30) { s.y = -20; s.x = Math.random() * (W + 80); } g.moveTo(s.x, s.y); g.lineTo(s.x + s.l * .35, s.y - s.l); });
-      g.stroke();
-    }
-    if (seaF >= 3.6 && !V.reduce) {
-      nextSpray -= dt * (seaF - 3);
-      if (nextSpray <= 0) {
-        nextSpray = 2.5 + Math.random() * 5;
-        const cx = W * (.15 + Math.random() * .7), cy = H * (.55 + Math.random() * .35);
-        for (let i = 0; i < 36; i++) spray.push({ x: cx + (Math.random() - .5) * 60, y: cy + (Math.random() - .5) * 30, vx: (Math.random() - .5) * 90, vy: -30 - Math.random() * 90, r: .6 + Math.random() * 1.6, life: 1 });
-      }
-    }
-    for (let i = spray.length - 1; i >= 0; i--) {
-      const p = spray[i]; p.life -= dt * .9; p.vy += 260 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
-      if (p.life <= 0) { spray.splice(i, 1); continue; }
-      g.fillStyle = rgba(br, .7 * p.life); g.beginPath(); g.arc(p.x, p.y, p.r, 0, 6.2832); g.fill();
-    }
-  }
-
 
   /* ---------- the game's world, as the drawing code wants it ---------- */
   // V: where she is and what the light is doing.  cur: the weather as drawn (eased toward tgt, the weather as it is).
-  const V = { loc: 'above', lamp: false, reduce: false, e: 30, us: .5, um: -9, moonP: .5, sailK: 1 };
+  const V = { loc: 'above', lamp: false, cabin: false, lantern: false, nav: false, reduce: false, e: 30, us: .5, um: -9, moonP: .5, sailK: 1 };
   const cur = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
   const tgt = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
   let glint = null, LW = 1;
   let forced = null;     // developer aid only (window.landfallHorizon.force): holds any of these in place
-  const stats = { strip: 0, glass: 0, frames: 0, glassCalls: 0 }; // developer aid: the average milliseconds a frame's drawing takes
+  const stats = { strip: 0, frames: 0 }; // developer aid: the average milliseconds a frame's drawing takes
   let broken = false;    // anything unexpected: the strip switches itself off and the game carries on without it
   // ?horizon=0 turns the strip off. An automated test browser (navigator.webdriver) runs the game without it unless it asks with ?horizon=1: the drawing is real work,
   // and a test clock that fast-forwards hours would repeat it tens of thousands of times for nothing.
@@ -24164,8 +24145,8 @@
   const horizonEl = document.getElementById('horizon'), stripEl = document.getElementById('hz-strip');
   const fadeEl = document.getElementById('hz-fade');
   const fogEl = document.getElementById('hz-fog'), darkEl = document.getElementById('hz-dark'), crtEl = document.getElementById('crt');
-  const hz = { cv: document.getElementById('hz'), g: null, W: 1, H: 1 }, gl = { cv: document.getElementById('hz-glass'), g: null, W: 1, H: 1 };
-  if (!horizonEl || !stripEl || !hz.cv || !gl.cv || !fadeEl || !fogEl || !darkEl || !crtEl) broken = true;
+  const hz = { cv: document.getElementById('hz'), g: null, W: 1, H: 1 };
+  if (!horizonEl || !stripEl || !hz.cv || !fadeEl || !fogEl || !darkEl || !crtEl) broken = true;
 
   function fit(o) {
     const r = o.cv.getBoundingClientRect(), d = Math.min(2, window.devicePixelRatio || 1);
@@ -24175,33 +24156,32 @@
     o.W = W; o.H = H; o.d = d; o.cv.width = W * d; o.cv.height = H * d;
     o.g = o.cv.getContext('2d'); o.g.setTransform(d, 0, 0, d, 0, 0);
   }
+  const geo = { mid: 120, deck: 190 }; // where the kerosene lamp's glow is centred (px from the top of the screen): between the two windows below deck, a little under the band on deck
   function fitAll() {
     if (broken) return;
-    fit(hz); fit(gl);
-    // the lamp's light starts under the strip
-    const top = stripEl.getBoundingClientRect().bottom - crtEl.getBoundingClientRect().top;
-    if (isFinite(top)) crtEl.style.setProperty('--hz-top', Math.max(0, Math.round(top)) + 'px');
+    fit(hz);
+    const sr = stripEl.getBoundingClientRect(), top = sr.top - crtEl.getBoundingClientRect().top;
+    if (isFinite(top) && sr.height > 0) { geo.mid = Math.round(top + sr.height / 2); geo.deck = Math.round(top + sr.height + 70); }
   }
   if (!broken && typeof ResizeObserver === 'function') new ResizeObserver(fitAll).observe(crtEl);
   window.addEventListener('resize', fitAll);
 
   /* ---------- the palette of the hour: the strip and the portholes, and (TXT) the colour of the game's text while the strip is up ---------- */
+  // As the mockup has it: the hour's colour; below deck with the cabin lights out only the porthole's light reaches the cabin; CABIN LIGHTS make everything amber except what is
+  // outside; NAV LIGHTS make the text white while the sky is dark; fog greys the deck.  The kerosene lamp changes no colour, it only glows (see applyLight).
   let TXT = null, txtKey = '';
   function palettes() {
-    const th = themeFor(V.e);
-    let ph = th.ph.map(v => v * th.lum), br = th.br.map(v => v * th.lum);
-    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the cabin lamp never changes it
-    // the text: as the mockup had it -- the hour's colour; below with the lamp out only the porthole's light; the lamp warms it; fog greys it
-    let tph = ph.slice(), tbr = br.slice(), tdim = th.dim.slice();
-    if (V.loc === 'below' && !V.lamp) { const f = lerp(.6, .95, dayFactor()); tph = tph.map(v => v * f); tbr = tbr.map(v => v * f); }
-    if (V.lamp) { tph = mix(tph, LAMP, .5); tbr = mix(tbr, [255, 226, 170], .5); tdim = mix(tdim, [140, 105, 60], .5); }
-    if (V.loc === 'above' && cur.fog > .01) tph = mix(tph, [185, 201, 192], cur.fog * .35);
-    TXT = { ph: tph, br: tbr, dim: tdim, glow: th.glow };
-    if (V.lamp) { ph = mix(ph, LAMP, .5); br = mix(br, [255, 226, 170], .5); } // the porthole frames take the lamp's light
-    if (V.loc === 'above' && cur.fog > .01) ph = mix(ph, [185, 201, 192], cur.fog * .35);
-    COL = { ph, br, dim: th.dim, bg: th.bg };
-    // the game's own light code paints the text: ask it to do so again whenever the hour's colour has moved
-    const key = [tph, tbr, tdim].map(c => c.map(v => v | 0).join()).join('|') + th.glow.toFixed(2);
+    const th = themeFor(V.e), below = V.loc === 'below';
+    let ph = th.ph.map(v => v * th.lum), br = th.br.map(v => v * th.lum), dim = th.dim.slice();
+    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like: the lights in the cabin never change it
+    if (below && !V.cabin) { const f = lerp(.6, .95, dayFactor()); ph = ph.map(v => v * f); br = br.map(v => v * f); }
+    if (below && V.cabin) { ph = LAMP.slice(); br = [255, 226, 170]; dim = [140, 105, 60]; }
+    else if (!below && V.nav) { const k = clamp((2 - V.e) / 8, 0, 1); ph = mix(ph, [228, 236, 238], k); br = mix(br, [252, 253, 253], k); dim = mix(dim, [130, 142, 146], k); }
+    if (!below && cur.fog > .01) ph = mix(ph, [185, 201, 192], cur.fog * .35);
+    COL = { ph, br, dim, bg: th.bg };
+    TXT = { ph, br, dim, glow: th.glow };
+    // the game's own light code paints the text: ask it to do so again whenever the colour has moved
+    const key = [ph, br, dim].map(c => c.map(v => v | 0).join()).join('|') + th.glow.toFixed(2);
     if (key !== txtKey) { txtKey = key; repaintText(); }
   }
   function repaintText() { try { if (typeof GAME === 'object' && GAME && GAME.crew && GAME.boat) applyNaturalLightDimming(GAME); } catch (e) { /* the next screen draw does it */ } }
@@ -24218,23 +24198,19 @@
   // the strip is gone (title page, switched off): the game's own colours come back
   function unpaintText() { try { document.documentElement.style.removeProperty('--rule'); } catch (e) {} txtKey = ''; repaintText(); }
 
-  /* ---------- the light the weather lets into the cabin, and the lamp's own ---------- */
-  let lampA = 0, spillA = 0, spillCol = [150, 185, 215], cssKey = '';
+  /* ---------- the kerosene lamp: a round glow, from between the two windows below deck and over the deck above, with a slight flicker ---------- */
+  let lampA = 0, lampKey = '';
   function dayFactor() { return clamp((V.e + 6) / 20, 0, 1) * (1 - cur.cloud / 100 * .4); }
-  function applyLight(dt) {
-    const below = V.loc === 'below';
-    const lampT = below && V.lamp ? 1 : 0;
-    lampA += (lampT - lampA) * Math.min(1, dt * 6);
-    const spillT = below && !V.lamp ? (.05 + .13 * dayFactor()) * (1 - cur.fog * .4) : 0;
-    spillA += (spillT - spillA) * Math.min(1, dt * 5);
-    spillCol = V.e > 2 ? mix([255, 244, 214], [255, 190, 110], clamp(1 - V.e / 22, 0, 1)) : [150, 185, 215];
-    const key = lampA.toFixed(3) + '|' + spillA.toFixed(3) + '|' + spillCol.map(v => v | 0).join();
-    if (key === cssKey) return;
-    cssKey = key;
+  function applyLight(dt, ts) {
+    lampA += ((V.lantern ? 1 : 0) - lampA) * Math.min(1, dt * 6);
+    let f = 1, r = 1;
+    if (V.lantern && !V.reduce) { const q = ts * .001; f = 1 + .06 * Math.sin(q * 9.1) + .045 * Math.sin(q * 23.7 + 1.3) + .03 * Math.sin(q * 41 + 4) + (Math.random() - .5) * .04; r = 1 + (f - 1) * .35; } // the flame
+    const a = (lampA * f).toFixed(3), y = (V.loc === 'below' ? geo.mid : geo.deck) + 'px', rad = (200 * r).toFixed(1) + 'px';
+    const key = a + '|' + y + '|' + rad;
+    if (key === lampKey) return;
+    lampKey = key;
     const st = crtEl.style;
-    st.setProperty('--hz-lamp-a', (lampA * .2).toFixed(3));
-    st.setProperty('--hz-spill-a', (spillA * .9).toFixed(3));
-    st.setProperty('--hz-spill-rgb', spillCol.map(v => v | 0).join(','));
+    st.setProperty('--hz-lamp-a', a); st.setProperty('--hz-lamp-y', y); st.setProperty('--hz-lamp-r', rad);
   }
   let fxKey = '';
   function applyWeatherLayers() {
@@ -24252,7 +24228,7 @@
   function wantLoc(loc) {
     if (loc === V.loc || loc === pendingLoc) return;
     pendingLoc = loc;
-    const swap = () => { V.loc = loc; pendingLoc = null; beads.length = streaks.length = spray.length = pb.length = pspray.length = 0; if (gl.g) gl.g.clearRect(0, 0, gl.W, gl.H); glassWas = false; }; // (nothing from the other view is left on the glass)
+    const swap = () => { V.loc = loc; pendingLoc = null; pb.length = pspray.length = 0; }; // (nothing from the other view is left on the glass)
     if (V.reduce || !visibleNow || !fadeEl.animate) { swap(); return; }
     fadeEl.getAnimations().forEach(a => a.cancel());
     fadeEl.animate([{ opacity: 0 }, { opacity: .92 }], { duration: 150, fill: 'forwards' }).onfinish = () => { swap(); fadeEl.animate([{ opacity: .92 }, { opacity: 0 }], { duration: 300, fill: 'forwards' }); };
@@ -24262,17 +24238,23 @@
   function sample() {
     const st = GAME;
     sampleSky(st); sampleWeather(st);
-    V.lamp = !!(st.boat && (st.boat.cabinLightsOn || lanternLit(st))) && (forced && forced.loc ? forced.loc : (st.crew && st.crew.location)) === 'below';
+    const where = (forced && forced.loc) ? forced.loc : (st.crew && st.crew.location === 'below' ? 'below' : 'above');
+    V.cabin = !!(st.boat && st.boat.cabinLightsOn) && where === 'below';    // CABIN LIGHTS: below deck only
+    V.nav = !!(st.boat && st.boat.navLightsOn) && where === 'above';        // NAV LIGHTS: on deck only
+    V.lantern = !!(st.boat && lanternLit(st));                               // the kerosene lamp: either place
+    V.lamp = V.cabin;
     wantLoc((forced && forced.loc) || (st.crew && st.crew.location === 'below' ? 'below' : 'above'));
     if (forced) {
       ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(k => { if (forced[k] != null) tgt[k] = forced[k]; });
       ['e', 'us', 'um', 'moonP', 'sailK'].forEach(k => { if (forced[k] != null) V[k] = forced[k]; });
-      if (forced.lamp != null) V.lamp = !!forced.lamp && V.loc === 'below';
+      if (forced.lamp != null) V.cabin = V.lamp = !!forced.lamp && where === 'below';
+      if (forced.nav != null) V.nav = !!forced.nav && where === 'above';
+      if (forced.lantern != null) V.lantern = !!forced.lantern;
     }
   }
 
   /* ---------- the loop ---------- */
-  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, glassWas = false, snapNext = true;
+  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true;
   function wanted() {
     return !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
   }
@@ -24282,9 +24264,9 @@
     try {
       const show = wanted();
       if (show !== visibleNow) {
-        visibleNow = show; horizonEl.hidden = !show;
+        visibleNow = show; horizonEl.hidden = !show; document.body.classList.toggle('hz-on', show);
         if (show) { snapNext = true; sampledAt = -1e9; }
-        else { crtEl.style.setProperty('--hz-lamp-a', '0'); crtEl.style.setProperty('--hz-spill-a', '0'); cssKey = ''; fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; beads.length = streaks.length = spray.length = 0; if (gl.g) gl.g.clearRect(0, 0, gl.W, gl.H); glassWas = false; unpaintText(); }
+        else { crtEl.style.setProperty('--hz-lamp-a', '0'); lampKey = ''; lampA = 0; fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; unpaintText(); }
         fitAll();
       }
       if (!show) return;
@@ -24295,23 +24277,20 @@
       const k = Math.min(1, dt * 3);
       ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(key => { cur[key] += (tgt[key] - cur[key]) * k; });
       if (!V.reduce) { const Lm = lerpTable(LAM, cur.sea); for (let i = 0; i < 3; i++) WPH[i] += dt * Math.sqrt(GRAV * 6.2832 / (Lm * WCOMP[i].f)); }
-      palettes(); applyLight(dt); applyWeatherLayers();
+      palettes(); applyLight(dt, ts); applyWeatherLayers();
       const t0 = performance.now();
       drawStrip(ts, dt);
       const t1 = performance.now();
-      const glassNow = V.loc === 'above' && (cur.rain > .02 || beads.length > 0 || streaks.length > 0 || spray.length > 0 || cur.sea >= 3.6);
-      if (glassNow || glassWas) { drawGlass(dt); stats.glassCalls++; }
-      glassWas = glassNow;
-      stats.strip += ((t1 - t0) - stats.strip) * .1; stats.glass += ((performance.now() - t1) - stats.glass) * .1; stats.frames++;
+      stats.strip += ((t1 - t0) - stats.strip) * .1; stats.frames++;
     } catch (err) {
-      broken = true; horizonEl.hidden = true; unpaintText();
+      broken = true; horizonEl.hidden = true; document.body.classList.remove('hz-on'); unpaintText();
       console.warn('[Landfall horizon] switched off:', err && err.message ? err.message : err);
     }
   }
   requestAnimationFrame(frame);
 
   // A developer aid, like landfallDaylight: from the console, hold the weather and the light in place to look at them.
-  //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true })   landfallHorizon.clear()   landfallHorizon.strike(1500)
+  //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
     paintText: paintText,
