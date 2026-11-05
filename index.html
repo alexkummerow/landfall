@@ -134,6 +134,10 @@
   .hdr-btn:hover { border-color: var(--phosphor); }
   .hdr-btn[hidden] { display: none; }
 
+  /* THE TOP BAR BUTTONS (beta 12): OUTSIDE VIEW and SOUND are each a small box with the label on two lines (OUTSIDE / VIEW ON, SOUND / OFF), side by side, as SOUND always was. */
+  #view-btn, #sound-btn { width: min-content; white-space: normal; text-align: center; line-height: 1.2; }
+  #view-btn { min-width: 7em; } /* the same box on and off (VIEW ON / VIEW OFF) */
+
   #navstrip {
     display: flex;
     flex-wrap: nowrap;
@@ -874,7 +878,6 @@
   .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.05em; font-size: 0.95rem; line-height: 1.55; text-shadow: var(--output-glow); opacity: 0; transition: opacity 3s linear; } /* the same face, size and spacing as every other line of the game; fades in and out over FINALE_TITLE_FADE_SECS */
   .ending-title.show { opacity: 1; }
   .ending-titles { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; pointer-events: none; } /* LANDFALL: centered on the screen, out of the summary's way */
-  .ending-overlay.rescue .ending-titles { display: none; }
   .ending-actions { width: 100%; margin-top: 1.6rem; padding-top: 0.8rem; border-top: 1px solid var(--rule); display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; opacity: 0; transition: opacity 1.5s ease; } /* RESTART: the whole menu fades in together */
   .ending-actions[hidden] { display: none; }
   .ending-actions.show { opacity: 1; }
@@ -884,7 +887,7 @@
   .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
   .ending-summary.show { max-height: 220rem; opacity: 1; } /* (the long summary scrolls inside the overlay) */
   .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
-  .ending-overlay.rescue #ending-title { display: none; } /* a rescue has no LANDFALL heading: straight to the summary */
+  /* (a rescue shows NO LANDFALL in the same place and the same way the arrival shows LANDFALL) */
   .ending-overlay.rescue .ending-summary.show { margin-top: 0; }
   .ending-newvoyage { margin-top: 2rem; opacity: 0; transition: opacity 1.5s ease; }
   .ending-newvoyage.show { opacity: 1; }
@@ -912,7 +915,7 @@
     <header id="topbar">
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
       <div id="topbar-right">
-        <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
+        <button id="view-btn" class="hdr-btn" type="button" aria-pressed="true">OUTSIDE VIEW&nbsp;ON</button>
         <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
         <span id="clock">—</span>
       </div>
@@ -2719,7 +2722,7 @@
       { label: 'MEALS EATEN', value: n(st.meals) }, { label: 'COFFEES MADE', value: n(state.crew.coffeeCount) }, { label: 'TEAS MADE', value: n(st.teas) },
       { label: 'TIMES WASHED', value: n(st.washes) }, { label: 'CHORES COMPLETED', value: n(st.chores), gap: true },
       { label: 'FISH CAUGHT', value: n(st.fishCaught) }, { label: 'BIGGEST FISH', value: big }, { label: 'SPECIES CAUGHT', value: n(st.fishSpecies.length) }, { label: 'FISH EATEN', value: n(st.fishEaten), gap: true },
-      { label: 'TIME WITH BINOCULARS', value: statsDuration(st.existMin) }, { label: 'TIME RELAXING', value: statsDuration(st.sitMin) },
+      { label: 'TIME RELAXING', value: statsDuration(st.sitMin) },
       { label: 'NOVELS READ', value: n(novels) }, { label: 'TAROT CARDS PULLED', value: n(st.tarot) },
       { label: 'PONG GAMES PLAYED', value: n(st.pongPlayed) }, { label: 'PONG GAMES WON', value: n(st.pongWon) },
     ];
@@ -11394,7 +11397,7 @@
   var navHeadingEl = document.getElementById('nav-heading');
   var navConditionEl = document.getElementById('nav-condition'); // information-architecture pass: used to show the region (see regionName), now shows weatherConditionLabel instead -- the region moved up into the header itself (setVesselLine)
   var soundBtn = document.getElementById('sound-btn');
-  var restartBtn = document.getElementById('restart-btn');
+  var restartBtn = document.getElementById('restart-btn') || document.createElement('button'); // (no RESTART in the top bar any more)
   var shipsPlanOverlayEl = document.getElementById('ships-plan-overlay');
   var shipsPlanImageEl = document.getElementById('ships-plan-image');
   var shipsPlanBackBtn = document.getElementById('ships-plan-back-btn');
@@ -12748,6 +12751,7 @@
     if (!ve || ve.phase === 'none') return;
     if (ve.phase === 'pending') {
       if (rescueCalling) return;
+      if (ve.reason === 'called') { rescueResumeCalled(state); return; } // (beta 13) a call from the HANDHELD RADIO that a reload cut off: it was made
       if (state.pendingChoice && state.pendingChoice.id === 'restart-choice') return; // NEW VOYAGE: YES / NO is being answered
       if (uiBusy) { if (!rescueKickTimer) rescueKickTimer = setTimeout(function () { rescueKickTimer = null; if (GAME) rescueKick(GAME); }, 500); return; } // an action's dots own the screen: the lines wait for them
       if (rescueShownStep !== (ve.step || 0) || tempViewEl.querySelectorAll('.rescue-line').length !== (ve.step || 0) + 1) { // (not on the screen: the first time, or something cleared it)
@@ -12761,6 +12765,13 @@
     }
   }
   function rescueEls() { return finaleEls(); }
+  function rescueResumeCalled(state) { // the page came back while the call was going out: the call was made, so the voyage ends here, straight to the summary
+    var ve = state.voyageEnd; if (!ve || ve.phase !== 'pending') return;
+    ve.phase = 'ended'; log(state, voyageEndLine(state)); flushNewLogEntries(state);
+    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+    saveGameState(state);
+    rescueOpenSummary(state, true);
+  }
   function rescueWire() {
     if (rescueWired) return; rescueWired = true;
     document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.voyageEnd && GAME.voyageEnd.phase === 'ended' && rescueSummaryUp) confirmRestart(); });
@@ -12812,6 +12823,7 @@
     E.ov.classList.add('rescue'); E.ov.hidden = false;
     function open(inst) {
       rescueOpenTimers = [];
+      finaleHide(E.title, 'show', true); // (NO LANDFALL is gone before the summary comes)
       finaleShow(E.ov, 'show', true);
       finaleBuildSummary(state, E);
       finaleShow(E.sum, 'show', inst);
@@ -12822,7 +12834,13 @@
     if (instant) { open(true); return; }
     rescueStartFade();
     var wait = Math.max(0, RESCUE_FADE_SECS * 1000 - (Date.now() - rescueFadeAt)) + 60;
-    rescueOpenTimers.push(setTimeout(function () { open(false); }, wait));
+    rescueOpenTimers.push(setTimeout(function () { // NO LANDFALL: in, held, out -- the arrival's LANDFALL, timed the same, then the summary
+      E.title.textContent = 'NO LANDFALL'; finaleShow(E.title, 'show', false);
+      rescueOpenTimers.push(setTimeout(function () {
+        finaleHide(E.title, 'show', false);
+        rescueOpenTimers.push(setTimeout(function () { open(false); }, FINALE_TITLE_FADE_SECS * 1000 + 60));
+      }, (FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS) * 1000));
+    }, wait));
   }
   function rescueResetUi() { // a new voyage: nothing of the ending may leak into it
     if (rescuePoll) { clearInterval(rescuePoll); rescuePoll = null; }
@@ -12831,6 +12849,7 @@
     rescueShownStep = -1; rescueCalling = false; rescueFadeAt = null; rescueSummaryUp = false;
     var el = navStationAudioEls.sos; if (el) { try { el.pause(); el.currentTime = 0; } catch (e) {} }
     var E = rescueEls(); if (E.ov) E.ov.classList.remove('rescue');
+    if (E.title) { E.title.classList.remove('show'); E.title.textContent = 'LANDFALL'; } // (the arrival's own title is LANDFALL again)
   }
 
   // The three conditions cmdEngine itself refuses START ENGINE on --
@@ -14946,11 +14965,31 @@
   // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER, SOLACE HANDBOOK.
   function navStationToolRows(state) {
     var rows = [];
-    rows.push({ label: 'HANDHELD GPS', action: 'cmd:gps-nav' });
+    rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
     rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
     rows.push({ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' });
     return rows;
+  }
+
+  // HANDHELD RADIO (beta 13) -- see patches_beta/13_handheld_radio.py. Its own batteries, always works. CALL FOR HELP asks once more (it ends the voyage), then it is the rescue ending.
+  function cmdHandheldRadio(state) {
+    printBlank();
+    state.pendingChoice = { id: 'handheld-radio', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-ask' }], 'cmd:nav-station') };
+  }
+  function radioCallAsk(state) {
+    printEcho('radio');
+    printBlank();
+    printLine('Once I call for help, the voyage is over.');
+    state.pendingChoice = { id: 'handheld-radio-confirm', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-go' }], 'cmd:radio') };
+  }
+  function radioCallGo(state) {
+    var ve = state.voyageEnd;
+    if (!ve || ve.phase !== 'none' || (state.finale && state.finale.phase !== 'none') || rescueCalling) return; // only ever one ending, and only while the voyage is still going
+    ve.phase = 'pending'; ve.reason = 'called'; ve.at = state.meta.voyageMinutes; ve.step = 1;
+    state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
+    state.pendingChoice = rescueCallChoice(state);
+    rescueBeginCall(state);
   }
 
   function cmdNavStation(state) {
@@ -15016,7 +15055,8 @@
 
     var options = groupedOptions([
       electricalRows,
-      navStationToolRows(state),
+      [{ label: 'GPS', action: 'cmd:gps-nav' }, { label: 'RADIO', action: 'cmd:radio' }],
+      [{ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' }, { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }, { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
@@ -15155,7 +15195,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The HANDHELD GPS is at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
+        { p: 'The GPS is on deck, just under the HELM, and at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
         { p: 'The chart shows SOLACE\u2019s position, her traveled track, the planned route, and the destination.' },
         { term: 'SOLID LINE', body: 'Where SOLACE has sailed.' },
         { term: 'DASHED LINE', body: 'Your planned route through numbered waypoints.' },
@@ -15176,6 +15216,8 @@
         { h3: 'ARRIVAL' },
         { p: 'When SOLACE reaches the N\u0101wiliwili harbor approach, the arrival sequence begins.' },
         { p: 'Read the harbor description and select ENTER NĀWILIWILI HARBOR when ready to bring her in.' },
+        { h3: 'CALLING FOR HELP' },
+        { p: 'The RADIO is beside the GPS at the NAV STATION. It runs on its own batteries and always works. If you cannot go on, select CALL FOR HELP, then CALL FOR HELP again. Help comes, the voyage ends there, and the summary follows.' },
       ],
     },
     {
@@ -15236,7 +15278,7 @@
         { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth, and in the sun a closed cabin runs hotter than the air outside. Open the hatch to cool it.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
         { p: 'Reading, music, and quiet time are there when you want the company.' },
-        { p: 'RELAX and BINOCULARS allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
+        { p: 'RELAX allows you to remain in place while the voyage continues. Leave whenever you are ready.' },
       ],
     },
     {
@@ -15264,8 +15306,8 @@
         { term: 'DAMAGED SAILS', body: 'They give half their speed. Repair them, or use the engine if available.' },
         { term: 'DAMAGED RUDDER', body: 'You can still change course with the sails, but each turn takes twice as long and the autopilot will not run. Repair the rudder to steer normally.' },
         { term: 'ENGINE FAILURE', body: 'Check its condition and repair it. Continue under sail if possible.' },
-        { term: 'ELECTRICAL FAILURE', body: 'The boat has no power until you replace the fuse. The HANDHELD GPS still works. Steer by hand, then switch needed systems back on.' },
-        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The autopilot and electric lights will be unavailable. The HANDHELD GPS still works.' },
+        { term: 'ELECTRICAL FAILURE', body: 'The boat has no power until you replace the fuse. The GPS still works. Steer by hand, then switch needed systems back on.' },
+        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The autopilot and electric lights will be unavailable. The GPS still works.' },
         { term: 'RUN AGROUND', body: 'Select FREE SOLACE, then adjust your course.' },
         { term: 'TOO DARK TO SEE', body: 'Use the appropriate electric lights or light the lantern. If neither is available, wait for daylight.' },
         { term: 'OUT OF KEROSENE', body: 'The heater, stove, and lantern cannot operate. Cold food, water, and sashimi remain available.' },
@@ -17031,7 +17073,7 @@
   function gpsNoPower(state, from) {
     printBlank();
     printLine(state.boat.accessoryOn ? 'The GPS has no power.' : 'The GPS has no power. Accessory power is off.');
-    var back = from === 'nav' ? 'cmd:nav-station' : from === 'helm' ? 'cmd:helm' : 'cmd:ships-computer';
+    var back = from === 'nav' ? 'cmd:nav-station' : from === 'helm' ? 'cmd:helm' : from === 'deck' ? 'gps-deck-back' : 'cmd:ships-computer';
     state.pendingChoice = { id: 'gps-blocked', options: [{ label: 'BACK', action: back }] };
   }
   // Called from the live loop (and on coming back to the page): if the GPS is up and its power has gone, it goes dark and the player is back where they were.
@@ -17042,7 +17084,7 @@
     state.pendingChoice = null;
     log(state, 'The GPS went dark.');
     flushNewLogEntries(state);
-    if (from === 'nav') cmdNavStation(state); else if (from === 'helm') cmdHelm(state); else cmdShipsComputerMenu(state);
+    if (from === 'nav') cmdNavStation(state); else if (from === 'helm') cmdHelm(state); else if (from === 'deck') { /* the plain above-deck menu is drawn just below */ } else cmdShipsComputerMenu(state);
     if (!uiBusy) renderOptions(state);
   }
 
@@ -17061,10 +17103,11 @@
     fitChartScreen();
     chartEdit.tool = null; chartEdit.msg = '';
     // (if something wipes the screen while the chart is open, these are the buttons that are left)
-    state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'helm' ? { label: 'BACK', action: 'cmd:helm' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
+    state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'helm' ? { label: 'BACK', action: 'cmd:helm' } : from === 'deck' ? { label: 'BACK', action: 'gps-deck-back' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
     gpsMount(chartScreenEl, 'computer', state);
   }
   function cmdGpsHelm(state) { cmdChart(state, 'helm'); }
+  function cmdGpsDeck(state) { cmdChart(state, 'deck'); } // (beta 14) the GPS button on the above-deck menu, under HELM
   function cmdGpsNav(state) {
     if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
     cmdChart(state, 'nav');
@@ -18776,6 +18819,7 @@
     engine: cmdEngine,
     helm: cmdHelm,
     'gps-helm': cmdGpsHelm,
+    'gps-deck': cmdGpsDeck,
     'gps-nav': cmdGpsNav,
     'change-course': cmdChangeCourse,
     galley: cmdGalley,
@@ -18785,6 +18829,7 @@
     'forward-cabin': cmdCabin,
     'aft-cabin': cmdAftCabin,
     'nav-station': cmdNavStation,
+    radio: cmdHandheldRadio,
     handbook: cmdHandbook,
     sleep: cmdSleep,
     eat: cmdEat,
@@ -21267,11 +21312,12 @@
     // walk forward to the bow (awake, above, under way, no grounding, no final arrival -- see obsAvailable). FISHING ROD is the fishing screen (the command is still 'fish').
     var aboveActions = [
       { label: 'HELM', action: 'cmd:helm' },
+      { label: 'GPS', action: 'cmd:gps-deck' },
       { label: 'SAILS', action: 'cmd:sails' },
       { label: 'ENGINE', action: 'cmd:engine' },
       { label: 'FISHING ROD', action: 'cmd:fish' },
     ];
-    if (obsAvailable(state)) aboveActions.push({ label: 'BINOCULARS', action: 'binoculars' });
+    // (beta 14) no BINOCULARS on the menu any more; its code stays so a save made inside a session still loads (see patches_beta/14_gps_deck.py)
     return groupedOptions([
       aboveActions,
       lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
@@ -21961,6 +22007,8 @@
           printBlank();
           printLine('Left as it was.', 'dim');
           break;
+        case 'gps-deck-back': // (beta 14) the GPS opened from the deck: nothing to do, the normal tail draws the above-deck menu
+          break;
         case 'commit-clothing':
           performClothingCommit(state);
           break;
@@ -22128,6 +22176,12 @@
           state.voyageEnd.step = 1;
           state.pendingChoice = rescueCallChoice(state);
           rescuePrintLines(state);
+          break;
+        case 'radio-call-ask': // the HANDHELD RADIO's CALL FOR HELP: once more, to be sure
+          radioCallAsk(state);
+          break;
+        case 'radio-call-go': // ... and the call itself
+          radioCallGo(state);
           break;
         case 'call-for-help': // CALLING FOR HELP -- see RESCUE ENDING
           if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || state.voyageEnd.step !== 1 || rescueCalling) break; // exactly one call, never replayed
@@ -23451,7 +23505,8 @@
     if (state.pendingChoice && state.pendingChoice.id === 'sails-choice') { // a save made on the old coastal SAILS screen (RAISE SAILS / FURL SAILS): rebuilt with the four settings
       state.pendingChoice.options = sailOptions(state);
     }
-    if (state.pendingChoice && state.pendingChoice.id === 'chart' && (state.pendingChoice.from === 'helm' || state.pendingChoice.from === 'deck')) { cmdHelm(state); return; } // a reload with the GPS open from the HELM screen: back at the helm
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'helm') { cmdHelm(state); return; } // a reload with the GPS open from the HELM screen: back at the helm
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'deck') { state.pendingChoice = null; return; } // (beta 14) the GPS was open from the deck: back on the above-deck menu
     if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'nav') { cmdNavStation(state); return; } // ... or from the NAV STATION: back there
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
@@ -23826,7 +23881,8 @@
     return pts;
   }
 
-  const NEAR_AMP = [1, 2.4, 4.5, 8, 15, 24, 34];        // height of the nearest swell in px
+  const NEAR_AMP = [1, 2.4, 4.5, 8, 15, 24, 34];        // (the old height of the nearest swell: now only sets how hard the boat heaves and how bright the crests are)
+  const WAVE_H = [1, 2, 3.2, 4.4, 6, 8, 10.5];          // height of the nearest swell in px: it grows gently with the sea state
   const NEAR_LEN = [95, 105, 115, 125, 140, 155, 170];   // and its length in px: bigger seas are longer swells
   const LAM = [8, 11, 16, 26, 42, 66, 100];              // the swell's length in metres: only used to set how fast it travels (deep water waves: longer is faster but slower to repeat)
   const GRAV = 9.81, SKEW = .55;
@@ -23985,19 +24041,7 @@
       gr = g.createLinearGradient(0, 0, 0, Bc + 8); gr.addColorStop(0, rgba(mix(bg, ph, .03 * (1 - sq * .8)), .95 * dk)); gr.addColorStop(1, rgba(mix(bg, ph, .065 * (1 - sq * .8)), .95 * dk)); // a dark ceiling: only the outline and a faint tint set it apart from the sky g.fillStyle = gr; g.fill();
       g.lineJoin = 'round'; g.lineWidth = lw; g.strokeStyle = rgba(ph, .55 * dk * (1 - sq * .3)); g.stroke();
     }
-    if (true && ceilA > .02 && haze > .02) { // OVERCAST, AS LINES ONLY: full cloud cover is rows of long, slightly wavy dashes across the whole sky, closer together toward the horizon, drifting at a crawl. No shelf, no cloud shapes, no sun, moon or stars.
-      const yTop = V.loc === 'below' ? 15 : 3, yBot = y0 - 3, wob = tt * .00018;
-      g.save(); g.lineCap = 'round'; g.lineJoin = 'round'; g.lineWidth = lw;
-      for (let r = 0; r < OC.length; r++) {
-        const R = OC[r], f = r / (OC.length - 1), yy = lerp(yTop, yBot, Math.pow(f, 1.45));
-        g.strokeStyle = rgba(ph, ceilA * haze * (.16 + .34 * f) * (1 - sq * .3));
-        g.setLineDash(R.pat); g.lineDashOffset = yawPx - dpx * R.sp * 3;
-        g.beginPath();
-        for (let x = -m, q = 0; x <= W + m + 8; x += 8, q++) { const y = yy + Math.sin((x + yawPx) * .021 + R.p + wob) * 1.3 * (1 - f * .55) + Math.sin((x + yawPx) * .009 + R.p * 2) * .9; q ? g.lineTo(x, y) : g.moveTo(x, y); }
-        g.stroke();
-      }
-      g.setLineDash([]); g.restore();
-    }
+    // OVERCAST IS A BLANK SKY: no lines, no cloud shapes (they are gone by 60% cover), and no sun, moon or stars (they fade out under a ceiling). Nothing is drawn here.
     const n = Math.round(cl * 14.4), drift = V.reduce ? 0 : ts * .0000007 * (1 + sea * .06); // clouds drift slowly: about a pixel a second
     const skyTop = V.loc === 'below' ? 15 : 2;
     CLOUDS.forEach((c, i) => {
@@ -24032,13 +24076,13 @@
     g.strokeStyle = rgba(ph, .85 * (1 - fogF)); g.lineWidth = lw; g.beginPath(); g.moveTo(-m, y0); g.lineTo(W + m, y0); g.stroke();
 
     gr = g.createLinearGradient(0, y0, 0, H); gr.addColorStop(0, rgba(ph, .07)); gr.addColorStop(1, rgba(ph, 0)); g.fillStyle = gr; g.fillRect(-m, y0, W + 2 * m, H - y0 + 40);
-    const near = lerpTable(NEAR_AMP, sea), Ln = lerpTable(NEAR_LEN, sea), NL = 9, tw = V.reduce ? 0 : ts * .004, PK = 1.5;
+    const near = lerpTable(NEAR_AMP, sea), waveH = lerpTable(WAVE_H, sea), Ln = lerpTable(NEAR_LEN, sea), NL = 9, tw = V.reduce ? 0 : ts * .004, PK = 1.5;
     const yT = y0 + 2, yB = y0 + (H - y0) * .58, contrast = clamp(near / 6, .3, 1);
     const heave = Math.sin(WPH[0]) * near * .13;        // the boat lifts and drops with the swell, so the water seems to sink and rise by more the closer it is
     const x0 = -m, nPts = Math.min(599, Math.ceil((W + 2 * m) / 3) + 1);
     const wdir = (V.loc === 'below' && V.side === 'starboard') ? -1 : 1; // the water passes the other way out of the starboard side
     for (let k = 0; k < NL; k++) {
-      const d = k / (NL - 1), by = lerp(yT, yB, Math.pow(d, 1.15)) + heave * d, a = near * (.07 + .93 * Math.pow(d, 1.6)) / PK, L = Ln * (.4 + .6 * d), sp = .55 + .45 * d, off = (NL - 1 - k) * 2.1;
+      const d = k / (NL - 1), by = lerp(yT, yB, Math.pow(d, 1.15)) + heave * d, a = waveH * (.07 + .93 * Math.pow(d, 1.6)) / PK, L = Ln * (.4 + .6 * d), sp = .55 + .45 * d, off = (NL - 1 - k) * 2.1;
       for (let q = 0; q < nPts; q++) {
         const x = x0 + q * 3, u = wdir * (x - W / 2 + yawPx) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
         const env = .78 + .22 * Math.sin(u / 2.3 + k * 1.7 + WPH[0] * .2);
@@ -24406,9 +24450,9 @@
   }
 
   /* ---------- the loop ---------- */
-  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true;
+  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true, viewOn = true; // viewOn: the OUTSIDE VIEW button (beta 12); off, the band is simply not shown and nothing is drawn
   function wanted() {
-    return !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
+    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
   }
   function frame(ts) {
     requestAnimationFrame(frame);
@@ -24450,6 +24494,7 @@
   //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true, hdg: 237, yaw: 0, side: 'port', sunAz: 270, moonAz: 100, moonAlt: 20, moonP: .5 })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
+    setOn: function (on) { viewOn = !!on; }, // (the OUTSIDE VIEW button)
     force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
     clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
     state: function () { return { pal: { scn: SCN, out: OUT, greyK: GREYK, ink: ink, col: COL }, V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
@@ -24457,6 +24502,23 @@
 
   })(); } catch (horizonErr) { console.warn('[Landfall horizon] could not start:', horizonErr && horizonErr.message ? horizonErr.message : horizonErr); }
 
+  /* ===== OUTSIDE VIEW BUTTON (beta 12) -- see patches_beta/12_outside_view.py ===== */
+  try { (function () {
+    var btn = document.getElementById('view-btn'); if (!btn) return;
+    var KEY = 'landfallOutsideView', on = true;
+    try { if (window.localStorage.getItem(KEY) === 'off') on = false; } catch (e) {}
+    function apply() {
+      btn.textContent = on ? 'OUTSIDE VIEW ON' : 'OUTSIDE VIEW OFF'; // (the space before ON / OFF does not break: the box reads OUTSIDE / VIEW ON)
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      try { if (window.landfallHorizon && window.landfallHorizon.setOn) window.landfallHorizon.setOn(on); } catch (e) {}
+    }
+    btn.addEventListener('click', function () {
+      on = !on;
+      try { window.localStorage.setItem(KEY, on ? 'on' : 'off'); } catch (e) {}
+      apply();
+    });
+    apply();
+  })(); } catch (viewErr) { console.warn('[Landfall outside view] could not start:', viewErr && viewErr.message ? viewErr.message : viewErr); }
   function boot() {
     var saved = loadGameState();
     var scenarioFresh = false; // a test scenario that was just built (not resumed): see its `arrive`
@@ -24597,6 +24659,7 @@
     if (chartOpenedFrom === 'computer') { chartReturnToHome(GAME); return; }
     clearTempView(); // closes the full-screen GPS and puts the widget away
     if (chartOpenedFrom === 'nav') { printEcho('nav-station'); runCommand(GAME, 'nav-station'); return; } // back at the NAV STATION
+    if (chartOpenedFrom === 'deck') { GAME.pendingChoice = null; renderOptions(GAME); saveGameState(GAME); scrollToBottom(); return; } // (beta 14) back on deck: the plain above-deck menu
     printEcho('helm'); runCommand(GAME, 'helm'); // back at the HELM screen (she is still at the helm: it just draws it again)
   });
   chartToolBtns.forEach(function (btn) {
