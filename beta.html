@@ -135,12 +135,9 @@
   .hdr-btn:hover { border-color: var(--phosphor); }
   .hdr-btn[hidden] { display: none; }
 
-  /* THE TOP BAR, TWO ROWS (beta 12): the vessel line and the clock on the first, the buttons (RESTART, OUTSIDE VIEW, SOUND) on the second, flush right as they were, each button on one line. */
-  #topbar { flex-wrap: wrap; row-gap: 0.5rem; }
-  #vessel-line { flex: 1 1 0; min-width: 0; }
-  #clock { flex: 0 0 auto; }
-  #topbar-right { flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; }
-  #topbar-right .hdr-btn { white-space: nowrap; }
+  /* THE TOP BAR BUTTONS (beta 12): OUTSIDE VIEW and SOUND are each a small box with the label on two lines (OUTSIDE / VIEW ON, SOUND / OFF), side by side, as SOUND always was. */
+  #view-btn, #sound-btn { width: min-content; white-space: normal; text-align: center; line-height: 1.2; }
+  #view-btn { min-width: 7em; } /* the same box on and off (VIEW ON / VIEW OFF) */
 
   #navstrip {
     display: flex;
@@ -882,7 +879,6 @@
   .ending-title { font-family: var(--font-mono); color: var(--phosphor-bright); letter-spacing: 0.05em; font-size: 0.95rem; line-height: 1.55; text-shadow: var(--output-glow); opacity: 0; transition: opacity 3s linear; } /* the same face, size and spacing as every other line of the game; fades in and out over FINALE_TITLE_FADE_SECS */
   .ending-title.show { opacity: 1; }
   .ending-titles { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; pointer-events: none; } /* LANDFALL: centered on the screen, out of the summary's way */
-  .ending-overlay.rescue .ending-titles { display: none; }
   .ending-actions { width: 100%; margin-top: 1.6rem; padding-top: 0.8rem; border-top: 1px solid var(--rule); display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; opacity: 0; transition: opacity 1.5s ease; } /* RESTART: the whole menu fades in together */
   .ending-actions[hidden] { display: none; }
   .ending-actions.show { opacity: 1; }
@@ -892,7 +888,7 @@
   .ending-summary { width: 100%; max-height: 0; overflow: hidden; opacity: 0; margin-top: 0; transition: max-height 2.5s ease, opacity 2.5s ease, margin-top 2.5s ease; font-family: var(--font-mono); }
   .ending-summary.show { max-height: 220rem; opacity: 1; } /* (the long summary scrolls inside the overlay) */
   .ending-summary .ending-line { text-align: center; margin: 0.15rem 0; }
-  .ending-overlay.rescue #ending-title { display: none; } /* a rescue has no LANDFALL heading: straight to the summary */
+  /* (a rescue shows NO LANDFALL in the same place and the same way the arrival shows LANDFALL) */
   .ending-overlay.rescue .ending-summary.show { margin-top: 0; }
   .ending-newvoyage { margin-top: 2rem; opacity: 0; transition: opacity 1.5s ease; }
   .ending-newvoyage.show { opacity: 1; }
@@ -929,11 +925,10 @@
     <div id="scanlines" aria-hidden="true"></div>
     <header id="topbar">
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
-      <span id="clock">—</span>
       <div id="topbar-right">
-        <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
-        <button id="view-btn" class="hdr-btn" type="button" aria-pressed="true">OUTSIDE VIEW ON</button>
+        <button id="view-btn" class="hdr-btn" type="button" aria-pressed="true">OUTSIDE VIEW&nbsp;ON</button>
         <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
+        <span id="clock">—</span>
       </div>
     </header>
     <div id="horizon" hidden>
@@ -11413,7 +11408,7 @@
   var navHeadingEl = document.getElementById('nav-heading');
   var navConditionEl = document.getElementById('nav-condition'); // information-architecture pass: used to show the region (see regionName), now shows weatherConditionLabel instead -- the region moved up into the header itself (setVesselLine)
   var soundBtn = document.getElementById('sound-btn');
-  var restartBtn = document.getElementById('restart-btn');
+  var restartBtn = document.getElementById('restart-btn') || document.createElement('button'); // (no RESTART in the top bar any more)
   var shipsPlanOverlayEl = document.getElementById('ships-plan-overlay');
   var shipsPlanImageEl = document.getElementById('ships-plan-image');
   var shipsPlanBackBtn = document.getElementById('ships-plan-back-btn');
@@ -12767,6 +12762,7 @@
     if (!ve || ve.phase === 'none') return;
     if (ve.phase === 'pending') {
       if (rescueCalling) return;
+      if (ve.reason === 'called') { rescueResumeCalled(state); return; } // (beta 13) a call from the HANDHELD RADIO that a reload cut off: it was made
       if (state.pendingChoice && state.pendingChoice.id === 'restart-choice') return; // NEW VOYAGE: YES / NO is being answered
       if (uiBusy) { if (!rescueKickTimer) rescueKickTimer = setTimeout(function () { rescueKickTimer = null; if (GAME) rescueKick(GAME); }, 500); return; } // an action's dots own the screen: the lines wait for them
       if (rescueShownStep !== (ve.step || 0) || tempViewEl.querySelectorAll('.rescue-line').length !== (ve.step || 0) + 1) { // (not on the screen: the first time, or something cleared it)
@@ -12780,6 +12776,13 @@
     }
   }
   function rescueEls() { return finaleEls(); }
+  function rescueResumeCalled(state) { // the page came back while the call was going out: the call was made, so the voyage ends here, straight to the summary
+    var ve = state.voyageEnd; if (!ve || ve.phase !== 'pending') return;
+    ve.phase = 'ended'; log(state, voyageEndLine(state)); flushNewLogEntries(state);
+    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+    saveGameState(state);
+    rescueOpenSummary(state, true);
+  }
   function rescueWire() {
     if (rescueWired) return; rescueWired = true;
     document.getElementById('ending-newvoyage').addEventListener('click', function () { if (GAME && GAME.voyageEnd && GAME.voyageEnd.phase === 'ended' && rescueSummaryUp) confirmRestart(); });
@@ -12831,6 +12834,7 @@
     E.ov.classList.add('rescue'); E.ov.hidden = false;
     function open(inst) {
       rescueOpenTimers = [];
+      finaleHide(E.title, 'show', true); // (NO LANDFALL is gone before the summary comes)
       finaleShow(E.ov, 'show', true);
       finaleBuildSummary(state, E);
       finaleShow(E.sum, 'show', inst);
@@ -12841,7 +12845,13 @@
     if (instant) { open(true); return; }
     rescueStartFade();
     var wait = Math.max(0, RESCUE_FADE_SECS * 1000 - (Date.now() - rescueFadeAt)) + 60;
-    rescueOpenTimers.push(setTimeout(function () { open(false); }, wait));
+    rescueOpenTimers.push(setTimeout(function () { // NO LANDFALL: in, held, out -- the arrival's LANDFALL, timed the same, then the summary
+      E.title.textContent = 'NO LANDFALL'; finaleShow(E.title, 'show', false);
+      rescueOpenTimers.push(setTimeout(function () {
+        finaleHide(E.title, 'show', false);
+        rescueOpenTimers.push(setTimeout(function () { open(false); }, FINALE_TITLE_FADE_SECS * 1000 + 60));
+      }, (FINALE_TITLE_FADE_SECS + FINALE_TITLE_HOLD_SECS) * 1000));
+    }, wait));
   }
   function rescueResetUi() { // a new voyage: nothing of the ending may leak into it
     if (rescuePoll) { clearInterval(rescuePoll); rescuePoll = null; }
@@ -12850,6 +12860,7 @@
     rescueShownStep = -1; rescueCalling = false; rescueFadeAt = null; rescueSummaryUp = false;
     var el = navStationAudioEls.sos; if (el) { try { el.pause(); el.currentTime = 0; } catch (e) {} }
     var E = rescueEls(); if (E.ov) E.ov.classList.remove('rescue');
+    if (E.title) { E.title.classList.remove('show'); E.title.textContent = 'LANDFALL'; } // (the arrival's own title is LANDFALL again)
   }
 
   // The three conditions cmdEngine itself refuses START ENGINE on --
@@ -14965,11 +14976,31 @@
   // NAV STATION's tools group, in this exact order: GPS (opens the chart full-screen; BACK returns here), MARINE FORECAST (always listed, always open), SHIP'S COMPUTER, SOLACE HANDBOOK.
   function navStationToolRows(state) {
     var rows = [];
-    rows.push({ label: 'HANDHELD GPS', action: 'cmd:gps-nav' });
+    rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
     rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
     rows.push({ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' });
     return rows;
+  }
+
+  // HANDHELD RADIO (beta 13) -- see patches_beta/13_handheld_radio.py. Its own batteries, always works. CALL FOR HELP asks once more (it ends the voyage), then it is the rescue ending.
+  function cmdHandheldRadio(state) {
+    printBlank();
+    state.pendingChoice = { id: 'handheld-radio', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-ask' }], 'cmd:nav-station') };
+  }
+  function radioCallAsk(state) {
+    printEcho('radio');
+    printBlank();
+    printLine('Once I call for help, the voyage is over.');
+    state.pendingChoice = { id: 'handheld-radio-confirm', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-go' }], 'cmd:radio') };
+  }
+  function radioCallGo(state) {
+    var ve = state.voyageEnd;
+    if (!ve || ve.phase !== 'none' || (state.finale && state.finale.phase !== 'none') || rescueCalling) return; // only ever one ending, and only while the voyage is still going
+    ve.phase = 'pending'; ve.reason = 'called'; ve.at = state.meta.voyageMinutes; ve.step = 1;
+    state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
+    state.pendingChoice = rescueCallChoice(state);
+    rescueBeginCall(state);
   }
 
   function cmdNavStation(state) {
@@ -15035,7 +15066,8 @@
 
     var options = groupedOptions([
       electricalRows,
-      navStationToolRows(state),
+      [{ label: 'GPS', action: 'cmd:gps-nav' }, { label: 'RADIO', action: 'cmd:radio' }],
+      [{ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' }, { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }, { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     state.pendingChoice = { id: 'nav-station-menu', options: options };
@@ -15174,7 +15206,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The HANDHELD GPS is at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
+        { p: 'The GPS is at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
         { p: 'The chart shows SOLACE\u2019s position, her traveled track, the planned route, and the destination.' },
         { term: 'SOLID LINE', body: 'Where SOLACE has sailed.' },
         { term: 'DASHED LINE', body: 'Your planned route through numbered waypoints.' },
@@ -15195,6 +15227,8 @@
         { h3: 'ARRIVAL' },
         { p: 'When SOLACE reaches the N\u0101wiliwili harbor approach, the arrival sequence begins.' },
         { p: 'Read the harbor description and select ENTER NĀWILIWILI HARBOR when ready to bring her in.' },
+        { h3: 'CALLING FOR HELP' },
+        { p: 'The RADIO is beside the GPS at the NAV STATION. It runs on its own batteries and always works. If you cannot go on, select CALL FOR HELP, then CALL FOR HELP again. Help comes, the voyage ends there, and the summary follows.' },
       ],
     },
     {
@@ -15283,8 +15317,8 @@
         { term: 'DAMAGED SAILS', body: 'They give half their speed. Repair them, or use the engine if available.' },
         { term: 'DAMAGED RUDDER', body: 'You can still change course with the sails, but each turn takes twice as long and the autopilot will not run. Repair the rudder to steer normally.' },
         { term: 'ENGINE FAILURE', body: 'Check its condition and repair it. Continue under sail if possible.' },
-        { term: 'ELECTRICAL FAILURE', body: 'The boat has no power until you replace the fuse. The HANDHELD GPS still works. Steer by hand, then switch needed systems back on.' },
-        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The autopilot and electric lights will be unavailable. The HANDHELD GPS still works.' },
+        { term: 'ELECTRICAL FAILURE', body: 'The boat has no power until you replace the fuse. The GPS still works. Steer by hand, then switch needed systems back on.' },
+        { term: 'DEAD BATTERY', body: 'Wait for solar charging. The autopilot and electric lights will be unavailable. The GPS still works.' },
         { term: 'RUN AGROUND', body: 'Select FREE SOLACE, then adjust your course.' },
         { term: 'TOO DARK TO SEE', body: 'Use the appropriate electric lights or light the lantern. If neither is available, wait for daylight.' },
         { term: 'OUT OF KEROSENE', body: 'The heater, stove, and lantern cannot operate. Cold food, water, and sashimi remain available.' },
@@ -18804,6 +18838,7 @@
     'forward-cabin': cmdCabin,
     'aft-cabin': cmdAftCabin,
     'nav-station': cmdNavStation,
+    radio: cmdHandheldRadio,
     handbook: cmdHandbook,
     sleep: cmdSleep,
     eat: cmdEat,
@@ -22148,6 +22183,12 @@
           state.pendingChoice = rescueCallChoice(state);
           rescuePrintLines(state);
           break;
+        case 'radio-call-ask': // the HANDHELD RADIO's CALL FOR HELP: once more, to be sure
+          radioCallAsk(state);
+          break;
+        case 'radio-call-go': // ... and the call itself
+          radioCallGo(state);
+          break;
         case 'call-for-help': // CALLING FOR HELP -- see RESCUE ENDING
           if (!state.voyageEnd || state.voyageEnd.phase !== 'pending' || state.voyageEnd.step !== 1 || rescueCalling) break; // exactly one call, never replayed
           rescueBeginCall(state);
@@ -24483,7 +24524,7 @@
     var KEY = 'landfallOutsideView', on = true;
     try { if (window.localStorage.getItem(KEY) === 'off') on = false; } catch (e) {}
     function apply() {
-      btn.textContent = on ? 'OUTSIDE VIEW ON' : 'OUTSIDE VIEW OFF';
+      btn.textContent = on ? 'OUTSIDE VIEW ON' : 'OUTSIDE VIEW OFF'; // (the space before ON / OFF does not break: the box reads OUTSIDE / VIEW ON)
       btn.setAttribute('aria-pressed', on ? 'true' : 'false');
       try { if (window.landfallHorizon && window.landfallHorizon.setOn) window.landfallHorizon.setOn(on); } catch (e) {}
     }
