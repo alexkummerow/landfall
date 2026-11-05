@@ -135,6 +135,13 @@
   .hdr-btn:hover { border-color: var(--phosphor); }
   .hdr-btn[hidden] { display: none; }
 
+  /* THE TOP BAR, TWO ROWS (beta 12): the vessel line and the clock on the first, the buttons (RESTART, OUTSIDE VIEW, SOUND) on the second, flush right as they were, each button on one line. */
+  #topbar { flex-wrap: wrap; row-gap: 0.5rem; }
+  #vessel-line { flex: 1 1 0; min-width: 0; }
+  #clock { flex: 0 0 auto; }
+  #topbar-right { flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; }
+  #topbar-right .hdr-btn { white-space: nowrap; }
+
   #navstrip {
     display: flex;
     flex-wrap: nowrap;
@@ -922,10 +929,11 @@
     <div id="scanlines" aria-hidden="true"></div>
     <header id="topbar">
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
+      <span id="clock">—</span>
       <div id="topbar-right">
         <button id="restart-btn" class="hdr-btn" type="button" hidden>RESTART</button>
+        <button id="view-btn" class="hdr-btn" type="button" aria-pressed="true">OUTSIDE VIEW ON</button>
         <button id="sound-btn" class="hdr-btn" type="button">SOUND OFF</button>
-        <span id="clock">—</span>
       </div>
     </header>
     <div id="horizon" hidden>
@@ -23902,12 +23910,13 @@
     return { h, n: h.length, hmax: Math.max(...h) };
   }
   const CLOUDS = [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3].map((shape, i) => Object.assign(makeCloud(shape), { x: R(), y: R(), s: .85 + R() * .45, v: .6 + R() * .8, flip: i > 5 || R() < .35 }));
+  const CLOUD_MIX = .30; // how far a cloud's solid fill is from the sky toward the hour's colour: brighter than the land (.16), dimmer than the outlines (about .7)
   function drawCloud(g, c, x, y, s, flip, lw, col, a, bg, fa) {
     g.save(); g.translate(x, y); g.scale(flip ? -s : s, s);
     g.beginPath(); g.moveTo(0, 0);
     for (let j = 1; j < c.n - 1; j++) g.quadraticCurveTo(j, -c.h[j], j + .5, -(c.h[j] + c.h[j + 1]) / 2);
     g.lineTo(c.n - 1, 0); g.closePath();
-    g.fillStyle = rgba(bg, .92 * fa); g.fill();
+    g.fillStyle = rgba(mix(bg, col, CLOUD_MIX), fa); g.fill();
     g.lineJoin = 'round'; g.lineWidth = lw / s; g.strokeStyle = rgba(col, a); g.stroke();
     g.restore();
   }
@@ -24416,9 +24425,9 @@
   }
 
   /* ---------- the loop ---------- */
-  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true;
+  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true, viewOn = true; // viewOn: the OUTSIDE VIEW button (beta 12); off, the band is simply not shown and nothing is drawn
   function wanted() {
-    return !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
+    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
   }
   function frame(ts) {
     requestAnimationFrame(frame);
@@ -24460,6 +24469,7 @@
   //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true, hdg: 237, yaw: 0, side: 'port', sunAz: 270, moonAz: 100, moonAlt: 20, moonP: .5 })   landfallHorizon.clear()   landfallHorizon.strike(1500)
   window.landfallHorizon = {
     strike: strike,
+    setOn: function (on) { viewOn = !!on; }, // (the OUTSIDE VIEW button)
     force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
     clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
     state: function () { return { pal: { scn: SCN, out: OUT, greyK: GREYK, ink: ink, col: COL }, V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
@@ -24467,6 +24477,23 @@
 
   })(); } catch (horizonErr) { console.warn('[Landfall horizon] could not start:', horizonErr && horizonErr.message ? horizonErr.message : horizonErr); }
 
+  /* ===== OUTSIDE VIEW BUTTON (beta 12) -- see patches_beta/12_outside_view.py ===== */
+  try { (function () {
+    var btn = document.getElementById('view-btn'); if (!btn) return;
+    var KEY = 'landfallOutsideView', on = true;
+    try { if (window.localStorage.getItem(KEY) === 'off') on = false; } catch (e) {}
+    function apply() {
+      btn.textContent = on ? 'OUTSIDE VIEW ON' : 'OUTSIDE VIEW OFF';
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      try { if (window.landfallHorizon && window.landfallHorizon.setOn) window.landfallHorizon.setOn(on); } catch (e) {}
+    }
+    btn.addEventListener('click', function () {
+      on = !on;
+      try { window.localStorage.setItem(KEY, on ? 'on' : 'off'); } catch (e) {}
+      apply();
+    });
+    apply();
+  })(); } catch (viewErr) { console.warn('[Landfall outside view] could not start:', viewErr && viewErr.message ? viewErr.message : viewErr); }
   function boot() {
     var saved = loadGameState();
     var scenarioFresh = false; // a test scenario that was just built (not resumed): see its `arrive`
