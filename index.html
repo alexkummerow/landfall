@@ -892,6 +892,18 @@
      or a book. Shown for about 200 ms at a time by opacity alone (no fade), never takes a tap, and is display:none the rest of the time.
      Below the ending overlay (99999): nothing flashes over the final black. */
   #lightning-flash { position: fixed; inset: 0; z-index: 9000; display: none; opacity: 0; pointer-events: none; background: #e9f1ff; transition: none; }
+
+  /* THE HORIZON (beta 11): a band under the top bar -- the horizon above deck, one porthole below -- with fog and squall dark on the screen glass. Nothing here takes a tap. */
+  #scanlines { display: none; } /* no terminal scanlines */
+  body.hz-on #topbar { border-bottom-color: transparent; } /* no line between the top bar and the window; the voyage line under the window keeps the game's own */
+  #horizon { flex-shrink: 0; position: relative; width: 100%; max-width: 640px; margin: 0 auto; }
+  #horizon[hidden], body.title-mode #horizon { display: none; }
+  #hz-strip { position: relative; height: 108px; border-bottom: 1px solid transparent; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; } /* a sideways drag turns your head; up and down still scrolls */ /* the mockup's size: 108 px tall (25% taller than v19's 86), as wide as the screen */
+  #hz-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #hz-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
+  #hz-fog, #hz-dark { position: absolute; inset: 0; pointer-events: none; }
+  #hz-fog { z-index: 4; opacity: 0; background-color: rgba(176, 198, 186, 0.16); }
+  #hz-dark { z-index: 5; opacity: 0; background: radial-gradient(ellipse 120% 90% at 50% 40%, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.85)); }
 </style>
 </head>
 <body>
@@ -905,6 +917,9 @@
         <span id="clock">—</span>
       </div>
     </header>
+    <div id="horizon" hidden>
+      <div id="hz-strip"><canvas id="hz" aria-hidden="true"></canvas><div id="hz-fade"></div></div>
+    </div>
     <div id="navstrip" hidden>
       <span id="nav-day"></span>
       <span id="nav-speed"></span>
@@ -917,6 +932,8 @@
     <footer id="controls">
       <div id="options"></div>
     </footer>
+    <div id="hz-fog" aria-hidden="true"></div>
+    <div id="hz-dark" aria-hidden="true"></div>
   </div>
 
   <!-- SHIP'S PLAN -- a true full-viewport image viewer, deliberately
@@ -10124,6 +10141,7 @@
     thunder.lastVariant = thunder.variant; // (so the next strike can never repeat it, heard or not)
     var delayMs = Math.round(thunderRandRange(thunderCadence().delay) * 1000);
     thunderFlash();
+    try { if (window.landfallHorizon) window.landfallHorizon.strike(delayMs); } catch (e) {} // (the horizon strip's bolt; it cannot affect the strike)
     if (thunderBuffersUsable() && !muted && audioCtx.state === 'running') { // fetch both sides now, so whichever is right when the thunder begins is ready
       thunderLoadBuffer(thunderPath(thunder.variant, 'ext'));
       thunderLoadBuffer(thunderPath(thunder.variant, 'int'));
@@ -14295,7 +14313,7 @@
     var alt = Math.asin(clamp(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(H), -1, 1));
     var g = rad * (357.529 + 0.98560028 * d), ls = rad * (280.460 + 0.9856474 * d + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)); // the sun's ecliptic longitude
     var az = normalizeDeg((Math.atan2(Math.sin(H), Math.cos(H) * Math.sin(phi) - Math.tan(dec) * Math.cos(phi)) + Math.PI) / rad); // true bearing of the moon, degrees clockwise from north (patch 68: the binoculars place it)
-    return { alt: alt / rad - 0.95 * Math.cos(alt), illum: (1 - Math.cos(l - ls)) / 2, az: az };
+    return { alt: alt / rad - 0.95 * Math.cos(alt), illum: (1 - Math.cos(l - ls)) / 2, az: az, ha: H, dec: dec, waxing: Math.sin(l - ls) > 0 };
   }
 
   // Everything a line's conditions can ask about, read once from the game's existing state (never a second copy of any of it).
@@ -23677,6 +23695,766 @@
     }
     document.title = 'TEST · ' + name.toUpperCase();
   }
+
+  /* ===== THE HORIZON (beta 11) -- see patches_beta/11_horizon.py ===== */
+  try { (function () {
+  'use strict';
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+  const mulberry = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+  const lerpTable = (tab, v) => { const i = clamp(Math.floor(v), 0, tab.length - 2), f = clamp(v - i, 0, 1); return lerp(tab[i], tab[i + 1], f); };
+
+  const RAD = Math.PI / 180, SYN = 29.530588853, FOV = 110, RANGE_KM = 60, VIS_KM = 46, EYE = 3, REFF = 7.4e6;
+
+  const wrap180 = a => ((a % 360) + 540) % 360 - 180;
+
+  function sunCalc(ms, lat, lon) {
+    const d = ms / 864e5 - 10957.5, g = RAD * (357.529 + .98560028 * d), L = RAD * (280.459 + .98564736 * d + 1.915 * Math.sin(g) + .02 * Math.sin(2 * g)), ob = RAD * (23.439 - 4e-7 * d);
+    const ra = Math.atan2(Math.cos(ob) * Math.sin(L), Math.cos(L)), dec = Math.asin(Math.sin(ob) * Math.sin(L));
+    const H = RAD * (280.16 + 360.9856235 * d + lon) - ra, phi = RAD * lat;
+    const el = Math.asin(clamp(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(H), -1, 1)) / RAD;
+    const az = ((Math.atan2(Math.sin(H), Math.cos(H) * Math.sin(phi) - Math.tan(dec) * Math.cos(phi)) + Math.PI) / RAD % 360 + 360) % 360;
+    return { el, az };
+  }
+
+  const SAMPLES = [0, .25, .6, 1, 1.6, 2.5, 4, 6, 9, 13, 18, 25, 35, 48];
+
+  function buildLand(rays, rel) {
+    const P = { rays }, top = new Float32Array(720).fill(-1), dst = new Float32Array(720).fill(999), seed = 7.3;
+    const sm = x => x * x * (3 - 2 * x), vn = x => { const i = Math.floor(x), f = x - i; return lerp(hash(i, seed), hash(i + 1, seed), sm(f)); };
+    let any = false;
+    for (let i = 0; i < 720; i++) {
+      for (const [dIn, dOut] of P.rays[i]) {
+        const open = dOut > RANGE_KM, ext = open ? 99 : dOut - dIn, big = clamp((Math.min(ext, 30) - 1) / 9, .05, 1); // small islands are low, big land is high
+        for (const s of SAMPLES) {
+          if (s > ext) break;
+          const u = Math.min(1, s / Math.min(ext, 26)), shape = ext > 26 ? sm(clamp(s / rel.ramp, 0, 1)) : Math.pow(Math.sin(Math.PI * u), .8);
+          const nz = .5 * vn(i / 10 + s / 9) + .3 * vn(i / 3.5 + s / 3.2 + 17) + .2 * vn(i / 1.3 + s / 1.2 + 41);
+          const h = rel.H * big * shape * (.3 + .7 * nz), d = Math.max(.15, dIn + s) * 1000;
+          const ang = ((h - d * d / (2 * REFF)) / d + Math.sqrt(2 * EYE / REFF)) / RAD; // how far it stands above the sea horizon, allowing for the curve of the earth
+          if (ang > 0 && ang > top[i]) { top[i] = ang; dst[i] = dIn + s; any = true; }
+        }
+      }
+    }
+    // smooth the outline (about 1.5 degrees either side), so the ends of an island slope down into the sea instead of dropping off a cliff
+    const KER = [1, 2, 3, 4, 3, 2, 1], t2 = new Float32Array(720), d2 = new Float32Array(720).fill(999);
+    for (let i = 0; i < 720; i++) {
+      let sum = 0, w = 0, dm = 999;
+      for (let k = -3; k <= 3; k++) { const j = (i + k + 720) % 720, wt = KER[k + 3]; sum += Math.max(top[j], 0) * wt; w += wt; if (top[j] > 0 && dst[j] < dm) dm = dst[j]; }
+      const v = sum / w; if (v > .06 && dm < 999) { t2[i] = v; d2[i] = dm; } else t2[i] = -1;
+    }
+    for (let i = 0; i < 720; i++) dst[i] = d2[i];
+    let hi = 0; for (let i = 1; i < 720; i++) if (t2[i] > t2[hi]) hi = i;
+    return { top: t2, dst, any, hi: hi / 2 };
+  }
+  const LAND_MIX = .16; // how far the fill is from the background toward the hour's colour: just a touch lighter than the sky
+
+  function drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl) {
+    const Ld = LAND; if (!Ld || !Ld.any || haze < .02) return;
+    const pxMax = y0 - (V.loc === 'below' ? 15 : 5), P = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step), visKm = V.visKm, SINK = visKm * .74; // (visKm: how far land shows; the game sets it from the weather)
+    const col = [];
+    for (let q = 0; q <= n; q++) {
+      const x = -m + q * step, bq = (vb + (x - W / 2) / ppd) * 2, i0 = Math.floor(bq), f = bq - i0, a0 = ((i0 % 720) + 720) % 720, a1 = (a0 + 1) % 720;
+      const t0 = Ld.top[a0], t1 = Ld.top[a1];
+      if (t0 <= 0 && t1 <= 0) { col.push(null); continue; }
+      const d = Math.min(Ld.dst[a0], Ld.dst[a1]);
+      if (d >= visKm) { col.push(null); continue; } // beyond what can be seen
+      const sink = 1 - Math.pow(clamp((d - SINK) / (visKm - SINK), 0, 1), 2); // the far end of what can be seen sinks into the sea, as land does over the edge of the world
+      col.push({ x, h: Math.max(1.4, P(lerp(Math.max(t0, 0), Math.max(t1, 0), f)) * sink) });
+    }
+    // ONE fill: a medium tone of the hour's colour, fully opaque (so no cloud or line behind it shows through); in fog it pales toward the haze
+    const fogMix = clamp((1 - haze) * .9, 0, 1), fillC = mix(mix(bg, ph, LAND_MIX), mix(bg, ph, .12), fogMix);
+    g.save(); g.lineJoin = 'round'; g.lineCap = 'round'; g.lineWidth = lw;
+    for (let q = 0; q <= n;) {
+      if (!col[q]) { q++; continue; }
+      let e = q; while (e + 1 <= n && col[e + 1]) e++;
+      if (e > q) {
+        const hh = k => (k === q || k === e) ? 0 : col[k].h; // each run starts and ends at the sea, so an island's ends slope down with no lip
+        g.beginPath(); g.moveTo(col[q].x, y0 + 2);
+        for (let k = q; k <= e; k++) g.lineTo(col[k].x, y0 - hh(k));
+        g.lineTo(col[e].x, y0 + 2); g.closePath(); g.fillStyle = rgb(fillC); g.fill();
+        // ONE outline: the skyline, in one line of the hour's colour, down to the sea at each end
+        g.strokeStyle = rgba(ph, .92 * haze); g.beginPath(); g.moveTo(col[q].x, y0 - hh(q));
+        for (let k = q + 1; k <= e; k++) g.lineTo(col[k].x, y0 - hh(k));
+        g.stroke();
+      }
+      q = e + 1;
+    }
+    g.restore();
+  }
+
+  // N, E, S, W (and the bow and stern) as small marks along the top of the view
+  let FONT = 'monospace';
+  function drawCompass(g, W, yb) {
+    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg;
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    const cards = [['N', 0], ['E', 90], ['S', 180], ['W', 270]], xs = [];
+    cards.forEach(([L, b]) => {
+      const x = W / 2 + wrap180(b - vb) * ppd; xs.push(x);
+      if (x < 8 || x > W - 8) return;
+      const isN = L === 'N';
+      g.strokeStyle = rgba(SCN.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
+      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? SCN.br : SCN.ph, isN ? .95 : .8); g.fillText(L, x, yb);
+    });
+    { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
+      if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(SCN.ph, .5); g.fillText('BOW', x, yb);
+        g.strokeStyle = rgba(SCN.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+      } }
+    g.restore();
+  }
+  // below deck: which side the windows face (tap the windows to switch)
+  function drawSide(g, W, yb) {
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.font = `700 8px ${FONT}`; g.fillStyle = rgba(COL.ph, .95); // (the game's own text colour)
+    g.fillText(V.side === 'port' ? 'PORT SIDE' : 'STARBOARD SIDE', W / 2, yb); g.restore();
+  }
+
+  const FW = 0; // (no frame band round the glass: the window is one outline)
+
+  // a pill (a rectangle with fully rounded ends): a dense closed outline, so points can be spaced equally along it
+  function pillOutline(cx, cy, hw, hh, steps) {
+    const r = hh, x1 = cx + hw - r, x0 = cx - hw + r, pts = [], seg = Math.max(2, Math.round((x1 - x0) / 6));
+    for (let i = 0; i < steps; i++) { const a = -Math.PI / 2 + Math.PI * i / steps; pts.push([x1 + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    for (let i = 0; i < seg; i++) pts.push([x1 - (x1 - x0) * i / seg, cy + r]);
+    for (let i = 0; i < steps; i++) { const a = Math.PI / 2 + Math.PI * i / steps; pts.push([x0 + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    for (let i = 0; i < seg; i++) pts.push([x0 + (x1 - x0) * i / seg, cy - r]);
+    return pts;
+  }
+
+  const NEAR_AMP = [1, 2.4, 4.5, 8, 15, 24, 34];        // height of the nearest swell in px
+  const NEAR_LEN = [95, 105, 115, 125, 140, 155, 170];   // and its length in px: bigger seas are longer swells
+  const LAM = [8, 11, 16, 26, 42, 66, 100];              // the swell's length in metres: only used to set how fast it travels (deep water waves: longer is faster but slower to repeat)
+  const GRAV = 9.81, SKEW = .55;
+  const WCOMP = [{ f: 1 }, { f: .61 }, { f: .23 }];      // swell, second swell, chop
+  const WPH = [0, 0, 0];                                  // each train's phase, advanced every frame
+  const wshape = p => { const u = .5 + .5 * Math.cos(p); return 2 * (u * Math.sqrt(u) - .4244); }; // sharper crests and flatter troughs than a sine
+  const hash = (a, b) => { const t = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return t - Math.floor(t); };
+  const RX = new Float32Array(600), RY = new Float32Array(600), RP = new Float32Array(600);
+  const HEEL = [0, 1, 2, 3.2, 4.6, 6.4, 8.2];       // the lean the boat holds under sail (also the fixed tilt when motion is reduced)
+  const ROLL = [0, .6, 1.4, 2.6, 4, 5.5, 7];        // how far she rolls each way around that lean, in degrees: she swings past level to the other side
+  const PITCH = [0, .3, .8, 1.6, 3, 5, 7.5];        // how far the bow lifts and drops, as pixels of horizon
+
+  // the scene (sky, sea, sun, moon, the window outline, the compass marks): blue at night, orange at dusk and dawn, white by day. Keyed by the sun's height.
+  const SKF = [
+    { e: -12, ph: hex('#6f97dc'), br: hex('#b8d0fb'), dim: hex('#40619a'), bg: hex('#04070e') },   // night: blue
+    { e: -5,  ph: hex('#cf8660'), br: hex('#f5b890'), dim: hex('#80513a'), bg: hex('#0a0706') },   // the last of the dusk (or the first of the dawn): the blue has turned to orange
+    { e: 0,   ph: hex('#ea9650'), br: hex('#ffcb92'), dim: hex('#925c2e'), bg: hex('#0a0705') },   // the sun on the horizon: orange
+    { e: 7,   ph: hex('#eeb274'), br: hex('#ffdcb8'), dim: hex('#9a6e44'), bg: hex('#0a0806') },   // low sun: pale orange
+    { e: 18,  ph: hex('#e3e6ea'), br: hex('#ffffff'), dim: hex('#8a9098'), bg: hex('#07090b') },   // day: white
+  ];
+  // the same, when the sky is overcast, raining, foggy or in a squall: the dusk and the dawn stay GREY, not orange (the blue night and the white day are the same)
+  const SKFG = [
+    SKF[0],
+    { e: -5,  ph: hex('#9a9ea8'), br: hex('#cfd3da'), dim: hex('#585c66'), bg: hex('#07080a') },
+    { e: 0,   ph: hex('#b4b8c0'), br: hex('#e2e5ea'), dim: hex('#6c7078'), bg: hex('#08090b') },
+    { e: 7,   ph: hex('#c8ccd2'), br: hex('#eff1f4'), dim: hex('#7c8088'), bg: hex('#08090b') },
+    SKF[4],
+  ];
+  let GREYK = 0; // how much of the sky is heavy: 0 for clear and partly cloudy (orange), 1 for overcast, rain, fog and squall (grey)
+  function sceneFor(e, greyK) {
+    const at = (K, e) => {
+      if (e <= K[0].e) return K[0];
+      const L = K.length - 1;
+      if (e >= K[L].e) return K[L];
+      for (let i = 0; i < L; i++) if (e <= K[i + 1].e) {
+        const a = K[i], b = K[i + 1], f = (e - a.e) / (b.e - a.e);
+        return { ph: mix(a.ph, b.ph, f), br: mix(a.br, b.br, f), dim: mix(a.dim, b.dim, f), bg: mix(a.bg, b.bg, f) };
+      }
+    }, o = at(SKF, e);
+    if (!(greyK > 0.001)) return o;
+    const g = at(SKFG, e);
+    return { ph: mix(o.ph, g.ph, greyK), br: mix(o.br, g.br, greyK), dim: mix(o.dim, g.dim, greyK), bg: mix(o.bg, g.bg, greyK) };
+  }
+
+  let COL = { ph: SKF[4].ph, br: SKF[4].br, dim: SKF[4].dim, bg: SKF[4].bg }, OUT = COL, SCN = COL; // (the glue sets all three every frame)
+
+  const R = mulberry(7);
+  const STARS = Array.from({ length: 150 }, () => ({ x: R(), y: R() * .82, r: .5 + R() * .8, p: R() * 6 }));
+  // The six cloud silhouettes, traced from the reference picture: low and wide, flat underneath, one main hump with shoulders and a thin tail.
+  // Each list is how thick the cloud is, in cells, down its length. They are smoothed and drawn as an outline with a solid inside.
+  const CLOUD_SHAPES = [
+    [1,1,2,2,3,3,4,4,3,2,4,5,5,6,7,7,7,7,7,6,5,5,5,4,4,3,3,2,1,2,2,1,1],
+    [1,1,2,2,2,3,3,3,3,4,4,5,6,6,6,6,6,4,4,4,3,2,1,2,2,3,3,3,2,2,1,1],
+    [1,1,2,2,2,3,4,5,5,5,5,3,2,3,2,1,1,1],
+    [1,1,1,1,1,2,2,2,2,3,4,4,3,2,2,2,2,1,1],
+    [1,1,1,2,2,2,3,4,4,3,3,3,1,1,1],
+    [1,1,2,2,2,3,3,3,2,2,1,1],
+  ];
+  function makeCloud(i) {
+    let h = [0, ...CLOUD_SHAPES[i], 0];
+    for (let pass = 0; pass < 3; pass++) { const o = h; h = o.map((v, j) => j === 0 || j === o.length - 1 ? 0 : (o[j - 1] + 2 * v + o[j + 1]) / 4); }
+    return { h, n: h.length, hmax: Math.max(...h) };
+  }
+  const CLOUDS = [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3].map((shape, i) => Object.assign(makeCloud(shape), { x: R(), y: R(), s: .85 + R() * .45, v: .6 + R() * .8, flip: i > 5 || R() < .35 }));
+  function drawCloud(g, c, x, y, s, flip, lw, col, a, bg, fa) {
+    g.save(); g.translate(x, y); g.scale(flip ? -s : s, s);
+    g.beginPath(); g.moveTo(0, 0);
+    for (let j = 1; j < c.n - 1; j++) g.quadraticCurveTo(j, -c.h[j], j + .5, -(c.h[j] + c.h[j + 1]) / 2);
+    g.lineTo(c.n - 1, 0); g.closePath();
+    g.fillStyle = rgba(bg, .92 * fa); g.fill();
+    g.lineJoin = 'round'; g.lineWidth = lw / s; g.strokeStyle = rgba(col, a); g.stroke();
+    g.restore();
+  }
+
+  // the lit part of the moon: a half circle on the lit side plus half of the terminator ellipse. No outline ring, just the light.
+  function drawMoon(g, x, y, r, p, col, a) {
+    const c = Math.cos(p * 6.2832), waxing = p < .5;
+    g.save(); g.translate(x, y); if (!waxing) g.scale(-1, 1); // seen from the northern hemisphere the waxing moon is lit on its right
+    g.beginPath(); g.moveTo(0, -r); g.arc(0, 0, r, -Math.PI / 2, Math.PI / 2, false);
+    g.ellipse(0, 0, Math.max(.01, Math.abs(c) * r), r, 0, Math.PI / 2, -Math.PI / 2, c > 0);
+    g.closePath(); g.fillStyle = rgba(col, a); g.fill(); g.restore();
+  }
+
+  // OVERCAST AS LINES: ten rows of long dashes (a different pattern in each, so the gaps never line up) laid from the top of the sky to the horizon
+  const OC = Array.from({ length: 10 }, (_, r) => { const pat = []; for (let i = 0; i < 6; i++) pat.push(55 + hash(r + 1, i) * 200, 8 + hash(r + 11, i) * 26); return { pat, sp: .6 + hash(r, 3) * .9, p: hash(r, 7) * 6.28 }; });
+
+
+  /* the outside world: sky, sun and moon, clouds, rain, sea. Drawn at any size, so the strip above and the porthole below share it. */
+  function drawScene(g, W, H, ts, lw) {
+    LW = lw;
+    const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
+    const pal = V.loc === 'below' ? OUT : SCN, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
+    const nk = true ? lerp(.62, 1, clamp((e + 8) / 12, 0, 1)) : 1; // at night the world outside is darker: its lines dim, while the moon and the stars keep their own light
+    const ph = pal.ph.map(v => v * nk), br = br0.map(v => v * nk);
+    const y0 = H * .56, m = W * .18;
+    const ppd = W / FOV, vb = viewBearing(), yawPx = vb * ppd; // pixels to a degree, which way the window points, and how far round the circle that is in pixels
+    g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
+    // Roll: a small steady lean plus a swing that goes through level and out the other side. Pitch: the bow climbs the front of each swell, then drops over the crest.
+    const rr = tt * .0011 * (1 + sea * .12);
+    const heel = V.reduce ? lerpTable(HEEL, sea) * V.sailK : lerpTable(HEEL, sea) * V.sailK * .35 + lerpTable(ROLL, sea) * (Math.sin(rr) + .35 * Math.sin(rr * 2.3 + 1)) / 1.35;
+    const pitch = V.reduce ? 0 : Math.cos(WPH[0]) * lerpTable(PITCH, sea);
+    g.translate(W / 2, y0 + pitch); g.rotate(heel * Math.PI / 180); g.translate(-W / 2, -y0);
+    const fogF = clamp(fog / .85, 0, 1), haze = clamp(1 - fogF * 1.15, 0, 1); // in thick fog the sky, sun, moon, stars and clouds are simply not there
+
+    let gr = g.createLinearGradient(0, 0, 0, y0); gr.addColorStop(0, rgba(ph, 0)); gr.addColorStop(1, rgba(ph, .07 * (1 - fogF)));
+    g.fillStyle = gr; g.fillRect(-m, -60, W + 2 * m, y0 + 60);
+    // fog: everything beyond a few boat lengths is the same pale grey
+    const fogTint = mix(ph, [205, 218, 210], .5), hazeCol = mix(bg, fogTint, .17 * fogF);
+    if (fogF > .01) { g.fillStyle = rgba(fogTint, .17 * fogF); g.fillRect(-m, -60, W + 2 * m, H + 200); }
+
+    const ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1); // how much of an overcast ceiling there is; under a full ceiling there is no sun, moon or star to see
+    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
+    if (starA > .02) STARS.forEach(s => {
+      const tw = .6 + .4 * Math.sin(tt * .0016 + s.p);
+      g.fillStyle = rgba(br0, starA * tw); g.beginPath(); g.arc(W / 2 + wrap180(s.x * 360 - vb) * ppd, s.y * y0, s.r, 0, 6.2832); g.fill();
+    });
+
+    g.save(); g.beginPath(); g.rect(-m, -60, W + 2 * m, y0 + 60); g.clip();
+    // the sun and the moon stand at their real compass bearing and height, at the same scale up as across: the picture shows only the first dozen degrees of sky, so a high sun is out of sight overhead and comes back into view as it sets
+    const peak = V.loc === 'below' ? 24 : 10; // how high the arc climbs: lower below deck so the sun stays inside the window frames
+    const bodyY = el => y0 - el * ppd, bodyX = az => W / 2 + wrap180(az - vb) * ppd;
+    const sunP = V.sun;
+    glint = null;
+    if (sunP.el > -7 && bodyY(sunP.el) > -26 && Math.abs(wrap180(sunP.az - vb)) < FOV / 2 + 20) {
+      const p = { x: bodyX(sunP.az), y: bodyY(sunP.el) }, warm = clamp(1 - e / 24, 0, 1), col = true ? mix(br0, [245, 170, 80], warm * .8 * (1 - GREYK)) : br0;
+      const a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA);
+      const gl = 26 + warm * 16, hot = mix(col, [255, 255, 255], .55);
+      const rg = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, gl);
+      rg.addColorStop(0, rgba(hot, a)); rg.addColorStop(.12, rgba(col, .96 * a)); rg.addColorStop(.3, rgba(col, .42 * a)); rg.addColorStop(.62, rgba(col, .12 * a)); rg.addColorStop(1, rgba(col, 0));
+      g.fillStyle = rg; g.fillRect(p.x - gl, p.y - gl, 2 * gl, 2 * gl);
+      glint = { x: p.x, a: a * clamp(e / 6, 0, 1) * (cl < .75 ? 1 : 0), col };
+    }
+    const mnow = V.mn;
+    if (mnow.alt > -3 && bodyY(mnow.alt) > -20 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 20) {
+      const p = { x: bodyX(mnow.az), y: bodyY(mnow.alt) }, a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+      if (a > .02) {
+        const mp = mnow.p, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br0, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br0, 0));
+        g.fillStyle = rg; g.fillRect(p.x - 30, p.y - 30, 60, 60);
+        drawMoon(g, p.x, p.y, 8, mp, br0, .96 * a);
+        if (!glint) glint = { x: p.x, a: a * (.25 + .6 * moonLit(mp)), col: br0 };
+      }
+    }
+    g.restore();
+
+    // Overcast is a ceiling, not a scatter of clouds: the same scalloped shelf the squall has, but lighter in tint than the squall's black. It comes down from the top as the cover thickens
+    // and its scallops drift slowly. A squall's black shelf hangs in front of it. The sky under it stays dark.
+    const dpx = V.reduce ? 0 : ts * .0000017 * (1 + sea * .06) * (W + 2 * m) * .8;
+    let deckB = 0;
+    if (!true && ceilA > .02 && haze > .02) {
+      const Bc = lerp(2, y0 * .44, Math.pow(ceilA, .8)) + sq * 12, dk = clamp(ceilA * 1.4, 0, 1) * haze, sw = 18, amp = 8 * ceilA, wob = V.reduce ? 0 : ts * .00018, off = dpx % sw;
+      deckB = Bc;
+      g.beginPath(); g.moveTo(-m - 2 * sw, -60); g.lineTo(W + m + sw + off, -60); g.lineTo(W + m + sw + off, Bc);
+      for (let x = W + m + sw + off; x > -m - 2 * sw; x -= sw) g.quadraticCurveTo(x - sw / 2, Bc + amp * Math.sin((x - dpx) * .13 + wob), x - sw, Bc);
+      g.closePath();
+      gr = g.createLinearGradient(0, 0, 0, Bc + 8); gr.addColorStop(0, rgba(mix(bg, ph, .03 * (1 - sq * .8)), .95 * dk)); gr.addColorStop(1, rgba(mix(bg, ph, .065 * (1 - sq * .8)), .95 * dk)); // a dark ceiling: only the outline and a faint tint set it apart from the sky g.fillStyle = gr; g.fill();
+      g.lineJoin = 'round'; g.lineWidth = lw; g.strokeStyle = rgba(ph, .55 * dk * (1 - sq * .3)); g.stroke();
+    }
+    if (true && ceilA > .02 && haze > .02) { // OVERCAST, AS LINES ONLY: full cloud cover is rows of long, slightly wavy dashes across the whole sky, closer together toward the horizon, drifting at a crawl. No shelf, no cloud shapes, no sun, moon or stars.
+      const yTop = V.loc === 'below' ? 15 : 3, yBot = y0 - 3, wob = tt * .00018;
+      g.save(); g.lineCap = 'round'; g.lineJoin = 'round'; g.lineWidth = lw;
+      for (let r = 0; r < OC.length; r++) {
+        const R = OC[r], f = r / (OC.length - 1), yy = lerp(yTop, yBot, Math.pow(f, 1.45));
+        g.strokeStyle = rgba(ph, ceilA * haze * (.16 + .34 * f) * (1 - sq * .3));
+        g.setLineDash(R.pat); g.lineDashOffset = yawPx - dpx * R.sp * 3;
+        g.beginPath();
+        for (let x = -m, q = 0; x <= W + m + 8; x += 8, q++) { const y = yy + Math.sin((x + yawPx) * .021 + R.p + wob) * 1.3 * (1 - f * .55) + Math.sin((x + yawPx) * .009 + R.p * 2) * .9; q ? g.lineTo(x, y) : g.moveTo(x, y); }
+        g.stroke();
+      }
+      g.setLineDash([]); g.restore();
+    }
+    const n = Math.round(cl * 14.4), drift = V.reduce ? 0 : ts * .0000007 * (1 + sea * .06); // clouds drift slowly: about a pixel a second
+    const skyTop = V.loc === 'below' ? 15 : 2;
+    CLOUDS.forEach((c, i) => {
+      if (i >= n) return;
+      const x = W / 2 + wrap180((((c.x + drift * c.v) % 1) + 1) % 1 * 360 - vb) * ppd - c.n * c.s * 1.55;
+      const sc = Math.min(c.s * 3.1 * (1 + cl * .2), (y0 - 5 - skyTop) / c.hmax), by = lerp(y0 - 5, skyTop + c.hmax * sc, c.y);
+      if (haze * cloudK > .03) drawCloud(g, c, x, by, sc, c.flip, lw, ph, (.7 - .2 * sq) * haze * cloudK, bg, haze * cloudK);
+    });
+    if (cl > .8) {
+      const a = (cl - .8) / .2;
+      g.strokeStyle = rgba(ph, .22 * a * haze); g.lineWidth = lw;
+      for (let i = 0; i < 5 && deckB > 10; i++) { const yy = 4 + i * (deckB - 8) / 4; g.beginPath(); g.setLineDash([26 + i * 9, 5 + i * 3]); g.lineDashOffset = yawPx - (V.reduce ? 0 : ts * .004 * (1 + i * .3)); g.moveTo(-m, yy); g.lineTo(W + m, yy); g.stroke(); }
+      g.setLineDash([]);
+      gr = g.createLinearGradient(0, 0, 0, y0 * .6); gr.addColorStop(0, rgba(bg, .65 * a)); gr.addColorStop(1, rgba(bg, 0)); g.fillStyle = gr; g.fillRect(-m, -60, W + 2 * m, y0 * .6 + 60);
+    }
+    if (sq > .02) {
+      g.beginPath(); g.moveTo(-m, -60); g.lineTo(W + m, -60); g.lineTo(W + m, 18);
+      for (let x = W + m; x > -m; x -= 16) g.quadraticCurveTo(x - 8, 18 + 9 * Math.sin(x * .13 + (V.reduce ? 0 : ts * .0006)), x - 16, 18);
+      g.closePath(); g.fillStyle = rgba(hex('#020403'), .9 * sq); g.fill(); g.strokeStyle = rgba(ph, .5 * sq); g.lineWidth = lw; g.stroke();
+    }
+    drawLand(g, W, y0, m, ppd, vb, ph, bg, lw, haze, cl);
+    if (rain > .02) {
+      g.strokeStyle = rgba(ph, .15 + rain * .15); g.lineWidth = lw; g.beginPath();
+      const cnt = Math.round(30 + rain * 40), off = V.reduce ? 0 : (ts * .06) % 14;
+      for (let i = 0; i < cnt; i++) {
+        const x = ((i * 53.7) % (W + 2 * m)) - m, y = 12 + ((i * 29.3 + off * (1 + (i % 3))) % (y0 - 8));
+        g.moveTo(x, y); g.lineTo(x - 3, y + 7 + rain * 4);
+      }
+      g.stroke();
+    }
+
+    g.strokeStyle = rgba(ph, .85 * (1 - fogF)); g.lineWidth = lw; g.beginPath(); g.moveTo(-m, y0); g.lineTo(W + m, y0); g.stroke();
+
+    gr = g.createLinearGradient(0, y0, 0, H); gr.addColorStop(0, rgba(ph, .07)); gr.addColorStop(1, rgba(ph, 0)); g.fillStyle = gr; g.fillRect(-m, y0, W + 2 * m, H - y0 + 40);
+    const near = lerpTable(NEAR_AMP, sea), Ln = lerpTable(NEAR_LEN, sea), NL = 9, tw = V.reduce ? 0 : ts * .004, PK = 1.5;
+    const yT = y0 + 2, yB = y0 + (H - y0) * .58, contrast = clamp(near / 6, .3, 1);
+    const heave = Math.sin(WPH[0]) * near * .13;        // the boat lifts and drops with the swell, so the water seems to sink and rise by more the closer it is
+    const x0 = -m, nPts = Math.min(599, Math.ceil((W + 2 * m) / 3) + 1);
+    const wdir = (V.loc === 'below' && V.side === 'starboard') ? -1 : 1; // the water passes the other way out of the starboard side
+    for (let k = 0; k < NL; k++) {
+      const d = k / (NL - 1), by = lerp(yT, yB, Math.pow(d, 1.15)) + heave * d, a = near * (.07 + .93 * Math.pow(d, 1.6)) / PK, L = Ln * (.4 + .6 * d), sp = .55 + .45 * d, off = (NL - 1 - k) * 2.1;
+      for (let q = 0; q < nPts; q++) {
+        const x = x0 + q * 3, u = wdir * (x - W / 2 + yawPx) / L * 6.2832, f1 = u + WPH[0] * sp - Math.PI / 2 + off;
+        const env = .78 + .22 * Math.sin(u / 2.3 + k * 1.7 + WPH[0] * .2);
+        const p = env * (wshape(f1 + SKEW * Math.sin(f1)) + .42 * wshape(u / .61 + WPH[1] * sp + k * 5.3) + (d > .35 ? .14 * wshape(u / .23 + WPH[2] * sp + k * 2.9) : 0));
+        RX[q] = x; RP[q] = p; RY[q] = by - a * p;
+      }
+      g.beginPath(); g.moveTo(RX[0], H + 90); for (let q = 0; q < nPts; q++) g.lineTo(RX[q], RY[q]); g.lineTo(RX[nPts - 1], H + 90); g.closePath();
+      const vis = 1 - fogF * (1 - clamp((d - .45) / .4, 0, 1)); // 1 when clear; in thick fog only the nearest layers show, fading out with distance
+      g.fillStyle = rgb(mix(mix(bg, ph, clamp(.015 + .1 * Math.pow(1 - d, 1.2), 0, 1) * (1 - .3 * clamp(cl * .5, 0, 1))), hazeCol, 1 - vis)); g.fill();
+      // the edge is brighter where the water is high: crests catch the light and the troughs fall away
+      const ra = (.3 + .55 * d) * Math.pow(vis, 1.3); g.lineWidth = lw; g.lineJoin = 'round'; g.lineCap = 'round';
+      for (let b = 0; b < 3; b++) {
+        g.strokeStyle = rgba(ph, Math.min(1, ra * lerp(1, [.28, .62, 1.2][b], contrast))); g.beginPath(); let on = false;
+        for (let q = 0; q < nPts - 1; q++) {
+          const pp = (RP[q] + RP[q + 1]) / 2, bb = pp < .1 ? 0 : pp < .7 ? 1 : 2;
+          if (bb === b) { if (!on) g.moveTo(RX[q], RY[q]); g.lineTo(RX[q + 1], RY[q + 1]); on = true; } else on = false;
+        }
+        g.stroke();
+      }
+      if (d > .5 && near > 3) { // a contour on the wave face, just under each crest
+        const dy = 1.8 + 3.4 * d; g.strokeStyle = rgba(ph, ra * .3); g.beginPath(); let on = false;
+        for (let q = 0; q < nPts - 1; q++) { const hi = RP[q] > .45; if (hi) { if (!on) g.moveTo(RX[q], RY[q] + dy); g.lineTo(RX[q + 1], RY[q + 1] + dy); on = true; } else on = false; }
+        g.stroke();
+      }
+      if (glint && glint.a > .02 && d < .9) { // the sun or moon glitters on the water in front of it, wider the closer the layer
+        const spread = 8 + 44 * d, nT = 1 + (d * 4 | 0); g.strokeStyle = rgba(glint.col, 1); g.lineWidth = lw;
+        for (let i = 0; i < nT; i++) {
+          const fl = Math.floor(tw * .35 + hash(k, i) * 4), dx = (hash(k + fl, i + 3) - .5) * spread, al = glint.a * (1 - Math.abs(dx) / (spread * .55)) * (.5 + .5 * hash(i, fl + k));
+          if (al < .04) continue;
+          const q = clamp(Math.round((glint.x + dx - x0) / 3), 0, nPts - 1), half = .8 + 2.4 * d;
+          g.globalAlpha = Math.min(1, al); g.beginPath(); g.moveTo(RX[q] - half, RY[q] + 1.6); g.lineTo(RX[q] + half, RY[q] + 1.6); g.stroke();
+        }
+        g.globalAlpha = 1;
+      }
+      if (sea >= 2.8 && d > .4) { // whitecaps on the highest crests, and spray blown off them in a gale
+        const fa = .8 * clamp((sea - 2.8) / 2.2, 0, 1) * vis * vis; g.strokeStyle = rgba(br, fa); g.lineWidth = lw * (1 + .5 * d); g.beginPath();
+        for (let q = 0; q < nPts; q++) if (RP[q] > .95 && hash(Math.floor(RX[q] / 5), k) > .2) { const w = 1.6 + 3 * d; g.moveTo(RX[q] - w, RY[q] - .4); g.lineTo(RX[q] + w * .6, RY[q] + .1); }
+        g.stroke();
+        if (sea >= 4.6) { g.fillStyle = rgba(br, fa * .6); for (let q = 0; q < nPts; q++) if (RP[q] > 1.05 && hash(q + Math.floor(tw), k) > .55) g.fillRect(RX[q] + hash(q, k) * 4 - 2, RY[q] - 2 - hash(k, q) * 4 * d, 1, 1); }
+      }
+    }
+    if (fog > .02) { gr = g.createLinearGradient(0, y0 - 30, 0, y0 + 28); gr.addColorStop(0, rgba(ph, 0)); gr.addColorStop(.5, rgba(ph, fog * .2)); gr.addColorStop(1, rgba(ph, 0)); g.fillStyle = gr; g.fillRect(-m, y0 - 30, W + 2 * m, 58); }
+
+    const age = performance.now() - boltT0;
+    if (bolt && boltDist < 2.3 && age < 260) {
+      g.strokeStyle = rgba([220, 235, 255], (1 - age / 260)); g.lineWidth = 1.6 * lw; g.shadowColor = 'rgba(190,215,255,.9)'; g.shadowBlur = 8;
+      g.beginPath(); bolt.forEach((p, i) => i ? g.lineTo(p[0] * W, p[1] * y0) : g.moveTo(p[0] * W, p[1] * y0)); g.stroke(); g.shadowBlur = 0;
+    }
+    g.restore();
+    return heel;
+  }
+
+
+  /* ---------- the band under the top bar: the horizon above deck, the porthole below ---------- */
+  const pb = [], pspray = [];
+  let pAcc = 0, nextPSpray = 3, WIN = [], RIM = [];
+  const inPoly = (x, y, P) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const a = P[i], b = P[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
+  const inWin = (x, y) => WIN.some(P => inPoly(x, y, P));
+  const rimPath = g => { g.beginPath(); RIM.forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); };
+  const winPath = g => { g.beginPath(); WIN.forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); };
+  function drawStrip(ts, dt) {
+    const { g } = hz; if (!g) return;
+    const W = hz.W, H = hz.H;
+    g.clearRect(0, 0, W, H);
+    if (V.loc === 'above') {
+      g.fillStyle = rgb(SCN.bg); g.fillRect(0, 0, W, H); // the sky has its own dark background: the lit screen behind it never shows through
+      drawScene(g, W, H, ts, 1);
+      drawCompass(g, W, 9);
+      return;
+    }
+    const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors
+    // ONE porthole, as wide as the two windows and the gap between them were: 10% edge, 80% window, 10% edge. The rim is the footprint; the glass is a few pixels inside it.
+    const my = 12, top = my, bot = H - my, fw = 3.5; // (the rim is the footprint; the glass is a few pixels inside it)
+    const pw = W * .80, hh = (bot - top) / 2, cy0 = H / 2, cx0 = W / 2;
+    RIM = [pillOutline(cx0, cy0, pw / 2, hh, 20)];
+    WIN = [pillOutline(cx0, cy0, pw / 2 - fw, hh - fw, 20)];
+    WIN[0].x0 = cx0 - pw / 2 + fw; WIN[0].w = pw - 2 * fw;
+    g.save(); winPath(g); g.clip();
+    g.fillStyle = rgb(OUT.bg); g.fillRect(0, 0, W, H);
+    drawScene(g, W, H, ts, 1);
+    // rain on the window glass (the screen glass above deck is covered separately)
+    const rain = cur.rain;
+    pAcc += dt * rain * 14;
+    while (pAcc > 1) {
+      pAcc--; if (pb.length >= 40) continue;
+      for (let tries = 0; tries < 6; tries++) {
+        const P = WIN[0], x = P.x0 + Math.random() * P.w, y = top + fw + Math.random() * (bot - top - 2 * fw);
+        if (inPoly(x, y, P)) { pb.push({ x, y, r: 1 + Math.random() * 2.4, vy: 0, age: 0, hold: .6 + Math.random() * 2.6, tr: [] }); break; }
+      }
+    }
+    for (let i = pb.length - 1; i >= 0; i--) {
+      const b = pb[i];
+      if (rain < .02) b.r -= dt * 1.1;
+      if (!V.reduce) {
+        b.age += dt;
+        if (b.age > b.hold && b.r > 1.5) {
+          b.vy = Math.min(b.vy + 120 * dt, 50 + b.r * 12); b.y += b.vy * dt; b.r -= dt * .06;
+          if (!b.tr.length || b.y - b.tr[b.tr.length - 1][1] > 2.5) { b.tr.push([b.x, b.y]); if (b.tr.length > 14) b.tr.shift(); }
+          if (Math.random() < dt * .9) { b.vy = 0; b.age = 0; b.hold = .3 + Math.random() * 1.4; }
+        }
+      }
+      if (b.y > bot + 3 || b.r < .7 || !inWin(b.x, Math.min(b.y, bot - 1))) { pb.splice(i, 1); continue; }
+      if (b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
+      if (true) streakDrop(g, b, ph, br, .55, .85);
+      else {
+        g.fillStyle = rgba(ph, .1); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
+        g.strokeStyle = rgba(ph, .6); g.lineWidth = 1; g.stroke();
+        g.fillStyle = rgba(br, .9); g.beginPath(); g.arc(b.x - b.r * .35, b.y - b.r * .38, Math.max(.5, b.r * .28), 0, 6.2832); g.fill();
+      }
+    }
+    // spray slapping the glass in a rough sea
+    if (cur.sea >= 3.6 && !V.reduce) {
+      nextPSpray -= dt * (cur.sea - 3);
+      if (nextPSpray <= 0) {
+        nextPSpray = 2.5 + Math.random() * 4.5; const P = WIN[0], sx = P.x0 + P.w * (.1 + Math.random() * .8);
+        for (let i = 0; i < 22; i++) pspray.push({ x: sx + (Math.random() - .5) * 26, y: bot - 6 + Math.random() * 6, vx: (Math.random() - .5) * 50, vy: -40 - Math.random() * 80, r: .5 + Math.random() * 1.3, life: 1 });
+      }
+    }
+    for (let i = pspray.length - 1; i >= 0; i--) {
+      const p = pspray[i]; p.life -= dt * 1.1; p.vy += 200 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+      if (p.life <= 0) { pspray.splice(i, 1); continue; }
+      g.fillStyle = rgba(br, .8 * p.life); g.beginPath(); g.arc(p.x, p.y, p.r, 0, 6.2832); g.fill();
+    }
+    g.restore();
+    // the rim and the glass edge: two thin strokes round each window, in the game's own text colour
+    g.lineJoin = 'round';
+    rimPath(g); g.strokeStyle = rgba(COL.ph, .85); g.lineWidth = 1.2; g.stroke();
+    winPath(g); g.strokeStyle = rgba(COL.ph, .5); g.lineWidth = 1; g.stroke();
+    drawSide(g, W, 9);
+  }
+
+
+
+  // a drop on the glass: a short streak (a faint body and a brighter head at the bottom), not a round bubble
+  function streakDrop(g, b, ph, br, a, k) {
+    const len = (3.5 + b.r * 3.4) * k, sl = len * .1; g.lineCap = 'round';
+    g.strokeStyle = rgba(ph, a); g.lineWidth = Math.max(.9, b.r * .38 * k); g.beginPath(); g.moveTo(b.x - sl, b.y - len); g.lineTo(b.x, b.y); g.stroke();
+    g.strokeStyle = rgba(br, Math.min(1, a * 1.7)); g.beginPath(); g.moveTo(b.x - sl * .35, b.y - len * .38); g.lineTo(b.x, b.y); g.stroke(); g.lineCap = 'butt';
+  }
+  let spawnAcc = 0, nextSpray = 4;
+
+  /* ---------- the game's world, as the drawing code wants it ---------- */
+  // V: where she is and what the light is doing.  cur: the weather as drawn (eased toward tgt, the weather as it is).
+  const V = { loc: 'above', lamp: false, cabin: false, lantern: false, nav: false, reduce: false, e: 30, moonP: .5, sailK: 1,
+              hdg: 0, yaw: 0, yawV: 0, side: 'port', visKm: 46, sun: { el: 30, az: 180 }, mn: { alt: -30, az: 0, p: .5 } };
+  const cur = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
+  const tgt = { cloud: 40, rain: 0, fog: 0, sq: 0, sea: 2 };
+  let glint = null, LW = 1;
+  let forced = null;     // developer aid only (window.landfallHorizon.force): holds any of these in place
+  const stats = { strip: 0, frames: 0 }; // developer aid: the average milliseconds a frame's drawing takes
+  let broken = false;    // anything unexpected: the strip switches itself off and the game carries on without it
+  // ?horizon=0 turns the strip off. An automated test browser (navigator.webdriver) runs the game without it unless it asks with ?horizon=1: the drawing is real work,
+  // and a test clock that fast-forwards hours would repeat it tens of thousands of times for nothing.
+  try {
+    const hzParam = new URLSearchParams(location.search).get('horizon');
+    if (hzParam === '0' || (navigator.webdriver && hzParam !== '1')) broken = true;
+  } catch (e) { /* no URL parameters here: the strip simply runs */ }
+
+  const mq = (typeof matchMedia === 'function') ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+  V.reduce = !!(mq && mq.matches);
+  if (mq && mq.addEventListener) mq.addEventListener('change', e => { V.reduce = e.matches; });
+
+  /* ---------- lightning: the game's own flash and thunder are the clock; the horizon draws the bolt that goes with them ---------- */
+  let bolt = null, boltT0 = -1e9, boltDist = 1;
+  function makeBolt() { let x = .2 + Math.random() * .6, y = 0; const pts = [[x, y]]; while (y < 1) { y += .08 + Math.random() * .1; x += (Math.random() - .5) * .08; pts.push([x, Math.min(1, y)]); } return pts; }
+  function strike(delayMs) { // called by the game's thunder scheduler the instant it flashes (the thunder recording follows delayMs later): the bolt is further off the longer that is
+    const delay = Math.max(.2, (delayMs || 1500) / 1000);
+    boltT0 = performance.now(); boltDist = delay * .343; bolt = V.reduce ? null : makeBolt();
+  }
+
+  /* ---------- the sun and the moon where the game says they are ---------- */
+  // The sun's height is the game's own (the one its daylight system uses); its compass bearing is worked out for the same instant and place. The moon is the game's obsMoon: its
+  // true bearing and height, and which part of it is lit.  The drawing code (the mockup's) puts each at that bearing and height in the 110-degree window.
+  function sampleSky(st) {
+    const tMs = daylightInstantMs(st), lat = st.nav.lat, lon = st.nav.lon;
+    V.e = solarElevationDeg(tMs, lat, lon);
+    V.sun = { el: V.e, az: sunCalc(tMs, lat, lon).az };
+    const mo = obsMoon(tMs, lat, lon);
+    const c = 1 - 2 * mo.illum, ang = Math.acos(clamp(c, -1, 1)) / (2 * Math.PI); // 0 new .. .5 full, as the drawing code counts the phase
+    V.moonP = mo.waxing ? ang : 1 - ang;
+    V.mn = { alt: mo.alt, az: mo.az, p: V.moonP };
+  }
+  const moonLit = p => (1 - Math.cos(p * 6.2832)) / 2;
+  // which way she points and how far you can see land: how far the weather lets you see (the game's own table), no further than the game lets her see that coast from the sea
+  const viewBearing = () => (((V.hdg + (V.loc === 'below' ? (V.side === 'port' ? -90 : 90) : V.yaw)) % 360) + 360) % 360;
+  function sampleView(st) {
+    let vis = OBS_VIS_NM[sitWeatherCategory(st)]; if (!isFinite(vis)) vis = OBS_COAST_VISIBLE_NM;
+    const cap = obsRegion(st) === 'hawaii' ? NAV_SIGHT_NM : OBS_COAST_VISIBLE_NM;
+    V.visKm = Math.min(cap, vis) * 1.852;
+  }
+
+  /* ---------- the weather the game has, in the drawing code's terms ---------- */
+  function sampleWeather(st) {
+    const w = st.weather, b = st.boat || {}, label = weatherConditionLabel(st);
+    let cloud = w.cloudPct != null ? w.cloudPct : (w.condition === 'clear' ? 10 : w.condition === 'overcast' ? 85 : 95);
+    let rain = 0, fog = 0, sq = 0;
+    if (label === 'LIGHT RAIN' || label === 'SHOWERS' || label === 'SNOW') rain = .3;
+    else if (label === 'RAIN') rain = .6;
+    else if (label === 'HEAVY RAIN') rain = .85;
+    else if (label === 'FOG') fog = .85;
+    if (w.condition === 'squall' || w.sky === 'THUNDERSTORM') { sq = 1; rain = 1; }
+    if (rain > 0) cloud = Math.max(cloud, 85);
+    if (fog > 0) cloud = Math.max(cloud, 70);
+    if (sq > 0) cloud = 100;
+    tgt.cloud = clamp(cloud, 0, 100); tgt.rain = rain; tgt.fog = fog; tgt.sq = sq;
+    tgt.sea = isFinite(w.seaState) ? clamp(w.seaState, 0, 6) : 2;
+    const sc = b.sailConfig; // she leans less with the sails down
+    V.sailK = sc === 'full' ? 1 : sc === 'reefed' ? .8 : sc === 'minimal' ? .55 : .25;
+  }
+
+  /* ---------- the land: the game's own coastline, traced as she moves ---------- */
+  // Every half degree of bearing, the stretches of land along a straight run out to RANGE_KM (the same trace the game's own collision uses).  It is worked out a few milliseconds a
+  // frame (never in one go) and again whenever she has moved far enough to matter: sooner the closer the land.  The game has no heights, so the mountains' heights are estimated
+  // (see RELIEF in the drawing code): the outline's SHAPE is the real coast's, the heights are not.
+  let LAND = null;
+  const landSt = { lat: 0, lon: 0, near: 999, has: false, job: null };
+  const KMLAT = 110.57;
+  function landRelief(lat) { return lat < 35 ? { H: 1450, ramp: 11 } : { H: 1150, ramp: 5 }; } // the Hawaiian islands' high ground, or Alaska's
+  function landStart(lat, lon) { landSt.job = { lat: lat, lon: lon, i: 0, rays: new Array(720), kmlon: Math.max(1, 111.32 * Math.cos(lat * RAD)) }; }
+  function landStep(budgetMs) {
+    const J = landSt.job; if (!J) return;
+    const t0 = performance.now();
+    while (J.i < 720) {
+      const b = J.i * .5 * RAD, dx = Math.sin(b) / J.kmlon, dy = Math.cos(b) / KMLAT, segs = []; // degrees per kilometre
+      let d0 = 0, guard = 0;
+      while (d0 < RANGE_KM && guard++ < 8) {
+        const x2 = J.lon + dx * RANGE_KM, y2 = J.lat + dy * RANGE_KM;
+        const h = worldFirstHit(J.lon + dx * d0, J.lat + dy * d0, x2, y2, true);
+        if (!h) break;
+        const dIn = d0 + h.t * (RANGE_KM - d0), e = dIn + .02;
+        const o = worldFirstHit(J.lon + dx * e, J.lat + dy * e, x2, y2, false); // where it comes off the land again
+        const dOut = o ? e + o.t * (RANGE_KM - e) : RANGE_KM + 1;
+        segs.push([Math.round(dIn * 100) / 100, Math.round(Math.min(dOut, RANGE_KM + 1) * 100) / 100]);
+        d0 = dOut + .02;
+      }
+      J.rays[J.i++] = segs;
+      if (performance.now() - t0 > budgetMs) return;
+    }
+    let near = 999; for (let i = 0; i < 720; i++) if (J.rays[i].length && J.rays[i][0][0] < near) near = J.rays[i][0][0];
+    LAND = buildLand(J.rays, landRelief(J.lat));
+    landSt.lat = J.lat; landSt.lon = J.lon; landSt.near = near; landSt.has = true; landSt.job = null;
+  }
+  function landCheck(lat, lon) { // once a second: has she moved far enough that the land has changed shape?
+    if (landSt.job || !isFinite(lat) || !isFinite(lon)) return;
+    if (!landSt.has) { landStart(lat, lon); return; }
+    const dkm = Math.hypot((lat - landSt.lat) * KMLAT, lonDiffDeg(lon, landSt.lon) * 111.32 * Math.cos(lat * RAD));
+    if (dkm > clamp(landSt.near * .05, .08, 2.5)) landStart(lat, lon);
+  }
+
+  /* ---------- the elements ---------- */
+  const horizonEl = document.getElementById('horizon'), stripEl = document.getElementById('hz-strip');
+  const fadeEl = document.getElementById('hz-fade');
+  const fogEl = document.getElementById('hz-fog'), darkEl = document.getElementById('hz-dark'), crtEl = document.getElementById('crt');
+  const hz = { cv: document.getElementById('hz'), g: null, W: 1, H: 1 };
+  if (!horizonEl || !stripEl || !hz.cv || !fadeEl || !fogEl || !darkEl || !crtEl) broken = true;
+
+  function fit(o) {
+    const r = o.cv.getBoundingClientRect(), d = Math.min(2, window.devicePixelRatio || 1);
+    if (r.width < 2 || r.height < 2) return;
+    const W = Math.max(1, Math.round(r.width)), H = Math.max(1, Math.round(r.height));
+    if (o.g && o.W === W && o.H === H && o.d === d) return;
+    o.W = W; o.H = H; o.d = d; o.cv.width = W * d; o.cv.height = H * d;
+    o.g = o.cv.getContext('2d'); o.g.setTransform(d, 0, 0, d, 0, 0);
+  }
+  function fitAll() { if (!broken) fit(hz); }
+  if (!broken && typeof ResizeObserver === 'function') new ResizeObserver(fitAll).observe(crtEl);
+  window.addEventListener('resize', fitAll);
+
+  /* ---------- the colour of the picture: the strip and the windows only.  The TEXT and the SCREEN are the game's own (its green, its natural-light dimming, --bg and --bg-lit): nothing here paints them ---------- */
+  // The picture is WHITE by day, BLUE at night, and ORANGE while the sun is low (sceneFor, by the sun's height) -- but GREY, not orange, when the sky is heavy (overcast, rain, fog, squall:
+  // GREYK).  The lights on the boat never change it (OUT is the world outside, SCN the picture above deck), and fog greys the deck.  COL, for the strokes round the porthole and the PORT / STARBOARD
+  // label, is the game's OWN text colour: whatever --phosphor is right now (its green, dimmed by natural light or lit up by the lights, exactly as the text is), read four times a second.
+  let ink = [143, 215, 172], inkAt = -1e9;
+  function readInk(ts) {
+    if (ts - inkAt < 250) return;
+    inkAt = ts;
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--phosphor').trim();
+      let m = /^#([0-9a-f]{6})$/i.exec(v);
+      if (m) ink = [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+      else { m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(v); if (m) ink = [+m[1], +m[2], +m[3]]; }
+    } catch (e) { /* keep the last colour */ }
+  }
+  function palettes(ts) {
+    GREYK = clamp((cur.cloud - 50) / 25, 0, 1); // (partly cloudy is 42, fog 70, overcast 92, rain 96, squall 100)
+    const th = sceneFor(V.e, GREYK);
+    const ph = th.ph.slice(), br = th.br.slice();
+    OUT = { ph: ph.slice(), br: br.slice(), dim: th.dim, bg: th.bg }; // what the world outside looks like
+    const fogK = V.loc === 'above' && cur.fog > .01 ? cur.fog * .35 : 0;
+    SCN = { ph: fogK ? mix(ph, [185, 201, 192], fogK) : ph, br: br, dim: th.dim, bg: th.bg };
+    readInk(ts);
+    COL = { ph: ink, br: ink, dim: ink, bg: th.bg };
+  }
+
+  function dayFactor() { return clamp((V.e + 6) / 20, 0, 1) * (1 - cur.cloud / 100 * .4); }
+  let fxKey = '';
+  function applyWeatherLayers() {
+    const above = V.loc === 'above', fog = above ? cur.fog : 0, sq = above ? cur.sq : 0;
+    const key = fog.toFixed(3) + '|' + sq.toFixed(3);
+    if (key === fxKey) return;
+    fxKey = key;
+    fogEl.style.opacity = String(fog * .75);
+    fogEl.style.webkitBackdropFilter = fogEl.style.backdropFilter = fog > .02 ? 'blur(' + (fog * .8).toFixed(2) + 'px)' : 'none';
+    darkEl.style.opacity = String(sq * .55);
+  }
+
+  /* ---------- going below / above: the view changes with a quick dip, when the game says she has arrived ---------- */
+  let pendingLoc = null;
+  function wantLoc(loc) {
+    if (loc === V.loc || loc === pendingLoc) return;
+    pendingLoc = loc;
+    const swap = () => { V.loc = loc; pendingLoc = null; if (loc === 'above') { V.yaw = 0; V.yawV = 0; } pb.length = pspray.length = 0; }; // (coming up on deck, she always starts facing the bow) // (nothing from the other view is left on the glass)
+    if (V.reduce || !visibleNow || !fadeEl.animate) { swap(); return; }
+    fadeEl.getAnimations().forEach(a => a.cancel());
+    fadeEl.animate([{ opacity: 0 }, { opacity: .92 }], { duration: 150, fill: 'forwards' }).onfinish = () => { swap(); fadeEl.animate([{ opacity: .92 }, { opacity: 0 }], { duration: 300, fill: 'forwards' }); };
+  }
+
+  /* ---------- sampling the game (once a second, never inside the drawing) ---------- */
+  function sample() {
+    const st = GAME;
+    sampleSky(st); sampleWeather(st); sampleView(st);
+    landCheck(st.nav.lat, st.nav.lon);
+    const where = (forced && forced.loc) ? forced.loc : (st.crew && st.crew.location === 'below' ? 'below' : 'above');
+    V.cabin = !!(st.boat && st.boat.cabinLightsOn) && where === 'below';    // CABIN LIGHTS: below deck only
+    V.nav = !!(st.boat && st.boat.navLightsOn) && where === 'above';        // NAV LIGHTS: on deck only
+    V.lantern = !!(st.boat && lanternLit(st));                               // the kerosene lamp: either place
+    V.lamp = V.cabin;
+    wantLoc((forced && forced.loc) || (st.crew && st.crew.location === 'below' ? 'below' : 'above'));
+    if (forced) {
+      ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(k => { if (forced[k] != null) tgt[k] = forced[k]; });
+      ['e', 'moonP', 'sailK', 'visKm'].forEach(k => { if (forced[k] != null) V[k] = forced[k]; });
+      V.sun = { el: V.e, az: forced.sunAz != null ? forced.sunAz : V.sun.az };
+      V.mn = { alt: forced.moonAlt != null ? forced.moonAlt : V.mn.alt, az: forced.moonAz != null ? forced.moonAz : V.mn.az, p: V.moonP };
+      if (forced.lamp != null) V.cabin = V.lamp = !!forced.lamp && where === 'below';
+      if (forced.nav != null) V.nav = !!forced.nav && where === 'above';
+      if (forced.lantern != null) V.lantern = !!forced.lantern;
+    }
+  }
+
+  /* ---------- look around: drag the picture to turn your head all the way round; below deck, tap the window to look out of the other side ---------- */
+  let drag = null, lastTap = 0;
+  FONT = getComputedStyle(document.body).fontFamily || 'monospace';
+  if (!broken) {
+    stripEl.addEventListener('pointerdown', e => {
+      if (!visibleNow) return;
+      drag = { id: e.pointerId, x: e.clientX, x0: e.clientX, y0: e.clientY, t0: e.timeStamp, vt: e.timeStamp }; V.yawV = 0; // (all the gesture's timing is the input events' own, so a slow frame never changes what a flick feels like)
+      try { stripEl.setPointerCapture(e.pointerId); } catch (_) { /* a pointer that cannot be captured still works while it stays over the picture */ }
+    });
+    stripEl.addEventListener('pointermove', e => {
+      if (!drag || e.pointerId !== drag.id || V.loc === 'below') return;
+      const dx = e.clientX - drag.x, dyaw = -dx / (hz.W / FOV); drag.x = e.clientX; V.yaw = wrap180(V.yaw + dyaw);
+      const now = e.timeStamp, dtm = Math.max(8, now - drag.vt); drag.vt = now; V.yawV = clamp(V.yawV * .6 + (dyaw / dtm * 1000) * .4, -540, 540);
+    });
+    const endDrag = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const now = e.timeStamp, tap = e.type === 'pointerup' && Math.abs(e.clientX - drag.x0) < 5 && Math.abs(e.clientY - drag.y0) < 8 && now - drag.t0 < 300;
+      if (tap) {
+        if (V.loc === 'below') V.side = V.side === 'port' ? 'starboard' : 'port'; // tap the window: look out of the other side
+        else if (now - lastTap < 350) { V.yaw = 0; V.yawV = 0; lastTap = 0; } else lastTap = now; // double-tap: face the bow again
+      }
+      if (now - drag.vt > 80 || Math.abs(drag.x - drag.x0) < 6) V.yawV = 0; // (no coast unless the finger really travelled sideways: an up-and-down scroll with a pixel of wobble must not turn the view)
+      drag = null;
+    };
+    stripEl.addEventListener('pointerup', endDrag); stripEl.addEventListener('pointercancel', endDrag);
+  }
+
+  /* ---------- the loop ---------- */
+  let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true;
+  function wanted() {
+    return !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
+  }
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    if (broken) return;
+    try {
+      const show = wanted();
+      if (show !== visibleNow) {
+        visibleNow = show; horizonEl.hidden = !show; document.body.classList.toggle('hz-on', show);
+        if (show) { snapNext = true; sampledAt = -1e9; }
+        else { fogEl.style.opacity = '0'; darkEl.style.opacity = '0'; fxKey = ''; pb.length = pspray.length = 0; }
+        fitAll();
+      }
+      if (!show) return;
+      if (ts - lastDraw < 30) return; // about thirty frames a second: plenty for water, and kinder to a phone's battery
+      const dt = Math.min(.1, (ts - lastDraw) / 1000); lastDraw = ts;
+      if (ts - sampledAt > 1000) { sampledAt = ts; sample(); fitAll(); }
+      if (forced && forced.hdg != null) V.hdg = forced.hdg; else if (GAME.nav && isFinite(GAME.nav.heading)) V.hdg = GAME.nav.heading; // (every frame: when she turns, the view turns smoothly)
+      if (forced && forced.yaw != null) V.yaw = forced.yaw;
+      if (forced && forced.side != null) V.side = forced.side;
+      if (Math.abs(V.yawV) > .05 && !drag && V.loc === 'above' && !V.reduce) { V.yaw = wrap180(V.yaw + V.yawV * dt); V.yawV *= Math.pow(.03, dt); } else if (!drag) V.yawV = 0; // a flick keeps turning, then settles
+      if (landSt.job) landStep(4); // the coastline, a few milliseconds a frame
+      if (snapNext) { snapNext = false; ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(k => { cur[k] = tgt[k]; }); }
+      const k = Math.min(1, dt * 3);
+      ['cloud', 'rain', 'fog', 'sq', 'sea'].forEach(key => { cur[key] += (tgt[key] - cur[key]) * k; });
+      if (!V.reduce) { const Lm = lerpTable(LAM, cur.sea); for (let i = 0; i < 3; i++) WPH[i] += dt * Math.sqrt(GRAV * 6.2832 / (Lm * WCOMP[i].f)); }
+      palettes(ts); applyWeatherLayers();
+      const t0 = performance.now();
+      drawStrip(ts, dt);
+      const t1 = performance.now();
+      stats.strip += ((t1 - t0) - stats.strip) * .1; stats.frames++;
+    } catch (err) {
+      broken = true; horizonEl.hidden = true; document.body.classList.remove('hz-on');
+      console.warn('[Landfall horizon] switched off:', err && err.message ? err.message : err);
+    }
+  }
+  requestAnimationFrame(frame);
+
+  // A developer aid, like landfallDaylight: from the console, hold the weather and the light in place to look at them.
+  //   landfallHorizon.force({ sea: 5, rain: 1, sq: 1, cloud: 100, e: 20, loc: 'below', lamp: true, lantern: true, nav: true, hdg: 237, yaw: 0, side: 'port', sunAz: 270, moonAz: 100, moonAlt: 20, moonP: .5 })   landfallHorizon.clear()   landfallHorizon.strike(1500)
+  window.landfallHorizon = {
+    strike: strike,
+    force: function (o) { forced = Object.assign(forced || {}, o || {}); sampledAt = -1e9; snapNext = true; },
+    clear: function () { forced = null; sampledAt = -1e9; snapNext = true; },
+    state: function () { return { pal: { scn: SCN, out: OUT, greyK: GREYK, ink: ink, col: COL }, V: V, cur: cur, tgt: tgt, visible: visibleNow, broken: broken, forced: forced, stats: stats, land: { has: landSt.has, working: !!landSt.job, near: landSt.near, lat: landSt.lat, lon: landSt.lon, any: !!(LAND && LAND.any), hi: LAND ? LAND.hi : null } }; },
+  };
+
+  })(); } catch (horizonErr) { console.warn('[Landfall horizon] could not start:', horizonErr && horizonErr.message ? horizonErr.message : horizonErr); }
 
   function boot() {
     var saved = loadGameState();
