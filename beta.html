@@ -1400,6 +1400,7 @@
         weatherSoftwareUpdated: true,      // WINDY is on the computer from the start: the one-time system update no longer waits for anything
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
+      cooking: null, // (beta 15) the one preparation on the stove / waiting to be fetched / waiting to be eaten -- see COOKING; null when there is none
       voyageEnd: { phase: 'none', reason: null, at: null, step: 0 }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: step 0 is the first line + CONTINUE, step 1 the second line + CALL FOR HELP) | 'ended' (the end-of-game summary is up: NEW VOYAGE). One-way, never reversed -- see checkNeglectRescue.
       finale: { phase: 'none', step: 0, stepAt: 0, arrivedMinutes: null, v: 1, birds: null, noDiesel: false }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
       // stageIndex walks through DEPARTURE_STEPS before normal gameplay
@@ -2733,7 +2734,7 @@
       { label: 'MEALS EATEN', value: n(st.meals) }, { label: 'COFFEES MADE', value: n(state.crew.coffeeCount) }, { label: 'TEAS MADE', value: n(st.teas) },
       { label: 'TIMES WASHED', value: n(st.washes) }, { label: 'CHORES COMPLETED', value: n(st.chores), gap: true },
       { label: 'FISH CAUGHT', value: n(st.fishCaught) }, { label: 'BIGGEST FISH', value: big }, { label: 'SPECIES CAUGHT', value: n(st.fishSpecies.length) }, { label: 'FISH EATEN', value: n(st.fishEaten), gap: true },
-      { label: 'TIME WITH BINOCULARS', value: statsDuration(st.existMin) }, { label: 'TIME RELAXING', value: statsDuration(st.sitMin) },
+      { label: 'TIME RELAXING', value: statsDuration(st.sitMin) },
       { label: 'NOVELS READ', value: n(novels) }, { label: 'TAROT CARDS PULLED', value: n(st.tarot) },
       { label: 'PONG GAMES PLAYED', value: n(st.pongPlayed) }, { label: 'PONG GAMES WON', value: n(st.pongWon) },
     ];
@@ -9300,6 +9301,7 @@
     // that was still locked -- and what moves it for any path that changed nav.heading or the sails without going through simTick or beginCourseTurn.
     updateNoGoZoneAudio(state);
     syncSailsAudioVolumes(state);
+    syncCookAudio(state); // (beta 15) COOKING: the preparation's sound, at the volume of the room the sailor is in
   }
 
   // THE ENVIRONMENTAL AUDIO RECONCILER. Compares what the game says should be heard (location, weather, rain, SOUND state, the
@@ -13156,18 +13158,26 @@
   // needsCabinLight at their own top, so the player discovers the
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
+    cookRoom('galley', state);
     printBlank();
     var c = state.crew;
     printLine('HUNGER: ' + HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]);
     printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
-    var options = [
-      { label: 'MEALS', action: 'cmd:meals' },
-      { label: 'SNACKS', action: 'cmd:snacks' },
-      { label: 'DRINKS', action: 'cmd:drink' },
-    ];
+    cookBlockEl = document.createElement('div'); // (beta 15) what is on the stove, live -- see COOKING
+    cookBlockEl.className = 'cook-block';
+    tempViewEl.appendChild(cookBlockEl);
+    cookFillBlock(state);
+    state.pendingChoice = { id: 'galley-menu', options: pushBack(galleyOptions(state), 'cancel') };
+  }
+  function galleyOptions(state) {
+    var options = [];
+    var st = cookStatus(state);
+    if (st === 'ready') options.push({ label: state.cooking.kind === 'drink' ? 'FETCH DRINK' : state.cooking.kind === 'snack' ? 'FETCH SNACK' : 'FETCH MEAL', action: 'cook-fetch' });
+    if (st === 'fetched') options.push({ label: state.cooking.kind === 'drink' ? 'DRINK' : 'EAT', action: 'cook-eat' });
+    options.push({ label: 'MEALS', action: 'cmd:meals' }, { label: 'SNACKS', action: 'cmd:snacks' }, { label: 'DRINKS', action: 'cmd:drink' });
     var dishesOpt = choreOptionIfDue(state, 'dishes');
     if (dishesOpt) options.push(dishesOpt);
-    state.pendingChoice = { id: 'galley-menu', options: pushBack(options, 'cancel') };
+    return options;
   }
 
   /* --------------------------------------------------------------
@@ -13240,6 +13250,7 @@
   // There's no shower aboard Solace; WASH is the wet head's sink/
   // washcloth wash-up, unchanged from before.
   function cmdHead(state) {
+    cookRoom('head', state);
     printRoomHeader('HEAD');
     printBlank();
     printLine('HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
@@ -13414,6 +13425,7 @@
   // below-deck clutter, which comes from activity all over the boat (a
   // book left out, a meal's wrappers), not one single room.
   function cmdSaloon(state) {
+    cookRoom('saloon', state);
     var b = state.boat;
     printBlank();
     climateRowEls = { morale: printLine(climateMoraleLine(state)), temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)), hatch: printLine(climateHatchLine(state)) }; // CABIN TEMP, HEATER and HATCH (kept current by refreshClimateRows)
@@ -14846,6 +14858,7 @@
   }
 
   function cmdAftCabin(state) {
+    cookRoom('aft', state);
     printRoomHeader('AFT CABIN');
     printBlank();
     var model = aftCabinStatusModel(state);
@@ -14932,6 +14945,7 @@
   // defined near HUNGER/THIRST/ENERGY above) — never a second
   // temperature calculation.
   function cmdCabin(state) {
+    cookRoom('cabin', state);
     printRoomHeader('FORWARD CABIN');
     printBlank();
     var c = state.crew;
@@ -15004,6 +15018,7 @@
   }
 
   function cmdNavStation(state) {
+    cookRoom('nav', state);
     var b = state.boat;
     printBlank();
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
@@ -15206,7 +15221,7 @@
     {
       id: 'handbook-navigation', heading: 'NAVIGATION',
       blocks: [
-        { p: 'The GPS is at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
+        { p: 'The GPS is on deck, just under the HELM, and at the NAV STATION. It runs on its own batteries and always works. It opens the chart and the planned route.' },
         { p: 'The chart shows SOLACE\u2019s position, her traveled track, the planned route, and the destination.' },
         { term: 'SOLID LINE', body: 'Where SOLACE has sailed.' },
         { term: 'DASHED LINE', body: 'Your planned route through numbered waypoints.' },
@@ -15289,7 +15304,7 @@
         { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth, and in the sun a closed cabin runs hotter than the air outside. Open the hatch to cool it.' },
         { term: 'HEAD', body: 'Wash to maintain hygiene.' },
         { p: 'Reading, music, and quiet time are there when you want the company.' },
-        { p: 'RELAX and BINOCULARS allow you to remain in place while the voyage continues. Leave whenever you are ready.' },
+        { p: 'RELAX allows you to remain in place while the voyage continues. Leave whenever you are ready.' },
       ],
     },
     {
@@ -17084,7 +17099,7 @@
   function gpsNoPower(state, from) {
     printBlank();
     printLine(state.boat.accessoryOn ? 'The GPS has no power.' : 'The GPS has no power. Accessory power is off.');
-    var back = from === 'nav' ? 'cmd:nav-station' : from === 'helm' ? 'cmd:helm' : 'cmd:ships-computer';
+    var back = from === 'nav' ? 'cmd:nav-station' : from === 'helm' ? 'cmd:helm' : from === 'deck' ? 'gps-deck-back' : 'cmd:ships-computer';
     state.pendingChoice = { id: 'gps-blocked', options: [{ label: 'BACK', action: back }] };
   }
   // Called from the live loop (and on coming back to the page): if the GPS is up and its power has gone, it goes dark and the player is back where they were.
@@ -17095,7 +17110,7 @@
     state.pendingChoice = null;
     log(state, 'The GPS went dark.');
     flushNewLogEntries(state);
-    if (from === 'nav') cmdNavStation(state); else if (from === 'helm') cmdHelm(state); else cmdShipsComputerMenu(state);
+    if (from === 'nav') cmdNavStation(state); else if (from === 'helm') cmdHelm(state); else if (from === 'deck') { /* the plain above-deck menu is drawn just below */ } else cmdShipsComputerMenu(state);
     if (!uiBusy) renderOptions(state);
   }
 
@@ -17114,10 +17129,11 @@
     fitChartScreen();
     chartEdit.tool = null; chartEdit.msg = '';
     // (if something wipes the screen while the chart is open, these are the buttons that are left)
-    state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'helm' ? { label: 'BACK', action: 'cmd:helm' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
+    state.pendingChoice = { id: 'chart', from: from, options: [from === 'nav' ? { label: 'BACK', action: 'cmd:nav-station' } : from === 'helm' ? { label: 'BACK', action: 'cmd:helm' } : from === 'deck' ? { label: 'BACK', action: 'gps-deck-back' } : { label: 'RETURN', action: 'cmd:ships-computer' }] };
     gpsMount(chartScreenEl, 'computer', state);
   }
   function cmdGpsHelm(state) { cmdChart(state, 'helm'); }
+  function cmdGpsDeck(state) { cmdChart(state, 'deck'); } // (beta 14) the GPS button on the above-deck menu, under HELM
   function cmdGpsNav(state) {
     if (state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:nav-station'); return; }
     cmdChart(state, 'nav');
@@ -18107,6 +18123,326 @@
     'Cup Noodles': 'cupNoodles',
   };
 
+  /* --------------------------------------------------------------
+     COOKING (beta 15) -- see patches_beta/15_cooking.py for the whole design.  SELECT -> COOK -> MOVE AROUND THE BOAT -> RETURN TO THE GALLEY -> FETCH -> EAT.
+     state.cooking is the one preparation; it is saved with everything else and READY is only ever worked out from the clock.
+     -------------------------------------------------------------- */
+  var COOK_FILES = {
+    longBoil: 'audio/finals/long_boil.mp3',
+    longBoilSizzle: 'audio/finals/long_boil_sizzle.mp3',
+    longBoilWater: 'audio/finals/long_boil_water.mp3',
+    longSizzle: 'audio/finals/long_sizzle.mp3',
+    longPopcorn: 'audio/finals/long_popcorn.mp3',
+  };
+  var COOK_PREP_BY_NAME = { 'Mac & Cheese': 'longBoil', 'Chili': 'longBoil', 'Chicken Noodle Soup': 'longBoil', 'Oatmeal': 'longBoil', 'Pancakes': 'longSizzle', 'Cup Noodles': 'longBoilWater', 'Popcorn': 'longPopcorn' };
+  var COOK_LINES = {
+    longBoil: 'I put a pot of water on the stove.',
+    longBoilSizzle: 'The rice is on, and the fish is in the pan.',
+    longSizzle: 'The pan is hot and the batter is going in.',
+    longBoilWater: 'I put the kettle on the stove.',
+    longPopcorn: 'The pot is on the stove with the lid on.',
+  };
+  var COOK_ROOM_VOLUME = { galley: 1, saloon: 1, nav: 1, hub: 1, cabin: 0.35, aft: 0.35, head: 0.35, above: 0 }; // the GALLEY, SALOON and NAV STATION (and the passage between them) full; the cabins and the head 35%; above deck silent
+  var cookDurations = {}; // prepKey -> seconds, read once from the file's own metadata (this session only; the save keeps the number it used)
+  var cookLastRoom = null, cookBlockEl = null, cookProgressEl = null;
+
+  function cookSpecFor(item, isHeldFish) {
+    if (isHeldFish) return { prep: 'longBoilSizzle', fetch: 'fetchPlate' };
+    var prep = item && COOK_PREP_BY_NAME[item.name];
+    if (!prep) return null; // (chocolate, trail mix, the energy bar: as they always were)
+    return { prep: prep, fetch: item.name === 'Popcorn' ? null : item.name === 'Cup Noodles' ? 'fetchDrink' : 'fetchPlate' };
+  }
+  function cookStatus(state) { // null | 'cooking' | 'ready' | 'fetched' -- from the clock, never from the sound
+    var r = state && state.cooking;
+    if (!r) return null;
+    if (r.fetched) return 'fetched';
+    return Date.now() >= r.doneAt ? 'ready' : 'cooking';
+  }
+  function cookPercent(r) {
+    if (!(r.durationSec > 0)) return 100;
+    var pct = Math.floor((Date.now() - r.startedAt) / (r.durationSec * 1000) * 100);
+    return clamp(Date.now() >= r.doneAt ? 100 : Math.min(pct, 99), 0, 100);
+  }
+  function cookClock(ms) {
+    var t = Math.max(0, Math.ceil(ms / 1000)), m = Math.floor(t / 60), sec = t % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+  function cookProgressText(r) { return cookPercent(r) + '% \u2014 ' + cookClock(r.doneAt - Date.now()) + ' REMAINING'; }
+
+  // The sound's own length, from the file's metadata (nothing is played). 0 = could not be read: the preparation is then ready at once, never given a made-up time.
+  function cookProbeDuration(prepKey, cb) {
+    if (cookDurations[prepKey] > 0) { cb(cookDurations[prepKey]); return; }
+    var done = false, el = null, timer = null;
+    function fin(d) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (el) { try { el.removeAttribute('src'); el.load(); } catch (e) { /* nothing to release */ } }
+      if (d > 0) cookDurations[prepKey] = d;
+      cb(d > 0 ? d : 0);
+    }
+    try {
+      el = createGameAudio();
+      el.preload = 'metadata';
+      el.addEventListener('loadedmetadata', function () { fin(isFinite(el.duration) ? el.duration : 0); });
+      el.addEventListener('error', function () { console.warn('[AUDIO] a cooking sound could not be read; the preparation is ready at once:', COOK_FILES[prepKey]); fin(0); });
+      timer = setTimeout(function () { console.warn('[AUDIO] a cooking sound’s length never arrived; the preparation is ready at once:', COOK_FILES[prepKey]); fin(0); }, 8000);
+      el.src = COOK_FILES[prepKey];
+    } catch (e) { fin(0); }
+  }
+
+  // SELECT -> PREPARE: the stove is lit, the sound's length is read, and only then do the ingredients go in -- once.
+  function cookBegin(state, spec) {
+    var probed = 0;
+    lightStoveThen(state, function () {
+      runAudioSyncedAction(state, {
+        label: spec.label,
+        transientLabel: true,
+        playAudio: function (onEnded) { onEnded = onceCallback(onEnded); cookProbeDuration(spec.prepKey, function (d) { probed = d; onEnded(); }); return null; },
+        action: function (s) {
+          if (s.cooking) { cmdGalley(s); return; } // never twice: something is already on the stove
+          spec.commit(s);
+          var now = Date.now(), dur = probed > 0 ? probed : 0;
+          s.cooking = {
+            v: 1, kind: spec.kind, key: spec.key, name: spec.name, heading: spec.heading, item: spec.item, held: !!spec.held, drink: spec.drink,
+            prepKey: spec.prepKey, fetchKey: spec.fetchKey, startedAt: now, durationSec: dur, doneAt: now + dur * 1000, status: dur > 0 ? 'cooking' : 'ready', fetched: false,
+          };
+          flushNewLogEntries(s);
+          cmdGalley(s);
+          syncCookAudio(s);
+        },
+      });
+    });
+  }
+  function cookBusyLine(state) {
+    var st = cookStatus(state);
+    printBlank();
+    printLine(st === 'cooking' ? 'There is already something on the stove.' : st === 'ready' ? 'There is something ready in the galley. I should fetch it first.' : 'There is still something on the table.');
+  }
+
+  function cookReadyLine(state, r) {
+    if (r.kind === 'drink') return 'The ' + r.name.toLowerCase() + ' is ready.';
+    if (r.name === 'Popcorn') return 'The popcorn is ready.';
+    if (r.name === 'Cup Noodles') return 'The noodles are ready.';
+    var period = mealPeriodName(state);
+    return period === 'breakfast' ? 'Breakfast is ready.' : period === 'lunch' ? 'Lunch is ready.' : period === 'dinner' ? 'Dinner is ready.' : 'The meal is ready.';
+  }
+  // What the galley shows of the preparation: live while it cooks (the percentage and the time left, redrawn every second by cookTick), then READY, then what is on the table.
+  function cookFillBlock(state) {
+    var el = cookBlockEl;
+    cookProgressEl = null;
+    if (!el) return;
+    el.innerHTML = '';
+    var r = state.cooking, st = cookStatus(state);
+    if (!r) return;
+    function line(text, cls) { var p = document.createElement('p'); p.className = 'line' + (cls ? ' ' + cls : ''); p.textContent = text; el.appendChild(p); return p; }
+    function gap() { var p = document.createElement('p'); p.className = 'gap'; el.appendChild(p); }
+    gap();
+    if (st === 'cooking') {
+      line(r.heading, 'heading-label'); gap();
+      line(COOK_LINES[r.prepKey] || ''); gap();
+      cookProgressEl = line(cookProgressText(r));
+    } else if (st === 'ready') {
+      line(r.name.toUpperCase() + ' READY', 'heading-label'); gap();
+      line(cookReadyLine(state, r));
+    } else {
+      line(r.name.toUpperCase(), 'heading-label'); gap();
+      line(r.kind === 'drink' ? 'The cup is poured.' : 'It is on the table.');
+    }
+  }
+  function cookGalleyShown(s) { return !uiBusy && s.pendingChoice && s.pendingChoice.id === 'galley-menu' && cookBlockEl && cookBlockEl.isConnected; }
+  function cookTick() { // once a second: the live percentage; the moment it is ready, the galley (if it is on screen) says so
+    var s = GAME;
+    if (!s || !s.cooking) return;
+    try {
+      var r = s.cooking, st = cookStatus(s);
+      if (st === 'ready' && r.status !== 'ready') {
+        r.status = 'ready';
+        saveGameState(s);
+        syncCookAudio(s);
+        if (cookGalleyShown(s)) { cookFillBlock(s); s.pendingChoice = { id: 'galley-menu', options: pushBack(galleyOptions(s), 'cancel') }; renderOptions(s); }
+      } else if (st === 'cooking') {
+        if (cookProgressEl && cookProgressEl.isConnected) cookProgressEl.textContent = cookProgressText(r);
+        syncCookAudio(s);
+      }
+    } catch (e) { console.warn('Cooking tick failed:', describeError(e)); }
+  }
+  setInterval(cookTick, 1000);
+
+  // FETCH: back in the galley with the preparation ready. The plate / the pour plays once (nothing for popcorn); the cooking sound is long over.
+  function cookFetch(state) {
+    var r = state.cooking;
+    if (!r || cookStatus(state) !== 'ready') { cmdGalley(state); return; } // (a stale button)
+    var collect = function (s) {
+      if (s.cooking && !s.cooking.fetched) { s.cooking.fetched = true; s.cooking.status = 'fetched'; }
+      cmdGalley(s);
+    };
+    if (r.fetchKey) {
+      runAudioSyncedAction(state, {
+        label: 'FETCHING ' + r.name.toUpperCase(),
+        transientLabel: true,
+        playAudio: function (onEnded) { return playGalleyOneShot(r.fetchKey, onEnded); },
+        action: collect,
+      });
+    } else collect(state);
+  }
+  // EAT / DRINK: the existing mechanics, now that the meal is in hand. state.cooking is cleared FIRST so a second tap can never serve it twice.
+  function cookServe(state) {
+    var r = state.cooking;
+    if (!r || !r.fetched) { cmdGalley(state); return; }
+    state.cooking = null;
+    if (r.kind === 'drink') cookServeDrink(state, r); else cookServeMeal(state, r);
+    syncCookAudio(state);
+  }
+  function cookServeMeal(s, r) {
+    var item = r.item, key = r.key, c = s.crew;
+    var life = lifeCtx(s); // before hunger resets, so "I was starving" is only ever said of a sailor who was
+    if (r.held || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks are not meals
+      // Hunger: a full meal resets to FULL; a snack is a smaller reset
+      // (see HUNGER_RESET_HOURS_BY_TYPE).
+      c.hoursSinceMeal = item.type === 'snack' ? Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack) : HUNGER_RESET_HOURS_BY_TYPE.meal;
+      c.lastAteAt = s.meta.voyageMinutes; // RESCUE -- a successful meal or snack restarts only the food clock
+
+      // Meal-history monotony (hidden, never shown): an exponential
+      // moving average nudged toward 1 by a snack, toward 0 by a real
+      // meal. One item barely moves it; several days the same way
+      // clearly does — see computeMoraleTarget's snackMealRatio
+      // pressure.
+      var snackWeight = item.type === 'snack' ? 1 : 0;
+      c.snackMealRatio = c.snackMealRatio * 0.7 + snackWeight * 0.3;
+
+      // A cooked meal leaves dishes behind — stamped once, not
+      // re-stamped by a second meal before they're washed, so the
+      // clock reflects how long they've ACTUALLY been sitting.
+      if (item.cooked && c.dishesDirtySinceMinutes == null) {
+        c.dishesDirtySinceMinutes = s.meta.voyageMinutes;
+      }
+      bumpClutter(s, 1); // wrappers, crumbs, a bowl left out — any meal leaves a little something
+
+      var fatigueGain = item.type === 'meal' ? 3 : 1;
+      var moraleGain = item.type === 'meal' ? 3 : 1;
+      // Finally breaking a run of snack-heavy eating with something
+      // proper feels genuinely restorative, on top of the flat amount.
+      if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
+      c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
+      c.morale = clamp(c.morale + moraleGain, 0, 100);
+      log(s, eatFlavorLine(s, item, life));
+      momentNoteMeal(s, item);
+      flushNewLogEntries(s);
+    cmdGalley(s);
+  }
+  function cookServeDrink(s, r) {
+    var life = lifeCtx(s); // before thirst resets
+    s.crew.hoursSinceWater = 0;
+    s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
+    if (r.drink === 'coffee') {
+      s.crew.lastCoffeeAt = s.meta.voyageMinutes;
+      s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
+      log(s, pickVariant(DAILY_COPY.coffee, 'coffee', life));
+    } else {
+      statAdd(s, 'teas', 1);
+      s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet, as it always was
+      log(s, pickVariant(DAILY_COPY.tea, 'tea', life));
+    }
+    flushNewLogEntries(s);
+    cmdGalley(s);
+  }
+  function migrateCookingIfNeeded(state) {
+    var r = state.cooking;
+    if (r === undefined) { state.cooking = null; return; } // an older save: nothing on the stove
+    if (r === null) return;
+    var ok = r && typeof r === 'object' && typeof r.name === 'string' && isFinite(r.startedAt) && isFinite(r.doneAt) && isFinite(r.durationSec) && (r.kind === 'meal' || r.kind === 'snack' || r.kind === 'drink') && COOK_FILES[r.prepKey];
+    if (!ok) state.cooking = null;
+  }
+
+  // WHERE THE SAILOR IS, for the volume. Each room command records its room; with no menu open on the below-deck list the sailor is in the passage ('hub'); asleep, in the bunk; above deck, silence.
+  function cookRoom(room, state) {
+    cookLastRoom = room;
+    try { syncCookAudio(state || GAME); } catch (e) { /* the volume catches up on the next sync */ }
+  }
+  function cookRoomFromChoice(id) {
+    id = String(id || '');
+    if (/^(galley|meals|snacks|drink|fresh-catch|provisions)/.test(id)) return 'galley';
+    if (/^(saloon|climate|sitting|tape)/.test(id)) return 'saloon';
+    if (/^(nav|marine|chart|pong|computer|handheld|radio|autopilot|electrical)/.test(id)) return 'nav';
+    if (/^aft/.test(id)) return 'aft';
+    if (/^(head|wash)/.test(id)) return 'head';
+    if (/^(cabin|clothing|garment|comfort|sleep)/.test(id)) return 'cabin';
+    return 'hub';
+  }
+  function cookRoomNow(state) {
+    if (state.crew.location !== 'below') return 'above';
+    if (state.crew.watchState === 'sleeping') return state.crew.sleepRoom === 'aft' ? 'aft' : 'cabin'; // (in the bunk: a cabin either way)
+    var pc = state.pendingChoice;
+    if (!pc) return 'hub';
+    return cookLastRoom || cookRoomFromChoice(pc.id);
+  }
+  function cookRoomVolume(state) { var v = COOK_ROOM_VOLUME[cookRoomNow(state)]; return v == null ? 1 : v; }
+
+  // THE SOUND. One element for the whole preparation, created through createGameAudio (so SOUND ON/OFF and the audio session apply to it like any sound); where the browser ignores element
+  // volume (an iPhone) it runs through a GainNode into the master bus, the same way the engine's does. It starts at the preparation's own position (a reload mid-cook picks up where it
+  // would be), plays once, and only its VOLUME ever changes as the sailor moves about.
+  var cookEl = null, cookElId = null;
+  function cookStopAudio() {
+    if (!cookEl) return;
+    try { cookEl.onended = null; cookEl.pause(); cookEl.removeAttribute('src'); cookEl.load(); } catch (e) { /* already gone */ }
+    cookEl = null; cookElId = null;
+  }
+  function cookMakeEl() {
+    var el = createGameAudio();
+    el.preload = 'auto';
+    el.loop = false;
+    if (audioCtx && masterGain && (elementVolumeIsIgnored() || isAppleTouchDevice())) {
+      try {
+        var gainNode = audioCtx.createGain();
+        gainNode.gain.value = 0;
+        var masterTrim = audioCtx.createGain();
+        masterTrim.gain.value = 1 / MASTER_GAIN_LEVEL;
+        audioCtx.createMediaElementSource(el).connect(gainNode).connect(masterTrim).connect(masterGain);
+        var param = gainNode.gain, ctx = audioCtx;
+        el._cookCtx = audioCtx; // (a hard audio rebuild closes this context: the sound is then remade on the new one)
+        Object.defineProperty(el, 'volume', {
+          configurable: true,
+          get: function () { return param.value; },
+          set: function (v) { var t = ctx.currentTime; param.cancelScheduledValues(t); param.setValueAtTime(v, t); },
+        });
+      } catch (e) { console.warn('Cooking audio: gain routing unavailable, using element volume:', describeError(e)); }
+    }
+    el.addEventListener('error', function () { console.warn('[AUDIO] the cooking sound failed to load:', el.currentSrc || el.src); });
+    return el;
+  }
+  function syncCookAudio(state) {
+    var r = state && state.cooking;
+    var over = state && ((state.voyageEnd && state.voyageEnd.phase !== 'none') || (state.finale && state.finale.phase !== 'none'));
+    if (!r || over || r.fetched || !(r.durationSec > 0) || Date.now() >= r.doneAt) { cookStopAudio(); return; }
+    if (!audioUnlocked) return; // starts at its position on the first tap, whenever that is
+    if (cookEl && cookEl._cookCtx && cookEl._cookCtx !== audioCtx) cookStopAudio(); // its audio context was replaced: remake it below, at the right position
+    var vol = cookRoomVolume(state);
+    var elapsed = Math.max(0, (Date.now() - r.startedAt) / 1000);
+    if (!cookEl || cookElId !== r.startedAt) {
+      cookStopAudio();
+      var el = cookMakeEl();
+      cookEl = el; cookElId = r.startedAt;
+      el.volume = vol;
+      var go = function () {
+        if (cookEl !== el) return;
+        try { if (elapsed > 1 && isFinite(el.duration) && elapsed < el.duration) el.currentTime = elapsed; } catch (e) { /* plays from the start */ }
+        var p = el.play();
+        if (p && p.catch) p.catch(function (e) { console.warn('Cooking audio failed to play:', describeError(e)); });
+      };
+      el.src = COOK_FILES[r.prepKey];
+      if (elapsed > 1) el.addEventListener('loadedmetadata', go, { once: true }); else go();
+      return;
+    }
+    if (Math.abs(cookEl.volume - vol) > 0.001) cookEl.volume = vol; // moving about only changes the volume: nothing restarts
+    if (cookEl.paused && !cookEl.ended && cookEl.readyState >= 1) { // the browser paused it (the app was left): back to where it should be
+      try { if (isFinite(cookEl.duration) && elapsed < cookEl.duration && Math.abs(cookEl.currentTime - elapsed) > 1.5) cookEl.currentTime = elapsed; } catch (e) { /* keep going from here */ }
+      var rp = cookEl.play();
+      if (rp && rp.catch) rp.catch(function () { /* the next sync tries again */ });
+    }
+  }
+  function cookAudioDebug() { return { has: !!cookEl, paused: cookEl ? cookEl.paused : null, ended: cookEl ? cookEl.ended : null, volume: cookEl ? cookEl.volume : null, t: cookEl ? cookEl.currentTime : null, dur: cookEl ? cookEl.duration : null, src: cookEl ? (cookEl.getAttribute('src') || '') : null, muted: cookEl ? cookEl.muted : null, room: GAME ? cookRoomNow(GAME) : null }; }
+
   // Standardized temporary action text for the SNACKS lineup (plus
   // Chocolate, which lives visually alongside them) -- overrides the
   // generic "PREPARING X" below (and Chocolate's
@@ -18222,6 +18558,23 @@
     // the generic "PREPARING X" with its own standardized verb (POPPING,
     // OPENING); every MEAL and a held fish (neither ever in that map)
     // reads "PREPARING X".
+    var cookSpec = cookSpecFor(item, isHeldFish);
+    if (cookSpec && state.cooking) { cookBusyLine(state); state.pendingChoice = eatSubmenuPendingChoice(state, item); return; } // (beta 15) one preparation at a time (after every existing gate: those speak first)
+    if (cookSpec) { // (beta 15) COOKING: the ingredients go in once, the food is ready when its sound would have ended, then FETCH, then EAT
+      cookBegin(state, {
+        kind: item.type === 'meal' ? 'meal' : 'snack', key: key, name: item.name, held: isHeldFish, drink: null,
+        label: SNACK_ACTION_LABEL[item.name] || ('PREPARING ' + item.name.toUpperCase()),
+        heading: SNACK_ACTION_LABEL[item.name] || ('COOKING ' + item.name.toUpperCase()),
+        prepKey: cookSpec.prep, fetchKey: cookSpec.fetch,
+        item: { key: item.key, name: item.name, type: item.type, cooked: !!item.cooked, fishName: item.fishName || null },
+        commit: function (s) {
+          if (waterNeeded > 0) consumeWater(s, waterNeeded);
+          if (isHeldFish) { s.food.rice = Math.max(0, s.food.rice - RICE_SERVING_CUPS); fishPortionEaten(s, 'meal'); } else { s.food[key] -= (item.serving || 1); }
+          if (usesStove) stoveDraw(s, isHeldFish ? KEROSENE_STOVE_FISH_GAL : item.type === 'meal' ? KEROSENE_STOVE_MEAL_GAL : KEROSENE_STOVE_DRINK_GAL);
+        },
+      });
+      return;
+    }
     var label = SNACK_ACTION_LABEL[item.name] || ('PREPARING ' + item.name.toUpperCase()); // every meal and every fresh-catch fish meal: PREPARING ...
     var doEat = function (s) {
       var life = lifeCtx(s); // before hunger resets, so "I was starving" is only ever said of a sailor who was
@@ -18387,23 +18740,12 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    lightStoveThen(state, function () { runAudioSyncedAction(state, {
-      label: 'MAKING COFFEE',
-      playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
-      action: function (s) {
-        var life = lifeCtx(s);
-        s.drinks.coffee -= 1;
-        consumeWater(s, WATER_COFFEE_GAL);
-        s.crew.hoursSinceWater = 0;
-        s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
-        s.crew.lastCoffeeAt = s.meta.voyageMinutes;
-        s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
-        log(s, pickVariant(DAILY_COPY.coffee, 'coffee', life));
-        stoveDraw(s, KEROSENE_STOVE_DRINK_GAL);
-        flushNewLogEntries(s);
-        cmdGalley(s);
-      },
-    }); });
+    if (state.cooking) { cookBusyLine(state); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 15) one preparation at a time (after every existing gate)
+    cookBegin(state, { // (beta 15) the kettle goes on; the coffee is fetched, then drunk (see cookServeDrink)
+      kind: 'drink', key: 'coffee', name: 'Coffee', drink: 'coffee', held: false, item: null,
+      label: 'MAKING COFFEE', heading: 'MAKING COFFEE', prepKey: 'longBoilWater', fetchKey: 'fetchDrink',
+      commit: function (s) { s.drinks.coffee -= 1; consumeWater(s, WATER_COFFEE_GAL); stoveDraw(s, KEROSENE_STOVE_DRINK_GAL); },
+    });
   }
 
   function performTea(state) {
@@ -18438,23 +18780,12 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
-    lightStoveThen(state, function () { runAudioSyncedAction(state, {
-      label: 'MAKING TEA',
-      playAudio: function (onEnded) { return playGalleyOneShot('hotDrink', onEnded); },
-      action: function (s) {
-        var life = lifeCtx(s);
-        s.drinks.tea -= 1;
-        statAdd(s, 'teas', 1);
-        consumeWater(s, WATER_TEA_GAL);
-        s.crew.hoursSinceWater = 0;
-        s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
-        s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet -- never shown to the player as a number, just folded into however STATUS's morale label reads afterward
-        log(s, pickVariant(DAILY_COPY.tea, 'tea', life));
-        stoveDraw(s, KEROSENE_STOVE_DRINK_GAL);
-        flushNewLogEntries(s);
-        cmdGalley(s);
-      },
-    }); });
+    if (state.cooking) { cookBusyLine(state); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 15) one preparation at a time (after every existing gate)
+    cookBegin(state, { // (beta 15) the kettle goes on; the tea is fetched, then drunk (see cookServeDrink)
+      kind: 'drink', key: 'tea', name: 'Tea', drink: 'tea', held: false, item: null,
+      label: 'MAKING TEA', heading: 'MAKING TEA', prepKey: 'longBoilWater', fetchKey: 'fetchDrink',
+      commit: function (s) { s.drinks.tea -= 1; consumeWater(s, WATER_TEA_GAL); stoveDraw(s, KEROSENE_STOVE_DRINK_GAL); },
+    });
   }
 
   /* --------------------------------------------------------------
@@ -18829,6 +19160,7 @@
     engine: cmdEngine,
     helm: cmdHelm,
     'gps-helm': cmdGpsHelm,
+    'gps-deck': cmdGpsDeck,
     'gps-nav': cmdGpsNav,
     'change-course': cmdChangeCourse,
     galley: cmdGalley,
@@ -19462,11 +19794,13 @@
     water: 'audio/finals/water.mp3',
     dishes: 'audio/finals/dishes.mp3',
     sashimi: 'audio/finals/sashimi.mp3', // slicing a fish (performSashimi)
+    fetchPlate: 'audio/finals/long_fork_plate.mp3', // (beta 15) FETCH: a meal
+    fetchDrink: 'audio/finals/long_pour_hot_drink.mp3', // (beta 15) FETCH: coffee, tea, cup noodles
   };
   var GALLEY_AUDIO_VOLUME = {
     thickBoil: 1, thinBoil: 1, boilSizzle: 1, sizzle: 1, boilChop: 1,
     popcorn: 1, wrapper: 1, nuts: 1, mango: 1, cupNoodles: 1,
-    hotDrink: 1, water: 1, dishes: 1, sashimi: 1,
+    hotDrink: 1, water: 1, dishes: 1, sashimi: 1, fetchPlate: 1, fetchDrink: 1,
   };
   var GALLEY_CROSSFADE_SECONDS = 0.1; // quick fade-in only, click prevention -- same as every other one-shot in this file
 
@@ -21321,11 +21655,12 @@
     // walk forward to the bow (awake, above, under way, no grounding, no final arrival -- see obsAvailable). FISHING ROD is the fishing screen (the command is still 'fish').
     var aboveActions = [
       { label: 'HELM', action: 'cmd:helm' },
+      { label: 'GPS', action: 'cmd:gps-deck' },
       { label: 'SAILS', action: 'cmd:sails' },
       { label: 'ENGINE', action: 'cmd:engine' },
       { label: 'FISHING ROD', action: 'cmd:fish' },
     ];
-    if (obsAvailable(state)) aboveActions.push({ label: 'BINOCULARS', action: 'binoculars' });
+    // (beta 14) no BINOCULARS on the menu any more; its code stays so a save made inside a session still loads (see patches_beta/14_gps_deck.py)
     return groupedOptions([
       aboveActions,
       lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
@@ -22014,6 +22349,10 @@
         case 'cancel':
           printBlank();
           printLine('Left as it was.', 'dim');
+          break;
+        case 'cook-fetch': cookFetch(state); break; // (beta 15)
+        case 'cook-eat': cookServe(state); break; // (beta 15)
+        case 'gps-deck-back': // (beta 14) the GPS opened from the deck: nothing to do, the normal tail draws the above-deck menu
           break;
         case 'commit-clothing':
           performClothingCommit(state);
@@ -23511,7 +23850,8 @@
     if (state.pendingChoice && state.pendingChoice.id === 'sails-choice') { // a save made on the old coastal SAILS screen (RAISE SAILS / FURL SAILS): rebuilt with the four settings
       state.pendingChoice.options = sailOptions(state);
     }
-    if (state.pendingChoice && state.pendingChoice.id === 'chart' && (state.pendingChoice.from === 'helm' || state.pendingChoice.from === 'deck')) { cmdHelm(state); return; } // a reload with the GPS open from the HELM screen: back at the helm
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'helm') { cmdHelm(state); return; } // a reload with the GPS open from the HELM screen: back at the helm
+    if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'deck') { state.pendingChoice = null; return; } // (beta 14) the GPS was open from the deck: back on the above-deck menu
     if (state.pendingChoice && state.pendingChoice.id === 'chart' && state.pendingChoice.from === 'nav') { cmdNavStation(state); return; } // ... or from the NAV STATION: back there
     if (state.pendingChoice && (state.pendingChoice.id === 'pong' || state.pendingChoice.id === 'chart' || state.pendingChoice.id === 'marine-weather')) { // 'marine-weather' = a save made inside the old computer forecast app: lands on the computer home
       cmdShipsComputerMenu(state);
@@ -24359,13 +24699,13 @@
   /* ---------- the colour of the picture: the strip and the windows only.  The TEXT and the SCREEN are the game's own (its green, its natural-light dimming, --bg and --bg-lit): nothing here paints them ---------- */
   // The picture is WHITE by day, BLUE at night, and ORANGE while the sun is low (sceneFor, by the sun's height) -- but GREY, not orange, when the sky is heavy (overcast, rain, fog, squall:
   // GREYK).  The lights on the boat never change it (OUT is the world outside, SCN the picture above deck), and fog greys the deck.  COL, for the strokes round the porthole and the PORT / STARBOARD
-  // label, is the game's OWN text colour: whatever --phosphor is right now (its green, dimmed by natural light or lit up by the lights, exactly as the text is), read four times a second.
-  let ink = [143, 215, 172], inkAt = -1e9;
+  // label, is the game's DARK green (--phosphor-dim, the timestamps' colour): whatever it is right now (dimmed by natural light the way the text is), read four times a second.
+  let ink = [77, 122, 94], inkAt = -1e9;
   function readInk(ts) {
     if (ts - inkAt < 250) return;
     inkAt = ts;
     try {
-      const v = getComputedStyle(document.documentElement).getPropertyValue('--phosphor').trim();
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--phosphor-dim').trim();
       let m = /^#([0-9a-f]{6})$/i.exec(v);
       if (m) ink = [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
       else { m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(v); if (m) ink = [+m[1], +m[2], +m[3]]; }
@@ -24542,6 +24882,7 @@
     migrateRouteIfNeeded(GAME);
     migrateProvisionsIfNeeded(GAME);
     migrateMaintenanceIfNeeded(GAME); // DAILY MAINTENANCE -- no missed day can be charged to a save from before it existed; the spare parts a save has are kept as they are
+    migrateCookingIfNeeded(GAME); // (beta 15) COOKING -- an older save has no preparation: that is null, and nothing else is touched
     migrateRescueIfNeeded(GAME); // RESCUE -- drop the retired mechanics, start the two timers from the existing hunger/thirst record
     migrateNavGeoIfNeeded(GAME); // NAVIGATION -- the new grounding / warning / finale state; a save in invalid water is moved the minimum distance back into it
     migrateWeatherStateIfNeeded(GAME); // PHASE 5 -- retire any old scripted-weather state, keep what the player is experiencing
@@ -24664,6 +25005,7 @@
     if (chartOpenedFrom === 'computer') { chartReturnToHome(GAME); return; }
     clearTempView(); // closes the full-screen GPS and puts the widget away
     if (chartOpenedFrom === 'nav') { printEcho('nav-station'); runCommand(GAME, 'nav-station'); return; } // back at the NAV STATION
+    if (chartOpenedFrom === 'deck') { GAME.pendingChoice = null; renderOptions(GAME); saveGameState(GAME); scrollToBottom(); return; } // (beta 14) back on deck: the plain above-deck menu
     printEcho('helm'); runCommand(GAME, 'helm'); // back at the HELM screen (she is still at the helm: it just draws it again)
   });
   chartToolBtns.forEach(function (btn) {
