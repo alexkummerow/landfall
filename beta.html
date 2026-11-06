@@ -774,6 +774,8 @@
     max-height: none;
     overflow-y: visible;
   }
+  /* (beta 21) ...and on that screen the window strip and the voyage line are put away, so the room heading, COMFORT ABOVE / COMFORT BELOW and the menu have the whole pane. */
+  body.clothing-full #horizon, body.clothing-full #navstrip { display: none; }
 
   .option {
     background: none;
@@ -18366,13 +18368,16 @@
     'Chili': ["I can still smell the chili from earlier.", "I can smell something warm and savory."],
     'Pancakes': ["There's still a trace of pancakes in the air."],
     'FISH': ["I think the galley still smells like fish."],
-    'Mac & Cheese': ["I can still smell the mac and cheese from earlier."],
+    'Mac & Cheese': ["I can still smell the mac and cheese from earlier.", "There's a trace of cheese in the air from a while ago."],
     'Chicken Noodle Soup': ["Still a hint of soup in the air."],
     'Popcorn': ["There's still a trace of popcorn in the air."],
     'Oatmeal': ["Still a faint smell of oats in here."],
   };
-  var SCENT_ROOM_CHANCE = { galley: 0.6, saloon: 0.6, nav: 0.25 };
-  var SCENT_MIN_GAP_MIN = 30; // an observation, then quiet for at least this long
+  var SCENT_ROOM_CHANCE = { galley: 0.3, saloon: 0.3, nav: 0.12 }; // (beta 21: rarer)
+  var SCENT_MIN_GAP_MIN = 60; // an observation, then quiet for at least this long
+  var SCENT_MAX_NOTICES = 2; // (beta 21) and no more than this many times for one cooking
+  function scentDelayMin(key) { return Math.min(40, SCENT_HOURS[key] * 30); } // (beta 21) not until a while after the food was eaten: 40 min (30 for the one-hour smells)
+  function scentServed(state) { if (state.scent && state.scent.servedAt == null) state.scent.servedAt = state.meta.voyageMinutes; } // (beta 21) the food has been eaten / drunk: the 'a while after' clock starts
   function scentNote(state, spec) { // the smell begins when the preparation does; a newer one replaces the older
     var key = spec.held ? 'FISH' : spec.name;
     if (!SCENT_HOURS[key]) return;
@@ -18388,9 +18393,12 @@
     if (state.crew.location !== 'below' || state.cooking) return null; // never above deck; never while something is on the stove or waiting there (those have their own words)
     var sc = scentActive(state), chance = SCENT_ROOM_CHANCE[room];
     if (!sc || !chance) return null;
+    var from = sc.servedAt != null ? sc.servedAt : sc.at, nowMin = state.meta.voyageMinutes; // (beta 21)
+    if (nowMin < from || nowMin - from < scentDelayMin(sc.key)) return null; // too soon after the meal: nothing to notice yet
+    if ((sc.n || 0) >= SCENT_MAX_NOTICES) return null;
     if (sc.shownAt != null && state.meta.voyageMinutes - sc.shownAt < SCENT_MIN_GAP_MIN && state.meta.voyageMinutes >= sc.shownAt) return null;
     if (Math.random() >= chance) return null;
-    sc.shownAt = state.meta.voyageMinutes;
+    sc.shownAt = state.meta.voyageMinutes; sc.n = (sc.n || 0) + 1;
     return pickVariant(SCENT_LINES[sc.key], 'scent:' + sc.key, {});
   }
   function printScent(state, room) { var l = scentLine(state, room); if (l) { printBlank(); printLine(l); } }
@@ -18576,6 +18584,7 @@
       var rr = s.cooking;
       if (!rr) { cmdGalley(s); return; }
       s.cooking = null;
+      scentServed(s); // (beta 21) smells are noticed only a while after this
       if (rr.kind === 'drink') cookServeDrink(s, rr); else cookServeMeal(s, rr);
       syncCookAudio(s);
     };
@@ -22194,6 +22203,11 @@
     // content itself is decided.
     optionsEl.classList.toggle('nav-station-fit', !!(state.pendingChoice && state.pendingChoice.id === 'nav-station-menu'));
     optionsEl.classList.toggle('clothing-fit', !!(state.pendingChoice && state.pendingChoice.id === 'clothing-menu')); // CHANGE CLOTHES: standard spacing, but never a scrolling panel
+    var clothingFull = !!(state.pendingChoice && state.pendingChoice.id === 'clothing-menu'); // (beta 21) CHANGE CLOTHES is full screen: no window strip, no voyage line
+    if (document.body.classList.contains('clothing-full') !== clothingFull) {
+      document.body.classList.toggle('clothing-full', clothingFull);
+      setTimeout(scrollToBottom, 120); // the pane has just grown or shrunk by the strip's height: keep the newest lines (the comfort read-outs) in view
+    }
     syncHelmTrim(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
@@ -25130,7 +25144,7 @@
   /* ---------- the loop ---------- */
   let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true, viewOn = true; // viewOn: the OUTSIDE VIEW button (beta 12); off, the band is simply not shown and nothing is drawn
   function wanted() {
-    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && document.visibilityState !== 'hidden';
+    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && !document.body.classList.contains('clothing-full') && document.visibilityState !== 'hidden';
   }
   function frame(ts) {
     requestAnimationFrame(frame);
