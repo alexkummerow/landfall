@@ -699,6 +699,13 @@
   .data-row-md { grid-template-columns: 15ch 1fr; }
   .data-row-lg { grid-template-columns: 22ch 1fr; }
 
+  /* STATUS BARS (beta 17): a thin bar after the words of HUNGER / THIRST / HYGIENE / ENERGY / MORALE. Phosphor green fill on a dim green track; nothing else. */
+  .stat-line, .stat-value { display: flex; flex-wrap: wrap; align-items: center; column-gap: 1.4ch; }
+  .stat-bar { flex: none; display: inline-block; width: 9ch; height: 0.4em; background: rgba(77, 122, 94, 0.35); overflow: hidden; }
+  .stat-bar-fill { display: block; height: 100%; width: 0; background: var(--phosphor); }
+  .stat-line .stat-text { min-width: 24ch; } /* the bars start in one column; on a very narrow screen the bar wraps beneath the words instead */
+  .stat-value > span:first-child { min-width: 10ch; }
+
   .heading-label {
     color: var(--phosphor);
     letter-spacing: 0.08em;
@@ -908,6 +915,11 @@
   #hz-fog, #hz-dark { position: absolute; inset: 0; pointer-events: none; }
   #hz-fog { z-index: 4; opacity: 0; background-color: rgba(176, 198, 186, 0.16); }
   #hz-dark { z-index: 5; opacity: 0; background: radial-gradient(ellipse 120% 90% at 50% 40%, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.85)); }
+
+  /* THE SLEEPING SCREEN (beta 18): a veil in the page's own colour, 3 s in, 1.2 s out; the controls footer (GET UP) is lifted above it. */
+  #sleep-veil { position: fixed; inset: 0; z-index: 9500; background: inherit; opacity: 0; pointer-events: none; transition: opacity 1.2s ease; }
+  body.sleeping-dark #sleep-veil { opacity: 1; pointer-events: auto; transition: opacity 3s linear; }
+  body.sleeping-dark #controls { position: relative; z-index: 9600; border-top-color: transparent; }
   #beta-strip {
     flex-shrink: 0;
     padding: 0.2rem 1.1rem;
@@ -949,6 +961,7 @@
     <div id="hz-fog" aria-hidden="true"></div>
     <div id="hz-dark" aria-hidden="true"></div>
   </div>
+  <div id="sleep-veil" aria-hidden="true"></div>
 
   <!-- SHIP'S PLAN -- a true full-viewport image viewer, deliberately
        OUTSIDE #crt/#output's own padded, max-width-capped content
@@ -1297,6 +1310,9 @@
         sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
+        lastSnackAt: null,           // (beta 16) voyageMinutes of the last snack eaten, for the shared 30-minute snack cooldown
+        sleepFatigueStart: null,     // (beta 16) fatigue as the sleep began, for the waking line
+        sleepSeaStart: null,         // (beta 16) the sea state as the sleep began, for the waking line
         coffeeCount: 0,
         location: 'above',          // 'above' | 'below' — a physical place, not a menu state; see GO ABOVE/GO BELOW
         atHelm: false,              // physically at the Helm -- a pure presence flag now, independent of AUTOPILOT (see cmdHelm/computeHeading: autopilot still wins the actual steering whenever both are true); ends automatically on GO BELOW, SLEEP, BACK (leave-helm), or STEERING damage -- no longer on autopilot re-engaging
@@ -1400,6 +1416,7 @@
         weatherSoftwareUpdated: true,      // WINDY is on the computer from the start: the one-time system update no longer waits for anything
         landOnHorizonShown: false,         // "Land on the horizon." -- shown once per voyage, the first time she is within 20 nm of a Hawaiian island
       },
+      scent: null, // (beta 16) the latest cooking smell: { key, at, shownAt } -- see COOKING SMELLS
       cooking: null, // (beta 15) the one preparation on the stove / waiting to be fetched / waiting to be eaten -- see COOKING; null when there is none
       voyageEnd: { phase: 'none', reason: null, at: null, step: 0 }, // RESCUE -- 'none' | 'pending' (a neglect threshold was reached: step 0 is the first line + CONTINUE, step 1 the second line + CALL FOR HELP) | 'ended' (the end-of-game summary is up: NEW VOYAGE). One-way, never reversed -- see checkNeglectRescue.
       finale: { phase: 'none', step: 0, stepAt: 0, arrivedMinutes: null, v: 1, birds: null, noDiesel: false }, // THE FINAL ARRIVAL -- 'none' | 'arrival' | 'done'; see FINALE_STEPS. Persisted so a reload resumes exactly where it was.
@@ -6740,18 +6757,22 @@
 
   var FAILURE_NARRATIVES = {
     sails: [
-      'A sharp crack overhead. The sail has torn along a seam.',
-      'Something lets go in the rig. The sail collapses loose.',
+      "That sounded like the sail tearing.",
+      "A sharp crack overhead. I think the sail's torn along a seam.",
+      "Something let go in the rig. The sail's hanging loose.",
     ],
     steering: [
-      'The helm suddenly goes loose in my hands.',
-      'The wheel turns, but the rudder does not answer.',
+      "The rudder isn't responding properly.",
+      "The helm's gone loose in my hands.",
+      "The wheel turns, but I don't think the rudder's answering.",
     ],
     engine: [
-      'The engine stopped on its own.',
+      "Something's wrong with the engine.",
+      "The engine just cut out. Something's wrong.",
     ],
     electrical: [
-      'A fuse blows somewhere behind the panel. The cabin goes dark.',
+      "I think I've blown a fuse.",
+      "I think I've blown a fuse. The panel's gone dead.",
     ],
   };
 
@@ -6919,8 +6940,8 @@
   var REPAIR_SPARE_KEY = { sails: 'sailRepairKit', steering: 'steeringParts', engine: 'engineParts', electrical: 'fuses' };
   var FAILURE_CAUSE_LABEL = { weather: 'WEATHER STRESS', neglect: 'MISSED MAINTENANCE' };
   var FAILURE_CAUSE_LINES = {
-    weather: { sails: 'It was too much wind for her.' },
-    neglect: 'I had let the daily maintenance go, and it showed.',
+    weather: { sails: "That was too much wind for that much sail." },
+    neglect: "I should've kept up with the maintenance.",
   };
 
   function spareCount(state, systemKey) {
@@ -6939,7 +6960,10 @@
 
   function maintenanceMemory(state) {
     if (!state.maintenance || typeof state.maintenance !== 'object') migrateMaintenanceIfNeeded(state);
-    return state.maintenance;
+    var m = state.maintenance;
+    if (!Number.isFinite(m.progressMs) || m.progressMs < 0) m.progressMs = 0; // (beta 19) the day's maintenance work done so far, in real milliseconds ...
+    if (m.progressDay === undefined) m.progressDay = null;                    // ... and the calendar day it belongs to
+    return m;
   }
   function maintenanceDoneToday(state) { return maintenanceMemory(state).done === voyageDayNumber(state); }
   function maintenanceOverdue(state) { return maintenanceMemory(state).pending.length > 0; } // a missed day's failure is still waiting for its time
@@ -8134,6 +8158,29 @@
     var ctx = { minutes: minutes, afloat: !state || !state.nav || !state.nav.grounded };
     return pickVariant(DAILY_COPY[key], key, ctx).split('{D}').join(describeSleepDuration(minutes));
   }
+  var WAKE_NAP_OK = ["I must've dozed off for a while.", "That helped a little.", "I feel slightly more rested."];
+  var WAKE_NAP_ROUGH = ["Hard to sleep with the boat moving like that."];
+  var WAKE_NAP_POOR = ["I barely slept."];
+  var WAKE_LONG_GOOD = ["I slept well. Really well.", "That was the best sleep I've had in days.", "I feel properly rested."];
+  var WAKE_LONG_CALM = ["The boat barely moved all night. I slept like a rock."];
+  var WAKE_LONG_ROUGH = ["I didn't sleep very well.", "The boat was rolling all night.", "I feel like I barely slept.", "That was a rough night."];
+  var WAKE_LOW_ENERGY = ["I could use a few more hours.", "Still tired.", "I don't feel nearly as rested as I'd hoped."];
+  var WAKE_HIGH_ENERGY = ["I feel ready for the day.", "That did me good.", "Not a bad night's sleep."];
+  function wakeCommentLine(state, minutes) { // from how long, the energy before and after, and the sea; one line, in the sailor's own voice
+    if (minutes < 10) return null;
+    var c = state.crew, now = c.fatigue, before = c.sleepFatigueStart == null ? now : c.sleepFatigueStart;
+    var gain = Math.max(0, before - now), sea = Math.max(state.weather.seaState || 0, c.sleepSeaStart || 0);
+    c.sleepFatigueStart = null; c.sleepSeaStart = null;
+    if (minutes < 180) { // a nap
+      if (sea >= 5) return pickVariant(WAKE_NAP_ROUGH, 'wakeNapRough', {});
+      if (gain < 2) return pickVariant(WAKE_NAP_POOR, 'wakeNapPoor', {});
+      return pickVariant(WAKE_NAP_OK, 'wakeNap', {});
+    }
+    if (sea >= 5) return pickVariant(WAKE_LONG_ROUGH, 'wakeLongRough', {});
+    if (gain < 8 || now >= 60) return pickVariant(WAKE_LOW_ENERGY, 'wakeLow', {}); // the sleep did not restore much: it is not called restful
+    if (now <= 25) return pickVariant(WAKE_LONG_GOOD.concat(sea <= 2 ? WAKE_LONG_CALM : []).concat(WAKE_HIGH_ENERGY), 'wakeGood', {});
+    return pickVariant(["Not a bad night's sleep.", "That did me good."], 'wakeMid', {});
+  }
   function wakeUp(state, room) {
     if (state.crew.watchState !== 'sleeping') return; // (he already woke by himself: checkNeedsWake)
     var start = state.crew.sleepStartedAt;
@@ -8148,7 +8195,8 @@
       log(state, 'Slept for ' + describeSleepDuration(capMinutes) + '. Been awake for a while.');
     } else {
       momentNoteWake(state, minutesAsleep);
-      log(state, sleepEntryText(minutesAsleep, state));
+      var wakeLine = wakeCommentLine(state, minutesAsleep); // (beta 16) nothing under 10 minutes; otherwise one first-person line
+      if (wakeLine) log(state, wakeLine);
     }
     flushNewLogEntries(state);
   }
@@ -11577,6 +11625,54 @@
     return valueEl;
   }
 
+  /* --------------------------------------------------------------
+     STATUS BARS (beta 17) -- see patches_beta/17_status_bars.py
+     -------------------------------------------------------------- */
+  function statClamp01(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+  // For each readout: its words (exactly as before) and how full its bar is, read from the very numbers the words come from.
+  // Hunger runs out at 14 hours since a meal (STARVING), thirst at 10 hours since a drink (PARCHED), hygiene at 40 hours since a wash (FILTHY); energy is the rest of the
+  // fatigue scale (0 rested ... 100 exhausted), and morale is the 0-100 value itself.
+  var STAT_SPECS = {
+    hunger:  function (st) { var c = st.crew; return { text: 'HUNGER: ' + HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)], frac: 1 - c.hoursSinceMeal / 14 }; },
+    thirst:  function (st) { var c = st.crew; return { text: 'THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)], frac: 1 - c.hoursSinceWater / 10 }; },
+    hygiene: function (st) { return { text: 'HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(st))], frac: 1 - hoursSinceWash(st) / 40 }; },
+    energy:  function (st) { var c = st.crew; return { text: 'ENERGY: ' + ENERGY_LABELS[energyLevel(c.fatigue)], frac: 1 - c.fatigue / 100 }; },
+    morale:  function (st) { var c = st.crew; return { text: 'MORALE: ' + moraleLevel(c.morale), frac: c.morale / 100 }; },
+  };
+  var statLiveRows = []; // the readouts on screen: { el, kind } -- refreshed by the live loop, dropped once their screen is gone
+  function statBarMake() {
+    var bar = document.createElement('span'); bar.className = 'stat-bar'; bar.setAttribute('aria-hidden', 'true');
+    var fill = document.createElement('span'); fill.className = 'stat-bar-fill';
+    bar.appendChild(fill);
+    return bar;
+  }
+  function statBarSet(barEl, frac) {
+    var w = Math.round(statClamp01(isFinite(frac) ? frac : 0) * 100) + '%', fill = barEl.firstChild;
+    if (fill.style.width !== w) fill.style.width = w;
+  }
+  // A whole readout line: the words, then the bar, on one row.  Returns the line.
+  function printStatLine(kind, state) {
+    var p = document.createElement('p');
+    p.className = 'line stat-line';
+    var t = document.createElement('span'); t.className = 'stat-text';
+    p.appendChild(t); p.appendChild(statBarMake());
+    tempViewEl.appendChild(p);
+    statLiveRows.push({ el: p, kind: kind });
+    statApply(p, kind, state);
+    return p;
+  }
+  // `el` is a readout line (words span first, bar second); keeps both current.
+  function statApply(el, kind, state) {
+    var spec = STAT_SPECS[kind](state), t = el.firstChild;
+    if (t.textContent !== spec.text) t.textContent = spec.text;
+    statBarSet(el.lastChild, spec.frac);
+  }
+  function refreshStatLines(state) {
+    if (!state || !statLiveRows.length) return;
+    statLiveRows = statLiveRows.filter(function (r) { return tempViewEl.contains(r.el); });
+    statLiveRows.forEach(function (r) { statApply(r.el, r.kind, state); });
+  }
+
   function printBlank() {
     var p = document.createElement('p');
     p.className = 'gap';
@@ -13142,6 +13238,8 @@
         s.crew.sleepRoom = sleepRoom;
         s.crew.watchState = 'sleeping';
         s.crew.sleepStartedAt = s.meta.voyageMinutes;
+        s.crew.sleepFatigueStart = s.crew.fatigue; // (beta 16) for the waking line
+        s.crew.sleepSeaStart = s.weather.seaState;
         s.crew.sleepCapMinutes = energyLevel(s.crew.fatigue) === ENERGY_EXHAUSTED ? SLEEP_CAP_EXHAUSTED_MINUTES : SLEEP_CAP_MINUTES; // SLEEP CAP: 12 h if EXHAUSTED as it begins, otherwise 10
         s.crew.atHelm = false; // can't stay at the helm while asleep — see cmdHelm
         s.pendingChoice = null; // otherwise the WELLBEING menu that led here keeps winning in getContextualOptions, and WAKE UP never actually appears
@@ -13161,19 +13259,18 @@
     cookRoom('galley', state);
     printBlank();
     var c = state.crew;
-    printLine('HUNGER: ' + HUNGER_LABELS[hungerLevel(c.hoursSinceMeal)]);
-    printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
+    printStatLine('hunger', state);
+    printStatLine('thirst', state);
     cookBlockEl = document.createElement('div'); // (beta 15) what is on the stove, live -- see COOKING
     cookBlockEl.className = 'cook-block';
     tempViewEl.appendChild(cookBlockEl);
     cookFillBlock(state);
+    printScent(state, 'galley'); // (beta 16)
     state.pendingChoice = { id: 'galley-menu', options: pushBack(galleyOptions(state), 'cancel') };
   }
   function galleyOptions(state) {
     var options = [];
-    var st = cookStatus(state);
-    if (st === 'ready') options.push({ label: state.cooking.kind === 'drink' ? 'FETCH DRINK' : state.cooking.kind === 'snack' ? 'FETCH SNACK' : 'FETCH MEAL', action: 'cook-fetch' });
-    if (st === 'fetched') options.push({ label: state.cooking.kind === 'drink' ? 'DRINK' : 'EAT', action: 'cook-eat' });
+    if (cookStatus(state) === 'ready') options.push({ label: (state.cooking.kind === 'drink' ? 'DRINK ' : 'EAT ') + state.cooking.name.toUpperCase(), action: 'cook-eat' });
     options.push({ label: 'MEALS', action: 'cmd:meals' }, { label: 'SNACKS', action: 'cmd:snacks' }, { label: 'DRINKS', action: 'cmd:drink' });
     var dishesOpt = choreOptionIfDue(state, 'dishes');
     if (dishesOpt) options.push(dishesOpt);
@@ -13253,7 +13350,7 @@
     cookRoom('head', state);
     printRoomHeader('HEAD');
     printBlank();
-    printLine('HYGIENE: ' + HYGIENE_LABELS[hygieneLevel(hoursSinceWash(state))]);
+    printStatLine('hygiene', state);
     // ROOM-NAVIGATION PASS -- BACK is 'leave-head', not the plain
     // 'cancel' every other screen's own BACK still uses: this specific
     // button is the one actually shutting the door behind you on the
@@ -13428,7 +13525,7 @@
     cookRoom('saloon', state);
     var b = state.boat;
     printBlank();
-    climateRowEls = { morale: printLine(climateMoraleLine(state)), temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)), hatch: printLine(climateHatchLine(state)) }; // CABIN TEMP, HEATER and HATCH (kept current by refreshClimateRows)
+    climateRowEls = { morale: printStatLine('morale', state), temp: printLine(climateTempLine(state)), heater: printLine(climateHeaterLine(state)), hatch: printLine(climateHatchLine(state)) }; // CABIN TEMP, HEATER and HATCH (kept current by refreshClimateRows)
     var options = [
       { label: 'READ', action: 'cmd:bookshelf' },
       { label: 'RELAX', action: 'sit-a-while' },
@@ -13437,6 +13534,7 @@
     ];
     var tidyOpt = choreOptionIfDue(state, 'tidy');
     if (tidyOpt) options.push(tidyOpt);
+    printScent(state, 'saloon'); // (beta 16)
     state.pendingChoice = { id: 'saloon-menu', options: pushBack(options, 'cancel') };
   }
 
@@ -13487,8 +13585,7 @@
   function climateHatchLine(state) { return 'HATCH: ' + (state.boat.hatchOpen ? 'OPEN' : 'CLOSED'); }
   function refreshClimateRows(state) {
     if (!climateRowEls || !state || !tempViewEl.contains(climateRowEls.temp)) { climateRowEls = null; return; }
-    var t = climateTempLine(state), h = climateHeaterLine(state), ha = climateHatchLine(state), mo = climateMoraleLine(state);
-    if (climateRowEls.morale && climateRowEls.morale.textContent !== mo) climateRowEls.morale.textContent = mo;
+    var t = climateTempLine(state), h = climateHeaterLine(state), ha = climateHatchLine(state); // (the morale line is a status-bar line: refreshStatLines keeps it)
     if (climateRowEls.temp.textContent !== t) climateRowEls.temp.textContent = t;
     if (climateRowEls.heater.textContent !== h) climateRowEls.heater.textContent = h;
     if (climateRowEls.hatch && climateRowEls.hatch.textContent !== ha) climateRowEls.hatch.textContent = ha;
@@ -14853,7 +14950,7 @@
       repairs: hasRepairableDamage(state),
       toolsOut: state.crew.toolsOutSinceMinutes != null,
       maintenanceDone: m.done === voyageDayNumber(state),
-      maintenance: m.pending.length > 0 ? 'OVERDUE' : 'DUE',
+      maintenance: (m.pending.length > 0 ? 'OVERDUE' : 'DUE') + (maintPercent(state) > 0 ? ' \u2014 ' + maintPercent(state) + '% DONE' : ''),
     };
   }
 
@@ -14881,7 +14978,7 @@
     }
     var work = [];
     if (model.repairs) work.push({ label: 'REPAIRS', action: 'cmd:repair' });
-    if (!model.maintenanceDone) work.push({ label: 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
+    if (!model.maintenanceDone) work.push({ label: maintPercent(state) > 0 ? 'RESUME MAINTENANCE' : 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
     if (model.toolsOut) work.push({ label: CHORE_LABELS.tools, action: 'chore:tools' });
     aftCabinSig = JSON.stringify(model);
     state.pendingChoice = { id: 'aft-cabin-menu', options: pushBack(groupedOptions([menu, work]), 'leave-aft-cabin') };
@@ -14916,9 +15013,134 @@
   }
   function cmdLeaveAftCabin(state) { cmdLeaveCabin(state); } // (the same door, the same sound, the same plain return to BELOW DECK)
 
-  // PERFORM MAINTENANCE: once per in-game calendar day. PERFORMING MAINTENANCE stays up for exactly as long as one of the four repair sounds (picked at random)
-  // plays -- the same audio-synced action every repair uses, so no game-time duration is added; when the sound ends the day is recorded as done (which also
-  // cancels the failure a missed day had scheduled), the tools are out (PUT AWAY TOOLS, as after a repair) and the room shows MAINTENANCE COMPLETE FOR TODAY.
+  /* --------------------------------------------------------------
+     MAINTENANCE (beta 19) -- see patches_beta/19_maintenance.py
+     -------------------------------------------------------------- */
+  var MAINT_TOTAL_MS = 20 * 60 * 1000;   // the day's work
+  var MAINT_GAP_MS = 15000;              // quiet between one repair recording and the next
+  var MAINT_POLL_MS = 1000;
+  var MAINT_STEP_CAP_MS = 5000;          // the most one second of the clock may add (a sleeping phone finishes nothing)
+  var MAINT_WATCHDOG_MS = 90000;         // a recording that has neither ended nor failed by now is stopped and the gap begins
+  var MAINT_OBS = [                      // the sailor's own words, by how far along the work is
+    { at: 0.00, lines: ["I'd better check everything over."] },
+    { at: 0.20, lines: ['Checking the engine.'] },
+    { at: 0.40, lines: ['The rudder looks alright.'] },
+    { at: 0.58, lines: ['Electrical connections seem fine.'] },
+    { at: 0.76, lines: ['Sails and rigging look good.'] },
+    { at: 0.92, lines: ['That should do it for today.', 'Everything seems to be in order.'] },
+  ];
+  var maintSession = null; // { state, lastAt, pollTimer, progEl, obsEl, shown, lastSound, curEl, gapTimer, watchdog }
+
+  function maintProgressMs(state) { // 0 .. MAINT_TOTAL_MS: today's work so far (nothing carries over from another day)
+    var m = maintenanceMemory(state);
+    if (m.done === voyageDayNumber(state)) return MAINT_TOTAL_MS;
+    if (m.progressDay !== voyageDayNumber(state)) return 0;
+    return Math.max(0, Math.min(MAINT_TOTAL_MS, m.progressMs));
+  }
+  function maintPercent(state) { return Math.floor(maintProgressMs(state) / MAINT_TOTAL_MS * 100); }
+
+  function maintStopSound(el) { // fade a recording out and stop it (never leaves one running behind)
+    if (!el) return;
+    el.onended = null;
+    fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) { /* nothing to stop */ } });
+  }
+  function maintAudioNext(s) {
+    if (maintSession !== s) return;
+    var pool = BOAT_FAIL_SYSTEMS.filter(function (k) { return k !== s.lastSound; });
+    var key = pool[Math.floor(Math.random() * pool.length)];
+    s.lastSound = key;
+    var settled = false;
+    function afterSound() {
+      if (settled) return;
+      settled = true;
+      if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
+      if (maintSession !== s) return;
+      s.curEl = null;
+      s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, MAINT_GAP_MS); // 15 seconds of quiet, then another
+    }
+    s.curEl = playRepairAudio(key, afterSound);
+    s.watchdog = setTimeout(function () { s.watchdog = null; if (maintSession !== s || settled) return; maintStopSound(s.curEl); afterSound(); }, MAINT_WATCHDOG_MS);
+  }
+
+  function maintDrawScreen(state, s) {
+    clearTempView();
+    printRoomHeader('AFT CABIN');
+    printBlank();
+    s.progEl = printDataRow('MAINTENANCE', maintPercent(state) + '%', 'data-row-md');
+    s.obsEl = printLine('');
+  }
+  function maintShowObservation(s, text) { if (s.obsEl) s.obsEl.textContent = text; }
+  function maintObsIndex(frac) { var i = 0; MAINT_OBS.forEach(function (o, k) { if (frac >= o.at) i = k; }); return i; }
+
+  function maintBegin(state) {
+    if (maintSession) { keepScreen(state); return; } // already at work: a repeat does nothing
+    var m = maintenanceMemory(state), today = voyageDayNumber(state);
+    if (m.progressDay !== today) { m.progressDay = today; m.progressMs = 0; } // a new day: new work
+    var s = maintSession = { state: state, lastAt: Date.now(), pollTimer: null, progEl: null, obsEl: null, shown: -1, lastSound: null, curEl: null, gapTimer: null, watchdog: null };
+    maintDrawScreen(state, s);
+    var frac = maintProgressMs(state) / MAINT_TOTAL_MS;
+    s.shown = maintObsIndex(frac);
+    if (frac === 0) maintShowObservation(s, MAINT_OBS[0].lines[0]); // a fresh start; picking the work up again says nothing until the next stage
+    state.pendingChoice = { id: 'maintaining', options: [{ label: 'STOP', action: 'maintenance-stop' }] }; // handleAction's tail renders it (and the PERFORMING MAINTENANCE dots)
+    s.pollTimer = setInterval(maintPoll, MAINT_POLL_MS);
+    maintAudioNext(s);
+  }
+
+  // Ends the work: the poll, the recordings, the gap timer. Idempotent. What was done is already in the maintenance memory.
+  function maintEnd() {
+    var s = maintSession;
+    if (!s) return;
+    maintSession = null;
+    if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
+    if (s.gapTimer) { clearTimeout(s.gapTimer); s.gapTimer = null; }
+    if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
+    maintStopSound(s.curEl); s.curEl = null;
+    if (activityDotsCurrentLabel === 'PERFORMING MAINTENANCE') stopActivityDots();
+  }
+
+  function maintPoll() {
+    var s = maintSession;
+    if (!s) return;
+    var st = s.state;
+    if (GAME !== st || !st.pendingChoice || st.pendingChoice.id !== 'maintaining') { maintEnd(); return; } // the screen has gone (a restart, the ending, a rescue)
+    var now = Date.now(), dt = Math.max(0, Math.min(now - s.lastAt, MAINT_STEP_CAP_MS));
+    s.lastAt = now;
+    if (needsCabinLight(st)) { // the lights went out in the dark: the work stops where it is
+      maintEnd();
+      log(st, "Too dark to see what I'm doing."); flushNewLogEntries(st);
+      st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
+      return;
+    }
+    var m = maintenanceMemory(st);
+    m.progressDay = voyageDayNumber(st);
+    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + dt);
+    var frac = m.progressMs / MAINT_TOTAL_MS;
+    if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
+    if (s.progEl) s.progEl.textContent = Math.floor(frac * 100) + '%';
+    var idx = maintObsIndex(frac);
+    if (idx > s.shown) { s.shown = idx; var lines = MAINT_OBS[idx].lines; maintShowObservation(s, lines.length > 1 ? pickVariant(lines, 'maintObs') : lines[0]); }
+  }
+
+  function maintFinish(state) {
+    maintEnd();
+    completeMaintenance(state); // the very same completion as ever: today is done, a failure a missed day had scheduled is cancelled
+    var m = maintenanceMemory(state); m.progressMs = 0; m.progressDay = null;
+    if (state.crew.toolsOutSinceMinutes == null) state.crew.toolsOutSinceMinutes = state.meta.voyageMinutes; // the tools are out (PUT AWAY TOOLS), as after a repair
+    log(state, "That's the maintenance done for today.");
+    flushNewLogEntries(state);
+    state.pendingChoice = null; clearTempView(); cmdAftCabin(state); renderOptions(state);
+    saveGameState(state);
+  }
+
+  // STOP: the work ends and what was done is kept.
+  function performMaintenanceStop(state) {
+    maintEnd();
+    clearTempView();
+    cmdAftCabin(state);
+  }
+
+  // PERFORM MAINTENANCE: once per in-game calendar day. It is twenty minutes of work (see MAINTENANCE above): this only starts it; when the twenty minutes are in, the day is recorded as
+  // done (which also cancels the failure a missed day had scheduled), the tools are out (PUT AWAY TOOLS, as after a repair) and the room shows MAINTENANCE COMPLETE FOR TODAY.
   function performMaintenance(state) {
     if (uiBusy) return;
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:aft-cabin'); return; }
@@ -14928,16 +15150,7 @@
       printLine('TOO DEPLETED TO PERFORM MAINTENANCE.', 'amber');
       return;
     }
-    var soundKey = BOAT_FAIL_SYSTEMS[Math.floor(Math.random() * BOAT_FAIL_SYSTEMS.length)];
-    runAudioSyncedAction(state, {
-      label: 'PERFORMING MAINTENANCE',
-      playAudio: function (onEnded) { return playRepairAudio(soundKey, onEnded); },
-      action: function (s) {
-        completeMaintenance(s);
-        if (s.crew.toolsOutSinceMinutes == null) s.crew.toolsOutSinceMinutes = s.meta.voyageMinutes;
-        cmdAftCabin(s);
-      },
-    });
+    maintBegin(state); // (beta 19) twenty minutes of work, with STOP -- see MAINTENANCE above
   }
 
   // FORWARD CABIN — sleep, clothing, and their related chores. COMFORT is a
@@ -15085,6 +15298,7 @@
       [{ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' }, { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }, { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
       [{ label: 'BACK', action: 'cancel' }],
     ]);
+    printScent(state, 'nav'); // (beta 16)
     state.pendingChoice = { id: 'nav-station-menu', options: options };
     // This screen's own content (echo through SOLAR/the DAMAGED note)
     // top-aligns in #output exactly like every other Below Deck room
@@ -15320,7 +15534,7 @@
         { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
         { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
         { h3: 'DAILY MAINTENANCE' },
-        { p: 'Select PERFORM MAINTENANCE once each day. Regular maintenance keeps ordinary, unexplained failures away.' },
+        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. Regular maintenance keeps ordinary, unexplained failures away.' },
         { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
         { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
@@ -17275,7 +17489,7 @@
   // screen is open. source 'worn' (the CABIN: ENERGY, then the comfort rows) or 'pending' (CHANGE CLOTHES: the draft outfit, no ENERGY).
   function comfortRowData(state, source) {
     var outfit = source === 'pending' && clothingSession ? clothingSession.draft : state.crew.clothing, rows = [];
-    if (source !== 'pending') rows.push(['ENERGY', ENERGY_LABELS[energyLevel(state.crew.fatigue)]]);
+    if (source !== 'pending') rows.push(['ENERGY', ENERGY_LABELS[energyLevel(state.crew.fatigue)], 'energy']);
     rows.push(['COMFORT ABOVE', comfortAboveLabel(state, outfit)]);
     rows.push(['COMFORT BELOW', comfortBelowLabel(state, outfit)]);
     if (rainProtectionRecommended(state, outfit)) rows.push(['RAIN PROTECTION', 'RECOMMENDED']); // always the fourth row, only while it is raining and the shell is off
@@ -17287,7 +17501,13 @@
       var row = document.createElement('div');
       row.className = 'data-row data-row-md';
       var l = document.createElement('span'); l.textContent = r[0];
-      var v = document.createElement('span'); v.textContent = r[1];
+      var v = document.createElement('span');
+      if (r[2]) { // a status-bar row (ENERGY): the words, then the bar
+        v.className = 'stat-value';
+        var vt = document.createElement('span'); vt.textContent = r[1];
+        var vb = statBarMake(); statBarSet(vb, STAT_SPECS[r[2]](state).frac);
+        v.appendChild(vt); v.appendChild(vb);
+      } else v.textContent = r[1];
       row.appendChild(l); row.appendChild(v); wrap.appendChild(row);
     });
   }
@@ -17302,6 +17522,7 @@
     var wrap = document.getElementById('comfort-rows');
     if (wrap && tempViewEl.contains(wrap) && state) fillComfortRows(wrap, state);
     refreshClimateRows(state); // the Saloon's cabin temperature and heater lines, kept current while it is open
+    refreshStatLines(state); // (beta 17) and the words and bars of the status readouts
   }
 
   function cmdClothing(state) {
@@ -17741,7 +17962,7 @@
     }
     if (b.batteryRecovering && b.battery < BATTERY_RESTART_THRESHOLD_PCT) {
       printBlank();
-      printLine('You press PLAY. Nothing. The cassette player has no power.', 'amber');
+      printLine('I press PLAY. Nothing. The cassette player has no power.', 'amber');
       cmdTapePlayer(state);
       return;
     }
@@ -18075,7 +18296,7 @@
   }
   // Chocolate never relieves hunger itself (see performEat) -- it is a lift in mood, and the one line says so.
   function eatChocolateLine(state) {
-    return pickVariant(SNACK_ENTRIES['Chocolate'], 'snack:Chocolate', lifeCtx(state));
+    return pickVariant(SNACK_ENTRIES['Chocolate'].concat(['That hit the spot.', 'Something sweet. Just what I needed.']), 'snack:Chocolate', lifeCtx(state));
   }
 
   // Which GALLEY_AUDIO_FILES key (see the GALLEY AUDIO section above)
@@ -18124,6 +18345,57 @@
   };
 
   /* --------------------------------------------------------------
+     SNACK COOLDOWN (beta 16) -- see patches_beta/16_master_a.py
+     -------------------------------------------------------------- */
+  var SNACK_COOLDOWN_MIN = 30;
+  var SNACK_BLOCK_LINES = ["I'm good on snacks for now.", "I don't need another snack just yet.", "That's enough snacking for a while.", "I'm not really hungry for another snack."];
+  function snackCooldownLine(state) { // null when a snack may be eaten, else the one thing the sailor says
+    var t = state.crew.lastSnackAt, now = state.meta.voyageMinutes;
+    if (t == null || now < t || now - t >= SNACK_COOLDOWN_MIN) return null;
+    return SNACK_BLOCK_LINES[Math.floor(now / 7) % SNACK_BLOCK_LINES.length]; // (the same line for a few minutes, so tapping again does not flicker through them)
+  }
+  function snackNoteEaten(state) { state.crew.lastSnackAt = state.meta.voyageMinutes; }
+
+  /* --------------------------------------------------------------
+     COOKING SMELLS (beta 16)
+     -------------------------------------------------------------- */
+  var SCENT_HOURS = { 'Coffee': 3, 'Chili': 3, 'Pancakes': 2, 'FISH': 2, 'Mac & Cheese': 2, 'Chicken Noodle Soup': 2, 'Popcorn': 2, 'Oatmeal': 1, 'Tea': 1 };
+  var SCENT_LINES = {
+    'Coffee': ["Still smells faintly of coffee in here.", "That coffee smell hasn't quite faded."],
+    'Tea': ["There's a faint smell of tea in here."],
+    'Chili': ["I can still smell the chili from earlier.", "I can smell something warm and savory."],
+    'Pancakes': ["There's still a trace of pancakes in the air."],
+    'FISH': ["I think the galley still smells like fish."],
+    'Mac & Cheese': ["I can still smell the mac and cheese from earlier."],
+    'Chicken Noodle Soup': ["Still a hint of soup in the air."],
+    'Popcorn': ["There's still a trace of popcorn in the air."],
+    'Oatmeal': ["Still a faint smell of oats in here."],
+  };
+  var SCENT_ROOM_CHANCE = { galley: 0.6, saloon: 0.6, nav: 0.25 };
+  var SCENT_MIN_GAP_MIN = 30; // an observation, then quiet for at least this long
+  function scentNote(state, spec) { // the smell begins when the preparation does; a newer one replaces the older
+    var key = spec.held ? 'FISH' : spec.name;
+    if (!SCENT_HOURS[key]) return;
+    state.scent = { key: key, at: state.meta.voyageMinutes, shownAt: null };
+  }
+  function scentActive(state) {
+    var sc = state.scent;
+    if (!sc || !SCENT_HOURS[sc.key]) return null;
+    if (state.meta.voyageMinutes < sc.at || state.meta.voyageMinutes - sc.at >= SCENT_HOURS[sc.key] * 60) { state.scent = null; return null; } // it has faded
+    return sc;
+  }
+  function scentLine(state, room) { // a line to say on entering a room below deck, or null (usually null)
+    if (state.crew.location !== 'below' || state.cooking) return null; // never above deck; never while something is on the stove or waiting there (those have their own words)
+    var sc = scentActive(state), chance = SCENT_ROOM_CHANCE[room];
+    if (!sc || !chance) return null;
+    if (sc.shownAt != null && state.meta.voyageMinutes - sc.shownAt < SCENT_MIN_GAP_MIN && state.meta.voyageMinutes >= sc.shownAt) return null;
+    if (Math.random() >= chance) return null;
+    sc.shownAt = state.meta.voyageMinutes;
+    return pickVariant(SCENT_LINES[sc.key], 'scent:' + sc.key, {});
+  }
+  function printScent(state, room) { var l = scentLine(state, room); if (l) { printBlank(); printLine(l); } }
+
+  /* --------------------------------------------------------------
      COOKING (beta 15) -- see patches_beta/15_cooking.py for the whole design.  SELECT -> COOK -> MOVE AROUND THE BOAT -> RETURN TO THE GALLEY -> FETCH -> EAT.
      state.cooking is the one preparation; it is saved with everything else and READY is only ever worked out from the clock.
      -------------------------------------------------------------- */
@@ -18135,13 +18407,24 @@
     longPopcorn: 'audio/finals/long_popcorn.mp3',
   };
   var COOK_PREP_BY_NAME = { 'Mac & Cheese': 'longBoil', 'Chili': 'longBoil', 'Chicken Noodle Soup': 'longBoil', 'Oatmeal': 'longBoil', 'Pancakes': 'longSizzle', 'Cup Noodles': 'longBoilWater', 'Popcorn': 'longPopcorn' };
-  var COOK_LINES = {
-    longBoil: 'I put a pot of water on the stove.',
-    longBoilSizzle: 'The rice is on, and the fish is in the pan.',
-    longSizzle: 'The pan is hot and the batter is going in.',
-    longBoilWater: 'I put the kettle on the stove.',
-    longPopcorn: 'The pot is on the stove with the lid on.',
+  // The sailor's own words for each preparation: what it is when it goes on, what is noticed while it cooks (one is picked per preparation, so it does not change
+  // every time the galley is redrawn), the 'ready' line, and the line after eating or drinking.  Always first person; one short sentence each.
+  var COOK_COPY = {
+    'Coffee': { start: "I put the kettle on the stove.", during: ["Waiting for the water to boil.", "I can smell the coffee already."], ready: "Coffee's ready.", after: "That's good. I needed that." },
+    'Tea': { start: "I put the kettle on the stove.", during: ["Waiting for the water to boil."], ready: "Tea's ready.", after: "That's nice." },
+    'Chicken Noodle Soup': { start: "I empty the soup into a pot and put it on the stove.", during: ["The soup's warming through.", "The soup's simmering away."], ready: "Soup's hot.", after: "That hit the spot." },
+    'Chili': { start: "I empty the chili into a pot and turn on the stove.", during: ["The chili's starting to simmer.", "The chili's bubbling away nicely."], ready: "Chili's hot.", after: "Not bad at all." },
+    'Mac & Cheese': { start: "I put some water on to boil for the mac and cheese.", during: ["The pasta's cooking.", "Water's boiling steadily now."], ready: "Mac and cheese is ready.", after: "That was good." },
+    'Oatmeal': { start: "I put the oats on to cook.", during: ["The oatmeal's starting to thicken.", "Steam's coming off the pot."], ready: "Oatmeal's ready.", after: "That'll keep me going." },
+    'Pancakes': { start: "I mix up some batter and heat the pan.", during: ["The pancakes are sizzling away.", "I can hear the butter sizzling."], ready: "Pancakes are ready.", after: "Those were good." },
+    'FISH': { start: "I put the rice on and get the fish into the pan.", during: ["The fish is sizzling nicely.", "I can smell the fish cooking."], ready: "Fish and rice are ready.", after: "Fresh fish. Hard to beat." },
+    'Cup Noodles': { start: "I put the kettle on.", during: ["Waiting for the water to boil."], ready: "Noodles are ready.", after: "That was just what I needed." },
+    'Popcorn': { start: "I put some popcorn on.", during: ["I can hear the first kernels popping."], ready: "Popcorn's ready.", after: "Not a bad little snack." },
   };
+  function cookCopyFor(r) { return COOK_COPY[r.held ? 'FISH' : r.name] || null; }
+  var COOK_START_PERCENT = 15; // the first words (what was put on) are shown for the first 15%, then the one noticed while it cooks
+  var COOK_DANGEROUS_SEA = 6, COOK_HEAVY_SEA = 5; // seas of 5 and up stop anything being started (as cooking always was); a sea of 6 turns the stove off under unfinished food
+  var COOK_INTERRUPT_LINES = ["The boat's rolling too hard. I've got to turn off the stove.", "Damn. There goes dinner."];
   var COOK_ROOM_VOLUME = { galley: 1, saloon: 1, nav: 1, hub: 1, cabin: 0.35, aft: 0.35, head: 0.35, above: 0 }; // the GALLEY, SALOON and NAV STATION (and the passage between them) full; the cabins and the head 35%; above deck silent
   var cookDurations = {}; // prepKey -> seconds, read once from the file's own metadata (this session only; the save keeps the number it used)
   var cookLastRoom = null, cookBlockEl = null, cookProgressEl = null;
@@ -18152,10 +18435,9 @@
     if (!prep) return null; // (chocolate, trail mix, the energy bar: as they always were)
     return { prep: prep, fetch: item.name === 'Popcorn' ? null : item.name === 'Cup Noodles' ? 'fetchDrink' : 'fetchPlate' };
   }
-  function cookStatus(state) { // null | 'cooking' | 'ready' | 'fetched' -- from the clock, never from the sound
+  function cookStatus(state) { // null | 'cooking' | 'ready' -- from the clock, never from the sound
     var r = state && state.cooking;
     if (!r) return null;
-    if (r.fetched) return 'fetched';
     return Date.now() >= r.doneAt ? 'ready' : 'cooking';
   }
   function cookPercent(r) {
@@ -18163,11 +18445,8 @@
     var pct = Math.floor((Date.now() - r.startedAt) / (r.durationSec * 1000) * 100);
     return clamp(Date.now() >= r.doneAt ? 100 : Math.min(pct, 99), 0, 100);
   }
-  function cookClock(ms) {
-    var t = Math.max(0, Math.ceil(ms / 1000)), m = Math.floor(t / 60), sec = t % 60;
-    return (m < 10 ? '0' : '') + m + ':' + (sec < 10 ? '0' : '') + sec;
-  }
-  function cookProgressText(r) { return cookPercent(r) + '% \u2014 ' + cookClock(r.doneAt - Date.now()) + ' REMAINING'; }
+  function cookProgressText(r) { return 'PREPARATION PROGRESS: ' + cookPercent(r) + '%'; }
+  function cookHeavySea(state) { return state.weather.seaState >= COOK_HEAVY_SEA; }
 
   // The sound's own length, from the file's metadata (nothing is played). 0 = could not be read: the preparation is then ready at once, never given a made-up time.
   function cookProbeDuration(prepKey, cb) {
@@ -18205,8 +18484,9 @@
           var now = Date.now(), dur = probed > 0 ? probed : 0;
           s.cooking = {
             v: 1, kind: spec.kind, key: spec.key, name: spec.name, heading: spec.heading, item: spec.item, held: !!spec.held, drink: spec.drink,
-            prepKey: spec.prepKey, fetchKey: spec.fetchKey, startedAt: now, durationSec: dur, doneAt: now + dur * 1000, status: dur > 0 ? 'cooking' : 'ready', fetched: false,
+            prepKey: spec.prepKey, fetchKey: spec.fetchKey, startedAt: now, durationSec: dur, doneAt: now + dur * 1000, status: dur > 0 ? 'cooking' : 'ready',
           };
+          scentNote(s, spec); // (beta 16) the smell begins when the preparation does
           flushNewLogEntries(s);
           cmdGalley(s);
           syncCookAudio(s);
@@ -18215,22 +18495,22 @@
     });
   }
   function cookBusyLine(state) {
-    var st = cookStatus(state);
     printBlank();
-    printLine(st === 'cooking' ? 'There is already something on the stove.' : st === 'ready' ? 'There is something ready in the galley. I should fetch it first.' : 'There is still something on the table.');
+    printLine(cookStatus(state) === 'cooking' ? "I've already got something on the stove." : "There's something ready already.");
   }
 
-  function cookReadyLine(state, r) {
-    if (r.kind === 'drink') return 'The ' + r.name.toLowerCase() + ' is ready.';
-    if (r.name === 'Popcorn') return 'The popcorn is ready.';
-    if (r.name === 'Cup Noodles') return 'The noodles are ready.';
-    var period = mealPeriodName(state);
-    return period === 'breakfast' ? 'Breakfast is ready.' : period === 'lunch' ? 'Lunch is ready.' : period === 'dinner' ? 'Dinner is ready.' : 'The meal is ready.';
+  // What the galley shows of the preparation: while it cooks the heading, one line of the sailor's own words and the percentage (redrawn each second by cookTick); when it is
+  // ready one line, and the EAT / DRINK button below.  No bar, no time left.
+  function cookLineFor(r) {
+    var c = cookCopyFor(r);
+    if (!c) return '';
+    return cookPercent(r) < COOK_START_PERCENT ? c.start : c.during[Math.floor(r.startedAt / 1000) % c.during.length];
   }
-  // What the galley shows of the preparation: live while it cooks (the percentage and the time left, redrawn every second by cookTick), then READY, then what is on the table.
+  var cookShownLine = null;
   function cookFillBlock(state) {
     var el = cookBlockEl;
     cookProgressEl = null;
+    cookShownLine = null;
     if (!el) return;
     el.innerHTML = '';
     var r = state.cooking, st = cookStatus(state);
@@ -18240,21 +18520,34 @@
     gap();
     if (st === 'cooking') {
       line(r.heading, 'heading-label'); gap();
-      line(COOK_LINES[r.prepKey] || ''); gap();
+      cookShownLine = cookLineFor(r);
+      line(cookShownLine); gap();
       cookProgressEl = line(cookProgressText(r));
-    } else if (st === 'ready') {
-      line(r.name.toUpperCase() + ' READY', 'heading-label'); gap();
-      line(cookReadyLine(state, r));
     } else {
-      line(r.name.toUpperCase(), 'heading-label'); gap();
-      line(r.kind === 'drink' ? 'The cup is poured.' : 'It is on the table.');
+      var c = cookCopyFor(r);
+      line(c ? c.ready : (r.name + ' is ready.'));
     }
   }
   function cookGalleyShown(s) { return !uiBusy && s.pendingChoice && s.pendingChoice.id === 'galley-menu' && cookBlockEl && cookBlockEl.isConnected; }
+  function cookRedrawGalley(s) { clearTempView(); cmdGalley(s); renderOptions(s); scrollToBottom(); }
+
+  // A DANGEROUS sea while the food is still cooking: the stove is turned off, the unfinished food is lost, one line is said, once.  (Ready food is never touched.)
+  function cookCheckSeas(s) {
+    var r = s.cooking;
+    if (!r || cookStatus(s) !== 'cooking' || s.weather.seaState < COOK_DANGEROUS_SEA) return false;
+    s.cooking = null;
+    cookStopAudio();
+    log(s, COOK_INTERRUPT_LINES[Math.floor(Math.random() * COOK_INTERRUPT_LINES.length)]);
+    flushNewLogEntries(s);
+    saveGameState(s);
+    if (cookGalleyShown(s)) cookRedrawGalley(s);
+    return true;
+  }
   function cookTick() { // once a second: the live percentage; the moment it is ready, the galley (if it is on screen) says so
     var s = GAME;
     if (!s || !s.cooking) return;
     try {
+      if (cookCheckSeas(s)) return;
       var r = s.cooking, st = cookStatus(s);
       if (st === 'ready' && r.status !== 'ready') {
         r.status = 'ready';
@@ -18262,38 +18555,40 @@
         syncCookAudio(s);
         if (cookGalleyShown(s)) { cookFillBlock(s); s.pendingChoice = { id: 'galley-menu', options: pushBack(galleyOptions(s), 'cancel') }; renderOptions(s); }
       } else if (st === 'cooking') {
-        if (cookProgressEl && cookProgressEl.isConnected) cookProgressEl.textContent = cookProgressText(r);
+        if (cookProgressEl && cookProgressEl.isConnected) {
+          if (cookLineFor(r) !== cookShownLine && cookGalleyShown(s)) cookFillBlock(s); // the first words give way to the one noticed while it cooks
+          else cookProgressEl.textContent = cookProgressText(r);
+        }
         syncCookAudio(s);
       }
     } catch (e) { console.warn('Cooking tick failed:', describeError(e)); }
   }
   setInterval(cookTick, 1000);
 
-  // FETCH: back in the galley with the preparation ready. The plate / the pour plays once (nothing for popcorn); the cooking sound is long over.
-  function cookFetch(state) {
+  // EAT <FOOD> / DRINK <DRINK>: back in the galley with it ready.  The plate / the pour sound plays once (nothing for popcorn), then the eating or drinking does what it always did.
+  // state.cooking is cleared first thing, so a second tap can never serve it twice.
+  function cookEat(state) {
     var r = state.cooking;
-    if (!r || cookStatus(state) !== 'ready') { cmdGalley(state); return; } // (a stale button)
-    var collect = function (s) {
-      if (s.cooking && !s.cooking.fetched) { s.cooking.fetched = true; s.cooking.status = 'fetched'; }
-      cmdGalley(s);
+    if (uiBusy || !r || cookStatus(state) !== 'ready') { if (!uiBusy) cmdGalley(state); return; } // (a stale button)
+    var cd = r.kind === 'snack' ? snackCooldownLine(state) : null;
+    if (cd) { cmdGalley(state); printLine(cd); return; } // (beta 16) still inside the snack cooldown: it stays ready, nothing is used, nothing is awarded
+    var serve = function (s) {
+      var rr = s.cooking;
+      if (!rr) { cmdGalley(s); return; }
+      s.cooking = null;
+      if (rr.kind === 'drink') cookServeDrink(s, rr); else cookServeMeal(s, rr);
+      syncCookAudio(s);
     };
     if (r.fetchKey) {
       runAudioSyncedAction(state, {
-        label: 'FETCHING ' + r.name.toUpperCase(),
+        label: r.kind === 'drink' ? 'DRINKING' : 'EATING',
         transientLabel: true,
         playAudio: function (onEnded) { return playGalleyOneShot(r.fetchKey, onEnded); },
-        action: collect,
+        action: serve,
       });
-    } else collect(state);
+    } else serve(state);
   }
-  // EAT / DRINK: the existing mechanics, now that the meal is in hand. state.cooking is cleared FIRST so a second tap can never serve it twice.
-  function cookServe(state) {
-    var r = state.cooking;
-    if (!r || !r.fetched) { cmdGalley(state); return; }
-    state.cooking = null;
-    if (r.kind === 'drink') cookServeDrink(state, r); else cookServeMeal(state, r);
-    syncCookAudio(state);
-  }
+  function cookAfterLine(r) { var c = cookCopyFor(r); return c ? c.after : null; }
   function cookServeMeal(s, r) {
     var item = r.item, key = r.key, c = s.crew;
     var life = lifeCtx(s); // before hunger resets, so "I was starving" is only ever said of a sailor who was
@@ -18326,8 +18621,9 @@
       if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
       c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
       c.morale = clamp(c.morale + moraleGain, 0, 100);
-      log(s, eatFlavorLine(s, item, life));
+      log(s, cookAfterLine(r) || eatFlavorLine(s, item, life)); // (beta 16) the sailor's own line for this dish
       momentNoteMeal(s, item);
+      if (item.type === 'snack') snackNoteEaten(s); // (beta 16) the shared snack cooldown starts now
       flushNewLogEntries(s);
     cmdGalley(s);
   }
@@ -18338,12 +18634,12 @@
     if (r.drink === 'coffee') {
       s.crew.lastCoffeeAt = s.meta.voyageMinutes;
       s.crew.coffeeCount = (s.crew.coffeeCount || 0) + 1;
-      log(s, pickVariant(DAILY_COPY.coffee, 'coffee', life));
+      s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // (beta 16) a small lift, like tea's
     } else {
       statAdd(s, 'teas', 1);
       s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet, as it always was
-      log(s, pickVariant(DAILY_COPY.tea, 'tea', life));
     }
+    log(s, cookAfterLine(r) || pickVariant(DAILY_COPY[r.drink === 'coffee' ? 'coffee' : 'tea'], r.drink, life));
     flushNewLogEntries(s);
     cmdGalley(s);
   }
@@ -18352,7 +18648,9 @@
     if (r === undefined) { state.cooking = null; return; } // an older save: nothing on the stove
     if (r === null) return;
     var ok = r && typeof r === 'object' && typeof r.name === 'string' && isFinite(r.startedAt) && isFinite(r.doneAt) && isFinite(r.durationSec) && (r.kind === 'meal' || r.kind === 'snack' || r.kind === 'drink') && COOK_FILES[r.prepKey];
-    if (!ok) state.cooking = null;
+    if (!ok) { state.cooking = null; return; }
+    if (r.fetched) { r.fetched = false; r.status = 'ready'; } // (an early beta kept a 'fetched' step: it is simply ready now)
+    delete r.fetched;
   }
 
   // WHERE THE SAILOR IS, for the volume. Each room command records its room; with no menu open on the below-deck list the sailor is in the passage ('hub'); asleep, in the bunk; above deck, silence.
@@ -18486,12 +18784,15 @@
       return;
     }
 
+    var cdLine = (item.type === 'snack' || item.type === 'chocolate') ? snackCooldownLine(state) : null; // (beta 16) the shared snack cooldown: nothing is used, nothing is awarded
+    if (cdLine) { printBlank(); printLine(cdLine); state.pendingChoice = eatSubmenuPendingChoice(state, item); return; }
     if (item.type === 'chocolate') {
       var doEatChocolate = function (s) {
         s.food[key] -= 1;
         var gain = chocolateMoraleGain(s);
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         s.crew.lastChocolateAt = s.meta.voyageMinutes;
+        snackNoteEaten(s); // (beta 16)
         log(s, eatChocolateLine(s));
         flushNewLogEntries(s);
         cmdGalley(s);
@@ -18559,12 +18860,14 @@
     // OPENING); every MEAL and a held fish (neither ever in that map)
     // reads "PREPARING X".
     var cookSpec = cookSpecFor(item, isHeldFish);
+    if (cookSpec && item.type === 'snack' && snackCooldownLine(state)) { cmdGalley(state); printLine(snackCooldownLine(state)); return; } // (beta 16) the shared 30-minute snack cooldown: nothing is started, nothing is used
+    if (cookSpec && cookHeavySea(state)) { printBlank(); printLine('Too rough to use the stove.'); state.pendingChoice = eatSubmenuPendingChoice(state, item); return; } // (beta 16) heavy seas: nothing is started
     if (cookSpec && state.cooking) { cookBusyLine(state); state.pendingChoice = eatSubmenuPendingChoice(state, item); return; } // (beta 15) one preparation at a time (after every existing gate: those speak first)
     if (cookSpec) { // (beta 15) COOKING: the ingredients go in once, the food is ready when its sound would have ended, then FETCH, then EAT
       cookBegin(state, {
         kind: item.type === 'meal' ? 'meal' : 'snack', key: key, name: item.name, held: isHeldFish, drink: null,
         label: SNACK_ACTION_LABEL[item.name] || ('PREPARING ' + item.name.toUpperCase()),
-        heading: SNACK_ACTION_LABEL[item.name] || ('COOKING ' + item.name.toUpperCase()),
+        heading: 'PREPARING ' + item.name.toUpperCase(),
         prepKey: cookSpec.prep, fetchKey: cookSpec.fetch,
         item: { key: item.key, name: item.name, type: item.type, cooked: !!item.cooked, fishName: item.fishName || null },
         commit: function (s) {
@@ -18620,6 +18923,7 @@
       c.morale = clamp(c.morale + moraleGain, 0, 100);
       log(s, eatFlavorLine(s, item, life));
       momentNoteMeal(s, item);
+      if (item.type === 'snack') snackNoteEaten(s); // (beta 16)
       if (usesStove) stoveDraw(s, isHeldFish ? KEROSENE_STOVE_FISH_GAL : item.type === 'meal' ? KEROSENE_STOVE_MEAL_GAL : KEROSENE_STOVE_DRINK_GAL); // the stove burned for this (and, if it was the last, says so after the meal)
       flushNewLogEntries(s);
       cmdGalley(s);
@@ -18740,8 +19044,9 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
+    if (cookHeavySea(state)) { printBlank(); printLine('Too rough to use the stove.'); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 16) heavy seas: nothing is started
     if (state.cooking) { cookBusyLine(state); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 15) one preparation at a time (after every existing gate)
-    cookBegin(state, { // (beta 15) the kettle goes on; the coffee is fetched, then drunk (see cookServeDrink)
+    cookBegin(state, { // (beta 15) the kettle goes on; the coffee is ready, then drunk (see cookServeDrink)
       kind: 'drink', key: 'coffee', name: 'Coffee', drink: 'coffee', held: false, item: null,
       label: 'MAKING COFFEE', heading: 'MAKING COFFEE', prepKey: 'longBoilWater', fetchKey: 'fetchDrink',
       commit: function (s) { s.drinks.coffee -= 1; consumeWater(s, WATER_COFFEE_GAL); stoveDraw(s, KEROSENE_STOVE_DRINK_GAL); },
@@ -18780,8 +19085,9 @@
       state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) };
       return;
     }
+    if (cookHeavySea(state)) { printBlank(); printLine('Too rough to use the stove.'); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 16) heavy seas: nothing is started
     if (state.cooking) { cookBusyLine(state); state.pendingChoice = { id: 'drink-menu', options: drinkMenuOptions(state) }; return; } // (beta 15) one preparation at a time (after every existing gate)
-    cookBegin(state, { // (beta 15) the kettle goes on; the tea is fetched, then drunk (see cookServeDrink)
+    cookBegin(state, { // (beta 15) the kettle goes on; the tea is ready, then drunk (see cookServeDrink)
       kind: 'drink', key: 'tea', name: 'Tea', drink: 'tea', held: false, item: null,
       label: 'MAKING TEA', heading: 'MAKING TEA', prepKey: 'longBoilWater', fetchKey: 'fetchDrink',
       commit: function (s) { s.drinks.tea -= 1; consumeWater(s, WATER_TEA_GAL); stoveDraw(s, KEROSENE_STOVE_DRINK_GAL); },
@@ -18836,6 +19142,7 @@
   function performSashimi(state) {
     var fish = heldCatches(state)[0];
     if (!fish || !fish.sashimi) { printBlank(); printLine("That's already gone.", 'dim'); return; }
+    if (snackCooldownLine(state)) { printBlank(); printLine(snackCooldownLine(state)); return; } // (beta 16) sashimi is a snack: the shared cooldown
     if (needsCabinLight(state)) { blockedByDarkness(state, 'cmd:snacks'); return; } // slicing a fish needs light, like any other preparing below deck; it needs no stove
     runAudioSyncedAction(state, {
       label: 'PREPARING ' + fish.name.toUpperCase() + ' SASHIMI', transientLabel: true,
@@ -18850,6 +19157,7 @@
         bumpClutter(s, 1);
         c.fatigue = clamp(c.fatigue - 1, 0, 100); // a snack's smaller lift
         c.morale = clamp(c.morale + 1, 0, 100);
+        snackNoteEaten(s); // (beta 16)
         log(s, pickVariant(SASHIMI_ENTRIES, 'sashimi', life).replace('[FISH]', fishNameForProse(fish.name)));
         flushNewLogEntries(s);
         cmdGalley(s);
@@ -19052,10 +19360,10 @@
     printBlank();
     printLine('REPAIR — ' + REPAIR_SYSTEM_LABEL[systemKey], 'heading-label');
     var c = state.crew, blockers = repairBlockers(state);
-    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED) printLine('ENERGY: ' + ENERGY_LABELS[ENERGY_EXHAUSTED]);
-    if (isStarving(state)) printLine('HUNGER: ' + HUNGER_LABELS[HUNGER_STARVING]);
-    if (isVeryThirsty(state)) printLine('THIRST: ' + THIRST_LABELS[thirstLevel(c.hoursSinceWater)]);
-    if (isDepleted(state)) printLine('MORALE: ' + moraleLevel(c.morale));
+    if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED) printStatLine('energy', state);
+    if (isStarving(state)) printStatLine('hunger', state);
+    if (isVeryThirsty(state)) printStatLine('thirst', state);
+    if (isDepleted(state)) printStatLine('morale', state);
     if (energyLevel(c.fatigue) === ENERGY_EXHAUSTED && coffeeBoostActive(state)) printLine('COFFEE: ACTIVE');
     var options = [];
     printBlank();
@@ -21376,18 +21684,18 @@
   var FISH_TIER_HINT_POOLS = {
     common: [
       ['There\u2019s weight on the line.', 'Something\u2019s there.', 'A light tug.'],
-      ['It pulls away, then eases.', 'You gain some line.', 'It comes in without much fuss.'],
+      ['It pulls away, then eases.', 'I gain some line.', 'It comes in without much fuss.'],
     ],
     substantial: [
       ['The line pulls harder.', 'Something pushes back.', 'A stronger tug this time.'],
       ['It runs a little, then settles.', 'It\u2019s not coming in easy.', 'Steady resistance.'],
-      ['You gain line, then lose a little back.', 'It fights for a moment.', 'A real pull now.'],
+      ['I gain line, then lose a little back.', 'It fights for a moment.', 'A real pull now.'],
     ],
     big: [
       ['Real weight, right away.', 'This one doesn\u2019t give easily.', 'Something big is pulling back.'],
       ['It runs, and keeps running.', 'The line stays taut.', 'It\u2019s not tiring yet.'],
       ['Whatever it is, it\u2019s strong.', 'The rod bends hard.', 'It\u2019s still fighting.'],
-      ['Slowly, you start to gain line.', 'It gives an inch at a time.', 'The fight is starting to turn.'],
+      ['Slowly, I start to gain line.', 'It gives an inch at a time.', 'The fight is starting to turn.'],
     ],
     trophy: [
       ['Heavy.', 'Heavier than anything so far.'],
@@ -21395,9 +21703,9 @@
       ['Whatever\u2019s down there is big.', 'This is something else.'],
     ],
   };
-  var FISH_GLIMPSE_LINES = ['You catch a glimpse beneath the surface.', 'Something breaks the surface, big.'];
+  var FISH_GLIMPSE_LINES = ['I catch a glimpse beneath the surface.', 'Something breaks the surface, big.'];
   var MARLIN_FLASH_LINES = ['A flash of blue beneath the surface.'];
-  var MARLIN_RARITY_LINES = ['You don\u2019t see many of these this close.', 'Not something you see every voyage.'];
+  var MARLIN_RARITY_LINES = ['I don\u2019t see many of these this close.', 'Not something I see every voyage.'];
 
   // Automatic, no further player input: the weight tier's own hint
   // beats (each followed by its own "..." line), then either an
@@ -21618,7 +21926,7 @@
 
 
     if (state.crew.watchState === 'sleeping') {
-      return [{ label: sleepPastCap(state) ? 'GET UP' : 'WAKE UP', action: 'wake-up' }]; // (the same action, audio and transition either way -- SLEEP CAP)
+      return [{ label: 'GET UP', action: 'wake-up' }]; // (beta 18: always GET UP; the same action, audio and transition either way -- SLEEP CAP)
     }
 
 
@@ -21853,7 +22161,24 @@
   // the click-echo line, and the room's own place in the navigation
   // list -- never the header.
 
+  /* THE SLEEPING SCREEN (beta 18) -- see patches_beta/18_sleep_fade.py.  Dark exactly while watchState is 'sleeping' and GET UP has not been pressed. */
+  var sleepVeilEl = document.getElementById('sleep-veil');
+  var sleepDarkOn = false, sleepWaking = false, sleepVeilFirst = true;
+  function syncSleepDark(state) {
+    if (!sleepVeilEl) return;
+    if (!state || state.crew.watchState !== 'sleeping') sleepWaking = false; // (awake again by any route: the next sleep starts clean)
+    var want = !!state && state.crew.watchState === 'sleeping' && !sleepWaking;
+    if (want === sleepDarkOn && !sleepVeilFirst) return;
+    var instant = sleepVeilFirst && want; // the page has just loaded in the middle of a sleep: dark at once, GET UP showing
+    sleepVeilFirst = false; sleepDarkOn = want;
+    if (instant) sleepVeilEl.style.transition = 'none';
+    document.body.classList.toggle('sleeping-dark', want);
+    if (instant) { void sleepVeilEl.offsetWidth; sleepVeilEl.style.transition = ''; }
+  }
+  function sleepWakeBegins(state) { sleepWaking = true; syncSleepDark(state); } // GET UP pressed: the screen starts coming back now, while the wake-up sound plays
+
   function renderOptions(state) {
+    syncSleepDark(state);
     applyCabinLighting(state);
     applyNaturalLightDimming(state);
     applyTapeLocationAudio(state);
@@ -22053,6 +22378,7 @@
 
   function activityDotsInfo(state) {
     if (state.pendingChoice && state.pendingChoice.id === 'reading') return { active: true, label: 'READING' };
+    if (maintSession && state.pendingChoice && state.pendingChoice.id === 'maintaining') return { active: true, label: 'PERFORMING MAINTENANCE' }; // (beta 19)
     if (sitSession && state.pendingChoice && state.pendingChoice.id === 'sitting') return { active: true, label: 'RELAXING' }; // for the whole of the sitting; the observations appear beneath it
     if (state.crew.watchState === 'sleeping') return { active: true, label: sleepPastCap(state) ? 'LYING DOWN' : 'SLEEPING' }; // (SLEEP CAP: past the cap he is awake in the bunk)
     return { active: false, label: null };
@@ -22257,6 +22583,8 @@
       aftCabinToggle(state, action.slice(11));
     } else if (action === 'perform-maintenance') {
       performMaintenance(state);
+    } else if (action === 'maintenance-stop') {
+      performMaintenanceStop(state);
     } else if (action === 'toggle-autopilot') {
       performAutopilotToggle(state);
     } else if (action === 'toggle-autopilot-nav') {
@@ -22350,8 +22678,7 @@
           printBlank();
           printLine('Left as it was.', 'dim');
           break;
-        case 'cook-fetch': cookFetch(state); break; // (beta 15)
-        case 'cook-eat': cookServe(state); break; // (beta 15)
+        case 'cook-eat': cookEat(state); break; // (beta 16) EAT <FOOD> / DRINK <DRINK>: the plate / pour sound, then the eating
         case 'gps-deck-back': // (beta 14) the GPS opened from the deck: nothing to do, the normal tail draws the above-deck menu
           break;
         case 'commit-clothing':
@@ -22378,6 +22705,7 @@
           // SLEEP CAP: the action's own label replaces the SLEEPING / LYING DOWN dots that were up -- WAKING UP when he is still asleep (WAKE UP), GETTING UP
           // when he has been lying awake past the cap (GET UP). Same audio, same transition, same wakeUp() either way.
           var gettingUp = sleepPastCap(state);
+          sleepWakeBegins(state); // (beta 18) the interface fades back in while the wake-up sound plays
           stopActivityDots();
           runAudioSyncedAction(state, {
             label: gettingUp ? 'GETTING UP' : 'WAKING UP',
@@ -22818,6 +23146,7 @@
     liveTimer = setInterval(function () {
       if (!GAME || introPending) return; // (after a restart the title page's placeholder game is not a voyage: nothing is simulated or saved until BEGIN)
       var ticks = briefingCatchUp(GAME); // same single clock as boot/resume -- see catchUpFromRealTime (the wrapper only adds the CAPTAIN'S BRIEFING's readings)
+      syncSleepDark(GAME); // (beta 18) the sleeping screen follows watchState
       refreshComfortRows(GAME); // a rain shower starting or stopping updates an open CABIN / CHANGE CLOTHES read-out in place
       gpsPowerWatch(GAME); // the GPS goes dark if its (accessory) power is lost while it is open
       marineForecastPowerWatch(GAME); // ... and so does the MARINE FORECAST radio
@@ -23837,6 +24166,10 @@
     if (state.pendingChoice && state.pendingChoice.id === 'snacks-menu') state.pendingChoice.options = buildSnacksOptions(state);
     if (state.pendingChoice && state.pendingChoice.id === 'aft-cabin-menu') { // the AFT CABIN as it is now (its readings are not saved with the menu)
       cmdAftCabin(state);
+      return;
+    }
+    if (state.pendingChoice && state.pendingChoice.id === 'maintaining') { // (beta 19) a maintenance session cannot survive a reload either: the AFT CABIN, with what the last save held
+      state.pendingChoice = null; cmdAftCabin(state);
       return;
     }
     if (state.pendingChoice && state.pendingChoice.id === 'sitting') { // a sit session (its timers, what was on screen) cannot survive a reload
