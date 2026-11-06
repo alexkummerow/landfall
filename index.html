@@ -6954,6 +6954,7 @@
     var m = state.maintenance;
     if (!Number.isFinite(m.progressMs) || m.progressMs < 0) m.progressMs = 0; // (beta 19) the day's maintenance work done so far, in real milliseconds ...
     if (m.progressDay === undefined) m.progressDay = null;                    // ... and the calendar day it belongs to
+    if (!Number.isFinite(m.workAt)) m.workAt = null;                          // (beta 22) the moment the work was last counted, while it is going on; null when it is not
     return m;
   }
   function maintenanceDoneToday(state) { return maintenanceMemory(state).done === voyageDayNumber(state); }
@@ -15010,7 +15011,7 @@
   var MAINT_TOTAL_MS = 20 * 60 * 1000;   // the day's work
   var MAINT_GAP_MS = 15000;              // quiet between one repair recording and the next
   var MAINT_POLL_MS = 1000;
-  var MAINT_STEP_CAP_MS = 5000;          // the most one second of the clock may add (a sleeping phone finishes nothing)
+  // (the work is measured in real time and goes on while the app is minimized or the phone is locked -- like the battery charging with the engine running: the next poll, or the next load, credits all of it)
   var MAINT_WATCHDOG_MS = 90000;         // a recording that has neither ended nor failed by now is stopped and the gap begins
   var MAINT_OBS = [                      // the sailor's own words, by how far along the work is
     { at: 0.00, lines: ["I'd better check everything over."] },
@@ -15067,6 +15068,7 @@
     if (maintSession) { keepScreen(state); return; } // already at work: a repeat does nothing
     var m = maintenanceMemory(state), today = voyageDayNumber(state);
     if (m.progressDay !== today) { m.progressDay = today; m.progressMs = 0; } // a new day: new work
+    m.workAt = Date.now();
     var s = maintSession = { state: state, lastAt: Date.now(), pollTimer: null, progEl: null, obsEl: null, shown: -1, lastSound: null, curEl: null, gapTimer: null, watchdog: null };
     maintDrawScreen(state, s);
     var frac = maintProgressMs(state) / MAINT_TOTAL_MS;
@@ -15082,6 +15084,7 @@
     var s = maintSession;
     if (!s) return;
     maintSession = null;
+    try { maintenanceMemory(s.state).workAt = null; } catch (e) { /* nothing to clear */ }
     if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
     if (s.gapTimer) { clearTimeout(s.gapTimer); s.gapTimer = null; }
     if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
@@ -15094,22 +15097,40 @@
     if (!s) return;
     var st = s.state;
     if (GAME !== st || !st.pendingChoice || st.pendingChoice.id !== 'maintaining') { maintEnd(); return; } // the screen has gone (a restart, the ending, a rescue)
-    var now = Date.now(), dt = Math.max(0, Math.min(now - s.lastAt, MAINT_STEP_CAP_MS));
+    var now = Date.now(), dt = Math.max(0, Math.min(now - s.lastAt, MAINT_TOTAL_MS)); // (beta 22) every real millisecond since the last count, away or not
     s.lastAt = now;
+    var m = maintenanceMemory(st);
+    m.progressDay = voyageDayNumber(st);
+    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + dt);
+    m.workAt = now;
+    var frac = m.progressMs / MAINT_TOTAL_MS;
+    if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
     if (needsCabinLight(st)) { // the lights went out in the dark: the work stops where it is
       maintEnd();
       log(st, "Too dark to see what I'm doing."); flushNewLogEntries(st);
       st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
       return;
     }
-    var m = maintenanceMemory(st);
-    m.progressDay = voyageDayNumber(st);
-    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + dt);
-    var frac = m.progressMs / MAINT_TOTAL_MS;
-    if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
     if (s.progEl) s.progEl.textContent = Math.floor(frac * 100) + '%';
     var idx = maintObsIndex(frac);
     if (idx > s.shown) { s.shown = idx; var lines = MAINT_OBS[idx].lines; maintShowObservation(s, lines.length > 1 ? pickVariant(lines, 'maintObs') : lines[0]); }
+  }
+
+  // (beta 22) A page that was closed while the work was going on (iPhone Safari does this to a page left in the background): at the next load every real
+  // minute since the work was last counted is credited, and a day's work that finished while away is recorded as done, exactly as if it had run on.
+  function maintCreditAway(state) {
+    var m = maintenanceMemory(state), at = m.workAt;
+    m.workAt = null;
+    if (!Number.isFinite(at)) return;
+    var today = voyageDayNumber(state);
+    if (m.done === today || m.progressDay !== today) return; // today's is done already, or this is another day's work: nothing carries over
+    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + Math.max(0, Math.min(Date.now() - at, MAINT_TOTAL_MS)));
+    if (m.progressMs >= MAINT_TOTAL_MS) {
+      completeMaintenance(state);
+      m.progressMs = 0; m.progressDay = null;
+      if (state.crew.toolsOutSinceMinutes == null) state.crew.toolsOutSinceMinutes = state.meta.voyageMinutes;
+      log(state, "That's the maintenance done for today.");
+    }
   }
 
   function maintFinish(state) {
@@ -15525,7 +15546,7 @@
         { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
         { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
         { h3: 'DAILY MAINTENANCE' },
-        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. Regular maintenance keeps ordinary, unexplained failures away.' },
+        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes, and it carries on if you switch to another app or lock your phone. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. Regular maintenance keeps ordinary, unexplained failures away.' },
         { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
         { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
@@ -24171,7 +24192,8 @@
       cmdAftCabin(state);
       return;
     }
-    if (state.pendingChoice && state.pendingChoice.id === 'maintaining') { // (beta 19) a maintenance session cannot survive a reload either: the AFT CABIN, with what the last save held
+    if (state.pendingChoice && state.pendingChoice.id === 'maintaining') { // (beta 19) a maintenance session cannot survive a reload either: the AFT CABIN, with what the last save held ...
+      maintCreditAway(state); // ... plus (beta 22) the real time that went by while the page was away
       state.pendingChoice = null; cmdAftCabin(state);
       return;
     }
@@ -25424,6 +25446,7 @@
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = introPending ? 0 : briefingCatchUp(GAME);
+      if (maintSession && !introPending) maintPoll(); // (beta 22) the maintenance went on while the app was away: count it now
       if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); aftCabinWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
