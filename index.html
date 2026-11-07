@@ -1301,6 +1301,7 @@
         sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
+        napLiftFor: null,            // (beta 23) the sleepStartedAt whose 30-minute nap has already lifted him out of EXHAUSTED (once per sleep)
         lastSnackAt: null,           // (beta 16) voyageMinutes of the last snack eaten, for the shared 30-minute snack cooldown
         sleepFatigueStart: null,     // (beta 16) fatigue as the sleep began, for the waking line
         sleepSeaStart: null,         // (beta 16) the sea state as the sleep began, for the waking line
@@ -5978,6 +5979,34 @@
   // MORALE AS A FLOOR: DEPLETED (under 20) blocks repairs and the daily maintenance. Nothing else.
   function isDepleted(state) { return moraleLevel(state.crew.morale) === 'DEPLETED'; }
 
+  // (beta 23) How fast an awake sailor tires right now, in fatigue points an hour: the sea, hunger, thirst, carried sleep debt and the cold. updateCrew uses it
+  // every tick, and the nap uses it to leave an exhausted sailor exactly two hours of energy.
+  function awakeFatigueRate(state) {
+    var c = state.crew, w = state.weather;
+    var fatigueRate = 1.6;
+    if (w.seaState >= 4) fatigueRate += 1.0;
+    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_HUNGRY) fatigueRate += 0.4;
+    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
+    if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
+    if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
+    // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
+    // a good night's sleep it reads RESTED in the morning, GOOD by
+    // midday, OKAY through the afternoon, TIRED by evening and VERY
+    // TIRED late at night -- rather than staying "fine" all day.
+    fatigueRate *= FATIGUE_RATE_SCALE;
+    // Carried sleep debt makes energy fall a little faster all day.
+    fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
+    if (coldAwake(state)) fatigueRate *= wearingWetClothes(state) ? COLD_WET_FATIGUE_FACTOR : COLD_FATIGUE_FACTOR;
+    return fatigueRate;
+  }
+  // THE 30-MINUTE NAP: a sailor who got into the bunk EXHAUSTED is lifted out of it once he has slept 30 minutes, whatever the sea, the cold or the sleep curve say.
+  // He is left with two hours of energy at the rate he tires now, and from there it climbs in the ordinary way. Sleeping on keeps restoring him as before.
+  var NAP_LIFT_MINUTES = 30, NAP_ENERGY_HOURS = 2, EXHAUSTED_FATIGUE = 72; // (72 is energyLevel()'s EXHAUSTED line)
+  function napLiftFatigue(state) {
+    var rate = awakeFatigueRate(state);
+    return EXHAUSTED_FATIGUE - NAP_ENERGY_HOURS * (isFinite(rate) && rate > 0 ? rate : 3.2);
+  }
+
   function updateCrew(state) {
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
@@ -6013,6 +6042,11 @@
       if (c.fatigue > SLEEP_FATIGUE_FLOOR) {
         c.fatigue = Math.max(SLEEP_FATIGUE_FLOOR, c.fatigue - sleepEnergyRecoveryPerHour(sessionHours) * qualityFactor * hrs);
       }
+      // (beta 23) the 30-minute nap (cap 720 = he began EXHAUSTED): once, per sleep. The same ticks run for a live sleep and an offline catch-up.
+      if (c.sleepCapMinutes === SLEEP_CAP_EXHAUSTED_MINUTES && c.sleepStartedAt != null && c.napLiftFor !== c.sleepStartedAt && sessionHours * 60 >= NAP_LIFT_MINUTES) {
+        c.napLiftFor = c.sleepStartedAt;
+        c.fatigue = Math.min(c.fatigue, napLiftFatigue(state));
+      }
       // SLEEP DEBT: repaid one hour per hour actually slept -- purely
       // elapsed time, however the sea is behaving -- and floored at
       // zero: it can never go negative, so there is no way to bank
@@ -6024,20 +6058,7 @@
       if (stillRecovering) c.morale = clamp(c.morale + hrs * 1.2 * quality, 0, 100);
       c.hoursSinceRest = 0;
     } else {
-      var fatigueRate = 1.6;
-      if (w.seaState >= 4) fatigueRate += 1.0;
-      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_HUNGRY) fatigueRate += 0.4;
-      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
-      if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
-      if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
-      // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
-      // a good night's sleep it reads RESTED in the morning, GOOD by
-      // midday, OKAY through the afternoon, TIRED by evening and VERY
-      // TIRED late at night -- rather than staying "fine" all day.
-      fatigueRate *= FATIGUE_RATE_SCALE;
-      // Carried sleep debt makes energy fall a little faster all day.
-      fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
-      if (coldAwake(state)) fatigueRate *= wearingWetClothes(state) ? COLD_WET_FATIGUE_FACTOR : COLD_FATIGUE_FACTOR;
+      var fatigueRate = awakeFatigueRate(state);
       if (relaxingNow(state)) {
         // RELAX: nothing builds (no tiredness, sleep debt stands still); energy slowly comes back unless he is cold, and never past GOOD
         if (!coldAwake(state) && c.fatigue > RELAX_FATIGUE_FLOOR) c.fatigue = Math.max(RELAX_FATIGUE_FLOOR, c.fatigue - RELAX_ENERGY_PER_HOUR * hrs);
@@ -15111,6 +15132,12 @@
       st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
       return;
     }
+    if (isExhausted(st)) { // (beta 23) EXHAUSTED: the work stops where it is, and what was done is kept
+      maintEnd();
+      log(st, "I'm too tired to keep working."); flushNewLogEntries(st);
+      st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
+      return;
+    }
     if (s.progEl) s.progEl.textContent = Math.floor(frac * 100) + '%';
     var idx = maintObsIndex(frac);
     if (idx > s.shown) { s.shown = idx; var lines = MAINT_OBS[idx].lines; maintShowObservation(s, lines.length > 1 ? pickVariant(lines, 'maintObs') : lines[0]); }
@@ -15160,6 +15187,11 @@
     if (isDepleted(state)) { // morale is the floor: at DEPLETED he cannot face the work (a walk, a book, a wash, a tape or sleep will bring it back)
       cmdAftCabin(state);
       printLine('TOO DEPLETED TO PERFORM MAINTENANCE.', 'amber');
+      return;
+    }
+    if (isExhausted(state)) { // (beta 23) EXHAUSTED: no repairs, no cooked meals, no maintenance -- a 30-minute nap or a coffee gets him through
+      cmdAftCabin(state);
+      printLine('TOO EXHAUSTED TO PERFORM MAINTENANCE.', 'amber');
       return;
     }
     maintBegin(state); // (beta 19) twenty minutes of work, with STOP -- see MAINTENANCE above
@@ -15504,7 +15536,7 @@
       blocks: [
         { p: 'SOLACE carries 20 gallons of kerosene shared by the heater, stove, and lantern.' },
         { term: 'HEATER', body: 'Controlled from the SALOON. Holds the cabin at 65\u00B0F when it is colder outside. Does not use battery power.' },
-        { term: 'STOVE', body: 'Used for hot meals, coffee, and tea.' },
+        { term: 'STOVE', body: 'Used for hot meals, coffee, and tea. You can cook through sea state 5. At sea state 6 it is too rough to use the stove.' },
         { term: 'LANTERN', body: 'Provides light above and below deck. Extinguish it when no longer needed.' },
         { p: 'Heating uses substantially more kerosene than cooking. Monitor the remaining supply in the AFT CABIN.' },
       ],
@@ -15513,9 +15545,9 @@
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
         { p: 'Your physical condition affects your ability to manage the boat.' },
-        { p: 'EXHAUSTED, you cannot make repairs or cook. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work, except in rough seas. A STARVING sailor can always cook.' },
+        { p: 'EXHAUSTED, you cannot make repairs, cook, or perform maintenance. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work. A STARVING sailor can always cook. A nap of 30 minutes lifts you out of EXHAUSTED, and you have about 2 hours of energy before it comes back.' },
         { p: 'STARVING or VERY THIRSTY, you cannot sleep or make repairs. A sleeping sailor wakes up when STARVING or PARCHED. Eat or drink first.' },
-        { term: 'COFFEE', body: 'Gets you through repairs and cooking while EXHAUSTED for 2 hours. You cannot sleep for those 2 hours. Tea does neither.' },
+        { term: 'COFFEE', body: 'Gets you through repairs, cooking, and maintenance while EXHAUSTED for 2 hours. You cannot sleep for the first hour. Tea does neither.' },
         { p: 'When you are COLD, you tire faster and sleep less well, and a cold sleeper wakes early. Wet clothes make it worse. Warm clothes, dry clothes, and the cabin heater help.' },
         { p: 'MORALE is how well you are looking after yourself and the boat. Reading, music, a wash, chores, a good meal, and time at the bow lift it. Going unwashed, a dirty galley or bunk, wet gear left hanging, rough seas, and living on snacks wear it down. At DEPLETED you cannot make repairs or perform maintenance until it recovers.' },
         { p: 'When you are too HOT, you get thirsty faster. Dress for the temperature: light clothes in the warm, layers in the cold. A T-shirt and shorts suit the warm; pants are too much above about 80\u00B0F.' },
@@ -15546,7 +15578,7 @@
         { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
         { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
         { h3: 'DAILY MAINTENANCE' },
-        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes, and it carries on if you switch to another app or lock your phone. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. Regular maintenance keeps ordinary, unexplained failures away.' },
+        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes, and it carries on if you switch to another app or lock your phone. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. You cannot start it while EXHAUSTED. Regular maintenance keeps ordinary, unexplained failures away.' },
         { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
         { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
@@ -18441,7 +18473,7 @@
   };
   function cookCopyFor(r) { return COOK_COPY[r.held ? 'FISH' : r.name] || null; }
   var COOK_START_PERCENT = 15; // the first words (what was put on) are shown for the first 15%, then the one noticed while it cooks
-  var COOK_DANGEROUS_SEA = 6, COOK_HEAVY_SEA = 5; // seas of 5 and up stop anything being started (as cooking always was); a sea of 6 turns the stove off under unfinished food
+  var COOK_DANGEROUS_SEA = 6, COOK_HEAVY_SEA = 6; // (beta 23) cooking works through sea state 5; a sea of 6 stops anything being started (coffee and tea included) and turns the stove off under unfinished food
   var COOK_INTERRUPT_LINES = ["The boat's rolling too hard. I've got to turn off the stove.", "Damn. There goes dinner."];
   var COOK_ROOM_VOLUME = { galley: 1, saloon: 1, nav: 1, hub: 1, cabin: 0.35, aft: 0.35, head: 0.35, above: 0 }; // the GALLEY, SALOON and NAV STATION (and the passage between them) full; the cabins and the head 35%; above deck silent
   var cookDurations = {}; // prepKey -> seconds, read once from the file's own metadata (this session only; the save keeps the number it used)
@@ -18843,7 +18875,7 @@
       return;
     }
     if (item.cooked) {
-      if (state.weather.seaState >= 5) {
+      if (state.weather.seaState >= COOK_HEAVY_SEA) {
         printBlank();
         printLine('THE BOAT IS MOVING TOO VIOLENTLY', 'amber');
         printLine('TO COOK SAFELY.', 'amber');
@@ -19314,6 +19346,13 @@
   // tired to cook (food is the cure). COFFEE gets an exhausted sailor through the work for 2 hours, and keeps him from sleeping for the same 2 hours (a second
   // coffee starts the 2 hours again); tea does neither. A sleeping sailor wakes by himself when he becomes STARVING or PARCHED (checkNeedsWake).
   var COFFEE_BOOST_MINUTES = 120;
+  var COFFEE_WIRED_MINUTES = 60;          // (beta 23) the energy lasts 2 hours; he is too wired to sleep for the first hour only
+  function coffeeWiredActive(state) {
+    var last = state.crew.lastCoffeeAt;
+    if (last == null) return false;
+    var since = state.meta.voyageMinutes - last;
+    return since >= 0 && since < COFFEE_WIRED_MINUTES;
+  }
   var ROUGH_SEA_STATE = 4;                // the game's ROUGH
 
   function coffeeBoostActive(state) {
@@ -19339,19 +19378,17 @@
   function sleepBlockLine(state) {
     if (isStarving(state)) return 'Too hungry to sleep. I need to eat something.';
     if (isVeryThirsty(state)) return 'Too thirsty to sleep. I need water.';
-    if (coffeeBoostActive(state)) return 'Too wired to sleep. Maybe in a while.';
+    if (coffeeWiredActive(state)) return 'Too wired to sleep. Maybe in a while.';
     return null;
   }
   // Why an exhausted sailor will not make this (null when he will). Meals, popcorn and a fish are cooking; Cup Noodles, tea and coffee are only hot water.
-  var STOVE_SEA_LINE = 'TOO EXHAUSTED TO MANAGE THE STOVE IN THIS SEA.';
+  // (beta 23) the old "too exhausted to manage the stove in a rough sea" rule is gone: exhaustion stops cooking and nothing else about the stove.
   function exhaustedFoodBlock(state, key, item) {
     if (!isExhausted(state) || isStarving(state)) return null; // (food is the cure: a starving sailor always cooks)
-    if (key === 'cupNoodles') return state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
+    if (key === 'cupNoodles') return null;
     return item.cooked ? 'TOO EXHAUSTED TO COOK.' : null;
   }
-  function exhaustedDrinkBlock(state) {
-    return isExhausted(state) && !isStarving(state) && state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
-  }
+  function exhaustedDrinkBlock(state) { return null; }
 
   // A sleeping sailor wakes by himself when hunger reaches STARVING or thirst reaches PARCHED. Run every tick, so a reload or an offline catch-up wakes him at
   // exactly the minute he would have. He keeps the sleep he got (energy and sleep debt are repaid tick by tick) and cannot lie back down until he has eaten or drunk.
@@ -23957,6 +23994,7 @@
       c.hygieneHours = lastWashAt == null ? state.meta.voyageMinutes / 60 : (state.meta.voyageMinutes - lastWashAt) / 60;
     }
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
+    if (c.napLiftFor === undefined) c.napLiftFor = null; // (beta 23)
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
     if (c.snackMealRatio === undefined) c.snackMealRatio = 0;
     if (c.dishesDirtySinceMinutes === undefined) c.dishesDirtySinceMinutes = null;
