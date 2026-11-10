@@ -3883,7 +3883,11 @@
 
   function advanceWeatherEngine(state, forceFallback) {
     var w = state.weather;
-    var env = forceFallback ? { temp: false, sky: false, sea: false, target: null } : realEnvironmentForTick(state, Date.now());
+    // WHILE SOMEONE WAS AWAY: each replayed tick reads the saved forecast at the moment THAT tick stands for (weatherReplayAtMs, set by advanceSimulation) -- not at the moment they came back, and never
+    // a made-up fallback because the saved data is old. After they are back, the same saved forecast is held until the fresh reading arrives (afterAbsence), which then takes over in one step (rwSnapToFresh).
+    var atMs = weatherReplayAtMs != null ? weatherReplayAtMs : Date.now();
+    var saved = weatherReplayAtMs != null || realWeatherRuntime.afterAbsence;
+    var env = forceFallback ? { temp: false, sky: false, sea: false, target: null } : realEnvironmentForTick(state, atMs, saved);
     if (!forceFallback) rwNoteEnvironment(state, env);
 
     // WIND: real wind from the start; no scripted engine exists.
@@ -3894,7 +3898,7 @@
     if (!env.sea) fallbackSeaToLive(state);
     if (!env.temp) fallbackTempToLive(state);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, false);
-    applyActiveWind(state, Date.now()); // real wind in full as soon as it exists; a data failure uses the fallback wind
+    applyActiveWind(state, atMs, saved); // real wind in full as soon as it exists; a data failure uses the fallback wind
     thunderScenarioForceSky(state); // (test scenarios ?scenario=thunderstorm* only; nothing in a normal load)
     sanitizeLiveWeather(state);
     thunderSync(state); // THUNDER + LIGHTNING: begins / ends with the authoritative real sky; the same sky arriving again changes nothing
@@ -3999,7 +4003,7 @@
   var RW_SEA_TIER_UPPER_FT = [1.5, 2.5, 3.5, 7.5, 9.5, 11.5];
 
   // The only non-persisted weather bookkeeping, kept in ONE place.
-  var realWeatherRuntime = { inFlight: false, failures: 0, nextAllowedMs: 0, fetchedThisSession: false, lastAttemptMs: null };
+  var realWeatherRuntime = { inFlight: false, failures: 0, nextAllowedMs: 0, fetchedThisSession: false, lastAttemptMs: null, afterAbsence: false }; // afterAbsence: someone is back after a real absence and the fresh reading has not arrived yet (runtime only, never saved)
 
   function newRealWeatherState() {
     realWeatherRuntime.failures = 0;       // a new game / migrated save starts with a clean retry slate
@@ -4244,6 +4248,24 @@
     if (typeof console !== 'undefined') console.warn('[Landfall real weather] refresh failed (' + kind + '): ' + String((e && e.message) || e).slice(0, 120) + ' -- next attempt in ' + Math.round(cooldown / 60000) + ' min; the game carries on silently.');
   }
 
+  // FRESH DATA AFTER AN ABSENCE: the live temperature, sky, sea and wind take the new reading at once, exactly as they do when the page is reloaded, instead of easing across from the saved forecast
+  // (the easing is for a refresh in the middle of play, where the change is small and gradual). Called only from a refresh that completes after a return (afterAbsence).
+  function rwSnapToFresh(state, nowMs) {
+    try {
+      var rw = state.realWeather;
+      if (!rw) return;
+      var env = realEnvironmentForTick(state, nowMs);
+      if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, true);
+      rwNoteEnvironment(state, env);
+      var h = rw.windHandoff;
+      if (h && h.status === 'real') {
+        var s = rwRealWindSample(state, nowMs);
+        if (s) { h.real = { kt: s.kt, from: s.from }; h.weight = 1; windHandoffStep(state, nowMs); }
+      }
+      sanitizeLiveWeather(state);
+    } catch (e) { console.warn('[Landfall real weather] snapping to the fresh reading failed:', describeError(e)); }
+  }
+
   async function rwRunRefresh(state, lat, lon) {
     try {
       var results = await Promise.all([rwSettle(rwFetchJson(rwForecastUrl(lat, lon))), rwSettle(rwFetchJson(rwMarineUrl(lat, lon)))]);
@@ -4272,6 +4294,7 @@
       realWeatherRuntime.failures = 0;
       realWeatherRuntime.nextAllowedMs = 0;
       realWeatherRuntime.fetchedThisSession = true;
+      if (realWeatherRuntime.afterAbsence) { realWeatherRuntime.afterAbsence = false; if (typeof GAME !== 'undefined' && GAME === state) rwSnapToFresh(state, nowMs); } // fresh data after an absence: straight to it, as a reload does
       rw.status = rwStatusFor(state, realWeatherAssess(state, nowMs)); // set BEFORE the save, so the stored copy is never behind the live one
       if (typeof GAME !== 'undefined' && GAME === state) saveGameState(state);
     } catch (e) {
@@ -4306,10 +4329,20 @@
   }
 
   // ---- freshness: FRESH / STALE-BUT-USABLE / TOO STALE ----
-  function realWeatherAssess(state, nowMs) {
+  // saved = true: the forecast the game saved is used as it stands -- whatever it holds is good for the hours it covers, however long ago it was fetched and however far the boat has
+  // sailed since. Used only to replay time that went by while the player was away (advanceSimulation), and to hold that picture until fresh data arrives after they are back.
+  // Nothing is invented: a saved forecast that does not reach the moment asked for simply keeps its last hour (rwSampleHours).
+  function realWeatherAssess(state, nowMs, saved) {
     var rw = state.realWeather;
     var out = { valid: false, usable: false, fresh: false, ageMs: null, distNm: null, reason: 'no cached data' };
     if (!rw || !rw.current || !rw.forecast || !Array.isArray(rw.forecast.hours) || !rw.forecast.hours.length || !isFinite(rw.fetchedAt) || !rw.position) return out;
+    if (saved) {
+      out.valid = true; out.usable = true; out.reason = 'saved forecast';
+      out.ageMs = Math.max(0, nowMs - rw.fetchedAt);
+      out.distNm = distanceBetween(state.nav.lat, state.nav.lon, rw.position.lat, rw.position.lon);
+      if (!isFinite(out.distNm)) out.distNm = Infinity;
+      return out;
+    }
     out.ageMs = nowMs - rw.fetchedAt;
     // Stamped in the future (the system clock was changed): its age is meaningless, so it is INVALID, not just
     // unusable -- invalid data is always "due", so it is replaced at once instead of waiting for the clock to catch up.
@@ -4406,9 +4439,9 @@
     return h ? h.status : 'protected';  // 'protected' | 'blending' | 'real'
   }
   // The real wind right now, in the game's units, or null if there is no valid, usable real wind (never NaN/empty).
-  function rwRealWindSample(state, nowMs) {
+  function rwRealWindSample(state, nowMs, saved) {
     var rw = state.realWeather;
-    if (!rw || !realWeatherAssess(state, nowMs).usable) return null;
+    if (!rw || !realWeatherAssess(state, nowMs, saved).usable) return null;
     var t = rwTarget(rw, nowMs);
     if (!t || !rwInRange(t.windKt, RW_LIMITS.windKt) || !isFinite(t.windFromDeg)) return null;
     return { kt: clamp(t.windKt, 0, 60), from: normalizeDeg(t.windFromDeg) }; // WIND FROM, 0-359; the provider's direction is never reversed
@@ -4420,12 +4453,12 @@
 
   // Advances the blend to nowMs (by wall-clock time) and writes the ACTIVE wind into the live fields. Called from
   // every engine tick (via applyActiveWind) and, while a blend is running, from its own short real-time timer.
-  function windHandoffStep(state, nowMs) {
+  function windHandoffStep(state, nowMs, saved) {
     var rw = state.realWeather, h = rw && rw.windHandoff, w = state.weather, eng = w.engine;
     if (!h || h.status === 'protected') return false;
     var dtSec = h.updatedAt == null ? 0 : clamp((nowMs - h.updatedAt) / 1000, 0, 86400);
     h.updatedAt = nowMs;
-    var sample = rwRealWindSample(state, nowMs);
+    var sample = rwRealWindSample(state, nowMs, saved);
     if (sample) {
       if (!h.real) h.real = { kt: sample.kt, from: sample.from };
       else { var k = 1 - Math.exp(-dtSec / WIND_SMOOTHING_SECONDS); h.real.kt += (sample.kt - h.real.kt) * k; h.real.from = interpAngleDeg(h.real.from, sample.from, k); }
@@ -4456,32 +4489,32 @@
   // Pacific controlled journeying has begun: start the real-wind handoff NOW if valid real wind exists. Called from the existing
   // Sound-exit crossing (so it starts on that very tick) and, as an idempotent safety net, from every environment tick (old
   // saves, reloads, a crossing that happened while no real wind was available). Returns whether the blend is (now) running.
-  function beginRealWindHandoff(state, nowMs) {
+  function beginRealWindHandoff(state, nowMs, saved) {
     var h = state.realWeather && state.realWeather.windHandoff;
     if (!h) return false;
     if (h.status !== 'protected') return h.status === 'blending';
-    var sample = rwRealWindSample(state, nowMs);
+    var sample = rwRealWindSample(state, nowMs, saved);
     if (!sample) return false;                           // no valid real wind yet: the fallback wind carries on and the data layer keeps retrying
     // The real wind IS the wind, in full, from the moment it exists: no blend, no timer. (A voyage saved mid-blend by an older version still finishes its blend: windHandoffStep.)
     h.status = 'real'; h.startedAt = nowMs; h.updatedAt = nowMs; h.completedAt = nowMs; h.weight = 1; h.real = { kt: sample.kt, from: sample.from };
     windHandoffCompleted(state);
-    windHandoffStep(state, nowMs);                       // writes it to the live wind right now (and releases the fallback wind)
+    windHandoffStep(state, nowMs, saved);                       // writes it to the live wind right now (and releases the fallback wind)
     return true;
   }
 
   // Called at the END of every environment tick. In the opening the corridor wind is the live wind (untouched). From Pacific
   // control: the blend to real wind (or, only if there is no usable real wind, the bounded fallback wind); afterwards real wind is
   // the live wind and nothing scripted writes it.
-  function applyActiveWind(state, nowMs) {
+  function applyActiveWind(state, nowMs, saved) {
     var rw = state.realWeather, h = rw && rw.windHandoff;
     if (!h) return;
     var w = state.weather;
     if (h.status === 'protected') {
-      if (!beginRealWindHandoff(state, nowMs)) fallbackWindToLive(state); // no usable real wind yet: the bounded fallback carries on
+      if (!beginRealWindHandoff(state, nowMs, saved)) fallbackWindToLive(state); // no usable real wind yet: the bounded fallback carries on
     } else if (w.fallback) {
       fallbackWindAdvance(state);                        // the fallback wind exists only while something still needs it
     }
-    windHandoffStep(state, nowMs);
+    windHandoffStep(state, nowMs, saved);
     if (h.status === 'real' && h.weight >= 1) fallbackWindRelease(state); // real wind is in full: nothing scripted is kept
     syncWindHandoffTimer();
   }
@@ -4543,9 +4576,10 @@
     else if (w.seaState > target) { w.seaState--; rw.bridge.seaStepMin = state.meta.voyageMinutes; }
   }
 
-  function rwMarineUsable(state, nowMs) {
+  function rwMarineUsable(state, nowMs, saved) {
     var m = state.realWeather && state.realWeather.marine;
     if (!m || !m.current || !m.position || !isFinite(m.fetchedAt)) return false;
+    if (saved) return true; // (the saved sea is replayed like the rest of the saved forecast)
     var age = nowMs - m.fetchedAt;
     if (age > REAL_WEATHER_STALE_USABLE_MS || age < -REAL_WEATHER_CLOCK_SKEW_MS) return false;
     return distanceBetween(state.nav.lat, state.nav.lon, m.position.lat, m.position.lon) <= REAL_WEATHER_MAX_USABLE_DISTANCE_NM;
@@ -4553,17 +4587,17 @@
 
   // Which environmental groups real data can drive THIS tick -- decided per group, so e.g. missing marine data
   // (inside the Sound) costs only the sea state, never the real temperature and sky.
-  function realEnvironmentForTick(state, nowMs) {
+  function realEnvironmentForTick(state, nowMs, saved) {
     var rw = state.realWeather, env = { temp: false, sky: false, sea: false, target: null };
     if (!rw) return env;
-    var a = realWeatherAssess(state, nowMs);
-    rw.status = rwStatusFor(state, a);
+    var a = realWeatherAssess(state, nowMs, saved);
+    if (!saved) rw.status = rwStatusFor(state, a); // (a replay says nothing about how fresh the data is right now)
     if (a.usable) {
       var t = rwTarget(rw, nowMs);
       env.target = t;
       env.temp = rwInRange(t.tempF, RW_LIMITS.tempF);
       env.sky = rwLegacyCondition(t) != null;
-      env.sea = rwMarineUsable(state, nowMs) && rwInRange(t.waveHeightFt, RW_LIMITS.waveFt);
+      env.sea = rwMarineUsable(state, nowMs, saved) && rwInRange(t.waveHeightFt, RW_LIMITS.waveFt);
     }
     return env;
   }
@@ -4610,10 +4644,19 @@
   function rwClearRealSky(w) { w.sky = null; w.cloudPct = null; w.precipMm = null; w.rainLevel = null; }
 
   // At load: a still-usable saved cache drives the environment immediately (a snap, before the catch-up ticks run).
+  // The moment the live weather is set for at load: now after a quick reload; after a real absence (a minute or more) the moment the player left -- the time away is then replayed from there, tick by tick,
+  // from the forecast the game saved (advanceSimulation / advanceWeatherEngine).
+  function bootWeatherInstant(state) {
+    var now = Date.now(), lt = state && state.meta && state.meta.lastTick;
+    var away = Number.isFinite(lt) && now - lt >= 60000;
+    return { ms: away ? lt : now, saved: away };
+  }
+
   function realWeatherBootSync(state) {
     var rw = state.realWeather;
     if (!rw) return;
-    var env = realEnvironmentForTick(state, Date.now());
+    var bwi = bootWeatherInstant(state);
+    var env = realEnvironmentForTick(state, bwi.ms, bwi.saved);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, true);
     rwNoteEnvironment(state, env);
     sanitizeLiveWeather(state);
@@ -6268,16 +6311,22 @@
   // elapsed time" apart from "the live loop just ran its regular,
   // real-time tick".
   var inCatchUpPass = false;
+  var weatherReplayAtMs = null; // while a long absence is replayed: the real moment the tick being run stands for (null the rest of the time)
 
   function advanceSimulation(state, minutes) {
     var remaining = minutes + (state.meta.leftoverMinutes || 0);
     var ticks = 0;
     state._ambientEventsThisPass = 0; // capped inside checkAmbientEvent — never dumps a backlog after a long absence
-    while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
-      simTick(state);
-      remaining -= TICK_MINUTES;
-      ticks++;
-    }
+    // A replay of time away knows which real moment each tick stands for: the simulation is behind lastTick by the carried fraction of a minute, and each tick is TICK_MINUTES on from there.
+    var replayFromMs = inCatchUpPass ? state.meta.lastTick - (state.meta.leftoverMinutes || 0) * 60000 : NaN, replayCapMs = Date.now();
+    try {
+      while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
+        weatherReplayAtMs = Number.isFinite(replayFromMs) ? Math.min(replayCapMs, replayFromMs + (ticks + 1) * TICK_MINUTES * 60000) : null;
+        simTick(state);
+        remaining -= TICK_MINUTES;
+        ticks++;
+      }
+    } finally { weatherReplayAtMs = null; }
     delete state._ambientEventsThisPass; // transient — never persisted
     state.meta.leftoverMinutes = remaining;
     // Continuous (non-tick) systems: each keeps its own last-synced
@@ -6325,7 +6374,19 @@
     var ticks = advanceSimulation(state, elapsedMinutes);
     inCatchUpPass = false;
     state.meta.lastTick = now;
+    noteAbsenceForWeather(state, elapsedMinutes, now);
     return ticks;
+  }
+
+  // After a real absence (WEATHER_ABSENCE_MINUTES or more) with the saved reading out of date, the first fresh reading to arrive takes the live weather in one step -- see rwSnapToFresh. An ordinary
+  // live-loop catch-up (seconds, or a throttled background minute) never sets this, so a normal refresh in the middle of play keeps easing in exactly as before.
+  var WEATHER_ABSENCE_MINUTES = 10;
+  function noteAbsenceForWeather(state, elapsedMinutes, nowMs) {
+    try {
+      if (!(elapsedMinutes >= WEATHER_ABSENCE_MINUTES) || !state.realWeather) return;
+      var a = realWeatherAssess(state, nowMs);
+      if (a.valid && (a.ageMs >= REAL_WEATHER_REFRESH_MS || a.distNm >= REAL_WEATHER_REFRESH_DISTANCE_NM)) realWeatherRuntime.afterAbsence = true;
+    } catch (e) { /* the weather carries on as it was */ }
   }
 
   // ONE-TIME REALIGNMENT of a save whose game clock fell behind the real
@@ -25684,7 +25745,7 @@ const A_GREY_RAW = {
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
     realWeatherBootSync(GAME); // REAL WEATHER -- usable cached real data drives the ENVIRONMENT right now, before the catch-up ticks run
-    applyActiveWind(GAME, Date.now()); // PHASE 5.1 -- a save at or past Pacific control (including one saved inside the retired learning window) starts / resumes the real-wind handoff AT LOAD, not on the first tick; a corridor save is untouched
+    applyActiveWind(GAME, bootWeatherInstant(GAME).ms, bootWeatherInstant(GAME).saved); // PHASE 5.1 -- a save at or past Pacific control (including one saved inside the retired learning window) starts / resumes the real-wind handoff AT LOAD, not on the first tick; a corridor save is untouched
     syncWindHandoffTimer();    // PHASE 3 -- a blend that was mid-way when the page closed carries straight on
     enforceFavorableDepartureIfNeeded(GAME); // PHASE 7 -- the opening (departure-corridor) WIND, only while still in the corridor. After every migration above, before the catch-up tick simulation below ever runs
     restartBtn.hidden = false;
