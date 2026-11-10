@@ -15092,7 +15092,8 @@
      MAINTENANCE (beta 19) -- see patches_beta/19_maintenance.py
      -------------------------------------------------------------- */
   var MAINT_TOTAL_MS = 20 * 60 * 1000;   // the day's work
-  var MAINT_GAP_MS = 15000;              // quiet between one repair recording and the next
+  var MAINT_GAP_MIN_MS = 10000;          // quiet between one repair recording and the next: a random 10 to 15 seconds
+  var MAINT_GAP_MAX_MS = 15000;
   var MAINT_POLL_MS = 1000;
   // (the work is measured in real time and goes on while the app is minimized or the phone is locked -- like the battery charging with the engine running: the next poll, or the next load, credits all of it)
   var MAINT_WATCHDOG_MS = 30000;         // a recording that has neither ended nor failed by now is stopped and the gap begins (the longest is about 14 seconds)
@@ -15114,10 +15115,56 @@
   }
   function maintPercent(state) { return Math.floor(maintProgressMs(state) / MAINT_TOTAL_MS * 100); }
 
-  function maintStopSound(el) { // fade a recording out and stop it (never leaves one running behind)
+  // ONE audio element plays every maintenance recording, one at a time. It is started from the PERFORM MAINTENANCE tap (which is what lets iPhone Safari start a sound from a
+  // timer afterwards), and each later recording is just another file on that same element -- so two recordings can never sound together, whatever the phone does.
+  var maintAudioEl = null;
+  function getMaintAudioEl() {
+    if (maintAudioEl) return maintAudioEl;
+    var el = createGameAudio(); // (registered with the game's other sounds, so SOUND ON / OFF reaches it)
+    el.loop = false; el.preload = 'auto';
+    maintAudioEl = el;
+    return el;
+  }
+  function maintStopSound(el) { // stop whatever the maintenance element is playing (fading out where the phone allows it)
     if (!el) return;
-    el.onended = null;
+    el.onended = null; el.onerror = null;
     fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) { /* nothing to stop */ } });
+  }
+  // Plays one repair recording on the maintenance element. onEnded when it has played; onFail when it cannot start (one retry after the game's audio recovery first).
+  function playMaintClip(s, systemKey, onEnded, onFail) {
+    onEnded = onceCallback(onEnded); onFail = onceCallback(onFail);
+    var audioKey = REPAIR_AUDIO_KEY[systemKey], el = getMaintAudioEl(), file = NAV_STATION_AUDIO_FILES[audioKey];
+    function attempt(isRetry) {
+      if (maintSession !== s) return; // the work has stopped meanwhile: nothing to start
+      if (!audioUnlocked) {
+        if (isRetry) { console.warn('Maintenance sound could not start (audio never unlocked): ' + audioKey); onFail(); return; }
+        unlockAudio();
+        attempt(true);
+        return;
+      }
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.onended = null; el.onerror = null;
+      try { el.pause(); } catch (e) { /* nothing to stop */ }
+      el.src = file; // the next recording, on the same element
+      el.muted = muted;
+      el.volume = NAV_STATION_AUDIO_VOLUME[audioKey];
+      el.onended = function () { el.onended = null; audioDebugLog('MAINTENANCE AUDIO ENDED: ' + audioKey); onEnded(); };
+      el.onerror = function () { el.onerror = null; el.onended = null; console.warn('Maintenance sound could not load: ' + file); onFail(); };
+      audioDebugLog('MAINTENANCE AUDIO START: ' + audioKey + ' muted=' + muted);
+      var p = el.play();
+      if (p && p.then) {
+        p.then(function () {}, function (e) {
+          if (maintSession !== s) return;
+          el.onended = null; el.onerror = null;
+          console.warn('MAINTENANCE AUDIO PLAY FAILED: audioKey=' + audioKey + ' error.name=' + (e && e.name) + ' error.message=' + (e && e.message));
+          audioDebugError(audioKey, e);
+          if (isRetry) { onFail(); return; }
+          recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
+        });
+      }
+    }
+    attempt(false);
+    return el;
   }
   function maintAudioNext(s) {
     if (maintSession !== s) return;
@@ -15132,13 +15179,14 @@
       s.afterSound = null;
       if (maintSession !== s) return;
       s.curEl = null;
-      s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, MAINT_GAP_MS); // 15 seconds of quiet, then another
+      var gap = MAINT_GAP_MIN_MS + Math.random() * (MAINT_GAP_MAX_MS - MAINT_GAP_MIN_MS); // 10 to 15 seconds of quiet, then another (any of the four, never the same one twice running)
+      s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, gap);
     }
     s.afterSound = afterSound; s.clipAt = Date.now();
     // Every way a recording can end is covered, so the chain of them never stops: it ends by itself (afterSound), it cannot start (the 3rd argument: on to the next
     // one after the gap), it throws (caught here), it ends without the browser saying so (maintAudioCheck, once a second, below), or it hangs (the watchdog).
     try {
-      s.curEl = playRepairAudio(key, afterSound, afterSound);
+      s.curEl = playMaintClip(s, key, afterSound, afterSound);
     } catch (e) {
       console.warn('Maintenance sound could not start (' + key + '):', describeError(e));
       s.curEl = null; afterSound(); return;
@@ -15152,22 +15200,6 @@
     try {
       if (el.ended || (el.paused && isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.05)) done();
     } catch (e) { /* nothing to check */ }
-  }
-  // iPhone Safari lets a sound start by itself (from a timer) only on a media element that has been played from a tap at least once. The first recording starts from the
-  // PERFORM MAINTENANCE tap; the other three are started and stopped here, silently, inside the same tap, so each later recording in the twenty minutes can start on its own.
-  function maintPrimeClips(exceptKey) {
-    BOAT_FAIL_SYSTEMS.forEach(function (k) {
-      if (k === exceptKey) return;
-      try {
-        var el = getNavStationAudioEl(REPAIR_AUDIO_KEY[k]);
-        if (el._maintPrimed || !el.paused) return;
-        el._maintPrimed = true;
-        el.muted = true;
-        var back = function () { try { el.pause(); el.currentTime = 0; } catch (e) { /* nothing to rewind */ } el.muted = muted; };
-        var p = el.play();
-        if (p && typeof p.then === 'function') p.then(back, function () { el._maintPrimed = false; el.muted = muted; }); else back();
-      } catch (e) { /* the recording will try again on its own when its turn comes */ }
-    });
   }
 
   function maintDrawScreen(state, s) {
@@ -15193,7 +15225,6 @@
     state.pendingChoice = { id: 'maintaining', options: [{ label: 'STOP', action: 'maintenance-stop' }] }; // handleAction's tail renders it (and the PERFORMING MAINTENANCE dots)
     s.pollTimer = setInterval(maintPoll, MAINT_POLL_MS);
     maintAudioNext(s);
-    maintPrimeClips(s.lastSound);
   }
 
   // Ends the work: the poll, the recordings, the gap timer. Idempotent. What was done is already in the maintenance memory.
