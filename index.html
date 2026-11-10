@@ -7486,6 +7486,7 @@
         evening: (phase === 'sunset' || phase === 'dusk') && hour >= 16 && hour < 23,
         toEvening: ((phase === 'lateAfternoon' && snap.minutesToSunset != null && snap.minutesToSunset <= 120) || phase === 'sunset' || phase === 'dusk') && hour >= 15 && hour < 23,
         night: phase === 'night' && (hour >= 19 || hour < 6),
+        lateDay: (phase === 'sunset' || phase === 'dusk' || phase === 'night') && hour >= 17 && hour < 24, // the day is over (5 pm to midnight on the clock, and the light gone): for lines that look back on a whole day
         dawn: phase === 'dawn' && hour >= 3 && hour < 10,
         afterNight: (phase === 'dawn' || phase === 'sunrise') && hour >= 3 && hour < 11,
         sunset: phase === 'sunset',
@@ -7617,7 +7618,7 @@
     { id: 'ocean-first-swell', once: true, text: 'Long swells today. Solace climbed them one at a time.', when: function (c) { return c.open && c.st.swell >= 60; } },
     { id: 'ocean-first-good-wind', once: true, text: 'Good wind all day. For once I mostly left things alone.', when: function (c) { return c.open && c.st.goodWind >= 480; } },
     { id: 'ocean-first-high-mileage', once: true, tod: 'sunset', text: 'Covered a lot of water today. It felt good to see the number.', when: function (c) { return c.open && c.distToday >= 120; } },
-    { id: 'ocean-poor-mileage', cd: 2880, tod: 'toEvening', text: "Didn't get very far today. The ocean didn't seem concerned.", when: function (c, m) { return c.open && c.distToday <= 45 && m.dist.length >= 2; } },
+    { id: 'ocean-poor-mileage', cd: 2880, tod: 'lateDay', text: "Didn't get very far today. The ocean didn't seem concerned.", when: function (c, m) { return c.open && c.distToday <= 45 && m.dist.length >= 2 && m.day.lightMin >= 360; } }, // (a long day with little to show for it: the evening, after six hours or more of daylight at sea)
     // ---- GENERAL OPEN-PACIFIC WEATHER ----
     { id: 'clear-morning', tod: 'morning', p: 0.35, cd: 4320, text: 'Clear this morning. Nothing between here and the horizon.', when: function (c) { return c.open && c.st.clear >= 60; } },
     { id: 'clear-afternoon', tod: 'afternoon', p: 0.3, cd: 4320, text: 'Blue in every direction today.', when: function (c) { return c.open && c.st.clear >= 90; } },
@@ -13699,7 +13700,7 @@
      the SITTING A WHILE indicator, which stays on screen for as long as she sits.
      WHEN one appears:
        - the first, SIT_FIRST_MS (10 s) after she sits down: chosen from the world AS IT IS THEN, never decided in advance;
-       - the next, SIT_SECOND_MS (3 min) after that, and then about every SIT_REPEAT_MS (5 min, give or take SIT_REPEAT_JITTER_MS), each replacing the last;
+       - the next, SIT_SECOND_MS (45 s) after that, and then about every SIT_REPEAT_MS (90 s, give or take SIT_REPEAT_JITTER_MS), each replacing the last;
        - and whenever the authoritative daylight PHASE (getDaylightPhase) or the WEATHER category (skyDisplayLabel, the header's own word) changes. Changes that
          land close together are coalesced: the first starts a SIT_COALESCE_MS window and ONE observation follows it, picked from the newest complete state.
        A change during the first 10 seconds does nothing extra: the first observation simply reads whatever is true when it arrives.
@@ -13871,9 +13872,9 @@
   ];
 
   var SIT_FIRST_MS = 10 * 1000;
-  var SIT_SECOND_MS = 3 * 60 * 1000;
-  var SIT_REPEAT_MS = 5 * 60 * 1000;
-  var SIT_REPEAT_JITTER_MS = 30 * 1000; // "about every 5 minutes": 4:30 to 5:30
+  var SIT_SECOND_MS = 45 * 1000;
+  var SIT_REPEAT_MS = 90 * 1000;
+  var SIT_REPEAT_JITTER_MS = 20 * 1000; // "about every minute and a half": 1:10 to 1:50
   var SIT_COALESCE_MS = 30 * 1000;      // changes noticed inside this window of the first one become a single observation
   var SIT_POLL_MS = 1000;               // how often the session looks at the clock and the world; it does nothing unless something is due or changed
   var SIT_COFFEE_RECENT_MIN = 45;       // game minutes: coffee "recently made"
@@ -15094,7 +15095,7 @@
   var MAINT_GAP_MS = 15000;              // quiet between one repair recording and the next
   var MAINT_POLL_MS = 1000;
   // (the work is measured in real time and goes on while the app is minimized or the phone is locked -- like the battery charging with the engine running: the next poll, or the next load, credits all of it)
-  var MAINT_WATCHDOG_MS = 90000;         // a recording that has neither ended nor failed by now is stopped and the gap begins
+  var MAINT_WATCHDOG_MS = 30000;         // a recording that has neither ended nor failed by now is stopped and the gap begins (the longest is about 14 seconds)
   var MAINT_OBS = [                      // the sailor's own words, by how far along the work is
     { at: 0.00, lines: ["I'd better check everything over."] },
     { at: 0.20, lines: ['Checking the engine.'] },
@@ -15128,12 +15129,45 @@
       if (settled) return;
       settled = true;
       if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
+      s.afterSound = null;
       if (maintSession !== s) return;
       s.curEl = null;
       s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, MAINT_GAP_MS); // 15 seconds of quiet, then another
     }
-    s.curEl = playRepairAudio(key, afterSound);
+    s.afterSound = afterSound; s.clipAt = Date.now();
+    // Every way a recording can end is covered, so the chain of them never stops: it ends by itself (afterSound), it cannot start (the 3rd argument: on to the next
+    // one after the gap), it throws (caught here), it ends without the browser saying so (maintAudioCheck, once a second, below), or it hangs (the watchdog).
+    try {
+      s.curEl = playRepairAudio(key, afterSound, afterSound);
+    } catch (e) {
+      console.warn('Maintenance sound could not start (' + key + '):', describeError(e));
+      s.curEl = null; afterSound(); return;
+    }
     s.watchdog = setTimeout(function () { s.watchdog = null; if (maintSession !== s || settled) return; maintStopSound(s.curEl); afterSound(); }, MAINT_WATCHDOG_MS);
+  }
+  // Once a second (from maintPoll): a recording that has played to its end but never reported it (iPhone Safari sometimes does not send 'ended') counts as finished.
+  function maintAudioCheck(s) {
+    var el = s.curEl, done = s.afterSound;
+    if (!el || !done || Date.now() - s.clipAt < 2000) return;
+    try {
+      if (el.ended || (el.paused && isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.05)) done();
+    } catch (e) { /* nothing to check */ }
+  }
+  // iPhone Safari lets a sound start by itself (from a timer) only on a media element that has been played from a tap at least once. The first recording starts from the
+  // PERFORM MAINTENANCE tap; the other three are started and stopped here, silently, inside the same tap, so each later recording in the twenty minutes can start on its own.
+  function maintPrimeClips(exceptKey) {
+    BOAT_FAIL_SYSTEMS.forEach(function (k) {
+      if (k === exceptKey) return;
+      try {
+        var el = getNavStationAudioEl(REPAIR_AUDIO_KEY[k]);
+        if (el._maintPrimed || !el.paused) return;
+        el._maintPrimed = true;
+        el.muted = true;
+        var back = function () { try { el.pause(); el.currentTime = 0; } catch (e) { /* nothing to rewind */ } el.muted = muted; };
+        var p = el.play();
+        if (p && typeof p.then === 'function') p.then(back, function () { el._maintPrimed = false; el.muted = muted; }); else back();
+      } catch (e) { /* the recording will try again on its own when its turn comes */ }
+    });
   }
 
   function maintDrawScreen(state, s) {
@@ -15159,6 +15193,7 @@
     state.pendingChoice = { id: 'maintaining', options: [{ label: 'STOP', action: 'maintenance-stop' }] }; // handleAction's tail renders it (and the PERFORMING MAINTENANCE dots)
     s.pollTimer = setInterval(maintPoll, MAINT_POLL_MS);
     maintAudioNext(s);
+    maintPrimeClips(s.lastSound);
   }
 
   // Ends the work: the poll, the recordings, the gap timer. Idempotent. What was done is already in the maintenance memory.
@@ -15199,6 +15234,7 @@
       st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
       return;
     }
+    maintAudioCheck(s);
     if (s.progEl) s.progEl.textContent = Math.floor(frac * 100) + '%';
     var idx = maintObsIndex(frac);
     if (idx > s.shown) { s.shown = idx; var lines = MAINT_OBS[idx].lines; maintShowObservation(s, lines.length > 1 ? pickVariant(lines, 'maintObs') : lines[0]); }
@@ -16728,7 +16764,7 @@
   var FLEET_DB_URL = 'https://landfall-a5942-default-rtdb.firebaseio.com';          // the database's address -- empty: the whole feature is off
   var FLEET_POST_EVERY_MS = 3 * 60 * 1000;      // how often this boat reports its position
   var FLEET_POLL_EVERY_MS = 60 * 1000;          // how often the fleet is read while the GPS is open
-  var FLEET_HIDE_AFTER_MS = 7 * 24 * 3600 * 1000; // a boat that has not reported for a week is not drawn
+  var FLEET_HIDE_AFTER_MS = 24 * 3600 * 1000;     // a boat that has not reported for a day is not drawn (and not counted): the GPS shows who is out there now
   var FLEET_DIM_AFTER_MS = 2 * 3600 * 1000;     // a boat that has not reported for two hours is drawn dim
   var FLEET_TIMEOUT_MS = 8000;                  // a request that has not answered by then is dropped
   var FLEET_BACKOFF_MAX_MS = 15 * 60 * 1000;    // the longest pause after repeated failures
@@ -16833,7 +16869,7 @@
     } catch (e) { fleet.postBusy = false; }
   }
 
-  // THE READING: whatever the database sent, checked. A boat is kept only with a valid code that is not this one, numbers in range, and a report less than a week old.
+  // THE READING: whatever the database sent, checked. A boat is kept only with a valid code that is not this one, numbers in range, and a report less than a day old.
   function fleetClean(data, now) {
     var out = [], own = fleet.id;
     if (!data || typeof data !== 'object') return out;
@@ -16894,13 +16930,18 @@
     gpsReadoutEl.appendChild(d);
     fleet.rowEl = b;
   }
+  // The boats worth showing right now: those that reported within the last FLEET_HIDE_AFTER_MS. Worked out afresh at every draw, so a list that has been sitting
+  // for a while (the GPS closed, the phone away) never shows or counts a boat that has since gone past a day.
+  function fleetShown(now) {
+    return fleet.boats.filter(function (b) { return now - b.t <= FLEET_HIDE_AFTER_MS; });
+  }
   function fleetRowUpdate() {
     if (!fleet.rowEl) return;
     var code = fleet.id ? fleetCode(fleet.id) : '', txt;
     if (!code) txt = 'NOT SHARING';
     else if (fleet.fails >= 2) txt = 'YOU ' + code + ' · NO CONTACT';
     else if (!fleet.gotList) txt = 'YOU ' + code;
-    else txt = 'YOU ' + code + ' · ' + fleet.boats.length + (fleet.boats.length === 1 ? ' OTHER' : ' OTHERS');
+    else { var nOthers = fleetShown(Date.now()).length; txt = 'YOU ' + code + ' · ' + nOthers + (nOthers === 1 ? ' OTHER' : ' OTHERS'); }
     if (fleet.diag) txt += ' · POST ' + (fleet.lastPost || '-') + ' GET ' + (fleet.lastGet || '-');
     if (fleet.rowEl.textContent !== txt) fleet.rowEl.textContent = txt;
   }
@@ -16921,7 +16962,7 @@
       if (!chartLoaded || !chartMap || typeof maplibregl === 'undefined') return;
       var now = Date.now(), seen = {};
       fleet.lastDrawAt = now;
-      fleet.boats.forEach(function (b) {
+      fleetShown(now).forEach(function (b) {
         seen[b.id] = true;
         var m = fleetMarkers[b.id];
         if (!m) { m = fleetMarkers[b.id] = fleetMakeMarker(); m.marker.setLngLat([b.lon, b.lat]).addTo(chartMap); }
@@ -20996,8 +21037,9 @@
   // watchdog's own generous startupFallbackSeconds ceiling (see
   // runAudioSyncedAction's own notes) already exists to complete the
   // action from, with no duplicate mechanism needed here.
-  function playRepairAudio(systemKey, onEnded) {
+  function playRepairAudio(systemKey, onEnded, onFail) {
     onEnded = onceCallback(onEnded);
+    onFail = onceCallback(onFail); // (PERFORM MAINTENANCE only: told when a recording could not start at all, so its chain moves on; the repairs pass nothing and never hear of it)
     var audioKey = REPAIR_AUDIO_KEY[systemKey];
     var el = getNavStationAudioEl(audioKey);
 
@@ -21007,6 +21049,7 @@
       if (!audioUnlocked) {
         if (isRetry) {
           console.warn('Repair audio could not start (audio never unlocked): ' + audioKey);
+          if (onFail) onFail();
           return; // never call onEnded -- see this function's own notes above
         }
         unlockAudio();
@@ -21017,7 +21060,7 @@
       el.onended = null;
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       if (!el.paused) el.pause();
-      el.currentTime = 0;
+      try { el.currentTime = 0; } catch (e) { /* a recording that has not loaded yet is already at its start */ }
       el.volume = 0;
       el.onended = function () {
         el.onended = null;
@@ -21034,6 +21077,7 @@
           audioDebugError(audioKey, e);
           if (isRetry) {
             console.warn('Repair audio could not start after retry: ' + audioKey);
+            if (onFail) onFail();
             return; // genuinely give up -- never call onEnded; see this function's own notes above
           }
           recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
