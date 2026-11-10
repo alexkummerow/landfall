@@ -24587,20 +24587,20 @@
   // N, E, S, W (and the bow and stern) as small marks along the top of the view
   let FONT = 'monospace';
   function drawCompass(g, W, yb) {
-    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg;
-    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg, TINT = ART.broken ? SCN.ph : A_WHITE, TINTB = ART.broken ? SCN.br : A_WHITE;
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.lineJoin = 'round';
     const cards = [['N', 0], ['E', 90], ['S', 180], ['W', 270]], xs = [];
     cards.forEach(([L, b]) => {
       const x = W / 2 + wrap180(b - vb) * ppd; xs.push(x);
       if (x < 8 || x > W - 8) return;
       const isN = L === 'N';
-      g.strokeStyle = rgba(SCN.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
-      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? SCN.br : SCN.ph, isN ? .95 : .8); g.fillText(L, x, yb);
+      g.strokeStyle = rgba(TINT, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
+      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? TINTB : TINT, isN ? .95 : .8); if (!ART.broken) { g.lineWidth = 2.4; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText(L, x, yb); } g.fillText(L, x, yb);
     });
     { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
       if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
-        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(SCN.ph, .5); g.fillText('BOW', x, yb);
-        g.strokeStyle = rgba(SCN.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(TINT, .5); if (!ART.broken) { g.lineWidth = 2.2; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText('BOW', x, yb); } g.fillText('BOW', x, yb);
+        g.strokeStyle = rgba(TINT, .3); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
       } }
     g.restore();
   }
@@ -24713,7 +24713,7 @@
 
 
   /* the outside world: sky, sun and moon, clouds, rain, sea. Drawn at any size, so the strip above and the porthole below share it. */
-  function drawScene(g, W, H, ts, lw) {
+  function drawSceneLines(g, W, H, ts, lw) {
     LW = lw;
     const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
     const pal = V.loc === 'below' ? OUT : SCN, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
@@ -24877,6 +24877,397 @@
   }
 
 
+  /* ===== THE COLOUR PICTURE (beta 19) -- the outside view's new art: a painted, full-colour sky, land and sea in place of the green line drawing. =====
+     It only DRAWS. It reads the same things the line drawing read (the sun and moon bearings and heights, the cloud cover, rain, fog, squall and sea state, the view bearing,
+     the coast) and writes nothing to the game: no save, no inventory, no clock. If anything in it ever goes wrong it switches itself off and the old line drawing (drawSceneLines,
+     below) takes over for the rest of the session. */
+const A_CLEAR_RAW = {
+    dawn: { sk: ['#2b3a6b', '#6d5b8f', '#d98a8f', '#f7c08a'], se: ['#f0b48a', '#7a7aa0', '#3a4a74', '#1c2a4a'], rock: '#6d6a86', forest: '#2c3552', rim: '#ffd9bf', haze: '#f2b98f', hazeOp: 0.5, cloud: '#ffd7c4', shade: '#b87d92', sun: '#ffe3b0', glint: '#ffe0b0', gull: '#3b3550' },
+    day: { sk: ['#2f6fb5', '#5fa0d6', '#9cccec', '#d9edf6'], se: ['#8cc0d8', '#3d85a9', '#215f84', '#143f5e'], rock: '#7e8ea0', forest: '#2f4a4a', rim: '#e9f2f8', haze: '#cfe5ef', hazeOp: 0.55, cloud: '#ffffff', shade: '#b4c7d8', sun: '#fff3cf', glint: '#fff6dc', gull: '#33404f' },
+    dusk: { sk: ['#1f2756', '#5a3f80', '#d2605a', '#ffb067'], se: ['#f09a62', '#8a5a7e', '#3a3a68', '#1a2145'], rock: '#6a5575', forest: '#2a2744', rim: '#ffc7a0', haze: '#f2a070', hazeOp: 0.5, cloud: '#ffb08a', shade: '#8c4c78', sun: '#ffc27a', glint: '#ffcf8f', gull: '#2a2440' },
+    night: { sk: ['#03050c', '#080f26', '#142245', '#27385f'], se: ['#2b3d63', '#101e3a', '#0a1428', '#050a16'], rock: '#161d33', forest: '#0b1120', rim: '#6e7fa8', haze: '#26365a', hazeOp: 0.5, cloud: '#3a4a70', shade: '#1a2440', sun: '#ffffff', glint: '#d8e4ff', gull: '#0a0f1c' }
+  };
+const A_GREY_RAW = {
+    dawn: { sk: ['#5d6270', '#7f808c', '#a79a9d', '#c8b6b0'], se: ['#b0a09c', '#5f6670', '#3d4650', '#252d36'], rock: '#6c6a78', forest: '#3a4048', rim: '#cdbdbb', haze: '#bfaea8', hazeOp: 0.7, glint: '#d8c8c0' },
+    day: { sk: ['#7d8890', '#9aa4ab', '#b6bec3', '#cdd3d6'], se: ['#8c9da3', '#51666f', '#35474f', '#212f36'], rock: '#7d868d', forest: '#4a5a5c', rim: '#cfd6da', haze: '#c4ccd0', hazeOp: 0.7, glint: '#dfe6e9' },
+    dusk: { sk: ['#3d3f50', '#5e5560', '#8a6f70', '#b58f7e'], se: ['#9a7a70', '#4f4a5c', '#33364a', '#1e2134'], rock: '#5d5568', forest: '#34303f', rim: '#b99a92', haze: '#a98a80', hazeOp: 0.7, glint: '#d6b8a8' },
+    night: { sk: ['#07090e', '#0e1219', '#171d27', '#212a37'], se: ['#2a3442', '#141b26', '#0b111b', '#06090f'], rock: '#141a24', forest: '#0a0e15', rim: '#566275', haze: '#232c3a', hazeOp: 0.7, glint: '#9aa6b8' }
+  };
+  const A_toRaw = o => { const r = {}; for (const k in o) { const v = o[k]; r[k] = Array.isArray(v) ? v.map(hex) : (typeof v === 'string' ? hex(v) : v); } return r; };
+  const A_CLEAR = {}, A_GREY = {};
+  for (const k in A_CLEAR_RAW) A_CLEAR[k] = A_toRaw(A_CLEAR_RAW[k]);
+  for (const k in A_GREY_RAW) { const p = A_toRaw(A_GREY_RAW[k]); p.cloud = p.sk[3]; p.shade = p.sk[1]; p.sun = p.sk[3]; p.gull = p.rock; A_GREY[k] = p; }
+  const A_DARK = hex('#141a20'), A_BLACK = [0, 0, 0], A_WHITE = [255, 255, 255];
+  const pmix = (A, B, t) => { const o = {}; for (const k in A) { const a = A[k], b = B[k]; o[k] = typeof a === 'number' ? lerp(a, b, t) : (Array.isArray(a[0]) ? a.map((c, i) => mix(c, b[i], t)) : mix(a, b, t)); } return o; };
+  const atStops = (stops, t) => { const n = stops.length - 1, x = clamp(t * n, 0, n), i = Math.min(n - 1, Math.floor(x)); return mix(stops[i], stops[i + 1], x - i); };
+  const smooth01 = f => f * f * (3 - 2 * f);
+
+  // the colours of the hour: night, dawn or dusk, day -- blended by the height of the sun, so every minute of the evening has its own sky. Heavy cloud turns it grey; rain darkens it.
+  function artPal() {
+    const e = V.e, dawnW = .5 + .5 * Math.sin(V.sun.az * RAD), gk = GREYK, rk = clamp(cur.rain / .6, 0, 1);
+    const fam = F => {
+      if (e <= -10) return F.night;
+      if (e >= 14) return F.day;
+      const tw = pmix(F.dusk, F.dawn, dawnW);                       // the sun in the east: dawn; in the west: dusk (it blends through north and south, so nothing jumps)
+      if (e < -1) return pmix(F.night, tw, smooth01((e + 10) / 9));
+      if (e <= 3) return tw;
+      return pmix(tw, F.day, smooth01((e - 3) / 11));
+    };
+    let p = fam(A_CLEAR);
+    if (gk > .001) p = pmix(p, fam(A_GREY), gk);
+    p = Object.assign({}, p, { moon: hex('#eef3ff') });
+    if (rk > .001) {
+      const f = .4 * rk;
+      p.sk = p.sk.map(c => mix(c, A_DARK, f)); p.se = p.se.map(c => mix(c, A_DARK, .75 * f));
+      ['rock', 'forest', 'rim', 'haze'].forEach(k => { p[k] = mix(p[k], A_DARK, f); });
+    }
+    return p;
+  }
+
+  // the sea, by sea state 0..6 (the game's own scale): how tall and long the swells are, how fast they go, how the boat rocks
+  const A_SEA = {
+    amp:  [.5, .8, 1.3, 2.0, 3.0, 4.2, 5.0],
+    L:    [150, 150, 146, 140, 134, 128, 124],
+    c:    [2, 3, 4, 5, 6.5, 8, 9],
+    bobA: [.4, .7, 1.0, 1.5, 2.1, 2.8, 3.4],
+    bobT: [10, 9, 8.5, 7.5, 6.8, 6.2, 5.8],
+    roll: [7.8, 7.2, 6.6, 6.0, 5.5, 5.0, 4.6]                          // how long she takes over one swing: seconds, the rougher the sea the quicker
+  };
+  const A_HEAVE = [0, .03, .06, .12, .18, .24, .30];                    // how far the horizon rises and falls from the middle of the frame, as a share of the frame's height (each end of it rolls by the same)
+  const A_YS = [0, .10, .22, .38, .58, .82], A_NL = 6, A_EASE_K = 1.45;
+  const A_PILL_MY = 12, A_PILL_FW = 5;                                  // the porthole: its margin above and below, and the width of its bronze ring
+
+  const ART = { t: 0, tc: 0, dt: 0, key: '', sprites: [], rain: [], lay: null, broken: false, glowX: 0, ovl: null };
+  { const R2 = mulberry(21); ART.lay = Array.from({ length: A_NL }, (_, k) => ({ k, f: (k + 1) / A_NL, ph: R2() * 6.2832, ph2: R2() * 6.2832, ph3: R2() * 6.2832, bobPh: R2() * 6.2832, A1: 0, A2: 0, A3: 0, buf: null })); }
+
+  // one swing: it eases to a full stop at the end of each stroke before it turns, and eases away. No small wiggles ride on top; the variety is in the size and pace drifting slowly.
+  function artSwing(t, T, ph, a, b) {
+    const th = 6.2832 * t / T + ph + .32 * Math.sin(6.2832 * t / (T * 5.3) + a), env = .86 + .14 * Math.sin(6.2832 * t / (T * 3.7) + b);
+    return env * Math.sin(A_EASE_K * Math.sin(th)) / Math.sin(A_EASE_K);
+  }
+  // heave and roll take turns being the bigger one, slowly, so the ends of the horizon stay inside the frame
+  function artCam(frameH, halfW, sea) {
+    const hv = frameH * lerpTable(A_HEAVE, sea);
+    if (V.reduce || !(hv > .05)) return { rot: 0, bob: 0 };
+    const t = ART.tc, T = 4.6, psi = 6.2832 * t / (T * 8.5) + .8 + .5 * Math.sin(6.2832 * t / (T * 23)), mixH = .62 + .38 * Math.cos(psi), mixR = 1.24 - mixH;
+    return { rot: Math.atan2(hv, halfW) * mixR * artSwing(t, T * 1.9, .4, 1.3, .2), bob: hv * mixH * artSwing(t, T * 2.4, 2, 4.1, 2.6) };
+  }
+  function artStep(dt) { // called once a frame, before anything is drawn
+    ART.dt = V.reduce ? 0 : dt;
+    if (V.reduce) return;
+    ART.t += dt; ART.tc += dt * 4.6 / lerpTable(A_SEA.roll, cur.sea);
+  }
+
+  const artMk = (w, h) => { const d = hz.d || 1, c = document.createElement('canvas'); c.width = Math.ceil(w * d); c.height = Math.ceil(h * d); const x = c.getContext('2d'); x.scale(d, d); return { c, x, w, h }; };
+
+  // one cumulus on its own canvas: flat base, lumpy shaded top
+  function artCloudImg(w, h, rnd, col, lx, ly) {
+    const padX = h * 1.2, bw = Math.ceil(w + padX * 2), bh = Math.ceil(h * 2.1), base = bh - 4, o = artMk(bw, bh), x = o.x, puffs = [], n = Math.max(10, Math.round(w / (h * .28)));
+    for (let i = 0; i < n; i++) {
+      const t = (i + .5) / n, env = Math.pow(Math.sin(Math.PI * t), .75), r = h * (.15 + .30 * env) * (.7 + .6 * rnd());
+      puffs.push([bw / 2 - w / 2 + t * w + (rnd() - .5) * r * .6, base - r * (.2 + .55 * rnd()) - h * .24 * env * rnd(), r]);
+    }
+    puffs.slice().sort((a, b) => a[1] - b[1]).slice(0, 5).forEach(p => puffs.push([p[0] + (rnd() - .5) * p[2] * .9, p[1] - p[2] * .55, p[2] * (.5 + .3 * rnd())]));
+    let topY = base; puffs.forEach(p => { if (p[1] - p[2] < topY) topY = p[1] - p[2]; });
+    x.save(); x.beginPath(); x.rect(0, 0, bw, base); x.clip();                                  // 1. the silhouette: soft puffs in one flat tone, cut off flat at the base
+    puffs.forEach(p => { const g = x.createRadialGradient(p[0], p[1], 0, p[0], p[1], p[2] * 1.08); g.addColorStop(0, rgba(col.mid, 1)); g.addColorStop(.7, rgba(col.mid, 1)); g.addColorStop(1, rgba(col.mid, 0)); x.fillStyle = g; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.08, 0, 6.2832); x.fill(); });
+    x.restore();
+    x.globalCompositeOperation = 'source-atop';                                                  // 2. the light: bright on top, shaded toward the flat underside
+    let lg = x.createLinearGradient(0, topY, 0, base);
+    lg.addColorStop(0, rgba(col.lit, 1)); lg.addColorStop(.35, rgba(col.lit, .65)); lg.addColorStop(.7, rgba(col.shade, .5)); lg.addColorStop(1, rgba(col.shade, .85));
+    x.fillStyle = lg; x.fillRect(0, 0, bw, bh);
+    puffs.forEach(p => {                                                                         // 3. each puff catches the light on its sunny side and is darker underneath
+      const hg = x.createRadialGradient(p[0] + lx * p[2] * .4, p[1] + ly * p[2] * .5, 0, p[0] + lx * p[2] * .4, p[1] + ly * p[2] * .5, p[2] * .95);
+      hg.addColorStop(0, rgba(col.lit, .5)); hg.addColorStop(1, rgba(col.lit, 0)); x.fillStyle = hg; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.05, 0, 6.2832); x.fill();
+      const sg = x.createLinearGradient(0, p[1], 0, p[1] + p[2]); sg.addColorStop(0, rgba(col.shade, 0)); sg.addColorStop(1, rgba(col.shade, .3));
+      x.fillStyle = sg; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.05, 0, 6.2832); x.fill();
+    });
+    const bg = x.createLinearGradient(0, base - h * .7, 0, base);                                // 4. the flat, dark underside
+    bg.addColorStop(0, rgba(col.base, 0)); bg.addColorStop(1, rgba(col.base, .6)); x.fillStyle = bg; x.fillRect(0, 0, bw, base);
+    x.globalCompositeOperation = 'source-over';
+    return { c: o.c, w: bw, h: bh, base };
+  }
+  function artCloud(i, P, ls) { // the sprite for the game's cloud number i, built once per colour of the sky (and cached)
+    let sp = ART.sprites[i]; if (sp) return sp;
+    const e = V.e, twf = clamp(1 - Math.abs(e - 1) / 8, 0, 1), night = e < -8, lx = night ? .25 : lerp(.55, .9, twf), ly = lerp(-.9, -.35, twf);
+    const r = mulberry(100 + i * 7), near = CLOUDS[i].y, far = 1 - near;
+    const w = ls * (36 + near * 78) * (.8 + .5 * r()), h = ls * (7 + near * 15) * (.8 + .4 * r());
+    const lit = mix(P.cloud, P.haze, .4 * far), shade = mix(P.shade, P.haze, .3 * far);
+    sp = ART.sprites[i] = artCloudImg(w, h, r, { lit, mid: mix(lit, shade, .4), shade, base: mix(mix(P.shade, P.sk[1], .25), A_BLACK, .12) }, lx, ly);
+    return sp;
+  }
+
+  // the land: the game's own coastline (its bearings and distances), in the picture's colours: one fill, shaded on the side away from the light, one outline, fading into haze with distance
+  function artLand(g, W, y0, m, ppd, vb, P, haze, pxMax) {
+    const Ld = LAND; if (!Ld || !Ld.any || haze < .02) return;
+    const P2 = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step), visKm = V.visKm, SINK = visKm * .74, col = [];
+    for (let q = 0; q <= n; q++) {
+      const x = -m + q * step, bq = (vb + (x - W / 2) / ppd) * 2, i0 = Math.floor(bq), f = bq - i0, a0 = ((i0 % 720) + 720) % 720, a1 = (a0 + 1) % 720, t0 = Ld.top[a0], t1 = Ld.top[a1];
+      if (t0 <= 0 && t1 <= 0) { col.push(null); continue; }
+      const d = Math.min(Ld.dst[a0], Ld.dst[a1]);
+      if (d >= visKm) { col.push(null); continue; }
+      const sink = 1 - Math.pow(clamp((d - SINK) / (visKm - SINK), 0, 1), 2);
+      col.push({ x, d, h: Math.max(1.4, P2(lerp(Math.max(t0, 0), Math.max(t1, 0), f)) * sink) });
+    }
+    const fogMix = clamp((1 - haze) * .9, 0, 1), greyK = P.hazeOp > .6 ? .5 : 1, lightX = ART.glowX;
+    g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+    for (let q = 0; q <= n;) {
+      if (!col[q]) { q++; continue; }
+      let e = q; while (e + 1 <= n && col[e + 1]) e++;
+      if (e > q) {
+        const hh = k => (k === q || k === e) ? 0 : col[k].h; // each run starts and ends at the sea, so an island's ends slope down with no lip
+        let dsum = 0, hmax = 4; for (let k = q; k <= e; k++) { dsum += col[k].d; if (col[k].h > hmax) hmax = col[k].h; }
+        const hz2 = clamp(.06 + .5 * (dsum / (e - q + 1)) / visKm, 0, .6) + fogMix * .5, topY = y0 - hmax, hzc = P.haze;
+        const poly = new Path2D(); poly.moveTo(col[q].x, y0 + 2); for (let k = q; k <= e; k++) poly.lineTo(col[k].x, y0 - hh(k)); poly.lineTo(col[e].x, y0 + 2); poly.closePath();
+        const gr = g.createLinearGradient(0, topY, 0, y0);
+        gr.addColorStop(0, rgb(mix(mix(P.rock, P.rim, .15), hzc, hz2))); gr.addColorStop(.3, rgb(mix(P.rock, hzc, hz2))); gr.addColorStop(.62, rgb(mix(mix(P.rock, P.forest, .6), hzc, hz2)));
+        gr.addColorStop(.88, rgb(mix(P.forest, hzc, hz2 * .6))); gr.addColorStop(1, rgb(mix(P.forest, hzc, hz2 * .6)));
+        g.fillStyle = gr; g.fill(poly);
+        g.save(); g.clip(poly);                                                                  // light and shadow on the slopes
+        const lg = g.createLinearGradient(0, topY, 0, y0), dg = g.createLinearGradient(0, topY, 0, y0), dk = mix(P.forest, A_BLACK, .5);
+        lg.addColorStop(0, rgba(P.rim, 1)); lg.addColorStop(.5, rgba(P.rim, .35)); lg.addColorStop(1, rgba(P.rim, 0));
+        dg.addColorStop(0, rgba(dk, 1)); dg.addColorStop(.5, rgba(dk, .6)); dg.addColorStop(1, rgba(dk, .1));
+        for (let k = q; k < e; k++) {
+          const slope = ((y0 - hh(k + 1)) - (y0 - hh(k))) / step, s = slope * (lightX > col[k].x ? 1 : -1), a = clamp(Math.abs(s) * .9 * 2, 0, 1) * greyK * (1 - fogMix);
+          if (a < .04) continue;
+          g.globalAlpha = a * (s > 0 ? .75 : .85); g.fillStyle = s > 0 ? lg : dg; g.fillRect(col[k].x, topY, step + .3, y0 - topY + 3);
+        }
+        g.globalAlpha = 1; g.restore();
+        g.strokeStyle = rgba(P.rim, .55 * (1 - fogMix * .6)); g.lineWidth = .8; g.beginPath(); g.moveTo(col[q].x, y0 - hh(q));
+        for (let k = q + 1; k <= e; k++) g.lineTo(col[k].x, y0 - hh(k));
+        g.stroke();
+      }
+      q = e + 1;
+    }
+    g.restore();
+  }
+
+  // the sea: six swells from the horizon to the bow, each with three wave trains. Sun and moon glitter sits on the faces of the waves, so it breaks up and moves with them.
+  function artSurf(ly, x, t) {
+    const wob = .55 * Math.sin(6.2832 * x / 380 + t * .23 + ly.k) + .3 * Math.sin(6.2832 * x / 170 - t * .31 + ly.k * 2);
+    const th = 6.2832 * x / ly.L - ly.A1 + ly.ph + wob, th2 = 6.2832 * x / ly.L2 - ly.A2 + ly.ph2 + .4 * Math.sin(6.2832 * x / 260 + t * .4), th3 = 6.2832 * x / ly.L3 - ly.A3 + ly.ph3;
+    const env = 1 + .2 * Math.sin(6.2832 * x / 460 - t * .31 + ly.k * 1.7) + .12 * Math.sin(6.2832 * x / 210 + t * .5 + ly.k);
+    return ly.y0 + ly.bob * Math.sin(6.2832 * t / ly.bobT + ly.bobPh) - ly.amp * env * (Math.cos(th) + .25 * Math.cos(2 * th) + .4 * Math.cos(th2) + .35 * Math.cos(th3));
+  }
+  function artSea(g, W, H, y0, S, port, dir, m, yawPx, P, fogF, glintOp, glowX) {
+    const t = ART.t, dt = ART.dt, sea = cur.sea, grey = P.hazeOp > .6;
+    const amp0 = lerpTable(A_SEA.amp, sea), L0 = lerpTable(A_SEA.L, sea), c0 = lerpTable(A_SEA.c, sea), bob0 = lerpTable(A_SEA.bobA, sea), bobT0 = lerpTable(A_SEA.bobT, sea);
+    const xs = -m, xe = W + m, nPts = Math.floor((xe - xs) / 5) + 1;
+    const hazeCol = mix(P.se[1], mix(P.sk[3], [205, 218, 210], .5), .5 * fogF);
+    for (let k = 0; k < A_NL; k++) {
+      const ly = ART.lay[k], f = ly.f;
+      ly.L = Math.round(L0 * (.45 + .95 * f)); ly.L2 = ly.L * .61; ly.L3 = ly.L * 1.8;
+      ly.amp = amp0 * (.22 + Math.pow(f, 1.2)) * (port ? 1.35 : 1);
+      const sp = c0 * (.45 + f) * (port ? 2.4 : 1);
+      ly.y0 = y0 + S * A_YS[k] + 1; ly.bandH = S * ((k + 1 < A_NL ? A_YS[k + 1] : A_YS[k] + .4) - A_YS[k]);
+      ly.bob = bob0 * (.3 + .14 * k) * (port ? 1.4 : 1); ly.bobT = bobT0 + k * .9;
+      if (dt > 0) { ly.A1 += 6.2832 * dir * sp / ly.L * dt; ly.A2 += 6.2832 * dir * sp * .8 / ly.L2 * dt; ly.A3 += 6.2832 * dir * sp * .5 / ly.L3 * dt; }
+      const vis = 1 - fogF * (1 - clamp((f - .45) / .4, 0, 1)), fillC = mix(mix(atStops(P.se, Math.min(1, A_YS[k] + .1)), A_BLACK, .1 * f), hazeCol, 1 - vis);
+      const reflect = (.34 * (1 - f) + .08) * (grey ? .6 : 1);
+      const gr = g.createLinearGradient(0, ly.y0 - ly.amp * 1.8, 0, ly.y0 + ly.bandH + ly.amp * 1.6);
+      gr.addColorStop(0, rgb(mix(fillC, P.sk[3], reflect * vis))); gr.addColorStop(.35, rgb(fillC)); gr.addColorStop(1, rgb(mix(fillC, A_BLACK, .2 + .03 * sea)));
+      const ys = ly.buf && ly.buf.length === nPts ? ly.buf : (ly.buf = new Float32Array(nPts));
+      for (let i = 0; i < nPts; i++) ys[i] = artSurf(ly, xs + i * 5 + yawPx, t);
+      g.beginPath(); g.moveTo(xs, H + 200); for (let i = 0; i < nPts; i++) g.lineTo(xs + i * 5, ys[i]); g.lineTo(xe, H + 200); g.closePath();
+      g.fillStyle = gr; g.fill();
+      if (glintOp > .02) {                                                                       // sun or moon glitter on the faces of the waves
+        const hw = (5 + 34 * f) * (.9 + .12 * sea), rows = Math.max(2, Math.min(6, Math.round(ly.bandH / 2.3))), gp = [new Path2D(), new Path2D(), new Path2D(), new Path2D()], sparkle = new Path2D();
+        let gany = false; const gap = sea >= 5 ? .6 : (sea >= 3 ? .45 : .35);
+        for (let x = glowX - hw * 1.7; x <= glowX + hw * 1.7; x += 1.7) {
+          const xi = Math.round(x * 3), hj = hash(xi, k + 40), xx2 = x + (hj - .5) * 1.6, w = Math.exp(-Math.pow((xx2 - glowX) / hw, 2));
+          if (w < .08) continue;
+          const y = artSurf(ly, xx2 + yawPx, t), sl3 = (artSurf(ly, xx2 + yawPx + 1.5, t) - y) / 1.5, lit = .4 + .6 * clamp(Math.abs(sl3) * 2.2, 0, 1);
+          for (let r = 0; r < rows; r++) {
+            const hr = hash(xi + r * 977, k + 90);
+            if (hr < gap) continue;
+            const tw = .4 + .6 * Math.sin(t * (2.2 + hr * 3) + hr * 40), ga = glintOp * w * lit * tw * (1 - r / rows * .55) * vis;
+            if (ga < .08) continue;
+            const gb = Math.min(3, Math.floor(ga * 4.2)), yy = y + .8 + r * 2.3 + (hr - .5) * 1.8, len2 = (.2 + .9 * f) * (sea <= 3 ? 1.4 : 1) * (.4 + hr * 1.2);
+            gp[gb].moveTo(xx2 - len2 / 2, yy - sl3 * len2 / 2); gp[gb].lineTo(xx2 + len2 / 2, yy + sl3 * len2 / 2);
+            if (ga > .5 && hr > .7) { sparkle.moveTo(xx2, yy); sparkle.lineTo(xx2 + .01, yy); }
+            gany = true;
+          }
+        }
+        if (gany) {
+          g.lineCap = 'round'; g.lineWidth = .9 + .3 * f;
+          for (let i = 0; i < 4; i++) { g.strokeStyle = rgba(P.glint, .22 + i * .26); g.stroke(gp[i]); }
+          g.lineWidth = 1.3 + .5 * f; g.strokeStyle = rgba(P.glint, .95); g.stroke(sparkle);
+        }
+      }
+    }
+  }
+
+  /* the whole outside world, in colour. Same inputs and the same job as drawSceneLines. */
+  function drawSceneArt(g, W, H, ts, lw) {
+    const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea, e = V.e, below = V.loc === 'below', P = artPal();
+    const y0 = H * .5, m = W * .18 + 30, ppd = W / FOV, vb = viewBearing(), yawPx = vb * ppd;
+    const frameH = below ? H - 2 * A_PILL_MY - 2 * A_PILL_FW : H, halfW = below ? (W * .8 - 2 * A_PILL_FW) / 2 : W / 2;
+    const S = below ? frameH / 2 - 2 : H - y0, ls = below ? .64 : .93, dir = below ? (V.side === 'starboard' ? 1 : -1) : -1, pxMax = y0 - (below ? 15 : 5);
+    const key = [Math.round(e * 2), Math.round((.5 + .5 * Math.sin(V.sun.az * RAD)) * 8), Math.round(GREYK * 10), Math.round(clamp(cur.rain / .6, 0, 1) * 10), below ? 1 : 0, hz.d, W | 0].join('|');
+    if (key !== ART.key) { ART.key = key; ART.sprites = []; }
+    const fogF = clamp(fog / .85, 0, 1), haze = clamp(1 - fogF * 1.15, 0, 1), ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1);
+    const cam = artCam(frameH, halfW, sea);
+    g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'medium';
+    g.translate(W / 2, y0); g.rotate(cam.rot); g.translate(-W / 2, -y0 + cam.bob);              // the whole picture heaves and rolls about the middle of the frame
+    // the sky
+    let gr = g.createLinearGradient(0, -40, 0, y0);
+    gr.addColorStop(0, rgb(P.sk[0])); gr.addColorStop(.38, rgb(P.sk[1])); gr.addColorStop(.72, rgb(P.sk[2])); gr.addColorStop(1, rgb(P.sk[3]));
+    g.fillStyle = gr; g.fillRect(-m, -400, W + 2 * m, y0 + 402);
+    // where the sun and moon are, at their real bearing and height (the same scale up as across)
+    const bodyY = el => y0 - el * ppd, bodyX = az => W / 2 + wrap180(az - vb) * ppd, sunP = V.sun, mnow = V.mn;
+    const sunX = bodyX(sunP.az), moonX = bodyX(mnow.az);
+    ART.glowX = e > -2 ? sunX : moonX;
+    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
+    if (starA > .02) {
+      g.fillStyle = '#f4f7ff';
+      STARS.forEach(s => { const x = W / 2 + wrap180(s.x * 360 - vb) * ppd; if (x < -4 || x > W + 4) return; g.globalAlpha = starA * (.55 + .45 * Math.sin(ART.t * (1.5 + (s.p % 1) * .9) + s.p)); const z = s.r > 1 ? 1.8 : 1.2; g.fillRect(x, s.y * y0, z, z); });
+      g.globalAlpha = 1;
+    }
+    let glintOp = 0, glowX = ART.glowX;
+    g.save(); g.beginPath(); g.rect(-m, -400, W + 2 * m, y0 + 400); g.clip();
+    if (sunP.el > -7 && bodyY(sunP.el) > -40 && Math.abs(wrap180(sunP.az - vb)) < FOV / 2 + 30) {
+      const px = sunX, py = bodyY(sunP.el), twf = clamp(1 - Math.abs(e - 1) / 8, 0, 1), a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA), gl = 44 + 20 * twf;
+      if (a > .01) {
+        const sg = g.createRadialGradient(px, py, 0, px, py, gl); sg.addColorStop(0, rgba(P.sun, .95 * a)); sg.addColorStop(.3, rgba(P.sun, .5 * a)); sg.addColorStop(1, rgba(P.sun, 0));
+        g.fillStyle = sg; g.beginPath(); g.arc(px, py, gl, 0, 6.2832); g.fill();
+        const dg = g.createRadialGradient(px, py, 0, px, py, 7); dg.addColorStop(0, rgba(A_WHITE, a)); dg.addColorStop(.6, rgba(P.sun, a)); dg.addColorStop(1, rgba(mix(P.sun, P.sk[2], .35), a));
+        g.fillStyle = dg; g.beginPath(); g.arc(px, py, 6.6, 0, 6.2832); g.fill();
+        glintOp = a * clamp(e / 6, 0, 1) * (cl < .75 ? 1 : 0) * (.75 + .2 * twf);
+      }
+    }
+    if (mnow.alt > -3 && bodyY(mnow.alt) > -30 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 30) {
+      const px = moonX, py = bodyY(mnow.alt), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+      if (a > .02) {
+        const p = mnow.p, c2 = Math.cos(p * 6.2832), waxing = p < .5, R = 7, lit = moonLit(p);
+        g.save(); g.globalAlpha = a;
+        const hg = g.createRadialGradient(px, py, 0, px, py, 24); hg.addColorStop(0, 'rgba(207,220,255,' + (.1 + .16 * lit).toFixed(3) + ')'); hg.addColorStop(1, 'rgba(207,220,255,0)');
+        g.fillStyle = hg; g.beginPath(); g.arc(px, py, 24, 0, 6.2832); g.fill();
+        g.fillStyle = 'rgba(120,140,180,.16)'; g.beginPath(); g.arc(px, py, R, 0, 6.2832); g.fill();             // the dark side, faintly
+        g.translate(px, py); if (!waxing) g.scale(-1, 1);
+        g.beginPath(); g.moveTo(0, -R); g.arc(0, 0, R, -Math.PI / 2, Math.PI / 2, false); g.ellipse(0, 0, Math.max(.01, Math.abs(c2) * R), R, 0, Math.PI / 2, -Math.PI / 2, c2 > 0); g.closePath();
+        const mg = g.createRadialGradient(-2, -2, .5, 0, 0, R); mg.addColorStop(0, '#ffffff'); mg.addColorStop(.65, '#e8efff'); mg.addColorStop(1, '#b3c3e6');
+        g.fillStyle = mg; g.fill(); g.clip();
+        g.fillStyle = 'rgba(120,140,180,.35)'; g.beginPath(); g.ellipse(-2, -1.4, 1.6, 1.2, 0, 0, 6.2832); g.fill(); g.beginPath(); g.ellipse(2, 2, 1.2, 1, 0, 0, 6.2832); g.fill();
+        g.restore();
+        if (glintOp < .02) glintOp = a * (.25 + .6 * lit) * .9;
+      }
+    }
+    g.restore();
+    // clouds: flat-based cumulus, hidden by fog and by a full overcast (an overcast sky is blank)
+    const nCl = Math.round(cl * 14.4), drift = ART.t * .0022, szc = (1 + cl * .2) * (.65 + .35 * clamp(cl / .4, 0, 1));
+    if (haze * cloudK > .03) {
+      g.globalAlpha = haze * cloudK;
+      CLOUDS.forEach((c, i) => {
+        if (i >= nCl) return;
+        const x = W / 2 + wrap180(((((c.x - drift * c.v) % 1) + 1) % 1) * 360 - vb) * ppd;
+        if (x < -170 || x > W + 170) return;
+        const sp = artCloud(i, P, ls), side = ART.glowX > x ? 1 : -1;
+        g.save(); g.translate(x, y0 - ls * (7 + c.y * 28)); if (side < 0) g.scale(-1, 1); g.scale(szc, szc); g.drawImage(sp.c, -sp.w / 2, -sp.base, sp.w, sp.h); g.restore();
+      });
+      g.globalAlpha = 1;
+    }
+    if (sq > .02) {                                                                              // a squall: a black shelf of cloud, scalloped underneath
+      g.beginPath(); g.moveTo(-m, -400); g.lineTo(W + m, -400); g.lineTo(W + m, 18);
+      for (let x = W + m; x > -m; x -= 16) g.quadraticCurveTo(x - 8, 18 + 9 * Math.sin(x * .13 + ART.t * .6), x - 16, 18);
+      g.closePath(); g.fillStyle = 'rgba(8,12,16,' + (.92 * sq).toFixed(3) + ')'; g.fill(); g.strokeStyle = rgba(P.haze, .35 * sq); g.lineWidth = 1; g.stroke();
+    }
+    // the land, then the haze along the horizon, then the water
+    artLand(g, W, y0, m, ppd, vb, P, haze, pxMax);
+    const hzTop = y0 - 20 * ls, hg2 = g.createLinearGradient(0, hzTop, 0, y0);
+    hg2.addColorStop(0, rgba(P.haze, 0)); hg2.addColorStop(1, rgba(P.haze, P.hazeOp)); g.fillStyle = hg2; g.fillRect(-m, hzTop, W + 2 * m, 20 * ls + 1);
+    const sgr = g.createLinearGradient(0, y0, 0, H + 40);
+    sgr.addColorStop(0, rgb(P.se[0])); sgr.addColorStop(.33, rgb(P.se[1])); sgr.addColorStop(.66, rgb(P.se[2])); sgr.addColorStop(1, rgb(P.se[3]));
+    g.fillStyle = sgr; g.fillRect(-m, y0, W + 2 * m, H + 400 - y0);
+    if (glintOp > .02) {                                                                         // the light lying on the water under the sun or moon
+      g.save(); g.translate(glowX, y0 + 7); g.scale(1, 16 / 70);
+      const eg = g.createRadialGradient(0, 0, 0, 0, 0, 70); eg.addColorStop(0, rgba(P.sun, .9)); eg.addColorStop(.3, rgba(P.sun, .5)); eg.addColorStop(1, rgba(P.sun, 0));
+      g.globalAlpha = Math.min(1, glintOp) * .7; g.fillStyle = eg; g.beginPath(); g.arc(0, 0, 70, 0, 6.2832); g.fill(); g.restore();
+    }
+    artSea(g, W, H, y0, S, below, dir, m, yawPx, P, fogF, Math.min(1, glintOp), glowX);
+    // rain in the air
+    const want = Math.round(clamp(rain, 0, 1) * 260), R = ART.rain;
+    while (R.length < want) { const i = R.length; R.push({ x: -30 + Math.random() * (W + 60), y: -30 + Math.random() * (H + 60), v: i % 2 ? 360 : 470, n: i % 2 }); }
+    if (R.length > want) R.length = want;
+    if (R.length) {
+      const p0 = new Path2D(), p1 = new Path2D(), dt = ART.dt;
+      for (let i = 0; i < R.length; i++) {
+        const r = R[i]; r.y += r.v * dt; r.x -= r.v * .25 * dt;
+        if (r.y > H + 30) { r.y -= H + 60; r.x = -30 + Math.random() * (W + 60); }
+        if (r.x < -30) r.x += W + 60;
+        const pth = r.n ? p1 : p0; pth.moveTo(r.x, r.y); pth.lineTo(r.x - 3, r.y + 12);
+      }
+      const rc = e < -4 ? '#8fa0b8' : '#d7e4ee'; g.lineCap = 'round';
+      g.strokeStyle = rgba(hex(rc), .4); g.lineWidth = .8; g.stroke(p0); g.strokeStyle = rgba(hex(rc), .32); g.lineWidth = .7; g.stroke(p1);
+    }
+    if (fogF > .01) {                                                                            // fog: everything beyond a few boat lengths is the same pale grey
+      const ft = mix(P.sk[3], [205, 218, 210], .5);
+      g.fillStyle = rgba(ft, .17 * fogF); g.fillRect(-m, -400, W + 2 * m, H + 800);
+      const fgr = g.createLinearGradient(0, y0 - 30, 0, y0 + 28); fgr.addColorStop(0, rgba(ft, 0)); fgr.addColorStop(.5, rgba(ft, fog * .3)); fgr.addColorStop(1, rgba(ft, 0)); g.fillStyle = fgr; g.fillRect(-m, y0 - 30, W + 2 * m, 58);
+    }
+    const age = performance.now() - boltT0;
+    if (bolt && boltDist < 2.3 && age < 260) {
+      g.strokeStyle = rgba([220, 235, 255], (1 - age / 260)); g.lineWidth = 1.6 * lw; g.shadowColor = 'rgba(190,215,255,.9)'; g.shadowBlur = 8;
+      g.beginPath(); bolt.forEach((p, i) => i ? g.lineTo(p[0] * W, p[1] * y0) : g.moveTo(p[0] * W, p[1] * y0)); g.stroke(); g.shadowBlur = 0;
+    }
+    g.restore();
+  }
+
+  // the picture, or -- if the new drawing ever fails -- the line drawing it replaced, for the rest of the session
+  function drawScene(g, W, H, ts, lw) {
+    if (!ART.broken) {
+      try { return drawSceneArt(g, W, H, ts, lw); }
+      catch (err) {
+        ART.broken = true; console.warn('[Landfall horizon] the colour picture switched itself off:', err && err.message ? err.message : err);
+        try { hz.cv.width = hz.cv.width; g.setTransform(hz.d, 0, 0, hz.d, 0, 0); if (V.loc === 'below') { winPath(g); g.clip(); } } catch (e2) { /* the next frame starts clean */ }
+      }
+    }
+    return drawSceneLines(g, W, H, ts, lw);
+  }
+
+  // the glass: an inset shadow round the edges (the deck window) and a bronze ring, a shadowed edge and a gleam (the porthole). Built once for a size, then just laid over the picture.
+  function artOverlays(W, H) {
+    const d = hz.d || 1, key = W + 'x' + H + '@' + d;
+    if (ART.ovl && ART.ovl.key === key) return ART.ovl;
+    const o = { key };
+    o.hero = artMk(W, H);
+    { const x = o.hero.x; x.save(); x.beginPath(); x.rect(0, 0, W, H); x.clip(); x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 20 * d; x.fillStyle = '#000';
+      x.beginPath(); x.rect(-80, -80, W + 160, H + 160); x.rect(0, 0, W, H); x.fill('evenodd'); x.restore(); }
+    const pw = W * .8, hh = (H - 2 * A_PILL_MY) / 2, cx = W / 2, cy = H / 2, win = pillOutline(cx, cy, pw / 2 - A_PILL_FW, hh - A_PILL_FW, 20);
+    const wpath = (x, dy) => { x.moveTo(win[0][0], win[0][1] + dy); for (let i = 1; i < win.length; i++) x.lineTo(win[i][0], win[i][1] + dy); x.closePath(); };
+    o.port = artMk(W, H);
+    { const x = o.port.x; x.save(); x.beginPath(); wpath(x, 0); x.clip();
+      x.save(); x.shadowColor = 'rgba(0,0,0,.7)'; x.shadowBlur = 18 * d; x.fillStyle = '#000'; x.beginPath(); x.rect(-80, -80, W + 160, H + 160); wpath(x, 0); x.fill('evenodd'); x.restore();
+      x.fillStyle = 'rgba(255,255,255,.08)'; x.beginPath(); wpath(x, 0); wpath(x, 3); x.fill('evenodd');                      // a thin gleam along the top edge of the glass
+      const L = Math.abs(pw * Math.sin(112 * RAD)) + Math.abs(2 * hh * Math.cos(112 * RAD)), dx = Math.sin(112 * RAD), dy = -Math.cos(112 * RAD);
+      const sg = x.createLinearGradient(cx - dx * L / 2, cy - dy * L / 2, cx + dx * L / 2, cy + dy * L / 2);
+      sg.addColorStop(0, 'rgba(255,255,255,.13)'); sg.addColorStop(.22, 'rgba(255,255,255,.04)'); sg.addColorStop(.34, 'rgba(255,255,255,0)'); x.fillStyle = sg; x.fillRect(0, 0, W, H);
+      x.restore(); }
+    ART.ovl = o; return o;
+  }
+  function artRim(g, W, H) { // the bronze ring round the porthole
+    const o = artOverlays(W, H), top = A_PILL_MY, bot = H - A_PILL_MY;
+    g.lineJoin = 'round'; rimPath(g); g.strokeStyle = '#1c1710'; g.lineWidth = 2; g.stroke();
+    const rg = g.createLinearGradient(0, top, 0, bot); rg.addColorStop(0, '#a99262'); rg.addColorStop(.38, '#5c4d30'); rg.addColorStop(.7, '#3a301d'); rg.addColorStop(1, '#6f5d38');
+    g.beginPath(); RIM.concat(WIN).forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); g.fillStyle = rg; g.fill('evenodd');
+    winPath(g); g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 1; g.stroke();
+    g.drawImage(o.port.c, 0, 0, W, H);
+  }
+  // a drop of water on the inside of the glass: a bead with a darker underside and a bright spot, and a thin wet trail where it has run
+  function artBead(g, b) {
+    if (b.tr.length > 1) {
+      g.lineCap = 'round'; g.lineJoin = 'round';
+      g.strokeStyle = 'rgba(255,255,255,.08)'; g.lineWidth = Math.max(1, b.r * .95); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke();
+      const off = Math.max(.5, b.r * .45); g.strokeStyle = 'rgba(255,255,255,.22)'; g.lineWidth = .5; g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0] - off, p[1]) : g.moveTo(p[0] - off, p[1])); g.lineTo(b.x - off, b.y); g.stroke();
+    }
+    const rx = b.r, ry = b.vy > 4 ? b.r * 1.3 : b.r;
+    g.beginPath(); g.ellipse(b.x, b.y, rx, ry, 0, 0, 6.2832); g.fillStyle = 'rgba(255,255,255,.11)'; g.fill();
+    g.beginPath(); g.ellipse(b.x, b.y + ry * .28, rx * .8, ry * .62, 0, 0, Math.PI); g.fillStyle = 'rgba(0,12,28,.2)'; g.fill();
+    g.beginPath(); g.ellipse(b.x, b.y, rx, ry, 0, 0, 6.2832); g.strokeStyle = 'rgba(255,255,255,.36)'; g.lineWidth = .5; g.stroke();
+    g.beginPath(); g.arc(b.x - rx * .32, b.y - ry * .34, Math.max(.4, rx * .26), 0, 6.2832); g.fillStyle = 'rgba(255,255,255,.62)'; g.fill();
+  }
+
+
   /* ---------- the band under the top bar: the horizon above deck, the porthole below ---------- */
   const pb = [], pspray = [];
   let pAcc = 0, nextPSpray = 3, WIN = [], RIM = [];
@@ -24887,16 +25278,18 @@
   function drawStrip(ts, dt) {
     const { g } = hz; if (!g) return;
     const W = hz.W, H = hz.H;
+    if (!ART.broken) artStep(dt);
     g.clearRect(0, 0, W, H);
     if (V.loc === 'above') {
       g.fillStyle = rgb(SCN.bg); g.fillRect(0, 0, W, H); // the sky has its own dark background: the lit screen behind it never shows through
       drawScene(g, W, H, ts, 1);
+      if (!ART.broken) { try { g.drawImage(artOverlays(W, H).hero.c, 0, 0, W, H); } catch (e3) { ART.broken = true; } }
       drawCompass(g, W, 9);
       return;
     }
     const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors
     // ONE porthole, as wide as the two windows and the gap between them were: 10% edge, 80% window, 10% edge. The rim is the footprint; the glass is a few pixels inside it.
-    const my = 12, top = my, bot = H - my, fw = 3.5; // (the rim is the footprint; the glass is a few pixels inside it)
+    const my = 12, top = my, bot = H - my, fw = ART.broken ? 3.5 : A_PILL_FW; // (the rim is the footprint; the glass is a few pixels inside it)
     const pw = W * .80, hh = (bot - top) / 2, cy0 = H / 2, cx0 = W / 2;
     RIM = [pillOutline(cx0, cy0, pw / 2, hh, 20)];
     WIN = [pillOutline(cx0, cy0, pw / 2 - fw, hh - fw, 20)];
@@ -24926,8 +25319,8 @@
         }
       }
       if (b.y > bot + 3 || b.r < .7 || !inWin(b.x, Math.min(b.y, bot - 1))) { pb.splice(i, 1); continue; }
-      if (b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
-      if (true) streakDrop(g, b, ph, br, .55, .85);
+      if (ART.broken && b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
+      if (!ART.broken) artBead(g, b); else if (true) streakDrop(g, b, ph, br, .55, .85);
       else {
         g.fillStyle = rgba(ph, .1); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
         g.strokeStyle = rgba(ph, .6); g.lineWidth = 1; g.stroke();
@@ -24950,8 +25343,10 @@
     g.restore();
     // the rim and the glass edge: two thin strokes round each window, in the game's own text colour
     g.lineJoin = 'round';
-    rimPath(g); g.strokeStyle = rgba(COL.ph, .85); g.lineWidth = 1.2; g.stroke();
-    winPath(g); g.strokeStyle = rgba(COL.ph, .5); g.lineWidth = 1; g.stroke();
+    if (ART.broken) {
+      rimPath(g); g.strokeStyle = rgba(COL.ph, .85); g.lineWidth = 1.2; g.stroke();
+      winPath(g); g.strokeStyle = rgba(COL.ph, .5); g.lineWidth = 1; g.stroke();
+    } else artRim(g, W, H);
     drawSide(g, W, 9);
   }
 
@@ -25207,7 +25602,7 @@
         fitAll();
       }
       if (!show) return;
-      if (ts - lastDraw < 30) return; // about thirty frames a second: plenty for water, and kinder to a phone's battery
+      if (ts - lastDraw < 14) return; // as many frames as the screen gives, up to about sixty a second: the rocking and the water need it to look smooth
       const dt = Math.min(.1, (ts - lastDraw) / 1000); lastDraw = ts;
       if (ts - sampledAt > 1000) { sampledAt = ts; sample(); fitAll(); }
       if (forced && forced.hdg != null) V.hdg = forced.hdg; else if (GAME.nav && isFinite(GAME.nav.heading)) V.hdg = GAME.nav.heading; // (every frame: when she turns, the view turns smoothly)
