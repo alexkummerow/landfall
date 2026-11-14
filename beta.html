@@ -23614,7 +23614,7 @@
   function renderStartScreen(state) {
     printPersistentLine(DEPARTURE_PORT.toUpperCase(), 'heading-label');
     printPersistentBlank();
-    printPersistentLine('Solace, a 35-foot sailboat, is loaded and tied up at the dock.');
+    printPersistentLine('Solace, ' + caBoatDesc(state) + ', is loaded and tied up at the dock.');
     printPersistentBlank();
     printPersistentLine('You will be sailing alone.');
     caStartScreenLines(state).forEach(function (t) { printPersistentBlank(); printPersistentLine(t); });
@@ -25902,17 +25902,45 @@ const A_GREY_RAW = {
     return jobs.slice(0, 4);
   }
   function caDaysText(nm) { var d = nm / 5 / 24; return d < 0.75 ? 'under a day' : d < 1.5 ? 'about a day' : 'about ' + Math.round(d) + ' days'; } // (at about 5 knots)
-  // ---- upgrades
-  var CA_UPGRADES = [
-    { id: 'sails', name: 'SAILS', what: 'Faster under sail.', lv: [{ price: 700, note: '+8% SPEED UNDER SAIL' }, { price: 1600, note: '+16% SPEED UNDER SAIL' }, { price: 3400, note: '+25% SPEED UNDER SAIL' }] },
-    { id: 'tank', name: 'DIESEL TANK', what: 'More diesel: more range under engine.', lv: [{ price: 450, note: '+15 GAL OF DIESEL' }, { price: 1000, note: '+30 GAL OF DIESEL' }, { price: 2000, note: '+50 GAL OF DIESEL' }] },
-    { id: 'locker', name: 'PROVISIONS LOCKER', what: 'More food and water: go further between ports.', lv: [{ price: 350, note: '+25% FOOD, +15 GAL OF WATER' }, { price: 800, note: '+50% FOOD, +30 GAL OF WATER' }, { price: 1700, note: '+100% FOOD, +60 GAL OF WATER' }] },
+  // ---- boats, upgrades and what she carries
+  // SOLACE starts as a small 35-foot sloop that carries about three and a half days of stores: enough for the longest first run (San Francisco to Santa Barbara) and not much more.
+  // Her RANGE is how far her stores take her (stores x her speed); a run longer than that cannot be taken until a bigger BOAT, a bigger PROVISIONS LOCKER or faster SAILS lifts it.
+  var CA_BOATS = [
+    { name: '35-FT SLOOP', desc: 'a 35-foot sloop', price: 0, speed: 1, stores: 1, diesel: 0, note: '' },
+    { name: '40-FT CUTTER', desc: 'a 40-foot cutter', price: 2400, speed: 1.10, stores: 1.4, diesel: 8, note: '+10% SPEED, 40% MORE STORES, +8 GAL OF DIESEL' },
+    { name: '46-FT KETCH', desc: 'a 46-foot ketch', price: 6000, speed: 1.18, stores: 2, diesel: 16, note: '+18% SPEED, DOUBLE THE STORES, +16 GAL OF DIESEL' },
+    { name: '52-FT OCEAN CRUISER', desc: 'a 52-foot ocean cruiser', price: 12500, speed: 1.25, stores: 3, diesel: 30, note: '+25% SPEED, TRIPLE THE STORES, +30 GAL OF DIESEL' },
   ];
-  var CA_SAIL_BONUS = [0, 0.08, 0.16, 0.25], CA_TANK_GAL = [0, 15, 30, 50], CA_LOCKER_WATER = [0, 15, 30, 60], CA_LOCKER_FOOD = [1, 1.25, 1.5, 2];
+  var CA_UPGRADES = [
+    { id: 'boat', name: 'BOAT', what: 'A bigger boat is faster, carries more and holds more diesel. She keeps the name SOLACE, and your upgrades move across to her.',
+      lv: [{ price: CA_BOATS[1].price, note: CA_BOATS[1].note }, { price: CA_BOATS[2].price, note: CA_BOATS[2].note }, { price: CA_BOATS[3].price, note: CA_BOATS[3].note }] },
+    { id: 'sails', name: 'SAILS', what: 'Faster under sail, so her stores last for more miles.', lv: [{ price: 700, note: '+8% SPEED UNDER SAIL' }, { price: 1600, note: '+16% SPEED UNDER SAIL' }, { price: 3400, note: '+25% SPEED UNDER SAIL' }] },
+    { id: 'tank', name: 'DIESEL TANK', what: 'More diesel: more time under engine.', lv: [{ price: 450, note: '+8 GAL OF DIESEL' }, { price: 1000, note: '+18 GAL OF DIESEL' }, { price: 2000, note: '+33 GAL OF DIESEL' }] },
+    { id: 'locker', name: 'PROVISIONS LOCKER', what: 'More food, water and kerosene: go further between ports.', lv: [{ price: 350, note: '+20% FOOD, WATER AND KEROSENE' }, { price: 800, note: '+40% FOOD, WATER AND KEROSENE' }, { price: 1700, note: '+70% FOOD, WATER AND KEROSENE' }] },
+  ];
+  var CA_SAIL_BONUS = [0, 0.08, 0.16, 0.25], CA_TANK_GAL = [0, 8, 18, 33], CA_LOCKER_STORES = [1, 1.2, 1.4, 1.7], CA_BASE_RANGE_NM = 330;
+  // what the smallest boat carries at the dock (diesel and water in gallons, the food in servings; oats, pancake mix and rice are in cups): about 3.5 days
+  var CA_BASE = { diesel: 12, water: 6, kero: 4, coffee: 6, tea: 6,
+    food: { macCheese: 2, chili: 2, chickenNoodleSoup: 2, oatmeal: 2, pancakes: 1.5, rice: 2, cupNoodles: 3, popcorn: 2, trailMix: 3, energyBar: 3, chocolate: 2 } };
   function caLv(upg, id) { var v = upg && upg[id]; return (v === 1 || v === 2 || v === 3) ? v : 0; }
-  function caSailFactor(state) { var u = state && state.leg && state.leg.upg; return 1 + CA_SAIL_BONUS[caLv(u, 'sails')]; }
+  function caBoatOf(upg) { return CA_BOATS[caLv(upg, 'boat')]; }
+  function caBoatDesc(state) { return caBoatOf((state && state.leg && state.leg.upg) || CAREER.upg).desc; }
+  function caSpeedFactor(upg) { return (1 + CA_SAIL_BONUS[caLv(upg, 'sails')]) * caBoatOf(upg).speed; }
+  function caStoresFactor(upg) { return caBoatOf(upg).stores * CA_LOCKER_STORES[caLv(upg, 'locker')]; }
+  function caRangeNm(upg) { return Math.round(CA_BASE_RANGE_NM * caStoresFactor(upg) * caSpeedFactor(upg) / 10) * 10; }
+  function caSailFactor(state) { return caSpeedFactor(state && state.leg && state.leg.upg); }
+  function caWith(upg, id, lv) { var o = {}; ['boat', 'sails', 'tank', 'locker'].forEach(function (k) { o[k] = caLv(upg, k); }); o[id] = lv; return o; }
+  function caStores(upg) { // everything she starts a run with, from the boat and the upgrades
+    var f = caStoresFactor(upg), S = { diesel: CA_BASE.diesel + caBoatOf(upg).diesel + CA_TANK_GAL[caLv(upg, 'tank')], water: Math.round(CA_BASE.water * f * 8) / 8,
+      kero: Math.round(CA_BASE.kero * f * 10) / 10, coffee: Math.max(1, Math.round(CA_BASE.coffee * f)), tea: Math.max(1, Math.round(CA_BASE.tea * f)), food: {} };
+    Object.keys(CA_BASE.food).forEach(function (k) {
+      var it = FOOD_ITEMS_BY_KEY[k], v = CA_BASE.food[k] * f;
+      S.food[k] = it && it.staple ? Math.max(0.5, Math.round(v * 2) / 2) : Math.max(1, Math.round(v));
+    });
+    return S;
+  }
   // ---- the career record (money, port, upgrades, the job taken): its own key, small and tolerant
-  function caCareerDefault() { return { v: 1, money: 0, port: 'sf', completed: 0, upg: { sails: 0, tank: 0, locker: 0 }, mission: null, lastPaid: null }; }
+  function caCareerDefault() { return { v: 1, money: 0, port: 'sf', completed: 0, upg: { boat: 0, sails: 0, tank: 0, locker: 0 }, mission: null, lastPaid: null }; }
   function caCareerLoad() {
     var c = caCareerDefault();
     try {
@@ -25921,7 +25949,7 @@ const A_GREY_RAW = {
         if (Number.isFinite(o.money) && o.money >= 0) c.money = Math.round(o.money);
         if (CA_PORTS[o.port]) c.port = o.port;
         if (Number.isFinite(o.completed) && o.completed >= 0) c.completed = Math.floor(o.completed);
-        if (o.upg) ['sails', 'tank', 'locker'].forEach(function (k) { c.upg[k] = caLv(o.upg, k); });
+        if (o.upg) ['boat', 'sails', 'tank', 'locker'].forEach(function (k) { c.upg[k] = caLv(o.upg, k); });
         if (o.mission && CA_PORTS[o.mission.from] && CA_PORTS[o.mission.to] && o.mission.from !== o.mission.to && Number.isFinite(o.mission.pay)) c.mission = o.mission;
         if (o.lastPaid != null) c.lastPaid = o.lastPaid;
       }
@@ -25959,8 +25987,9 @@ const A_GREY_RAW = {
     ROUTE_DISTANCE_NM = Math.round(TOTAL_ROUTE_NM);
     MOMENT_TOTAL_NM = TOTAL_ROUTE_NM;
     var u = upg || CAREER.upg;
-    FUEL_STARTING_GALLONS = 30 + CA_TANK_GAL[caLv(u, 'tank')];
-    WATER_STARTING_GALLONS = 60 + CA_LOCKER_WATER[caLv(u, 'locker')];
+    var S0 = caStores(u); // (the totals the inventory shows its counts against)
+    FUEL_STARTING_GALLONS = S0.diesel; WATER_STARTING_GALLONS = S0.water; KEROSENE_STARTING_GALLONS = S0.kero; ORIGINAL_COFFEE = S0.coffee; ORIGINAL_TEA = S0.tea;
+    FOOD_ITEMS.forEach(function (f) { if (S0.food[f.key] != null) f.original = S0.food[f.key]; });
     try { // the chart's destination marker, if the chart is already up
       if (chartDestMarker) {
         chartDestMarker.setLngLat([FINAL_DEST.lon, FINAL_DEST.lat]);
@@ -25972,11 +26001,10 @@ const A_GREY_RAW = {
   function caStampState(state) {
     var m = CAREER.mission && CAREER.mission.from === CA.from && CAREER.mission.to === CA.to ? CAREER.mission : null, U = CAREER.upg;
     state.leg = { from: CA.from, to: CA.to, jobId: m ? m.id : null, cargo: m ? m.cargo : null, nm: m ? m.nm : Math.round(caRouteNm(CA.from, CA.to)), pay: m ? m.pay : 0, paid: false,
-      upg: { sails: caLv(U, 'sails'), tank: caLv(U, 'tank'), locker: caLv(U, 'locker') } };
-    state.boat.fuelGallons = 30 + CA_TANK_GAL[state.leg.upg.tank];
-    state.water.gallons = 60 + CA_LOCKER_WATER[state.leg.upg.locker];
-    var fm = CA_LOCKER_FOOD[state.leg.upg.locker];
-    if (fm !== 1) Object.keys(state.food).forEach(function (k) { state.food[k] = Math.round(state.food[k] * fm); });
+      upg: { boat: caLv(U, 'boat'), sails: caLv(U, 'sails'), tank: caLv(U, 'tank'), locker: caLv(U, 'locker') } };
+    var S = caStores(state.leg.upg);
+    state.boat.fuelGallons = S.diesel; state.water.gallons = S.water; state.boat.keroseneGallons = S.kero; state.drinks.coffee = S.coffee; state.drinks.tea = S.tea;
+    Object.keys(S.food).forEach(function (k) { state.food[k] = S.food[k]; });
   }
   function caBootInit(saved) {
     if (saved && saved.leg && CA_PORTS[saved.leg.from] && CA_PORTS[saved.leg.to]) caSetLeg(saved.leg.from, saved.leg.to, saved.leg.upg);
@@ -26067,12 +26095,13 @@ const A_GREY_RAW = {
     document.body.classList.remove('title-mode');
     printPersistentLine(heading, 'heading-label'); printPersistentBlank();
   }
-  function caUpgradeSummary() { return ['sails', 'tank', 'locker'].map(function (k) { return caLv(CAREER.upg, k); }).join(' · '); }
+  function caUpgradeSummary() { return ['boat', 'sails', 'tank', 'locker'].map(function (k) { return caLv(CAREER.upg, k); }).join(' · '); }
   function caPortMain() {
     var P = CA_PORTS[CAREER.port], M = CAREER.mission;
     caPortFrame(P.name.toUpperCase());
     printPersistentLine('SOLACE is tied up at the dock, ready for her next job.'); printPersistentBlank();
     caRow('MONEY', caMoney(CAREER.money)); caRow('RUNS DELIVERED', String(CAREER.completed));
+    caRow('BOAT', caBoatOf(CAREER.upg).name); caRow('RANGE', 'ABOUT ' + caRangeNm(CAREER.upg) + ' NM');
     caRow('UPGRADES', 'SAILS ' + caLv(CAREER.upg, 'sails') + ' · TANK ' + caLv(CAREER.upg, 'tank') + ' · LOCKER ' + caLv(CAREER.upg, 'locker'), true);
     if (M) {
       printPersistentLine('THE JOB', 'heading-label');
@@ -26087,14 +26116,18 @@ const A_GREY_RAW = {
   function caPortJobs() {
     var P = CA_PORTS[CAREER.port], jobs = caJobsFrom(CAREER.port, CAREER.completed);
     caPortFrame('JOB BOARD — ' + P.name.toUpperCase());
+    var range = caRangeNm(CAREER.upg);
     printPersistentLine('Supplies waiting to be carried by sea. You are paid when they are delivered.'); printPersistentBlank();
+    printPersistentLine('The stores aboard take SOLACE about ' + range + ' NM.', 'dim'); printPersistentBlank();
     jobs.forEach(function (j) {
       printPersistentLine('SUPPLY RUN TO ' + CA_PORTS[j.to].name.toUpperCase(), 'heading-label');
       printPersistentLine(j.cargo.charAt(0).toUpperCase() + j.cargo.slice(1) + '. About ' + j.nm + ' NM, ' + caDaysText(j.nm) + ' at sea. Pays ' + caMoney(j.pay) + '.');
+      if (j.nm > range) printPersistentLine('Too far for the stores aboard. A bigger BOAT, a bigger PROVISIONS LOCKER or faster SAILS would take her there.', 'dim');
       printPersistentBlank();
     });
     if (!(CAREER.completed > 0)) printPersistentLine('Longer runs open up after your first delivery.', 'dim');
     jobs.forEach(function (j) {
+      if (j.nm > range) return;
       caBtn('TAKE THE ' + CA_PORTS[j.to].name.toUpperCase() + ' RUN — ' + caMoney(j.pay), function () { CAREER.mission = j; caCareerSave(); caPortMain(); });
     });
     caBtn('BACK', caPortMain);
@@ -26103,23 +26136,24 @@ const A_GREY_RAW = {
   function caPortShop() {
     caPortFrame('SHOP — ' + CA_PORTS[CAREER.port].name.toUpperCase());
     printPersistentLine('Upgrades stay with SOLACE for every run after you buy them.'); printPersistentBlank();
-    caRow('MONEY', caMoney(CAREER.money), true);
+    caRow('MONEY', caMoney(CAREER.money)); caRow('BOAT', caBoatOf(CAREER.upg).name); caRow('RANGE', 'ABOUT ' + caRangeNm(CAREER.upg) + ' NM', true);
     var buys = [];
     CA_UPGRADES.forEach(function (u) {
       var lv = caLv(CAREER.upg, u.id);
-      printPersistentLine(u.name + ' — LEVEL ' + lv + ' OF 3', 'heading-label');
+      printPersistentLine(u.id === 'boat' ? 'BOAT — ' + CA_BOATS[lv].name : u.name + ' — LEVEL ' + lv + ' OF 3', 'heading-label');
       printPersistentLine(u.what);
-      if (lv >= 3) printPersistentLine('Fully upgraded.', 'dim');
+      if (lv >= 3) printPersistentLine(u.id === 'boat' ? 'The biggest boat there is.' : 'Fully upgraded.', 'dim');
       else {
         var nx = u.lv[lv];
-        printPersistentLine('Next: ' + nx.note + '. ' + caMoney(nx.price) + '.' + (CAREER.money < nx.price ? ' (Need ' + caMoney(nx.price - CAREER.money) + ' more.)' : ''), CAREER.money < nx.price ? 'dim' : '');
+        var rng = u.id === 'tank' ? '' : ' RANGE THEN ABOUT ' + caRangeNm(caWith(CAREER.upg, u.id, lv + 1)) + ' NM.';
+        printPersistentLine((u.id === 'boat' ? 'Next: THE ' + CA_BOATS[lv + 1].name + ', ' : 'Next: ') + nx.note + '. ' + caMoney(nx.price) + '.' + rng + (CAREER.money < nx.price ? ' (Need ' + caMoney(nx.price - CAREER.money) + ' more.)' : ''), CAREER.money < nx.price ? 'dim' : '');
         if (CAREER.money >= nx.price) buys.push({ u: u, lv: lv, nx: nx });
       }
       printPersistentBlank();
     });
     printPersistentLine('An upgrade takes effect on the next run you set sail on.', 'dim');
     buys.forEach(function (b) {
-      caBtn('BUY ' + b.u.name + ' ' + ['I', 'II', 'III'][b.lv] + ' — ' + caMoney(b.nx.price), function () {
+      caBtn(b.u.id === 'boat' ? 'BUY THE ' + CA_BOATS[b.lv + 1].name + ' — ' + caMoney(b.nx.price) : 'BUY ' + b.u.name + ' ' + ['I', 'II', 'III'][b.lv] + ' — ' + caMoney(b.nx.price), function () {
         if (CAREER.money < b.nx.price || caLv(CAREER.upg, b.u.id) !== b.lv) { caPortShop(); return; }
         CAREER.money -= b.nx.price; CAREER.upg[b.u.id] = b.lv + 1; caCareerSave(); caPortShop();
       });
