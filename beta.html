@@ -6,8 +6,7 @@
 <meta name="theme-color" content="#05080a" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="robots" content="noindex, nofollow" />
-<title>LANDFALL BETA</title>
+<title>LANDFALL</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -922,20 +921,10 @@
   #sleep-veil { position: fixed; inset: 0; z-index: 9500; background: inherit; opacity: 0; pointer-events: none; transition: opacity 1.2s ease; }
   body.sleeping-dark #sleep-veil { opacity: 1; pointer-events: auto; transition: opacity 3s linear; }
   body.sleeping-dark #controls { position: relative; z-index: 9600; border-top-color: transparent; }
-  #beta-strip {
-    flex-shrink: 0;
-    padding: 0.2rem 1.1rem;
-    border-bottom: 1px solid var(--rule);
-    font-size: 0.62rem;
-    letter-spacing: 0.14em;
-    color: var(--phosphor);
-    pointer-events: none;
-  }
 </style>
 </head>
 <body>
   <div id="crt">
-    <div id="beta-strip" aria-hidden="true">BETA — OWN SAVE · NOT THE LIVE GAME</div>
     <div id="scanlines" aria-hidden="true"></div>
     <header id="topbar">
       <span id="vessel-line">S/V SOLACE — AT DOCK</span>
@@ -1133,7 +1122,7 @@
     </div>
     <div id="ending-summary" class="ending-summary"></div>
     <div id="ending-actions" class="ending-actions" hidden>
-      <button id="ending-newvoyage" class="option ending-newvoyage" type="button" hidden>&gt; RESTART</button>
+      <button id="ending-newvoyage" class="option ending-newvoyage" type="button" hidden>&gt; BACK TO PORT</button>
     </div>
   </div>
 </div>
@@ -1183,15 +1172,15 @@
     } catch (e) { return null; }
   })();
   // This build has its OWN save. The saves of the other builds of the game ('kauaiVoyage_v1' and 'landfallSim_v1') are different shapes and are never read, written or cleared here.
-  var STORAGE_KEY = SCENARIO_NAME ? 'landfallSitka_TEST_' + SCENARIO_NAME : 'landfallSitka_beta'; // BETA BUILD: its own slot -- the live game's is 'landfallSitka_v1'
-  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1', 'landfallFleetId']; // BETA BUILD: the live game's save and fleet code are set aside and put back by ?reset=1
+  var STORAGE_KEY = SCENARIO_NAME ? 'landfallCA_TEST_' + SCENARIO_NAME : 'landfallCA_v1'; // the California game has its OWN save: nothing here reads, writes or clears the other build's save
+  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1'];
   var TICK_MINUTES = 1;               // simulation resolution, in simulated minutes -- was 10; every per-tick rate/probability elsewhere is expressed as an hourly rate times (TICK_MINUTES/60), or converted via tickProbability() below, so it scales correctly with this value. A few things (driftWeather's random-walk magnitudes, computeHeading's wobble/drift-wander) are scaled by TICK_MINUTES/10 directly since they were tuned by feel for the old 10-minute step, not derived from a stated hourly rate.
   var MAX_CATCHUP_TICKS = 200000;     // safety cap (~139 days) for offline catch-up -- scaled 10x alongside TICK_MINUTES to preserve the same real-world catch-up window per advanceSimulation call
   var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
 
   var VESSEL_NAME = 'SOLACE';
-  var DEPARTURE_PORT = "Sitka, Alaska";
-  var DESTINATION_PORT = "N\u0101wiliwili Harbor, Kaua\u02bbi";
+  var DEPARTURE_PORT = "San Francisco, California";
+  var DESTINATION_PORT = "Santa Barbara, California";
 
   var GAME = null;
   var printedCount = 0;
@@ -1230,7 +1219,7 @@
         landWarn: 0,               // 0 none | 1 "Land ahead." | 2 "too close" -- escalating, re-armed once nothing is projected nearby
         boundaryWarn: 0,           // (no longer used: there are no ocean boundaries) kept so older saves load
         boundaryStopped: false,    // (no longer used: there are no ocean boundaries) kept so older saves load
-        pacificControl: false,     // Pacific controlled journeying has begun: she has cleared Sitka Sound for the open Pacific (permanent). Real wind takes over -- see pacificControlBegun
+        pacificControl: true,      // (California: the real wind from the first minute) Pacific controlled journeying has begun: she has cleared Sitka Sound for the open Pacific (permanent). Real wind takes over -- see pacificControlBegun
         tack: null,                // (auto-tacking no longer exists: always null; kept so older code paths and saves stay valid)
         tackDistanceNm: 0,         // nm covered on the current coastal tack, for deciding when to come about
         driftHeading: null,        // open ocean, AUTOPILOT OFF only — the free-wandering heading; null until autopilot is first switched off, initialized from the boat's actual heading at that moment so it never jumps; reset back to null whenever autopilot re-engages so the NEXT disengagement starts fresh too
@@ -1280,7 +1269,7 @@
         steering: 'GOOD',
         engine: 'GOOD',
         electrical: 'GOOD',        // physical wiring/fuse CONDITION, separate from battery charge below
-        failCause: { sails: null, steering: null, engine: null, electrical: null }, // why each system last failed: 'weather' (storm wind -- the sails only) or 'neglect' (a day without maintenance) -- shown in the AFT CABIN status
+        failCause: { sails: null, steering: null, engine: null, electrical: null }, // why each system last failed: 'weather' (storm wind -- the sails only) or 'neglect' (a day without maintenance) -- shown in the STORAGE status
         nextFailureAt: rand(48, 96) * 60, // (retired: no longer drives anything -- see checkScheduledFailures) voyageMinutes of the next scheduled normal failure — see scheduleNextFailure
         engineRunningMinutes: 0,   // continuous current runtime, resets to 0 the moment the engine stops — see checkFuel/engineRuntimeWeightBonus
         repairProtectedUntil: { sails: 0, steering: 0, engine: 0, electrical: 0 }, // voyageMinutes below which a just-repaired system is shielded from the NORMAL failure draw — see performSystemRepairAttempt/pickFailureSystem. Storm-driven risk (checkStormRisk) ignores this deliberately.
@@ -1312,6 +1301,7 @@
         sleepDebt: 1.5,              // hours of sleep owed, hidden; grows while awake, repaid only by sleeping, never below 0 -- see SLEEP DEBT. 1.5 = the ordinary accrual for the 3 hoursSinceRest below, so a fresh voyage starts carrying none
         hygieneHours: 3,             // accumulated "dirty hours" since the last wash, advanced faster by heat/work/spray/wet clothes -- see hoursSinceWash
         lastCoffeeAt: null,          // voyageMinutes of the last coffee, for the mild/subtle alertness effect
+        napLiftFor: null,            // (beta 23) the sleepStartedAt whose 30-minute nap has already lifted him out of EXHAUSTED (once per sleep)
         lastSnackAt: null,           // (beta 16) voyageMinutes of the last snack eaten, for the shared 30-minute snack cooldown
         sleepFatigueStart: null,     // (beta 16) fatigue as the sleep began, for the waking line
         sleepSeaStart: null,         // (beta 16) the sea state as the sleep began, for the waking line
@@ -1453,6 +1443,7 @@
       state.boat.navLightsOn = true;
       state.boat.cabinLightsOn = true;
     }
+    caStampState(state); // California: the leg, and what the upgrades do to what she starts with
     return state;
   }
 
@@ -1865,14 +1856,13 @@
 
   // THE PASSAGE'S FIXED PLACES. There is no authored route: the player plots one (see THE ROUTE, below). What is fixed is where the passage starts (SOLACE at the dock in
   // Sitka, Alaska), the line that marks the Sound's outer edge, and where it ends. Nothing here steers the boat.
-  var START_POINT = { name: 'Sitka', lat: 57.069002, lon: -135.377817 }; // the dock
-  var FINAL_DEST = { name: 'Nāwiliwili Harbor', lat: 21.954, lon: -159.356 };
+  var START_POINT = { name: 'San Francisco', lat: 37.8086, lon: -122.4432 }; // the dock (rewritten by setLeg for each leg of the career)
+  var FINAL_DEST = { name: 'Santa Barbara', lat: 34.4025, lon: -119.6905 };      // the mission's port (rewritten by setLeg)
   var SOUND_EXIT_LON = -136.05;  // west of this, past Kruzof Island's outer coast, is the open Pacific (Pacific control: the real wind takes over)
   var SOUND_MOUTH_LON = -135.80; // east of this, in the lee of Kruzof and Baranof, is Sitka Sound itself; between the two lines is the open water at its mouth
   // Which stretch of water she is in, from her position alone (nothing is remembered): 'sound' | 'coast' | 'open'.
   function coastalZone(lat, lon) {
-    if (lon <= SOUND_EXIT_LON || lon > 0) return 'open';
-    return (lon > SOUND_MOUTH_LON && lat > 56.75 && lat < 57.15) ? 'sound' : 'coast';
+    return 'open'; // California: no sound, no outer passes -- the real wind is in charge from the dock out
   }
 
   /* ======================================================================
@@ -2480,7 +2470,7 @@
         var q = r.points[next];
         line += ' Waypoint ' + (next + 1) + ' is ' + routeBearingText(bearingBetween(n.lat, n.lon, q.lat, q.lon)) + ', ' + routeDistText(distanceBetween(n.lat, n.lon, q.lat, q.lon)) + ' away.';
       } else {
-        line += ' No more waypoints are plotted. Nāwiliwili Harbor is ' + routeBearingText(bearingBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) + ', ' + routeDistText(distanceBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) + ' away.';
+        line += ' No more waypoints are plotted. ' + caArrivalTitle() + ' is ' + routeBearingText(bearingBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) + ', ' + routeDistText(distanceBetween(n.lat, n.lon, FINAL_DEST.lat, FINAL_DEST.lon)) + ' away.';
       }
       log(state, line);
       statAdd(state, 'waypointsReached', 1);
@@ -2512,8 +2502,8 @@
      ====================================================================== */
   var FINALE_NO_DIESEL_LINES = ['I’m out of diesel.', 'I’ll have to sail her in.']; // (shown the moment she is captured when the tank is empty; the arrival is then made under sail)
   var FINALE_STEPS = [
-    { id: 'welcome',  kind: 'action', option: { label: 'ENTER NĀWILIWILI HARBOR', action: 'finale-welcome' } },             // THE ARRIVAL PAUSE: the harbor described, then ENTER NĀWILIWILI HARBOR begins the arrival below, which is otherwise unchanged
-    { id: 'enter',    kind: 'auto',   label: 'ENTERING NĀWILIWILI HARBOR', secs: 10, done: function (s) { finaleLog(s, 'Entered Nāwiliwili Harbor.'); } },
+    { id: 'welcome',  kind: 'action', option: { get label() { return 'ENTER ' + caArrivalName(); }, action: 'finale-welcome' } },             // THE ARRIVAL PAUSE: the harbor described, then ENTER NĀWILIWILI HARBOR begins the arrival below, which is otherwise unchanged
+    { id: 'enter',    kind: 'auto',   get label() { return 'ENTERING ' + caArrivalName(); }, secs: 10, done: function (s) { finaleLog(s, 'Entered ' + caArrivalTitle() + '.'); } },
     { id: 'above',    kind: 'action', option: { label: 'GO ABOVE', action: 'go-above-below' } },              // only while the player is below deck; the usual GOING ABOVE does the work
     { id: 'furl',     kind: 'action', option: { label: 'FURL SAILS', action: 'finale-furl' } },              // skipped if the sails are already furled (motor-sailing: it is the one action on entering the harbor)
     { id: 'start',    kind: 'action', option: { label: 'START ENGINE', action: 'finale-engine-start' } },    // skipped if the engine is already running
@@ -2549,7 +2539,7 @@
   function finaleWelcomeScreen(state) {
     if (outputEl.querySelector('.finale-welcome')) return;
     clearTempView(); // whatever menu was open is done being looked at
-    var lines = sceneNawiliwili(sceneFacts(state));
+    var lines = scenePortArrival(sceneFacts(state));
     var gap = document.createElement('p'); gap.className = 'gap persist finale-welcome'; outputEl.insertBefore(gap, tempViewEl);
     lines.forEach(function (t) { var p = document.createElement('p'); p.className = 'line persist finale-welcome'; p.textContent = t; outputEl.insertBefore(p, tempViewEl); });
     scrollToBottom();
@@ -2566,6 +2556,7 @@
     if (noDiesel) { log(state, FINALE_NO_DIESEL_LINES[0]); log(state, FINALE_NO_DIESEL_LINES[1]); } // (the arrival's log() takes the real moment; the live loop prints them at once)
     state.nav.grounded = false;
     state.flags.arrivedAtDestination = true;
+    caOnArrival(state); // the pay, once
     state.pendingChoice = null; state.crew.watchState = 'awake'; state.crew.sleepStartedAt = null;
   }
   function finalePlaceAtDock(state) {
@@ -2741,7 +2732,9 @@
     var seas = seaReadout(st.maxWaveFt > 0 ? st.maxWaveFt : seaStateWaveHeightFt(st.maxSea));
     var n = function (v) { return String(Math.round(v || 0)); };
     return [
-      { label: 'VOYAGE', value: rescued ? 'RESCUED' : 'COMPLETED' }, { label: 'DAYS AT SEA', value: n(dd) }, { label: 'TIME AT SEA', value: statsClock(secsAtSea), gap: true },
+      { label: 'RUN', value: (CA_PORTS[caLegOf(state).from].name + ' TO ' + CA_PORTS[caLegOf(state).to].name).toUpperCase() }, { label: 'CARGO', value: String(caLegOf(state).cargo || 'SUPPLIES').toUpperCase() },
+      { label: 'RESULT', value: rescued ? 'RESCUED, NO PAY' : 'DELIVERED' }, { label: 'PAID', value: caMoney(rescued ? 0 : caLegOf(state).pay) }, { label: 'MONEY NOW', value: caMoney(CAREER.money), gap: true },
+      { label: 'DAYS AT SEA', value: n(dd) }, { label: 'TIME AT SEA', value: statsClock(secsAtSea), gap: true },
       { label: 'DISTANCE SAILED', value: Math.round(nm).toLocaleString() + ' NM' }, { label: 'AVERAGE SPEED', value: (hrs > 0 ? nm / hrs : 0).toFixed(1) + ' KT' },
       { label: 'MAX SPEED', value: maxSpd.toFixed(1) + ' KT', gap: true },
       { label: 'TIME UNDER SAIL', value: statsHours(st.sailMin) }, { label: 'TIME UNDER ENGINE', value: engineHrs.toFixed(1) + ' HRS' },
@@ -2818,7 +2811,7 @@
     }
     if (state.finale.birds != null && !finaleBirdsOn) { // by day the Hawaii birds, at night the Hawaii crickets: one voice, one level, one fade
       finaleBirdsOn = true;
-      finaleBirds().set(state.finale.birds ? FINALE_BIRDS_PATH : FINALE_CRICKETS_PATH, FINALE_BIRDS_LEVEL, fade);
+      if (state.finale.birds) finaleBirds().set(MARINA_AUDIO_FILES.pnwBirds, MARINA_AUDIO_VOLUME.pnwBirds, fade); // California: by day the opening's own seabirds (the Hawaii birds are Hawaii's); at night, as at the dock, the marina alone
     }
   }
   function finaleResetUi() { // a new voyage: nothing of the ending may leak into it
@@ -2855,9 +2848,7 @@
     if (zone === 'sound') return 'inland';
     if (zone === 'coast') return 'passes';
     var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-    if (distToFinal > PHASE_OFFSHORE_NM) return 'offshore';
-    if (distToFinal > PHASE_APPROACH_NM) return 'tropics';
-    return 'approach';
+    return distToFinal > 12 ? 'offshore' : 'approach'; // California: the open coast, then the port's approach
   }
 
   /* ==============================================================
@@ -2909,7 +2900,7 @@
   // date), retarded continuously with westing: 4 minutes per degree of longitude, never in steps. That makes it local MEAN SOLAR time shifted
   // by one constant per date, so it is anchored to the real clock a Sitka sailor would read and drifts smoothly toward Hawaii's -- it
   // arrives within about forty minutes of Hawaii standard time.
-  var SOLAR_CLOCK_HOME_TZ = 'America/Sitka';
+  var SOLAR_CLOCK_HOME_TZ = 'America/Los_Angeles';
   var SOLAR_CLOCK_HOME_LON_DEG = START_POINT.lon; // Sitka Sound, where the voyage begins
   var solarClockShiftCache = {};
   var homeTzFormatter = null;
@@ -2923,7 +2914,7 @@
     } catch (e) { // no Intl timezone support: the same US rule, computed -- second Sunday of March to first Sunday of November
       var firstSun = function (m, nth) { var dow = new Date(Date.UTC(y, m, 1)).getUTCDay(); return 1 + ((7 - dow) % 7) + 7 * (nth - 1); };
       var dst = Date.UTC(y, mo, d) >= Date.UTC(y, 2, firstSun(2, 2)) && Date.UTC(y, mo, d) < Date.UTC(y, 10, firstSun(10, 1));
-      return (dst ? -8 : -9) * 3600000;
+      return (dst ? -7 : -8) * 3600000;
     }
   }
   // ship's clock minus local mean solar time at the departure port, in ms, for a game calendar date
@@ -3195,7 +3186,7 @@
     },
     coastal: {
       quiet: [
-        'The Alaska coast is a low grey line on the horizon, then nothing.',
+        'The California coast is a low grey line on the horizon, then nothing.',
         'Swell starts to build under the hull, the first real ocean motion.',
         'The water changes color, from grey-green to a deeper, colder blue.',
       ],
@@ -3245,7 +3236,7 @@
       quiet: [
         'The cloud pattern ahead looks different — piled up over something solid.',
       ],
-      awe: ['A smudge on the horizon that might be cloud, might be Kauaʻi. Too early to be sure.'],
+      awe: ['A smudge on the horizon that might be cloud, might be land. Too early to be sure.'],
       awe_night: ['The stars are different here. Lower ones I don\'t recognize.'],
     },
   };
@@ -3893,7 +3884,11 @@
 
   function advanceWeatherEngine(state, forceFallback) {
     var w = state.weather;
-    var env = forceFallback ? { temp: false, sky: false, sea: false, target: null } : realEnvironmentForTick(state, Date.now());
+    // WHILE SOMEONE WAS AWAY: each replayed tick reads the saved forecast at the moment THAT tick stands for (weatherReplayAtMs, set by advanceSimulation) -- not at the moment they came back, and never
+    // a made-up fallback because the saved data is old. After they are back, the same saved forecast is held until the fresh reading arrives (afterAbsence), which then takes over in one step (rwSnapToFresh).
+    var atMs = weatherReplayAtMs != null ? weatherReplayAtMs : Date.now();
+    var saved = weatherReplayAtMs != null || realWeatherRuntime.afterAbsence;
+    var env = forceFallback ? { temp: false, sky: false, sea: false, target: null } : realEnvironmentForTick(state, atMs, saved);
     if (!forceFallback) rwNoteEnvironment(state, env);
 
     // WIND: real wind from the start; no scripted engine exists.
@@ -3904,7 +3899,7 @@
     if (!env.sea) fallbackSeaToLive(state);
     if (!env.temp) fallbackTempToLive(state);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, false);
-    applyActiveWind(state, Date.now()); // real wind in full as soon as it exists; a data failure uses the fallback wind
+    applyActiveWind(state, atMs, saved); // real wind in full as soon as it exists; a data failure uses the fallback wind
     thunderScenarioForceSky(state); // (test scenarios ?scenario=thunderstorm* only; nothing in a normal load)
     sanitizeLiveWeather(state);
     thunderSync(state); // THUNDER + LIGHTNING: begins / ends with the authoritative real sky; the same sky arriving again changes nothing
@@ -4009,7 +4004,7 @@
   var RW_SEA_TIER_UPPER_FT = [1.5, 2.5, 3.5, 7.5, 9.5, 11.5];
 
   // The only non-persisted weather bookkeeping, kept in ONE place.
-  var realWeatherRuntime = { inFlight: false, failures: 0, nextAllowedMs: 0, fetchedThisSession: false, lastAttemptMs: null };
+  var realWeatherRuntime = { inFlight: false, failures: 0, nextAllowedMs: 0, fetchedThisSession: false, lastAttemptMs: null, afterAbsence: false }; // afterAbsence: someone is back after a real absence and the fresh reading has not arrived yet (runtime only, never saved)
 
   function newRealWeatherState() {
     realWeatherRuntime.failures = 0;       // a new game / migrated save starts with a clean retry slate
@@ -4254,6 +4249,24 @@
     if (typeof console !== 'undefined') console.warn('[Landfall real weather] refresh failed (' + kind + '): ' + String((e && e.message) || e).slice(0, 120) + ' -- next attempt in ' + Math.round(cooldown / 60000) + ' min; the game carries on silently.');
   }
 
+  // FRESH DATA AFTER AN ABSENCE: the live temperature, sky, sea and wind take the new reading at once, exactly as they do when the page is reloaded, instead of easing across from the saved forecast
+  // (the easing is for a refresh in the middle of play, where the change is small and gradual). Called only from a refresh that completes after a return (afterAbsence).
+  function rwSnapToFresh(state, nowMs) {
+    try {
+      var rw = state.realWeather;
+      if (!rw) return;
+      var env = realEnvironmentForTick(state, nowMs);
+      if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, true);
+      rwNoteEnvironment(state, env);
+      var h = rw.windHandoff;
+      if (h && h.status === 'real') {
+        var s = rwRealWindSample(state, nowMs);
+        if (s) { h.real = { kt: s.kt, from: s.from }; h.weight = 1; windHandoffStep(state, nowMs); }
+      }
+      sanitizeLiveWeather(state);
+    } catch (e) { console.warn('[Landfall real weather] snapping to the fresh reading failed:', describeError(e)); }
+  }
+
   async function rwRunRefresh(state, lat, lon) {
     try {
       var results = await Promise.all([rwSettle(rwFetchJson(rwForecastUrl(lat, lon))), rwSettle(rwFetchJson(rwMarineUrl(lat, lon)))]);
@@ -4282,6 +4295,7 @@
       realWeatherRuntime.failures = 0;
       realWeatherRuntime.nextAllowedMs = 0;
       realWeatherRuntime.fetchedThisSession = true;
+      if (realWeatherRuntime.afterAbsence) { realWeatherRuntime.afterAbsence = false; if (typeof GAME !== 'undefined' && GAME === state) rwSnapToFresh(state, nowMs); } // fresh data after an absence: straight to it, as a reload does
       rw.status = rwStatusFor(state, realWeatherAssess(state, nowMs)); // set BEFORE the save, so the stored copy is never behind the live one
       if (typeof GAME !== 'undefined' && GAME === state) saveGameState(state);
     } catch (e) {
@@ -4316,10 +4330,20 @@
   }
 
   // ---- freshness: FRESH / STALE-BUT-USABLE / TOO STALE ----
-  function realWeatherAssess(state, nowMs) {
+  // saved = true: the forecast the game saved is used as it stands -- whatever it holds is good for the hours it covers, however long ago it was fetched and however far the boat has
+  // sailed since. Used only to replay time that went by while the player was away (advanceSimulation), and to hold that picture until fresh data arrives after they are back.
+  // Nothing is invented: a saved forecast that does not reach the moment asked for simply keeps its last hour (rwSampleHours).
+  function realWeatherAssess(state, nowMs, saved) {
     var rw = state.realWeather;
     var out = { valid: false, usable: false, fresh: false, ageMs: null, distNm: null, reason: 'no cached data' };
     if (!rw || !rw.current || !rw.forecast || !Array.isArray(rw.forecast.hours) || !rw.forecast.hours.length || !isFinite(rw.fetchedAt) || !rw.position) return out;
+    if (saved) {
+      out.valid = true; out.usable = true; out.reason = 'saved forecast';
+      out.ageMs = Math.max(0, nowMs - rw.fetchedAt);
+      out.distNm = distanceBetween(state.nav.lat, state.nav.lon, rw.position.lat, rw.position.lon);
+      if (!isFinite(out.distNm)) out.distNm = Infinity;
+      return out;
+    }
     out.ageMs = nowMs - rw.fetchedAt;
     // Stamped in the future (the system clock was changed): its age is meaningless, so it is INVALID, not just
     // unusable -- invalid data is always "due", so it is replaced at once instead of waiting for the clock to catch up.
@@ -4416,9 +4440,9 @@
     return h ? h.status : 'protected';  // 'protected' | 'blending' | 'real'
   }
   // The real wind right now, in the game's units, or null if there is no valid, usable real wind (never NaN/empty).
-  function rwRealWindSample(state, nowMs) {
+  function rwRealWindSample(state, nowMs, saved) {
     var rw = state.realWeather;
-    if (!rw || !realWeatherAssess(state, nowMs).usable) return null;
+    if (!rw || !realWeatherAssess(state, nowMs, saved).usable) return null;
     var t = rwTarget(rw, nowMs);
     if (!t || !rwInRange(t.windKt, RW_LIMITS.windKt) || !isFinite(t.windFromDeg)) return null;
     return { kt: clamp(t.windKt, 0, 60), from: normalizeDeg(t.windFromDeg) }; // WIND FROM, 0-359; the provider's direction is never reversed
@@ -4430,12 +4454,12 @@
 
   // Advances the blend to nowMs (by wall-clock time) and writes the ACTIVE wind into the live fields. Called from
   // every engine tick (via applyActiveWind) and, while a blend is running, from its own short real-time timer.
-  function windHandoffStep(state, nowMs) {
+  function windHandoffStep(state, nowMs, saved) {
     var rw = state.realWeather, h = rw && rw.windHandoff, w = state.weather, eng = w.engine;
     if (!h || h.status === 'protected') return false;
     var dtSec = h.updatedAt == null ? 0 : clamp((nowMs - h.updatedAt) / 1000, 0, 86400);
     h.updatedAt = nowMs;
-    var sample = rwRealWindSample(state, nowMs);
+    var sample = rwRealWindSample(state, nowMs, saved);
     if (sample) {
       if (!h.real) h.real = { kt: sample.kt, from: sample.from };
       else { var k = 1 - Math.exp(-dtSec / WIND_SMOOTHING_SECONDS); h.real.kt += (sample.kt - h.real.kt) * k; h.real.from = interpAngleDeg(h.real.from, sample.from, k); }
@@ -4466,32 +4490,32 @@
   // Pacific controlled journeying has begun: start the real-wind handoff NOW if valid real wind exists. Called from the existing
   // Sound-exit crossing (so it starts on that very tick) and, as an idempotent safety net, from every environment tick (old
   // saves, reloads, a crossing that happened while no real wind was available). Returns whether the blend is (now) running.
-  function beginRealWindHandoff(state, nowMs) {
+  function beginRealWindHandoff(state, nowMs, saved) {
     var h = state.realWeather && state.realWeather.windHandoff;
     if (!h) return false;
     if (h.status !== 'protected') return h.status === 'blending';
-    var sample = rwRealWindSample(state, nowMs);
+    var sample = rwRealWindSample(state, nowMs, saved);
     if (!sample) return false;                           // no valid real wind yet: the fallback wind carries on and the data layer keeps retrying
     // The real wind IS the wind, in full, from the moment it exists: no blend, no timer. (A voyage saved mid-blend by an older version still finishes its blend: windHandoffStep.)
     h.status = 'real'; h.startedAt = nowMs; h.updatedAt = nowMs; h.completedAt = nowMs; h.weight = 1; h.real = { kt: sample.kt, from: sample.from };
     windHandoffCompleted(state);
-    windHandoffStep(state, nowMs);                       // writes it to the live wind right now (and releases the fallback wind)
+    windHandoffStep(state, nowMs, saved);                       // writes it to the live wind right now (and releases the fallback wind)
     return true;
   }
 
   // Called at the END of every environment tick. In the opening the corridor wind is the live wind (untouched). From Pacific
   // control: the blend to real wind (or, only if there is no usable real wind, the bounded fallback wind); afterwards real wind is
   // the live wind and nothing scripted writes it.
-  function applyActiveWind(state, nowMs) {
+  function applyActiveWind(state, nowMs, saved) {
     var rw = state.realWeather, h = rw && rw.windHandoff;
     if (!h) return;
     var w = state.weather;
     if (h.status === 'protected') {
-      if (!beginRealWindHandoff(state, nowMs)) fallbackWindToLive(state); // no usable real wind yet: the bounded fallback carries on
+      if (!beginRealWindHandoff(state, nowMs, saved)) fallbackWindToLive(state); // no usable real wind yet: the bounded fallback carries on
     } else if (w.fallback) {
       fallbackWindAdvance(state);                        // the fallback wind exists only while something still needs it
     }
-    windHandoffStep(state, nowMs);
+    windHandoffStep(state, nowMs, saved);
     if (h.status === 'real' && h.weight >= 1) fallbackWindRelease(state); // real wind is in full: nothing scripted is kept
     syncWindHandoffTimer();
   }
@@ -4553,9 +4577,10 @@
     else if (w.seaState > target) { w.seaState--; rw.bridge.seaStepMin = state.meta.voyageMinutes; }
   }
 
-  function rwMarineUsable(state, nowMs) {
+  function rwMarineUsable(state, nowMs, saved) {
     var m = state.realWeather && state.realWeather.marine;
     if (!m || !m.current || !m.position || !isFinite(m.fetchedAt)) return false;
+    if (saved) return true; // (the saved sea is replayed like the rest of the saved forecast)
     var age = nowMs - m.fetchedAt;
     if (age > REAL_WEATHER_STALE_USABLE_MS || age < -REAL_WEATHER_CLOCK_SKEW_MS) return false;
     return distanceBetween(state.nav.lat, state.nav.lon, m.position.lat, m.position.lon) <= REAL_WEATHER_MAX_USABLE_DISTANCE_NM;
@@ -4563,17 +4588,17 @@
 
   // Which environmental groups real data can drive THIS tick -- decided per group, so e.g. missing marine data
   // (inside the Sound) costs only the sea state, never the real temperature and sky.
-  function realEnvironmentForTick(state, nowMs) {
+  function realEnvironmentForTick(state, nowMs, saved) {
     var rw = state.realWeather, env = { temp: false, sky: false, sea: false, target: null };
     if (!rw) return env;
-    var a = realWeatherAssess(state, nowMs);
-    rw.status = rwStatusFor(state, a);
+    var a = realWeatherAssess(state, nowMs, saved);
+    if (!saved) rw.status = rwStatusFor(state, a); // (a replay says nothing about how fresh the data is right now)
     if (a.usable) {
       var t = rwTarget(rw, nowMs);
       env.target = t;
       env.temp = rwInRange(t.tempF, RW_LIMITS.tempF);
       env.sky = rwLegacyCondition(t) != null;
-      env.sea = rwMarineUsable(state, nowMs) && rwInRange(t.waveHeightFt, RW_LIMITS.waveFt);
+      env.sea = rwMarineUsable(state, nowMs, saved) && rwInRange(t.waveHeightFt, RW_LIMITS.waveFt);
     }
     return env;
   }
@@ -4620,10 +4645,19 @@
   function rwClearRealSky(w) { w.sky = null; w.cloudPct = null; w.precipMm = null; w.rainLevel = null; }
 
   // At load: a still-usable saved cache drives the environment immediately (a snap, before the catch-up ticks run).
+  // The moment the live weather is set for at load: now after a quick reload; after a real absence (a minute or more) the moment the player left -- the time away is then replayed from there, tick by tick,
+  // from the forecast the game saved (advanceSimulation / advanceWeatherEngine).
+  function bootWeatherInstant(state) {
+    var now = Date.now(), lt = state && state.meta && state.meta.lastTick;
+    var away = Number.isFinite(lt) && now - lt >= 60000;
+    return { ms: away ? lt : now, saved: away };
+  }
+
   function realWeatherBootSync(state) {
     var rw = state.realWeather;
     if (!rw) return;
-    var env = realEnvironmentForTick(state, Date.now());
+    var bwi = bootWeatherInstant(state);
+    var env = realEnvironmentForTick(state, bwi.ms, bwi.saved);
     if (env.temp || env.sky || env.sea) applyRealEnvironmentToLive(state, env, true);
     rwNoteEnvironment(state, env);
     sanitizeLiveWeather(state);
@@ -5720,6 +5754,7 @@
     // this at all (sailSpeed is already ~0 there, and 90% of ~0 is
     // still ~0) — see SAIL_TRIM_PENALTY_FRACTION's own notes.
     if (state.nav.sailTrimState === 'needsTrim') sailSpeed *= (1 - SAIL_TRIM_PENALTY_FRACTION);
+    sailSpeed *= caSailFactor(state); // the SAILS upgrade
     var engineSpeed = computeEngineSpeed(state, heading);
     // RELIABILITY PASS -- belt-and-suspenders re-check right before the
     // two contributors combine, on top of (not instead of) each
@@ -5771,7 +5806,7 @@
       warnInvalidSpeedValue({ issue: 'computeBoatSpeed\u2019s own propelled value was non-finite at the final step', value: propelled, sailSpeed: sailSpeed, engineSpeed: engineSpeed });
       propelled = 0;
     }
-    return +Math.min(propelled, MAX_REALISTIC_SPEED_KT).toFixed(2);
+    return +Math.min(propelled, MAX_REALISTIC_SPEED_KT * caSailFactor(state)).toFixed(2);
 
   }
 
@@ -5989,6 +6024,34 @@
   // MORALE AS A FLOOR: DEPLETED (under 20) blocks repairs and the daily maintenance. Nothing else.
   function isDepleted(state) { return moraleLevel(state.crew.morale) === 'DEPLETED'; }
 
+  // (beta 23) How fast an awake sailor tires right now, in fatigue points an hour: the sea, hunger, thirst, carried sleep debt and the cold. updateCrew uses it
+  // every tick, and the nap uses it to leave an exhausted sailor exactly two hours of energy.
+  function awakeFatigueRate(state) {
+    var c = state.crew, w = state.weather;
+    var fatigueRate = 1.6;
+    if (w.seaState >= 4) fatigueRate += 1.0;
+    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_HUNGRY) fatigueRate += 0.4;
+    if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
+    if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
+    if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
+    // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
+    // a good night's sleep it reads RESTED in the morning, GOOD by
+    // midday, OKAY through the afternoon, TIRED by evening and VERY
+    // TIRED late at night -- rather than staying "fine" all day.
+    fatigueRate *= FATIGUE_RATE_SCALE;
+    // Carried sleep debt makes energy fall a little faster all day.
+    fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
+    if (coldAwake(state)) fatigueRate *= wearingWetClothes(state) ? COLD_WET_FATIGUE_FACTOR : COLD_FATIGUE_FACTOR;
+    return fatigueRate;
+  }
+  // THE 30-MINUTE NAP: a sailor who got into the bunk EXHAUSTED is lifted out of it once he has slept 30 minutes, whatever the sea, the cold or the sleep curve say.
+  // He is left with two hours of energy at the rate he tires now, and from there it climbs in the ordinary way. Sleeping on keeps restoring him as before.
+  var NAP_LIFT_MINUTES = 30, NAP_ENERGY_HOURS = 2, EXHAUSTED_FATIGUE = 72; // (72 is energyLevel()'s EXHAUSTED line)
+  function napLiftFatigue(state) {
+    var rate = awakeFatigueRate(state);
+    return EXHAUSTED_FATIGUE - NAP_ENERGY_HOURS * (isFinite(rate) && rate > 0 ? rate : 3.2);
+  }
+
   function updateCrew(state) {
     var c = state.crew;
     var hrs = TICK_MINUTES / 60;
@@ -6024,6 +6087,11 @@
       if (c.fatigue > SLEEP_FATIGUE_FLOOR) {
         c.fatigue = Math.max(SLEEP_FATIGUE_FLOOR, c.fatigue - sleepEnergyRecoveryPerHour(sessionHours) * qualityFactor * hrs);
       }
+      // (beta 23) the 30-minute nap (cap 720 = he began EXHAUSTED): once, per sleep. The same ticks run for a live sleep and an offline catch-up.
+      if (c.sleepCapMinutes === SLEEP_CAP_EXHAUSTED_MINUTES && c.sleepStartedAt != null && c.napLiftFor !== c.sleepStartedAt && sessionHours * 60 >= NAP_LIFT_MINUTES) {
+        c.napLiftFor = c.sleepStartedAt;
+        c.fatigue = Math.min(c.fatigue, napLiftFatigue(state));
+      }
       // SLEEP DEBT: repaid one hour per hour actually slept -- purely
       // elapsed time, however the sea is behaving -- and floored at
       // zero: it can never go negative, so there is no way to bank
@@ -6035,20 +6103,7 @@
       if (stillRecovering) c.morale = clamp(c.morale + hrs * 1.2 * quality, 0, 100);
       c.hoursSinceRest = 0;
     } else {
-      var fatigueRate = 1.6;
-      if (w.seaState >= 4) fatigueRate += 1.0;
-      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_HUNGRY) fatigueRate += 0.4;
-      if (hungerLevel(c.hoursSinceMeal) >= HUNGER_VERY_HUNGRY) fatigueRate += 0.6;
-      if (thirstLevel(c.hoursSinceWater) >= THIRST_THIRSTY) fatigueRate += 0.3;
-      if (thirstLevel(c.hoursSinceWater) >= THIRST_VERY) fatigueRate += 0.5;
-      // FATIGUE_RATE_SCALE sets the pace of the daily energy rhythm: from
-      // a good night's sleep it reads RESTED in the morning, GOOD by
-      // midday, OKAY through the afternoon, TIRED by evening and VERY
-      // TIRED late at night -- rather than staying "fine" all day.
-      fatigueRate *= FATIGUE_RATE_SCALE;
-      // Carried sleep debt makes energy fall a little faster all day.
-      fatigueRate *= 1 + Math.min(sleepDebtCarry(state), 8) * 0.04;
-      if (coldAwake(state)) fatigueRate *= wearingWetClothes(state) ? COLD_WET_FATIGUE_FACTOR : COLD_FATIGUE_FACTOR;
+      var fatigueRate = awakeFatigueRate(state);
       if (relaxingNow(state)) {
         // RELAX: nothing builds (no tiredness, sleep debt stands still); energy slowly comes back unless he is cold, and never past GOOD
         if (!coldAwake(state) && c.fatigue > RELAX_FATIGUE_FLOOR) c.fatigue = Math.max(RELAX_FATIGUE_FLOOR, c.fatigue - RELAX_ENERGY_PER_HOUR * hrs);
@@ -6258,16 +6313,22 @@
   // elapsed time" apart from "the live loop just ran its regular,
   // real-time tick".
   var inCatchUpPass = false;
+  var weatherReplayAtMs = null; // while a long absence is replayed: the real moment the tick being run stands for (null the rest of the time)
 
   function advanceSimulation(state, minutes) {
     var remaining = minutes + (state.meta.leftoverMinutes || 0);
     var ticks = 0;
     state._ambientEventsThisPass = 0; // capped inside checkAmbientEvent — never dumps a backlog after a long absence
-    while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
-      simTick(state);
-      remaining -= TICK_MINUTES;
-      ticks++;
-    }
+    // A replay of time away knows which real moment each tick stands for: the simulation is behind lastTick by the carried fraction of a minute, and each tick is TICK_MINUTES on from there.
+    var replayFromMs = inCatchUpPass ? state.meta.lastTick - (state.meta.leftoverMinutes || 0) * 60000 : NaN, replayCapMs = Date.now();
+    try {
+      while (remaining >= TICK_MINUTES && ticks < MAX_CATCHUP_TICKS) {
+        weatherReplayAtMs = Number.isFinite(replayFromMs) ? Math.min(replayCapMs, replayFromMs + (ticks + 1) * TICK_MINUTES * 60000) : null;
+        simTick(state);
+        remaining -= TICK_MINUTES;
+        ticks++;
+      }
+    } finally { weatherReplayAtMs = null; }
     delete state._ambientEventsThisPass; // transient — never persisted
     state.meta.leftoverMinutes = remaining;
     // Continuous (non-tick) systems: each keeps its own last-synced
@@ -6315,7 +6376,19 @@
     var ticks = advanceSimulation(state, elapsedMinutes);
     inCatchUpPass = false;
     state.meta.lastTick = now;
+    noteAbsenceForWeather(state, elapsedMinutes, now);
     return ticks;
+  }
+
+  // After a real absence (WEATHER_ABSENCE_MINUTES or more) with the saved reading out of date, the first fresh reading to arrive takes the live weather in one step -- see rwSnapToFresh. An ordinary
+  // live-loop catch-up (seconds, or a throttled background minute) never sets this, so a normal refresh in the middle of play keeps easing in exactly as before.
+  var WEATHER_ABSENCE_MINUTES = 10;
+  function noteAbsenceForWeather(state, elapsedMinutes, nowMs) {
+    try {
+      if (!(elapsedMinutes >= WEATHER_ABSENCE_MINUTES) || !state.realWeather) return;
+      var a = realWeatherAssess(state, nowMs);
+      if (a.valid && (a.ageMs >= REAL_WEATHER_REFRESH_MS || a.distNm >= REAL_WEATHER_REFRESH_DISTANCE_NM)) realWeatherRuntime.afterAbsence = true;
+    } catch (e) { /* the weather carries on as it was */ }
   }
 
   // ONE-TIME REALIGNMENT of a save whose game clock fell behind the real
@@ -6927,7 +7000,7 @@
 
 
   /* --------------------------------------------------------------
-     DAILY MAINTENANCE (see PERFORM MAINTENANCE in the AFT CABIN)
+     DAILY MAINTENANCE (see PERFORM MAINTENANCE in the STORAGE)
 
      The ordinary, otherwise-unexplained failures of the four systems are no longer a random timer: they happen only when a whole in-game calendar day
      (midnight to midnight, by the same clock the date and the DAY count use) goes by with no maintenance. Then ONE failure is scheduled for a random time
@@ -6965,6 +7038,7 @@
     var m = state.maintenance;
     if (!Number.isFinite(m.progressMs) || m.progressMs < 0) m.progressMs = 0; // (beta 19) the day's maintenance work done so far, in real milliseconds ...
     if (m.progressDay === undefined) m.progressDay = null;                    // ... and the calendar day it belongs to
+    if (!Number.isFinite(m.workAt)) m.workAt = null;                          // (beta 22) the moment the work was last counted, while it is going on; null when it is not
     return m;
   }
   function maintenanceDoneToday(state) { return maintenanceMemory(state).done === voyageDayNumber(state); }
@@ -7414,6 +7488,7 @@
         evening: (phase === 'sunset' || phase === 'dusk') && hour >= 16 && hour < 23,
         toEvening: ((phase === 'lateAfternoon' && snap.minutesToSunset != null && snap.minutesToSunset <= 120) || phase === 'sunset' || phase === 'dusk') && hour >= 15 && hour < 23,
         night: phase === 'night' && (hour >= 19 || hour < 6),
+        lateDay: (phase === 'sunset' || phase === 'dusk' || phase === 'night') && hour >= 17 && hour < 24, // the day is over (5 pm to midnight on the clock, and the light gone): for lines that look back on a whole day
         dawn: phase === 'dawn' && hour >= 3 && hour < 10,
         afterNight: (phase === 'dawn' || phase === 'sunrise') && hour >= 3 && hour < 11,
         sunset: phase === 'sunset',
@@ -7425,13 +7500,10 @@
       st: {}, ended: {}, regChange: null,
       dExit: dExit, shoreNm: null,
     };
+    ctx.coastNm = caCoastNm(state);
     ctx.encRegion = encRegion(ctx);
     ctx.onCourse = distDest <= 70 && navOnDirectCourse(state, distDest); // her heading points at land (only worked out within 70 nm of the harbor): what "ahead" needs
-    if (ctx.encRegion === 'sound' || ctx.encRegion === 'passes' || ctx.encRegion === 'offCoast') { // how near the nearest shore or island is (the shore animals need one close by)
-      navInit();
-      var sh = navNearestOnEdges(navGeoLon(n.lon), n.lat, NAV.landEdges);
-      ctx.shoreNm = sh ? sh.nm : null;
-    }
+    ctx.shoreNm = ctx.coastNm < 90 ? ctx.coastNm : null; // how near the nearest shore is (the shore animals need one close by)
     return ctx;
   }
 
@@ -7440,14 +7512,8 @@
   //   offCoast: open water within ~250 nm of the Sound's exit        pacific: the open North Pacific
   //   mid: far from both coasts (700+ nm from the Sound's exit AND from Kaua\u02BBi)
   //   hawaiiFar: 650-150 nm out, approaching       hawaiiNear: within 150 nm of Kaua\u02BBi
-  function encRegion(c) {
-    if (c.zone === 'sound') return 'sound';
-    if (c.zone === 'coast') return 'passes';
-    if (c.distDest <= 150) return 'hawaiiNear';
-    if (c.distDest <= 650) return 'hawaiiFar';
-    if (c.dExit <= 250) return 'offCoast';
-    if (c.dExit >= 700 && c.distDest >= 700) return 'mid';
-    return 'pacific';
+  function encRegion(c) { // California: along the shore, or out on the open ocean
+    return c.coastNm != null && c.coastNm <= 10 ? 'offCoast' : 'pacific';
   }
 
   // Updates the sustained-condition memory and fills c.st (minutes a condition has now held) / c.ended (length of a run that ended this tick).
@@ -7545,7 +7611,7 @@
     { id: 'ocean-first-swell', once: true, text: 'Long swells today. Solace climbed them one at a time.', when: function (c) { return c.open && c.st.swell >= 60; } },
     { id: 'ocean-first-good-wind', once: true, text: 'Good wind all day. For once I mostly left things alone.', when: function (c) { return c.open && c.st.goodWind >= 480; } },
     { id: 'ocean-first-high-mileage', once: true, tod: 'sunset', text: 'Covered a lot of water today. It felt good to see the number.', when: function (c) { return c.open && c.distToday >= 120; } },
-    { id: 'ocean-poor-mileage', cd: 2880, tod: 'toEvening', text: "Didn't get very far today. The ocean didn't seem concerned.", when: function (c, m) { return c.open && c.distToday <= 45 && m.dist.length >= 2; } },
+    { id: 'ocean-poor-mileage', cd: 2880, tod: 'lateDay', text: "Didn't get very far today. The ocean didn't seem concerned.", when: function (c, m) { return c.open && c.distToday <= 45 && m.dist.length >= 2 && m.day.lightMin >= 360; } }, // (a long day with little to show for it: the evening, after six hours or more of daylight at sea)
     // ---- GENERAL OPEN-PACIFIC WEATHER ----
     { id: 'clear-morning', tod: 'morning', p: 0.35, cd: 4320, text: 'Clear this morning. Nothing between here and the horizon.', when: function (c) { return c.open && c.st.clear >= 60; } },
     { id: 'clear-afternoon', tod: 'afternoon', p: 0.3, cd: 4320, text: 'Blue in every direction today.', when: function (c) { return c.open && c.st.clear >= 90; } },
@@ -7589,7 +7655,7 @@
     // ---- VOYAGE PROGRESS ----
     { id: 'first-full-day-no-land', ms: true, once: true, text: 'A whole day without seeing land.', when: function (c) { return c.st.off >= 1440; } },
     { id: 'several-days-offshore', ms: true, once: true, text: "I'm starting to forget what standing still feels like.", when: function (c) { return c.st.off >= 4320; } },
-    { id: 'progress-25', ms: true, once: true, text: 'A quarter of the distance done. Sitka is far behind and Kaua\u02BBi is still far ahead.', when: function (c) { return c.open && c.progress >= 0.25; } },
+    { id: 'progress-25', ms: true, once: true, get text() { return 'A quarter of the way. ' + CA_PORTS[CA.from].name + ' is far behind and ' + caDestName() + ' is still far ahead.'; }, when: function (c) { return c.open && c.progress >= 0.25; } },
     { id: 'progress-50', ms: true, once: true, text: 'Somewhere around halfway today. Too far to go back. Still a long way forward.', when: function (c) { return c.open && c.progress >= 0.5; } },
     { id: 'furthest-from-land', ms: true, once: true, text: 'Nothing nearby in any direction. I tried not to think about the size of that.', when: function (c) { return c.open && c.landNm != null && c.landNm >= 700; } },
     { id: 'routine-day', tod: 'evening', p: 0.5, cd: 5760, text: "Nothing much happened today. I think I'm starting to like days like that.", when: function (c, m) { return c.open && c.st.off >= 4320 && m.day.trouble === 0 && m.day.count === 0; } },
@@ -7601,7 +7667,7 @@
     { id: 'steady-warm-wind', p: 0.5, cd: 4320, text: 'Steady wind today. Warm and easy.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.daytime && c.tempF >= 72 && c.st.steadyWind >= 240; } },
     { id: 'tropical-shower', tod: 'afternoon', cd: 1440, text: 'Warm rain this afternoon. Over almost as soon as it started.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.tempF >= 72 && c.ended.rain != null && c.ended.rain >= 5 && c.ended.rain <= 45; } },
     { id: 'clear-warm-night', tod: 'night', p: 0.6, cd: 2880, text: 'Warm, clear night. Stayed above for a while.', when: function (c) { return (c.region === 'tropics' || c.region === 'approach') && c.clear && c.tempF >= 70 && c.above && c.st.above >= 30; } },
-    { id: 'under-100', ms: true, once: true, text: 'Under a hundred miles to Kaua\u02BBi.', when: function (c) { return c.open && c.distDest <= 100; } },
+    { id: 'under-100', ms: true, once: true, get text() { return 'Under a hundred miles to ' + caDestName() + '.'; }, when: function (c) { return c.open && c.distDest <= 100; } },
     { id: 'under-50', ms: true, once: true, text: 'Fifty miles to go. Nothing on the horizon yet.', when: function (c) { return c.open && c.distDest <= 50; } },
     // ---- KAUA'I ----
     { id: 'kauai-grows', ms: true, once: true, tod: 'daytime', text: 'The island looked bigger every time I checked.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 14 && c.distDest > 8 && !c.fog && !c.heavyRain; } },
@@ -7610,9 +7676,9 @@
     { id: 'kauai-night', ms: true, once: true, tod: 'night', text: 'Land somewhere ahead in the dark. Close now.', when: function (c) { return c.s.flags.landOnHorizonShown && c.distDest <= 20 && c.onCourse; } },
     { id: 'kauai-dawn', ms: true, once: true, tod: 'afterNight', text: 'Kaua\u02BBi came back with the morning light.', when: function (c, m) { return m.fired['kauai-night'] != null && c.distDest <= 25 && c.cloud <= 85 && !c.fog; } },
     // ---- N\u0100WILIWILI APPROACH (increasingly restrained: the arrival is about to take over) ----
-    { id: 'approach-20', ms: true, once: true, text: 'Kaua\u02BBi ahead. No mistaking it now.', when: function (c) { return c.distDest <= 20 && c.daytime && !c.fog && c.onCourse; } },
+    { id: 'approach-20', ms: true, once: true, get text() { return caDestName() + ' ahead. No mistaking it now.'; }, when: function (c) { return c.distDest <= 20 && c.daytime && !c.fog && c.onCourse; } },
     { id: 'approach-10', ms: true, once: true, text: 'Close enough to make out the shape of the coast.', when: function (c) { return c.distDest <= 10 && c.daytime && !c.fog && !c.heavyRain; } },
-    { id: 'approach-5', ms: true, once: true, text: 'N\u0101wiliwili ahead.', when: function (c) { if (c.distDest > 15 || c.s.finale.phase !== 'none' || !c.onCourse) return false; navInit(); return navPointInRing(navGeoLon(c.n.lon), c.n.lat, NAV.approach); } },
+    { id: 'approach-5', ms: true, once: true, get text() { return caDestName() + ' ahead.'; }, when: function (c) { if (c.distDest > 15 || c.s.finale.phase !== 'none' || !c.onCourse) return false; navInit(); return navPointInRing(navGeoLon(c.n.lon), c.n.lat, NAV.approach); } },
     { id: 'approach-harbor', ms: true, once: true, topic: 'land', text: 'The breakwater shows at the harbor mouth, the shore buildings behind it.', when: function (c) { return c.distDest <= 5 && c.distDest > 0.8 && c.daytime && !c.fog && !c.heavyRain && c.s.finale.phase === 'none'; } },
     // ---- environmental facts the game did not track when this library was first written: now it does ----
     { id: 'kauai-mountains', ms: true, once: true, tod: 'daytime', topic: 'land',
@@ -11857,16 +11923,10 @@
 
   function regionName(state) {
     var phase = voyagePhase(state);
-    if (phase === 'inland' || phase === 'passes') return 'SITKA SOUND';
-    if (phase === 'offshore') return distFromSoundExit(state) <= 250 ? 'GULF OF ALASKA' : 'NORTH PACIFIC';
-    if (phase === 'tropics') return 'CENTRAL NORTH PACIFIC';
-    if (phase === 'approach') {
-      var distToFinal = distanceBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon);
-      if (distToFinal < 5) return 'NAWILIWILI';
-      if (distToFinal < 60) return 'KAUA\u02BBI';
-      return 'HAWAIIAN WATERS';
-    }
-    return 'NORTH PACIFIC';
+    if (phase === 'approach') return String(FINAL_DEST.name).toUpperCase();
+    var n = state.nav;
+    if (n.lat > 37.4 && n.lat < 38.2 && n.lon > -122.7 && n.lon < -122.3) return 'SAN FRANCISCO BAY';
+    return distFromCoastNm(state) <= 60 ? 'CALIFORNIA COAST' : 'NORTH PACIFIC';
   }
 
   function voyageDayNumber(state) {
@@ -12289,7 +12349,7 @@
   // itself, which now shows it expanded -- arguably a small
   // improvement over the old behavior, since the player sees the
   // system they just dealt with immediately, with no extra click.
-  function cmdStatus(state) { cmdAftCabin(state); } // (the ship status moved from the NAV STATION to the AFT CABIN; a stale button lands there)
+  function cmdStatus(state) { cmdAftCabin(state); } // (the ship status moved from the NAV STATION to the STORAGE; a stale button lands there)
 
   var ELECTRICAL_TOGGLE_FIELDS = {
     cabinLights: 'cabinLightsOn',
@@ -12515,7 +12575,7 @@
     }
     printBlank();
     printLine('HEADING', 'heading-label');
-    printLine(Math.round(state.nav.heading) + '°  (bearing to Nāwiliwili ' + Math.round(state.nav.intendedCourse) + '°)');
+    printLine(Math.round(state.nav.heading) + '°  (bearing to ' + caDestName() + ' ' + Math.round(state.nav.intendedCourse) + '°)');
     printBlank();
     printLine('PROPULSION', 'heading-label');
     printLine(propulsionLabel(propulsionState(state, state.nav.heading)));
@@ -12817,7 +12877,7 @@
     });
   }
 
-  // The old INVENTORY screens are gone (the AFT CABIN's INVENTORY dropdown shows all of it); a stale button for one lands there, with the list open.
+  // The old INVENTORY screens are gone (the STORAGE's INVENTORY dropdown shows all of it); a stale button for one lands there, with the list open.
   function showInventoryCategory(state, cat) {
     aftCabinOpen.inventory = true;
     cmdAftCabin(state);
@@ -12879,7 +12939,7 @@
   function rescueResumeCalled(state) { // the page came back while the call was going out: the call was made, so the voyage ends here, straight to the summary
     var ve = state.voyageEnd; if (!ve || ve.phase !== 'pending') return;
     ve.phase = 'ended'; log(state, voyageEndLine(state)); flushNewLogEntries(state);
-    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'BACK TO PORT', action: 'confirm-restart' }] };
     saveGameState(state);
     rescueOpenSummary(state, true);
   }
@@ -12925,7 +12985,7 @@
     ve.phase = 'ended';
     log(state, voyageEndLine(state));
     flushNewLogEntries(state);
-    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'RESTART', action: 'confirm-restart' }] };
+    state.pendingChoice = { id: 'voyage-ended', options: [{ label: 'BACK TO PORT', action: 'confirm-restart' }] };
     rescueOpenSummary(state, false);
   }
   // Opens the end-of-game summary over the charcoal. instant: a reload / return -- everything is simply there. Otherwise it waits for the fade to finish.
@@ -13057,7 +13117,7 @@
       printBlank();
     }
     var headingEl = printDataRow('HEADING', Math.round(nav.heading) + '\u00B0', 'data-row-lg');
-    printDataRow('BEARING TO N\u0100WILIWILI', Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
+    printDataRow('BEARING TO ' + caDestName().toUpperCase(), Math.round(figures.bearingToDest) + '\u00B0', 'data-row-lg');
     printBlank();
     var speedEl = printDataRow('BOAT SPEED', figures.boatSpeed.toFixed(1) + ' KT', 'data-row-lg');
     var vmgEl = printDataRow('VELOCITY MADE GOOD', figures.vmg.toFixed(1) + ' KT', 'data-row-lg');
@@ -13209,7 +13269,7 @@
     opts.push({ label: 'SET ' + nav.courseDraft + '\u00B0', action: 'course-draft-confirm' });
     var gw = routeGuidance(state);
     if (gw.point && !gw.complete) opts.push({ label: 'SET COURSE FOR WAYPOINT ' + gw.number, action: 'set-for-waypoint' });
-    opts.push({ label: 'SET COURSE FOR N\u0100WILIWILI', action: 'set-for-nawiliwili' });
+    opts.push({ label: 'SET COURSE FOR ' + caDestName().toUpperCase(), action: 'set-for-nawiliwili' });
     state.pendingChoice = { id: 'change-course-menu', options: pushBack(opts, 'course-draft-cancel') };
   }
 
@@ -13282,7 +13342,7 @@
   /* --------------------------------------------------------------
      ROOM-NAVIGATION PASS -- door-opening/closing wrappers for the
      CABIN/HEAD transitions reachable from BELOW DECK's own room list,
-     plus AFT CABIN's locked-door interaction. Same runAudioSyncedAction/
+     plus STORAGE's locked-door interaction. Same runAudioSyncedAction/
      transientLabel shape as cmdOpenHatch/cmdCloseHatch -- a brief,
      routine beat that leaves nothing behind in the scrollback once it
      resolves, with the real room (or "Left as it was."/"The door is
@@ -13627,7 +13687,7 @@
      the SITTING A WHILE indicator, which stays on screen for as long as she sits.
      WHEN one appears:
        - the first, SIT_FIRST_MS (10 s) after she sits down: chosen from the world AS IT IS THEN, never decided in advance;
-       - the next, SIT_SECOND_MS (3 min) after that, and then about every SIT_REPEAT_MS (5 min, give or take SIT_REPEAT_JITTER_MS), each replacing the last;
+       - the next, SIT_SECOND_MS (45 s) after that, and then about every SIT_REPEAT_MS (90 s, give or take SIT_REPEAT_JITTER_MS), each replacing the last;
        - and whenever the authoritative daylight PHASE (getDaylightPhase) or the WEATHER category (skyDisplayLabel, the header's own word) changes. Changes that
          land close together are coalesced: the first starts a SIT_COALESCE_MS window and ONE observation follows it, picked from the newest complete state.
        A change during the first 10 seconds does nothing extra: the first observation simply reads whatever is true when it arrives.
@@ -13799,9 +13859,9 @@
   ];
 
   var SIT_FIRST_MS = 10 * 1000;
-  var SIT_SECOND_MS = 3 * 60 * 1000;
-  var SIT_REPEAT_MS = 5 * 60 * 1000;
-  var SIT_REPEAT_JITTER_MS = 30 * 1000; // "about every 5 minutes": 4:30 to 5:30
+  var SIT_SECOND_MS = 45 * 1000;
+  var SIT_REPEAT_MS = 90 * 1000;
+  var SIT_REPEAT_JITTER_MS = 20 * 1000; // "about every minute and a half": 1:10 to 1:50
   var SIT_COALESCE_MS = 30 * 1000;      // changes noticed inside this window of the first one become a single observation
   var SIT_POLL_MS = 1000;               // how often the session looks at the clock and the world; it does nothing unless something is due or changed
   var SIT_COFFEE_RECENT_MIN = 45;       // game minutes: coffee "recently made"
@@ -14390,20 +14450,17 @@
   // The outer Pacific coast the "coast" zone is measured from: the coastal (non-artificial) edges of the Pacific ring north of 40N -- the Alaskan outer coast first.
   var obsOuterEdges = null;
   function obsOuterCoastEdges() {
-    if (!obsOuterEdges) { navInit(); obsOuterEdges = NAV.landEdges.filter(function (e) { return e[4] === 'pacific' && e[1] >= 40 && e[3] >= 40; }); }
+    if (!obsOuterEdges) obsOuterEdges = []; // (California: the coast comes from the world's land, see obsCoastNm)
     return obsOuterEdges;
   }
-  function obsCoastNm(state) {
-    var n = state.nav, near = navNearestOnEdges(navGeoLon(n.lon), n.lat, obsOuterCoastEdges());
+  function obsCoastNm(state) { // California: the real coast (the world's land), nearest shore of any kind
+    var n = state.nav, near = worldNearest(n.lon, n.lat, 90);
     return near ? near.nm : 99999;
   }
+  function distFromCoastNm(state) { return caCoastNm(state); }
   // The game's own route position, in the library's five regions: Sitka Sound (voyagePhase 'inland'), its outer passes, open water within reach of the Alaskan coast as
   // the "coast", everything else in open water as the open Pacific, and the Hawaiian approach.
   function obsRegion(state) {
-    var ph = voyagePhase(state);
-    if (ph === 'inland') return 'sound';
-    if (ph === 'passes') return 'passes';
-    if (ph === 'approach') return 'hawaii';
     return obsCoastNm(state) <= OBS_COAST_ZONE_NM ? 'coast' : 'pacific';
   }
   function obsWorldKey(state) { return getDaylightPhase(state) + '|' + sitWeatherCategory(state) + '|' + obsRegion(state); } // the three things that can start an observation
@@ -14891,9 +14948,9 @@
 
 
   /* ==============================================================
-     AFT CABIN -- the boat's status, inventory, repairs and daily maintenance.
+     STORAGE -- the boat's status, inventory, repairs and daily maintenance.
 
-     The last room on the BELOW DECK menu. It is entered and left through its door (the same sounds as the FORWARD CABIN's), and the other screens that return
+     The last room on the BELOW DECK menu. It is entered and left through its door (the same sounds as the CABIN's), and the other screens that return
      here (REPAIRS, PERFORM MAINTENANCE, PUT AWAY TOOLS) come back without it. What it shows:
        MAINTENANCE  DUE | OVERDUE        or, once it is done: MAINTENANCE COMPLETE FOR TODAY
        > STATUS                          drops down: SAILS / RUDDER / ENGINE / ELECTRICAL (an undiscovered engine fault still reads GOOD, as it always did), and
@@ -14958,7 +15015,7 @@
 
   function cmdAftCabin(state) {
     cookRoom('aft', state);
-    printRoomHeader('AFT CABIN');
+    printRoomHeader('STORAGE');
     printBlank();
     var model = aftCabinStatusModel(state);
     if (model.maintenanceDone) printLine('MAINTENANCE COMPLETE FOR TODAY');
@@ -15019,10 +15076,11 @@
      MAINTENANCE (beta 19) -- see patches_beta/19_maintenance.py
      -------------------------------------------------------------- */
   var MAINT_TOTAL_MS = 20 * 60 * 1000;   // the day's work
-  var MAINT_GAP_MS = 15000;              // quiet between one repair recording and the next
+  var MAINT_GAP_MIN_MS = 10000;          // quiet between one repair recording and the next: a random 10 to 15 seconds
+  var MAINT_GAP_MAX_MS = 15000;
   var MAINT_POLL_MS = 1000;
-  var MAINT_STEP_CAP_MS = 5000;          // the most one second of the clock may add (a sleeping phone finishes nothing)
-  var MAINT_WATCHDOG_MS = 90000;         // a recording that has neither ended nor failed by now is stopped and the gap begins
+  // (the work is measured in real time and goes on while the app is minimized or the phone is locked -- like the battery charging with the engine running: the next poll, or the next load, credits all of it)
+  var MAINT_WATCHDOG_MS = 30000;         // a recording that has neither ended nor failed by now is stopped and the gap begins (the longest is about 14 seconds)
   var MAINT_OBS = [                      // the sailor's own words, by how far along the work is
     { at: 0.00, lines: ["I'd better check everything over."] },
     { at: 0.20, lines: ['Checking the engine.'] },
@@ -15041,10 +15099,56 @@
   }
   function maintPercent(state) { return Math.floor(maintProgressMs(state) / MAINT_TOTAL_MS * 100); }
 
-  function maintStopSound(el) { // fade a recording out and stop it (never leaves one running behind)
+  // ONE audio element plays every maintenance recording, one at a time. It is started from the PERFORM MAINTENANCE tap (which is what lets iPhone Safari start a sound from a
+  // timer afterwards), and each later recording is just another file on that same element -- so two recordings can never sound together, whatever the phone does.
+  var maintAudioEl = null;
+  function getMaintAudioEl() {
+    if (maintAudioEl) return maintAudioEl;
+    var el = createGameAudio(); // (registered with the game's other sounds, so SOUND ON / OFF reaches it)
+    el.loop = false; el.preload = 'auto';
+    maintAudioEl = el;
+    return el;
+  }
+  function maintStopSound(el) { // stop whatever the maintenance element is playing (fading out where the phone allows it)
     if (!el) return;
-    el.onended = null;
+    el.onended = null; el.onerror = null;
     fadeNavStationVolume(el, 0, 0.25, function () { try { el.pause(); } catch (e) { /* nothing to stop */ } });
+  }
+  // Plays one repair recording on the maintenance element. onEnded when it has played; onFail when it cannot start (one retry after the game's audio recovery first).
+  function playMaintClip(s, systemKey, onEnded, onFail) {
+    onEnded = onceCallback(onEnded); onFail = onceCallback(onFail);
+    var audioKey = REPAIR_AUDIO_KEY[systemKey], el = getMaintAudioEl(), file = NAV_STATION_AUDIO_FILES[audioKey];
+    function attempt(isRetry) {
+      if (maintSession !== s) return; // the work has stopped meanwhile: nothing to start
+      if (!audioUnlocked) {
+        if (isRetry) { console.warn('Maintenance sound could not start (audio never unlocked): ' + audioKey); onFail(); return; }
+        unlockAudio();
+        attempt(true);
+        return;
+      }
+      if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
+      el.onended = null; el.onerror = null;
+      try { el.pause(); } catch (e) { /* nothing to stop */ }
+      el.src = file; // the next recording, on the same element
+      el.muted = muted;
+      el.volume = NAV_STATION_AUDIO_VOLUME[audioKey];
+      el.onended = function () { el.onended = null; audioDebugLog('MAINTENANCE AUDIO ENDED: ' + audioKey); onEnded(); };
+      el.onerror = function () { el.onerror = null; el.onended = null; console.warn('Maintenance sound could not load: ' + file); onFail(); };
+      audioDebugLog('MAINTENANCE AUDIO START: ' + audioKey + ' muted=' + muted);
+      var p = el.play();
+      if (p && p.then) {
+        p.then(function () {}, function (e) {
+          if (maintSession !== s) return;
+          el.onended = null; el.onerror = null;
+          console.warn('MAINTENANCE AUDIO PLAY FAILED: audioKey=' + audioKey + ' error.name=' + (e && e.name) + ' error.message=' + (e && e.message));
+          audioDebugError(audioKey, e);
+          if (isRetry) { onFail(); return; }
+          recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
+        });
+      }
+    }
+    attempt(false);
+    return el;
   }
   function maintAudioNext(s) {
     if (maintSession !== s) return;
@@ -15056,17 +15160,35 @@
       if (settled) return;
       settled = true;
       if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
+      s.afterSound = null;
       if (maintSession !== s) return;
       s.curEl = null;
-      s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, MAINT_GAP_MS); // 15 seconds of quiet, then another
+      var gap = MAINT_GAP_MIN_MS + Math.random() * (MAINT_GAP_MAX_MS - MAINT_GAP_MIN_MS); // 10 to 15 seconds of quiet, then another (any of the four, never the same one twice running)
+      s.gapTimer = setTimeout(function () { s.gapTimer = null; maintAudioNext(s); }, gap);
     }
-    s.curEl = playRepairAudio(key, afterSound);
+    s.afterSound = afterSound; s.clipAt = Date.now();
+    // Every way a recording can end is covered, so the chain of them never stops: it ends by itself (afterSound), it cannot start (the 3rd argument: on to the next
+    // one after the gap), it throws (caught here), it ends without the browser saying so (maintAudioCheck, once a second, below), or it hangs (the watchdog).
+    try {
+      s.curEl = playMaintClip(s, key, afterSound, afterSound);
+    } catch (e) {
+      console.warn('Maintenance sound could not start (' + key + '):', describeError(e));
+      s.curEl = null; afterSound(); return;
+    }
     s.watchdog = setTimeout(function () { s.watchdog = null; if (maintSession !== s || settled) return; maintStopSound(s.curEl); afterSound(); }, MAINT_WATCHDOG_MS);
+  }
+  // Once a second (from maintPoll): a recording that has played to its end but never reported it (iPhone Safari sometimes does not send 'ended') counts as finished.
+  function maintAudioCheck(s) {
+    var el = s.curEl, done = s.afterSound;
+    if (!el || !done || Date.now() - s.clipAt < 2000) return;
+    try {
+      if (el.ended || (el.paused && isFinite(el.duration) && el.duration > 0 && el.currentTime >= el.duration - 0.05)) done();
+    } catch (e) { /* nothing to check */ }
   }
 
   function maintDrawScreen(state, s) {
     clearTempView();
-    printRoomHeader('AFT CABIN');
+    printRoomHeader('STORAGE');
     printBlank();
     s.progEl = printDataRow('MAINTENANCE', maintPercent(state) + '%', 'data-row-md');
     s.obsEl = printLine('');
@@ -15078,6 +15200,7 @@
     if (maintSession) { keepScreen(state); return; } // already at work: a repeat does nothing
     var m = maintenanceMemory(state), today = voyageDayNumber(state);
     if (m.progressDay !== today) { m.progressDay = today; m.progressMs = 0; } // a new day: new work
+    m.workAt = Date.now();
     var s = maintSession = { state: state, lastAt: Date.now(), pollTimer: null, progEl: null, obsEl: null, shown: -1, lastSound: null, curEl: null, gapTimer: null, watchdog: null };
     maintDrawScreen(state, s);
     var frac = maintProgressMs(state) / MAINT_TOTAL_MS;
@@ -15093,6 +15216,7 @@
     var s = maintSession;
     if (!s) return;
     maintSession = null;
+    try { maintenanceMemory(s.state).workAt = null; } catch (e) { /* nothing to clear */ }
     if (s.pollTimer) { clearInterval(s.pollTimer); s.pollTimer = null; }
     if (s.gapTimer) { clearTimeout(s.gapTimer); s.gapTimer = null; }
     if (s.watchdog) { clearTimeout(s.watchdog); s.watchdog = null; }
@@ -15105,22 +15229,47 @@
     if (!s) return;
     var st = s.state;
     if (GAME !== st || !st.pendingChoice || st.pendingChoice.id !== 'maintaining') { maintEnd(); return; } // the screen has gone (a restart, the ending, a rescue)
-    var now = Date.now(), dt = Math.max(0, Math.min(now - s.lastAt, MAINT_STEP_CAP_MS));
+    var now = Date.now(), dt = Math.max(0, Math.min(now - s.lastAt, MAINT_TOTAL_MS)); // (beta 22) every real millisecond since the last count, away or not
     s.lastAt = now;
+    var m = maintenanceMemory(st);
+    m.progressDay = voyageDayNumber(st);
+    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + dt);
+    m.workAt = now;
+    var frac = m.progressMs / MAINT_TOTAL_MS;
+    if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
     if (needsCabinLight(st)) { // the lights went out in the dark: the work stops where it is
       maintEnd();
       log(st, "Too dark to see what I'm doing."); flushNewLogEntries(st);
       st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
       return;
     }
-    var m = maintenanceMemory(st);
-    m.progressDay = voyageDayNumber(st);
-    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + dt);
-    var frac = m.progressMs / MAINT_TOTAL_MS;
-    if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
+    if (isExhausted(st)) { // (beta 23) EXHAUSTED: the work stops where it is, and what was done is kept
+      maintEnd();
+      log(st, "I'm too tired to keep working."); flushNewLogEntries(st);
+      st.pendingChoice = null; clearTempView(); cmdAftCabin(st); renderOptions(st); saveGameState(st);
+      return;
+    }
+    maintAudioCheck(s);
     if (s.progEl) s.progEl.textContent = Math.floor(frac * 100) + '%';
     var idx = maintObsIndex(frac);
     if (idx > s.shown) { s.shown = idx; var lines = MAINT_OBS[idx].lines; maintShowObservation(s, lines.length > 1 ? pickVariant(lines, 'maintObs') : lines[0]); }
+  }
+
+  // (beta 22) A page that was closed while the work was going on (iPhone Safari does this to a page left in the background): at the next load every real
+  // minute since the work was last counted is credited, and a day's work that finished while away is recorded as done, exactly as if it had run on.
+  function maintCreditAway(state) {
+    var m = maintenanceMemory(state), at = m.workAt;
+    m.workAt = null;
+    if (!Number.isFinite(at)) return;
+    var today = voyageDayNumber(state);
+    if (m.done === today || m.progressDay !== today) return; // today's is done already, or this is another day's work: nothing carries over
+    m.progressMs = Math.min(MAINT_TOTAL_MS, Math.max(0, m.progressMs) + Math.max(0, Math.min(Date.now() - at, MAINT_TOTAL_MS)));
+    if (m.progressMs >= MAINT_TOTAL_MS) {
+      completeMaintenance(state);
+      m.progressMs = 0; m.progressDay = null;
+      if (state.crew.toolsOutSinceMinutes == null) state.crew.toolsOutSinceMinutes = state.meta.voyageMinutes;
+      log(state, "That's the maintenance done for today.");
+    }
   }
 
   function maintFinish(state) {
@@ -15152,16 +15301,21 @@
       printLine('TOO DEPLETED TO PERFORM MAINTENANCE.', 'amber');
       return;
     }
+    if (isExhausted(state)) { // (beta 23) EXHAUSTED: no repairs, no cooked meals, no maintenance -- a 30-minute nap or a coffee gets him through
+      cmdAftCabin(state);
+      printLine('TOO EXHAUSTED TO PERFORM MAINTENANCE.', 'amber');
+      return;
+    }
     maintBegin(state); // (beta 19) twenty minutes of work, with STOP -- see MAINTENANCE above
   }
 
-  // FORWARD CABIN — sleep, clothing, and their related chores. COMFORT is a
+  // CABIN — sleep, clothing, and their related chores. COMFORT is a
   // pure read of the existing clothing-comfort system (comfortLabel,
   // defined near HUNGER/THIRST/ENERGY above) — never a second
   // temperature calculation.
   function cmdCabin(state) {
     cookRoom('cabin', state);
-    printRoomHeader('FORWARD CABIN');
+    printRoomHeader('CABIN');
     printBlank();
     var c = state.crew;
     renderComfortRows(state, 'worn'); // ENERGY / COMFORT ABOVE / COMFORT BELOW (+ RAIN PROTECTION only while it is raining and the shell is off), all on the standard grid
@@ -15184,7 +15338,7 @@
     state.pendingChoice = { id: 'cabin-menu', options: pushBack(options, 'leave-cabin') };
   }
 
-  // (STATUS used to expand in place here, with its REPAIR button; the ship status is in the AFT CABIN now.)
+  // (STATUS used to expand in place here, with its REPAIR button; the ship status is in the STORAGE now.)
 
   // NAV STATION -- the boat's operational center: cabin/power status at
   // a glance, the electrical panel embedded directly (no heading of its
@@ -15266,7 +15420,7 @@
       printBlank();
       printLine('Electrical system damaged. Controls unavailable until repaired.', 'amber');
     }
-    // (PUT AWAY TOOLS used to be offered here; the tools come out in the AFT CABIN now, and are put away there.)
+    // (PUT AWAY TOOLS used to be offered here; the tools come out in the STORAGE now, and are put away there.)
 
     // The electrical panel itself: no ELECTRICAL heading (the controls
     // are self-explanatory), no divider line bracketing it -- just its
@@ -15373,8 +15527,8 @@
     {
       id: 'handbook-notes-for-this-passage', heading: 'NOTES FOR THIS PASSAGE',
       blocks: [
-        { lines: ['Departure: Sitka Sound, Alaska.', 'Destination: N\u0101wiliwili Harbor, Kaua\u02BBi.'] },
-        { p: 'The first waypoint is plotted beyond the islands. N\u0101wiliwili is marked on the GPS as your destination. Plan your route through the Sound and across the Pacific.' },
+        { get lines() { return ['Departure: ' + DEPARTURE_PORT + '.', 'Destination: ' + DESTINATION_PORT + '.']; } },
+        { p: 'The first waypoints are plotted offshore, clear of the coast. The destination is marked on the GPS. Plan your route along the California coast, and mind the headlands.' },
         { p: 'SOLACE can sail anywhere in the world, but she cannot navigate herself. You are responsible for her heading, sails, and safe passage.' },
         { p: 'The voyage continues while you are away. Before leaving the helm, check the weather, heading, autopilot, and battery. Take care of yourself along the way.' },
       ],
@@ -15428,7 +15582,7 @@
         { term: 'POINT OF SAIL', body: 'Your angle to the wind.' },
         { term: 'BEARING', body: 'The direct direction toward your next waypoint or destination.' },
         { term: 'VELOCITY MADE GOOD', body: 'How quickly you are approaching your destination. A negative value means you are moving farther away.' },
-        { p: 'Use CHANGE COURSE to select a heading. SET COURSE FOR WAYPOINT or SET COURSE FOR N\u0100WILIWILI turns SOLACE toward the current bearing.' },
+        { p: 'Use CHANGE COURSE to select a heading. SET COURSE FOR WAYPOINT or SET COURSE FOR the destination turns SOLACE toward the current bearing.' },
         { p: 'These commands set a heading only. They do not continuously steer toward the target.' },
         { term: 'AUTOPILOT', body: 'Autopilot holds your current heading. It does not follow waypoints, navigate around land, or compensate for changing winds. It needs power and a working rudder.' },
         { p: 'While at the helm, you can hold course manually. Switch on autopilot before leaving the helm if you want SOLACE to maintain her heading.' },
@@ -15456,8 +15610,8 @@
         { p: 'Watch the coastline, particularly around islands, narrow channels, and harbor entrances. If SOLACE encounters land, she runs aground and stops moving.' },
         { p: 'Select FREE SOLACE to return to clear water. Then check your heading and route before continuing.' },
         { h3: 'ARRIVAL' },
-        { p: 'When SOLACE reaches the N\u0101wiliwili harbor approach, the arrival sequence begins.' },
-        { p: 'Read the harbor description and select ENTER NĀWILIWILI HARBOR when ready to bring her in.' },
+        { p: 'When SOLACE enters the bay or nears the marina, the arrival sequence begins.' },
+        { p: 'Read the harbor description and select ENTER (the harbor\u2019s name) when ready to bring her in.' },
         { h3: 'CALLING FOR HELP' },
         { p: 'The RADIO is beside the GPS at the NAV STATION. It runs on its own batteries and always works. If you cannot go on, select CALL FOR HELP, then CALL FOR HELP again. Help comes, the voyage ends there, and the summary follows.' },
       ],
@@ -15494,18 +15648,18 @@
       blocks: [
         { p: 'SOLACE carries 20 gallons of kerosene shared by the heater, stove, and lantern.' },
         { term: 'HEATER', body: 'Controlled from the SALOON. Holds the cabin at 65\u00B0F when it is colder outside. Does not use battery power.' },
-        { term: 'STOVE', body: 'Used for hot meals, coffee, and tea.' },
+        { term: 'STOVE', body: 'Used for hot meals, coffee, and tea. You can cook through sea state 5. At sea state 6 it is too rough to use the stove.' },
         { term: 'LANTERN', body: 'Provides light above and below deck. Extinguish it when no longer needed.' },
-        { p: 'Heating uses substantially more kerosene than cooking. Monitor the remaining supply in the AFT CABIN.' },
+        { p: 'Heating uses substantially more kerosene than cooking. Monitor the remaining supply in STORAGE.' },
       ],
     },
     {
       id: 'handbook-life-aboard', heading: 'LIFE ABOARD',
       blocks: [
         { p: 'Your physical condition affects your ability to manage the boat.' },
-        { p: 'EXHAUSTED, you cannot make repairs or cook. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work, except in rough seas. A STARVING sailor can always cook.' },
+        { p: 'EXHAUSTED, you cannot make repairs, cook, or perform maintenance. You can still sleep, drink water, and eat cold snacks. Coffee, tea, and Cup Noodles still work. A STARVING sailor can always cook. A nap of 30 minutes lifts you out of EXHAUSTED, and you have about 2 hours of energy before it comes back.' },
         { p: 'STARVING or VERY THIRSTY, you cannot sleep or make repairs. A sleeping sailor wakes up when STARVING or PARCHED. Eat or drink first.' },
-        { term: 'COFFEE', body: 'Gets you through repairs and cooking while EXHAUSTED for 2 hours. You cannot sleep for those 2 hours. Tea does neither.' },
+        { term: 'COFFEE', body: 'Gets you through repairs, cooking, and maintenance while EXHAUSTED for 2 hours. You cannot sleep for the first hour. Tea does neither.' },
         { p: 'When you are COLD, you tire faster and sleep less well, and a cold sleeper wakes early. Wet clothes make it worse. Warm clothes, dry clothes, and the cabin heater help.' },
         { p: 'MORALE is how well you are looking after yourself and the boat. Reading, music, a wash, chores, a good meal, and time at the bow lift it. Going unwashed, a dirty galley or bunk, wet gear left hanging, rough seas, and living on snacks wear it down. At DEPLETED you cannot make repairs or perform maintenance until it recovers.' },
         { p: 'When you are too HOT, you get thirsty faster. Dress for the temperature: light clothes in the warm, layers in the cold. A T-shirt and shorts suit the warm; pants are too much above about 80\u00B0F.' },
@@ -15513,8 +15667,8 @@
         { p: 'Rice, oats, and pancake mix are kept in cups. Each serving uses half a cup.' },
         { p: 'Freshly caught fish can be cooked with a half cup of rice with seared or grilled fish and rice, or eaten as sashimi without using kerosene or rice. Fish keeps for 12 hours after it is caught.' },
         { p: 'Wash dishes when needed.' },
-        { term: 'FORWARD CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
-        { term: 'AFT CABIN', body: 'Check the boat\u2019s status and inventory, make repairs, and perform the day\u2019s maintenance.' },
+        { term: 'CABIN', body: 'Sleep to restore energy. Change clothing for the temperature and conditions. Wet clothing must be hung up to dry.' },
+        { term: 'STORAGE', body: 'Check the boat\u2019s status and inventory, make repairs, and perform the day\u2019s maintenance.' },
         { term: 'SALOON', body: 'Read, stretch, or RELAX. Control the heater and hatch here.' },
         { p: 'Reading lifts your spirits. RELAX rests your body: while you do it you do not tire, and your energy slowly comes back, though never past GOOD. It does nothing for you if you are cold.' },
         { p: 'Opening the hatch ventilates the cabin. Closing it helps retain warmth, and in the sun a closed cabin runs hotter than the air outside. Open the hatch to cool it.' },
@@ -15526,7 +15680,7 @@
     {
       id: 'handbook-repairs', heading: 'REPAIRS AND MAINTENANCE',
       blocks: [
-        { p: 'The AFT CABIN is the boat\u2019s workroom. Open STATUS to see the condition of:' },
+        { p: 'STORAGE is the boat\u2019s workroom. Open STATUS to see the condition of:' },
         { list: ['SAILS', 'RUDDER', 'ENGINE', 'ELECTRICAL'] },
         { p: 'When a system is damaged, STATUS names the cause: WEATHER STRESS or MISSED MAINTENANCE.' },
         { p: 'Open INVENTORY to see the water, diesel, kerosene, food, drink, and spare parts left aboard.' },
@@ -15534,9 +15688,9 @@
         { p: 'Repairs always work. You cannot make them while you are EXHAUSTED, STARVING, VERY THIRSTY, or DEPLETED. Rest, eat, drink, or lift your spirits first.' },
         { p: 'A repaired system stays repaired as long as daily maintenance is done.' },
         { p: 'SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and spare fuses. They are not replenished during this passage.' },
-        { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in the AFT CABIN until you do.' },
+        { p: 'Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in STORAGE until you do.' },
         { h3: 'DAILY MAINTENANCE' },
-        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. Regular maintenance keeps ordinary, unexplained failures away.' },
+        { p: 'Select PERFORM MAINTENANCE once each day. The work takes twenty minutes, and it carries on if you switch to another app or lock your phone. STOP keeps what has been done, and RESUME MAINTENANCE carries on from there. You cannot start it while EXHAUSTED. Regular maintenance keeps ordinary, unexplained failures away.' },
         { p: 'If a whole day passes without it, one system will fail in the early hours of the next day. Any working system can be the one, including a system you have just repaired. Completing maintenance before then prevents it.' },
         { p: 'Maintenance does not protect against weather. Sails are damaged only when too much sail is set for the wind.' },
       ],
@@ -16607,7 +16761,7 @@
   function buildChartDestMarkerEl() {
     var el = document.createElement('div');
     el.className = 'chart-dest-marker';
-    el.innerHTML = '<div class="chart-dest-dot"></div><div class="chart-dest-label">DESTINATION: N\u0100WILIWILI</div>';
+    el.innerHTML = '<div class="chart-dest-dot"></div><div class="chart-dest-label">DESTINATION: ' + caDestName().toUpperCase() + '</div>';
     return el;
   }
 
@@ -16625,7 +16779,7 @@
   var FLEET_DB_URL = '';          // the database's address -- empty: the whole feature is off
   var FLEET_POST_EVERY_MS = 3 * 60 * 1000;      // how often this boat reports its position
   var FLEET_POLL_EVERY_MS = 60 * 1000;          // how often the fleet is read while the GPS is open
-  var FLEET_HIDE_AFTER_MS = 7 * 24 * 3600 * 1000; // a boat that has not reported for a week is not drawn
+  var FLEET_HIDE_AFTER_MS = 24 * 3600 * 1000;     // a boat that has not reported for a day is not drawn (and not counted): the GPS shows who is out there now
   var FLEET_DIM_AFTER_MS = 2 * 3600 * 1000;     // a boat that has not reported for two hours is drawn dim
   var FLEET_TIMEOUT_MS = 8000;                  // a request that has not answered by then is dropped
   var FLEET_BACKOFF_MAX_MS = 15 * 60 * 1000;    // the longest pause after repeated failures
@@ -16730,7 +16884,7 @@
     } catch (e) { fleet.postBusy = false; }
   }
 
-  // THE READING: whatever the database sent, checked. A boat is kept only with a valid code that is not this one, numbers in range, and a report less than a week old.
+  // THE READING: whatever the database sent, checked. A boat is kept only with a valid code that is not this one, numbers in range, and a report less than a day old.
   function fleetClean(data, now) {
     var out = [], own = fleet.id;
     if (!data || typeof data !== 'object') return out;
@@ -16791,13 +16945,18 @@
     gpsReadoutEl.appendChild(d);
     fleet.rowEl = b;
   }
+  // The boats worth showing right now: those that reported within the last FLEET_HIDE_AFTER_MS. Worked out afresh at every draw, so a list that has been sitting
+  // for a while (the GPS closed, the phone away) never shows or counts a boat that has since gone past a day.
+  function fleetShown(now) {
+    return fleet.boats.filter(function (b) { return now - b.t <= FLEET_HIDE_AFTER_MS; });
+  }
   function fleetRowUpdate() {
     if (!fleet.rowEl) return;
     var code = fleet.id ? fleetCode(fleet.id) : '', txt;
     if (!code) txt = 'NOT SHARING';
     else if (fleet.fails >= 2) txt = 'YOU ' + code + ' · NO CONTACT';
     else if (!fleet.gotList) txt = 'YOU ' + code;
-    else txt = 'YOU ' + code + ' · ' + fleet.boats.length + (fleet.boats.length === 1 ? ' OTHER' : ' OTHERS');
+    else { var nOthers = fleetShown(Date.now()).length; txt = 'YOU ' + code + ' · ' + nOthers + (nOthers === 1 ? ' OTHER' : ' OTHERS'); }
     if (fleet.diag) txt += ' · POST ' + (fleet.lastPost || '-') + ' GET ' + (fleet.lastGet || '-');
     if (fleet.rowEl.textContent !== txt) fleet.rowEl.textContent = txt;
   }
@@ -16818,7 +16977,7 @@
       if (!chartLoaded || !chartMap || typeof maplibregl === 'undefined') return;
       var now = Date.now(), seen = {};
       fleet.lastDrawAt = now;
-      fleet.boats.forEach(function (b) {
+      fleetShown(now).forEach(function (b) {
         seen[b.id] = true;
         var m = fleetMarkers[b.id];
         if (!m) { m = fleetMarkers[b.id] = fleetMakeMarker(); m.marker.setLngLat([b.lon, b.lat]).addTo(chartMap); }
@@ -16904,7 +17063,7 @@
   //   NĀWILIWILI        BRG 216° · 2,323 NM     (always the direct bearing and distance to the harbor)
   var GPS_ROWS = [
     ['position', 'POSITION'], ['heading', 'HEADING'], ['speed', 'SPEED'],
-    ['wp', 'WAYPOINT'], ['off', 'OFF ROUTE'], ['dest', 'N\u0100WILIWILI'],
+    ['wp', 'WAYPOINT'], ['off', 'OFF ROUTE'], ['dest', 'DESTINATION'],
   ];
   var gpsRowEls = {}, gpsLabelEls = {};
   GPS_ROWS.forEach(function (row) {
@@ -16932,7 +17091,7 @@
     else if (g.complete) gpsSetRow('wp', 'ALL REACHED', 'WAYPOINT');
     else gpsSetRow('wp', 'BRG ' + routeBearingText(g.bearing) + dot + routeDistText(g.distNm), 'WAYPOINT ' + g.number + ' OF ' + g.count);
     gpsSetRow('off', g.point && !g.complete ? routeOffText(g) : dash);
-    gpsSetRow('dest', 'BRG ' + routeBearingText(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)) + dot + routeDistText(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)));
+    gpsSetRow('dest', 'BRG ' + routeBearingText(bearingBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)) + dot + routeDistText(distanceBetween(nav.lat, nav.lon, NAWILIWILI_HARBOR.lat, NAWILIWILI_HARBOR.lon)), caDestName().toUpperCase());
   }
   function gpsSetStatus(text) { if (gpsStatusEl.textContent !== text) gpsStatusEl.textContent = text; }
 
@@ -18431,7 +18590,7 @@
   };
   function cookCopyFor(r) { return COOK_COPY[r.held ? 'FISH' : r.name] || null; }
   var COOK_START_PERCENT = 15; // the first words (what was put on) are shown for the first 15%, then the one noticed while it cooks
-  var COOK_DANGEROUS_SEA = 6, COOK_HEAVY_SEA = 5; // seas of 5 and up stop anything being started (as cooking always was); a sea of 6 turns the stove off under unfinished food
+  var COOK_DANGEROUS_SEA = 6, COOK_HEAVY_SEA = 6; // (beta 23) cooking works through sea state 5; a sea of 6 stops anything being started (coffee and tea included) and turns the stove off under unfinished food
   var COOK_INTERRUPT_LINES = ["The boat's rolling too hard. I've got to turn off the stove.", "Damn. There goes dinner."];
   var COOK_ROOM_VOLUME = { galley: 1, saloon: 1, nav: 1, hub: 1, cabin: 0.35, aft: 0.35, head: 0.35, above: 0 }; // the GALLEY, SALOON and NAV STATION (and the passage between them) full; the cabins and the head 35%; above deck silent
   var cookDurations = {}; // prepKey -> seconds, read once from the file's own metadata (this session only; the save keeps the number it used)
@@ -18833,7 +18992,7 @@
       return;
     }
     if (item.cooked) {
-      if (state.weather.seaState >= 5) {
+      if (state.weather.seaState >= COOK_HEAVY_SEA) {
         printBlank();
         printLine('THE BOAT IS MOVING TOO VIOLENTLY', 'amber');
         printLine('TO COOK SAFELY.', 'amber');
@@ -18983,7 +19142,7 @@
   // made with. Current-quantity only, like EAT — DRINK is about a choice
   // right now, not a supply audit; CURRENT/ORIGINAL is INVENTORY's job.
   function drinkMenuOptions(state) {
-    // only what can be made from what is aboard (no quantities: they are in the AFT CABIN's INVENTORY)
+    // only what can be made from what is aboard (no quantities: they are in the STORAGE's INVENTORY)
     var opts = [];
     if (hasEnoughWater(state, WATER_DRINK_GAL)) opts.push({ label: 'WATER', action: 'drink:water' });
     if (state.drinks.coffee > 0) opts.push({ label: 'COFFEE', action: 'drink:coffee' });
@@ -19190,7 +19349,7 @@
     { match: 'Fog sits in patches', topic: 'fog', when: function (c) { return c.fog; } },
     { match: 'The swell begins to reach the boat', topic: 'sea', when: function (c) { return c.waveFt != null && c.waveFt >= 3; } },
     { match: 'For a few minutes the water goes glassy', topic: 'calm', when: function (c) { return c.sea <= 1 && c.wind <= 4 && c.daytime && c.cloud <= 80 && !c.fog && !c.raining; } },
-    { match: 'The Alaska coast is a low grey line', topic: 'land', when: function (c) { return c.encRegion === 'offCoast' && c.dExit >= 20 && c.dExit <= 90 && c.daytime && !c.fog; } },
+    { match: 'The California coast is a low grey line', topic: 'land', when: function (c) { return c.encRegion === 'offCoast' && c.dExit >= 20 && c.dExit <= 90 && c.daytime && !c.fog; } },
     { match: 'Swell starts to build under the hull', topic: 'sea', when: function (c) { return c.encRegion === 'offCoast' && (c.sea >= 3 || (c.waveFt != null && c.waveFt >= 5)); } },
     { match: 'The water changes color, from grey-green', topic: 'color', when: function (c) { return c.encRegion === 'offCoast' && c.daytime && !c.fog && !c.heavyRain; } },
     { match: 'Long swells lift and drop', topic: 'sea', when: function (c) { return c.waveFt != null && c.waveFt >= 6 && c.wind <= 18; } },
@@ -19304,6 +19463,13 @@
   // tired to cook (food is the cure). COFFEE gets an exhausted sailor through the work for 2 hours, and keeps him from sleeping for the same 2 hours (a second
   // coffee starts the 2 hours again); tea does neither. A sleeping sailor wakes by himself when he becomes STARVING or PARCHED (checkNeedsWake).
   var COFFEE_BOOST_MINUTES = 120;
+  var COFFEE_WIRED_MINUTES = 60;          // (beta 23) the energy lasts 2 hours; he is too wired to sleep for the first hour only
+  function coffeeWiredActive(state) {
+    var last = state.crew.lastCoffeeAt;
+    if (last == null) return false;
+    var since = state.meta.voyageMinutes - last;
+    return since >= 0 && since < COFFEE_WIRED_MINUTES;
+  }
   var ROUGH_SEA_STATE = 4;                // the game's ROUGH
 
   function coffeeBoostActive(state) {
@@ -19329,19 +19495,17 @@
   function sleepBlockLine(state) {
     if (isStarving(state)) return 'Too hungry to sleep. I need to eat something.';
     if (isVeryThirsty(state)) return 'Too thirsty to sleep. I need water.';
-    if (coffeeBoostActive(state)) return 'Too wired to sleep. Maybe in a while.';
+    if (coffeeWiredActive(state)) return 'Too wired to sleep. Maybe in a while.';
     return null;
   }
   // Why an exhausted sailor will not make this (null when he will). Meals, popcorn and a fish are cooking; Cup Noodles, tea and coffee are only hot water.
-  var STOVE_SEA_LINE = 'TOO EXHAUSTED TO MANAGE THE STOVE IN THIS SEA.';
+  // (beta 23) the old "too exhausted to manage the stove in a rough sea" rule is gone: exhaustion stops cooking and nothing else about the stove.
   function exhaustedFoodBlock(state, key, item) {
     if (!isExhausted(state) || isStarving(state)) return null; // (food is the cure: a starving sailor always cooks)
-    if (key === 'cupNoodles') return state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
+    if (key === 'cupNoodles') return null;
     return item.cooked ? 'TOO EXHAUSTED TO COOK.' : null;
   }
-  function exhaustedDrinkBlock(state) {
-    return isExhausted(state) && !isStarving(state) && state.weather.seaState >= ROUGH_SEA_STATE ? STOVE_SEA_LINE : null;
-  }
+  function exhaustedDrinkBlock(state) { return null; }
 
   // A sleeping sailor wakes by himself when hunger reaches STARVING or thirst reaches PARCHED. Run every tick, so a reload or an offline catch-up wakes him at
   // exactly the minute he would have. He keeps the sleep he got (energy and sleep debt are repaid tick by tick) and cannot lie back down until he has eaten or drunk.
@@ -19445,7 +19609,7 @@
     if (items.length === 0) {
       printBlank();
       printLine('Nothing aboard needs repair.', 'dim');
-      cmdAftCabin(state); // e.g. just-completed the last repair on the list -- back to the AFT CABIN (REPAIRS' real parent), not the generic deck menu
+      cmdAftCabin(state); // e.g. just-completed the last repair on the list -- back to the STORAGE (REPAIRS' real parent), not the generic deck menu
       return;
     }
     printBlank();
@@ -19455,12 +19619,12 @@
 
   function cmdRestart(state) {
     printBlank();
-    printLine('NEW VOYAGE', 'heading-label');
-    printLine('This abandons the current voyage and starts over from Sitka.');
+    printLine('GIVE UP THE JOB', 'heading-label');
+    printLine('This abandons the current run and returns to the port. You keep your money and upgrades, but the run earns nothing.');
     state.pendingChoice = {
       id: 'restart-choice',
       options: [
-        { label: 'YES \u2014 START OVER', action: 'confirm-restart' },
+        { label: 'YES \u2014 GIVE UP THE RUN', action: 'confirm-restart' },
         { label: 'NO \u2014 KEEP SAILING', action: 'cancel' },
       ],
     };
@@ -19483,7 +19647,7 @@
     galley: cmdGalley,
     head: cmdHead,
     saloon: cmdSaloon,
-    cabin: cmdCabin,                 // (a stale 'cmd:cabin' button: the FORWARD CABIN)
+    cabin: cmdCabin,                 // (a stale 'cmd:cabin' button: the CABIN)
     'forward-cabin': cmdCabin,
     'aft-cabin': cmdAftCabin,
     'nav-station': cmdNavStation,
@@ -19772,7 +19936,7 @@
   // yellowfin/ahi, wahoo/ono) -- purely cosmetic, doesn't affect which
   // species gets picked or its weight.
   function fishSpeciesDisplayName(state, species) {
-    if (species.hawaiianName && voyagePhase(state) === 'approach') return species.hawaiianName;
+    if (species.hawaiianName && false) return species.hawaiianName; // (California: the fish keep their plain names)
     return species.name;
   }
 
@@ -20621,12 +20785,12 @@
      DOOR AUDIO -- ROOM-NAVIGATION PASS. The physical door sounds for
      entering/leaving CABIN or HEAD from BELOW DECK (open/close; see
      the 'enter-cabin'/'enter-head'/'leave-cabin'/'leave-head' cases in
-     handleAction), and AFT CABIN's own locked-door attempt (rattle;
+     handleAction), and STORAGE's own locked-door attempt (rattle;
      see 'try-aft-cabin'). Same lazy-element/fade-in/onEnded shape as
      every other one-shot domain in this file (SALOON AUDIO just above,
      HEAD/CABIN/GALLEY/SAILS elsewhere) -- a NEW domain of its own
      rather than folded into CABIN_AUDIO/HEAD_AUDIO, since these sounds
-     belong to the DOORWAY itself (and, for AFT CABIN, a room with no
+     belong to the DOORWAY itself (and, for STORAGE, a room with no
      other audio of its own at all), not to anything already happening
      inside either room. playDoorOneShot still runs its onEnded
      callback correctly (via the existing audioUnlocked/play-rejection
@@ -20888,8 +21052,9 @@
   // watchdog's own generous startupFallbackSeconds ceiling (see
   // runAudioSyncedAction's own notes) already exists to complete the
   // action from, with no duplicate mechanism needed here.
-  function playRepairAudio(systemKey, onEnded) {
+  function playRepairAudio(systemKey, onEnded, onFail) {
     onEnded = onceCallback(onEnded);
+    onFail = onceCallback(onFail); // (PERFORM MAINTENANCE only: told when a recording could not start at all, so its chain moves on; the repairs pass nothing and never hear of it)
     var audioKey = REPAIR_AUDIO_KEY[systemKey];
     var el = getNavStationAudioEl(audioKey);
 
@@ -20899,6 +21064,7 @@
       if (!audioUnlocked) {
         if (isRetry) {
           console.warn('Repair audio could not start (audio never unlocked): ' + audioKey);
+          if (onFail) onFail();
           return; // never call onEnded -- see this function's own notes above
         }
         unlockAudio();
@@ -20909,7 +21075,7 @@
       el.onended = null;
       if (el._fadeTimer) { clearInterval(el._fadeTimer); el._fadeTimer = null; }
       if (!el.paused) el.pause();
-      el.currentTime = 0;
+      try { el.currentTime = 0; } catch (e) { /* a recording that has not loaded yet is already at its start */ }
       el.volume = 0;
       el.onended = function () {
         el.onended = null;
@@ -20926,6 +21092,7 @@
           audioDebugError(audioKey, e);
           if (isRetry) {
             console.warn('Repair audio could not start after retry: ' + audioKey);
+            if (onFail) onFail();
             return; // genuinely give up -- never call onEnded; see this function's own notes above
           }
           recoverLandfallAudio('repair-audio-failure').then(function () { attempt(true); });
@@ -21914,7 +22081,7 @@
     if (ve && ve.phase !== 'none') {
       var pc = state.pendingChoice;
       if (pc && pc.id === 'restart-choice') return pc.options;
-      return ve.phase === 'pending' ? rescueCallChoice(state).options : [{ label: 'RESTART', action: 'confirm-restart' }];
+      return ve.phase === 'pending' ? rescueCallChoice(state).options : [{ label: 'BACK TO PORT', action: 'confirm-restart' }];
     }
     if (state.finale && state.finale.phase !== 'none') return finaleOptions(state); // THE FINAL ARRIVAL: nothing but its own actions
     if (state.nav.grounded && state.crew.watchState !== 'sleeping') { // RUN AGROUND: until she is freed, FREE SOLACE is what there is (the header's restart request stays answerable)
@@ -21957,12 +22124,12 @@
       // the door-open sound; see those two cases in handleAction.
       return groupedOptions([
         [
-          { label: 'FORWARD CABIN', action: 'enter-cabin' },
+          { label: 'CABIN', action: 'enter-cabin' },
           { label: 'HEAD', action: 'enter-head' },
           { label: 'SALOON', action: 'cmd:saloon' },
           { label: 'GALLEY', action: 'cmd:galley' },
           { label: 'NAV STATION', action: 'cmd:nav-station' },
-          { label: 'AFT CABIN', action: 'enter-aft-cabin' },
+          { label: 'STORAGE', action: 'enter-aft-cabin' },
         ],
         lanternRows(state).concat([{ label: goLabel, action: 'go-above-below' }]),
       ]);
@@ -22310,7 +22477,7 @@
             return;
           }
           openInfoPanel = INFO_COMMANDS[cmdName] ? cmdName : null;
-          printEcho(cmdName === 'cabin' ? 'forward cabin' : cmdName === 'status' ? 'aft cabin' : cmdName === 'repair' ? 'repairs' : cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName === 'drink' ? 'drinks' : cmdName === 'fish' ? 'fishing rod' : cmdName.indexOf('gps-') === 0 ? 'gps' : cmdName);
+          printEcho(cmdName === 'cabin' ? 'cabin' : cmdName === 'status' ? 'storage' : cmdName === 'repair' ? 'repairs' : cmdName === 'chore' ? 'chores' : cmdName === 'clothing' ? 'change clothes' : cmdName === 'drink' ? 'drinks' : cmdName === 'fish' ? 'fishing rod' : cmdName.indexOf('gps-') === 0 ? 'gps' : cmdName);
           runCommand(state, cmdName);
         } else {
           clearTempView();
@@ -22698,7 +22865,7 @@
         case 'commit-clothing':
           performClothingCommit(state);
           break;
-        case 'toggle-status': // (a stale NAV STATION button from before STATUS moved to the AFT CABIN)
+        case 'toggle-status': // (a stale NAV STATION button from before STATUS moved to the STORAGE)
           cmdAftCabin(state);
           break;
         case 'wake-up':
@@ -22979,7 +23146,7 @@
         state.nav.setCourse = Math.round(bearingBetween(state.nav.lat, state.nav.lon, FINAL_DEST.lat, FINAL_DEST.lon)); // a deliberate PLAYER command — the only place a destination bearing becomes a heading
         state.nav.courseDraft = null; // reached from the CHANGE COURSE screen now -- its half-dialled draft is moot
         state.nav.autopilotHeading = state.nav.setCourse; // ...and, like CHANGE COURSE, what AUTOPILOT (if on) then holds — it just holds it, it never chooses it
-        log(state, 'Set a course for N\u0101wiliwili. ' + state.nav.setCourse + '\u00B0.');
+        log(state, 'Set a course for ' + caDestName() + '. ' + state.nav.setCourse + '\u00B0.');
         if (state.boat.steering === 'DAMAGED') log(state, 'Easing the sheets. She comes round slowly.');
         statAdd(state, 'courseChanges', 1);
         flushNewLogEntries(state);
@@ -23166,7 +23333,7 @@
       marineForecastPowerWatch(GAME); // ... and so does the MARINE FORECAST radio
       fleetLiveTick(GAME); // reports this boat's position to the fleet database (does nothing unless one is set)
       lanternMenuWatch(GAME); // dusk, or the lights going out, brings LIGHT LANTERN onto the plain deck menu without waiting for the next tap
-      aftCabinWatch(GAME); // ... and the open AFT CABIN is drawn again if anything it shows has changed (a failure, the day's maintenance)
+      aftCabinWatch(GAME); // ... and the open STORAGE is drawn again if anything it shows has changed (a failure, the day's maintenance)
       // ticks > 0 covers the coarse simulation; the continuous systems
       // (reading milestones/completion, darkness interrupting a
       // session) synced inside advanceSimulation can also log something
@@ -23194,11 +23361,11 @@
     document.body.classList.add('title-mode');
     printPersistentLine('LANDFALL', 'heading-label');
     printPersistentBlank();
-    printPersistentLine('A real-time sailing voyage from Alaska to Hawaiʻi.');
+    printPersistentLine('A real-time sailing voyage along the California coast.');
     printPersistentBlank();
     printPersistentLine('Keep the boat and yourself going.');
     printPersistentBlank();
-    printPersistentLine('Navigate the Pacific, manage your provisions, and maintain your vessel.');
+    printPersistentLine('Carry supplies between the ports, manage your provisions, and maintain your vessel.');
     printPersistentBlank();
     printPersistentLine('The voyage continues while you’re away.');
     printPersistentBlank();
@@ -23416,7 +23583,7 @@
   // THE SCENE (after BEGIN's dots, before CONTINUE).
   function introSceneStanzas(state) {
     var f = sceneFacts(state, openingSky(openingWx.state));
-    return f.night ? sceneSitkaNight(f) : sceneSitkaDay(f);
+    return caDepartStanzas(f);
   }
   // A scene line split into its sentences (the scene text has no abbreviations; if the pieces do not add back up to exactly the line, it is kept whole).
   function introSceneSentences(text) {
@@ -23447,11 +23614,10 @@
   function renderStartScreen(state) {
     printPersistentLine(DEPARTURE_PORT.toUpperCase(), 'heading-label');
     printPersistentBlank();
-    printPersistentLine('Solace, a 35-foot ocean-cruising sailboat, is tied up at the dock.');
+    printPersistentLine('Solace, a 35-foot sailboat, is loaded and tied up at the dock.');
     printPersistentBlank();
     printPersistentLine('You will be sailing alone.');
-    printPersistentBlank();
-    printPersistentLine('The destination is Nāwiliwili Harbor, Kauaʻi, Hawaiʻi, somewhere beyond the curve of the Earth.');
+    caStartScreenLines(state).forEach(function (t) { printPersistentBlank(); printPersistentLine(t); });
   }
   // BEGIN: the title page goes, four seconds of dots (three more while the sky is still on its way), then the scene.
   var TITLE_DOTS_SECONDS = 4;
@@ -23469,7 +23635,7 @@
       clearInterval(dotTimer);
       document.body.classList.remove('title-mode');
       resetOutputEl();
-      renderIntroScene();
+      caShowPortFromTitle(); // California: the port screen (job board, shop, SET SAIL); SET SAIL brings up the departure scene
       updateClock();
     }, (TITLE_DOTS_SECONDS + openingWxWaitExtra()) * 1000);
   }
@@ -23542,6 +23708,7 @@
     // A restart discards the save and begins a fresh voyage "now" — this is
     // not a time-skip (see PROJECT.md): it doesn't fast-forward or rewind
     // an in-progress voyage, it just starts over exactly like a first visit.
+    caAbandonUnpaid(); // a run not delivered earns nothing; the career record (money, upgrades, port) is kept
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) { console.warn('Could not clear save:', describeError(e)); }
     briefingHide();
     rescueResetUi();
@@ -23552,7 +23719,7 @@
     resetOutputEl();
     restartBtn.hidden = true;
     setVesselLine('S/V ' + VESSEL_NAME + ' \u2014 AT DOCK');
-    renderIntroStory(); // a restart starts over exactly like a first visit: the title page, then BEGIN
+    caShowPort(); // back to the port screen: the job board, the shop, SET SAIL
     updateClock();
   }
 
@@ -23600,7 +23767,7 @@
   var BRIEFING_BATTERY_PTS = 10;             // a battery charge change of at least this many points
   var BRIEFING_LOW_FRACTION = 0.2;           // diesel / kerosene "low": under a fifth of the starting amount
   var BRIEFING_BLOCKING_CHOICES = ['binoculars', 'existing', 'reading', 'sitting', 'pong', 'repair-menu', 'repair-decision', 'rescue-call', 'restart-choice', 'voyage-ended']; // screens that are an activity in progress
-  var BRIEFING_REGION_WORDS = { 'SITKA SOUND': 'Sitka Sound', 'GULF OF ALASKA': 'the Gulf of Alaska', 'NORTH PACIFIC': 'the North Pacific', 'CENTRAL NORTH PACIFIC': 'the central North Pacific', 'HAWAIIAN WATERS': 'Hawaiian waters', 'KAUAʻI': 'Kauaʻi waters', 'NAWILIWILI': 'Nāwiliwili' };
+  var BRIEFING_REGION_WORDS = { 'SAN FRANCISCO BAY': 'San Francisco Bay', 'CALIFORNIA COAST': 'the California coast', 'MONTEREY': 'Monterey', 'SANTA BARBARA': 'Santa Barbara', 'LOS ANGELES': 'Los Angeles', 'SAN DIEGO': 'San Diego', 'SITKA SOUND': 'Sitka Sound', 'GULF OF ALASKA': 'the Gulf of Alaska', 'NORTH PACIFIC': 'the North Pacific', 'CENTRAL NORTH PACIFIC': 'the central North Pacific', 'HAWAIIAN WATERS': 'Hawaiian waters', 'KAUAʻI': 'Kauaʻi waters', 'NAWILIWILI': 'Nāwiliwili' };
   var briefingShown = null; // the report object the overlay is showing right now, or null
 
   function briefingPageVisible() { return document.visibilityState === 'visible'; }
@@ -23947,6 +24114,7 @@
       c.hygieneHours = lastWashAt == null ? state.meta.voyageMinutes / 60 : (state.meta.voyageMinutes - lastWashAt) / 60;
     }
     if (c.lastCoffeeAt === undefined) c.lastCoffeeAt = null;
+    if (c.napLiftFor === undefined) c.napLiftFor = null; // (beta 23)
     if (c.coffeeCount === undefined) c.coffeeCount = 0;
     if (c.snackMealRatio === undefined) c.snackMealRatio = 0;
     if (c.dishesDirtySinceMinutes === undefined) c.dishesDirtySinceMinutes = null;
@@ -24178,11 +24346,12 @@
     }
     if (state.pendingChoice && state.pendingChoice.id === 'meals-menu') state.pendingChoice.options = buildMealsOptions(state); // drawn afresh: a fish aboard is in it now
     if (state.pendingChoice && state.pendingChoice.id === 'snacks-menu') state.pendingChoice.options = buildSnacksOptions(state);
-    if (state.pendingChoice && state.pendingChoice.id === 'aft-cabin-menu') { // the AFT CABIN as it is now (its readings are not saved with the menu)
+    if (state.pendingChoice && state.pendingChoice.id === 'aft-cabin-menu') { // the STORAGE as it is now (its readings are not saved with the menu)
       cmdAftCabin(state);
       return;
     }
-    if (state.pendingChoice && state.pendingChoice.id === 'maintaining') { // (beta 19) a maintenance session cannot survive a reload either: the AFT CABIN, with what the last save held
+    if (state.pendingChoice && state.pendingChoice.id === 'maintaining') { // (beta 19) a maintenance session cannot survive a reload either: the STORAGE, with what the last save held ...
+      maintCreditAway(state); // ... plus (beta 22) the real time that went by while the page was away
       state.pendingChoice = null; cmdAftCabin(state);
       return;
     }
@@ -24391,6 +24560,9 @@
     return s;
   }
   var SCENARIOS = {
+    'ca-arrival': { about: 'California: a few minutes outside the Santa Barbara harbor mouth on the San Francisco run, engine running, sails furled. Tests the arrival, the pay and BACK TO PORT.', build: function () { return caScenarioArrival(true, false, false); } },
+    'ca-arrival-sail': { about: 'California: the same, under sail with the engine off.', build: function () { return caScenarioArrival(false, false, false); } },
+    'ca-arrival-no-diesel': { about: 'California: the same, under sail with the tank empty.', build: function () { return caScenarioArrival(false, true, false); } },
     'harbor': { about: 'A couple of minutes from the Nāwiliwili harbor mouth, under sail, engine off. Tests the capture and the whole arrival, from FURL SAILS and START ENGINE to the final summary.', build: function () { return scenarioHarbor(false); } },
     'harbor-below': { about: 'The same as harbor, but you are below deck: the arrival makes you GO ABOVE before FURL SAILS and START ENGINE.', build: function () { return scenarioHarbor(false, true); } },
     'harbor-motorsail': { about: 'Motor-sailing: the engine is running and the sails are still up, so the arrival offers FURL SAILS and skips START ENGINE.', build: function () { return scenarioHarbor(true, false, true); } },
@@ -24538,20 +24710,20 @@
   // N, E, S, W (and the bow and stern) as small marks along the top of the view
   let FONT = 'monospace';
   function drawCompass(g, W, yb) {
-    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg;
-    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    const ppd = W / FOV, vb = viewBearing(), hd = V.hdg, TINT = ART.broken ? SCN.ph : A_WHITE, TINTB = ART.broken ? SCN.br : A_WHITE;
+    g.save(); g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.lineJoin = 'round';
     const cards = [['N', 0], ['E', 90], ['S', 180], ['W', 270]], xs = [];
     cards.forEach(([L, b]) => {
       const x = W / 2 + wrap180(b - vb) * ppd; xs.push(x);
       if (x < 8 || x > W - 8) return;
       const isN = L === 'N';
-      g.strokeStyle = rgba(SCN.ph, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
-      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? SCN.br : SCN.ph, isN ? .95 : .8); g.fillText(L, x, yb);
+      g.strokeStyle = rgba(TINT, isN ? .75 : .5); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + (isN ? 9 : 7)); g.stroke();
+      g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? TINTB : TINT, isN ? .95 : .8); if (!ART.broken) { g.lineWidth = 2.4; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText(L, x, yb); } g.fillText(L, x, yb);
     });
     { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
       if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
-        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(SCN.ph, .5); g.fillText('BOW', x, yb);
-        g.strokeStyle = rgba(SCN.ph, .3); g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(TINT, .5); if (!ART.broken) { g.lineWidth = 2.2; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText('BOW', x, yb); } g.fillText('BOW', x, yb);
+        g.strokeStyle = rgba(TINT, .3); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
       } }
     g.restore();
   }
@@ -24664,7 +24836,7 @@
 
 
   /* the outside world: sky, sun and moon, clouds, rain, sea. Drawn at any size, so the strip above and the porthole below share it. */
-  function drawScene(g, W, H, ts, lw) {
+  function drawSceneLines(g, W, H, ts, lw) {
     LW = lw;
     const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea;
     const pal = V.loc === 'below' ? OUT : SCN, e = V.e, br0 = pal.br, bg = pal.bg, tt = V.reduce ? 0 : ts;
@@ -24828,6 +25000,428 @@
   }
 
 
+  /* ===== THE COLOUR PICTURE (beta 19) -- the outside view's new art: a painted, full-colour sky, land and sea in place of the green line drawing. =====
+     It only DRAWS. It reads the same things the line drawing read (the sun and moon bearings and heights, the cloud cover, rain, fog, squall and sea state, the view bearing,
+     the coast) and writes nothing to the game: no save, no inventory, no clock. If anything in it ever goes wrong it switches itself off and the old line drawing (drawSceneLines,
+     below) takes over for the rest of the session. */
+const A_CLEAR_RAW = {
+    dawn: { sk: ['#2b3a6b', '#6d5b8f', '#d98a8f', '#f7c08a'], se: ['#f0b48a', '#7a7aa0', '#3a4a74', '#1c2a4a'], rock: '#6d6a86', forest: '#2c3552', rim: '#ffd9bf', haze: '#f2b98f', hazeOp: 0.5, cloud: '#ffd7c4', shade: '#b87d92', sun: '#ffe3b0', glint: '#ffe0b0', gull: '#3b3550' },
+    day: { sk: ['#2f6fb5', '#5fa0d6', '#9cccec', '#d9edf6'], se: ['#8cc0d8', '#3d85a9', '#215f84', '#143f5e'], rock: '#7e8ea0', forest: '#2f4a4a', rim: '#e9f2f8', haze: '#cfe5ef', hazeOp: 0.55, cloud: '#ffffff', shade: '#b4c7d8', sun: '#fff3cf', glint: '#fff6dc', gull: '#33404f' },
+    dusk: { sk: ['#1f2756', '#5a3f80', '#d2605a', '#ffb067'], se: ['#f09a62', '#8a5a7e', '#3a3a68', '#1a2145'], rock: '#6a5575', forest: '#2a2744', rim: '#ffc7a0', haze: '#f2a070', hazeOp: 0.5, cloud: '#ffb08a', shade: '#8c4c78', sun: '#ffc27a', glint: '#ffcf8f', gull: '#2a2440' },
+    night: { sk: ['#03050c', '#080f26', '#142245', '#27385f'], se: ['#2b3d63', '#101e3a', '#0a1428', '#050a16'], rock: '#161d33', forest: '#0b1120', rim: '#6e7fa8', haze: '#26365a', hazeOp: 0.5, cloud: '#3a4a70', shade: '#1a2440', sun: '#ffffff', glint: '#d8e4ff', gull: '#0a0f1c' }
+  };
+const A_GREY_RAW = {
+    dawn: { sk: ['#5d6270', '#7f808c', '#a79a9d', '#c8b6b0'], se: ['#b0a09c', '#5f6670', '#3d4650', '#252d36'], rock: '#6c6a78', forest: '#3a4048', rim: '#cdbdbb', haze: '#bfaea8', hazeOp: 0.7, glint: '#d8c8c0' },
+    day: { sk: ['#7d8890', '#9aa4ab', '#b6bec3', '#cdd3d6'], se: ['#8c9da3', '#51666f', '#35474f', '#212f36'], rock: '#7d868d', forest: '#4a5a5c', rim: '#cfd6da', haze: '#c4ccd0', hazeOp: 0.7, glint: '#dfe6e9' },
+    dusk: { sk: ['#3d3f50', '#5e5560', '#8a6f70', '#b58f7e'], se: ['#9a7a70', '#4f4a5c', '#33364a', '#1e2134'], rock: '#5d5568', forest: '#34303f', rim: '#b99a92', haze: '#a98a80', hazeOp: 0.7, glint: '#d6b8a8' },
+    night: { sk: ['#07090e', '#0e1219', '#171d27', '#212a37'], se: ['#2a3442', '#141b26', '#0b111b', '#06090f'], rock: '#141a24', forest: '#0a0e15', rim: '#566275', haze: '#232c3a', hazeOp: 0.7, glint: '#9aa6b8' }
+  };
+  const A_toRaw = o => { const r = {}; for (const k in o) { const v = o[k]; r[k] = Array.isArray(v) ? v.map(hex) : (typeof v === 'string' ? hex(v) : v); } return r; };
+  const A_CLEAR = {}, A_GREY = {};
+  for (const k in A_CLEAR_RAW) A_CLEAR[k] = A_toRaw(A_CLEAR_RAW[k]);
+  for (const k in A_GREY_RAW) { const p = A_toRaw(A_GREY_RAW[k]); p.cloud = p.sk[3]; p.shade = p.sk[1]; p.sun = p.sk[3]; p.gull = p.rock; A_GREY[k] = p; }
+  const A_DARK = hex('#141a20'), A_BLACK = [0, 0, 0], A_WHITE = [255, 255, 255];
+  const pmix = (A, B, t) => { const o = {}; for (const k in A) { const a = A[k], b = B[k]; o[k] = typeof a === 'number' ? lerp(a, b, t) : (Array.isArray(a[0]) ? a.map((c, i) => mix(c, b[i], t)) : mix(a, b, t)); } return o; };
+  const atStops = (stops, t) => { const n = stops.length - 1, x = clamp(t * n, 0, n), i = Math.min(n - 1, Math.floor(x)); return mix(stops[i], stops[i + 1], x - i); };
+  const smooth01 = f => f * f * (3 - 2 * f);
+
+  // the colours of the hour: night, dawn or dusk, day -- blended by the height of the sun, so every minute of the evening has its own sky. Heavy cloud turns it grey; rain darkens it.
+  function artPal() {
+    const e = V.e, dawnW = .5 + .5 * Math.sin(V.sun.az * RAD), gk = GREYK, rk = clamp(cur.rain / .6, 0, 1);
+    const fam = F => {
+      if (e <= -10) return F.night;
+      if (e >= 14) return F.day;
+      const tw = pmix(F.dusk, F.dawn, dawnW);                       // the sun in the east: dawn; in the west: dusk (it blends through north and south, so nothing jumps)
+      if (e < -1) return pmix(F.night, tw, smooth01((e + 10) / 9));
+      if (e <= 3) return tw;
+      return pmix(tw, F.day, smooth01((e - 3) / 11));
+    };
+    let p = fam(A_CLEAR);
+    if (gk > .001) p = pmix(p, fam(A_GREY), gk);
+    p = Object.assign({}, p, { moon: hex('#eef3ff') });
+    const nd = clamp((-e - 3) / 9, 0, 1);                                                          // 0 by day and at dusk, 1 in the dark
+    if (nd > .001) {                                                                               // the glow along the horizon is darker at night
+      p.sk = p.sk.slice(); p.se = p.se.slice();
+      for (let i = 0; i < p.sk.length; i++) p.sk[i] = mix(p.sk[i], A_BLACK, .30 * nd);                  // the sky keeps the game's own gradient, 30% darker in the dark
+      p.se[0] = mix(p.se[0], A_BLACK, .46 * nd); p.se[1] = mix(p.se[1], A_BLACK, .14 * nd);
+      p.haze = mix(p.haze, A_BLACK, .45 * nd); p.hazeOp = p.hazeOp * (1 - .5 * nd);
+    }
+    if (rk > .001) {
+      const f = .4 * rk;
+      p.sk = p.sk.map(c => mix(c, A_DARK, f)); p.se = p.se.map(c => mix(c, A_DARK, .75 * f));
+      ['rock', 'forest', 'rim', 'haze'].forEach(k => { p[k] = mix(p[k], A_DARK, f); });
+    }
+    return p;
+  }
+
+  // the sea, by sea state 0..6 (the game's own scale): how tall and long the swells are, how fast they go, how the boat rocks
+  const A_SEA = {
+    amp:  [.5, .8, 1.3, 2.0, 3.0, 4.2, 5.0],
+    L:    [150, 150, 146, 140, 134, 128, 124],
+    c:    [3.5, 5.5, 7.5, 10, 13, 15.5, 17],
+    bobA: [.4, .7, 1.0, 1.5, 2.1, 2.8, 3.4],
+    bobT: [10, 9, 8.5, 7.5, 6.8, 6.2, 5.8],
+    roll: [7.8, 7.2, 6.6, 6.0, 5.5, 5.0, 4.6]                          // how long she takes over one swing: seconds, the rougher the sea the quicker
+  };
+  const A_HEAVE = [0, .03, .06, .12, .18, .24, .30];                    // how far the horizon rises and falls from the middle of the frame, as a share of the frame's height (each end of it rolls by the same)
+  const A_YS = [0, .10, .22, .38, .58, .82], A_NL = 6, A_EASE_K = 1.45;
+  const A_PILL_MY = 12, A_PILL_FW = 5;                                  // the porthole: its margin above and below, and the width of its bronze ring
+
+  const ART = { t: 0, tc: 0, dt: 0, key: '', sprites: [], rain: [], lay: null, broken: false, glowX: 0, ovl: null };
+  { const R2 = mulberry(21); ART.lay = Array.from({ length: A_NL }, (_, k) => ({ k, f: (k + 1) / A_NL, ph: R2() * 6.2832, ph2: R2() * 6.2832, ph3: R2() * 6.2832, bobPh: R2() * 6.2832, A1: 0, A2: 0, A3: 0, buf: null })); }
+
+  // one swing: it eases to a full stop at the end of each stroke before it turns, and eases away. No small wiggles ride on top; the variety is in the size and pace drifting slowly.
+  function artSwing(t, T, ph, a, b) {
+    const th = 6.2832 * t / T + ph + .32 * Math.sin(6.2832 * t / (T * 5.3) + a), env = .86 + .14 * Math.sin(6.2832 * t / (T * 3.7) + b);
+    return env * Math.sin(A_EASE_K * Math.sin(th)) / Math.sin(A_EASE_K);
+  }
+  // heave and roll take turns being the bigger one, slowly, so the ends of the horizon stay inside the frame
+  function artCam(frameH, halfW, sea) {
+    const hv = frameH * lerpTable(A_HEAVE, sea);
+    if (V.reduce || !(hv > .05)) return { rot: 0, bob: 0 };
+    const t = ART.tc, T = 4.6, psi = 6.2832 * t / (T * 8.5) + .8 + .5 * Math.sin(6.2832 * t / (T * 23)), mixH = .62 + .38 * Math.cos(psi), mixR = 1.24 - mixH;
+    return { rot: Math.atan2(hv, halfW) * mixR * artSwing(t, T * 1.9, .4, 1.3, .2), bob: hv * mixH * artSwing(t, T * 2.4, 2, 4.1, 2.6) };
+  }
+  function artStep(dt) { // called once a frame, before anything is drawn
+    ART.dt = V.reduce ? 0 : dt;
+    if (V.reduce) return;
+    ART.t += dt; ART.tc += dt * 4.6 / lerpTable(A_SEA.roll, cur.sea);
+  }
+
+  const artMk = (w, h) => { const d = hz.d || 1, c = document.createElement('canvas'); c.width = Math.ceil(w * d); c.height = Math.ceil(h * d); const x = c.getContext('2d'); x.scale(d, d); return { c, x, w, h }; };
+
+  // one cumulus on its own canvas: flat base, lumpy shaded top
+  function artCloudImg(w, h, rnd, col, lx, ly) {
+    const padX = h * 1.2, bw = Math.ceil(w + padX * 2), bh = Math.ceil(h * 2.1), base = bh - 4, o = artMk(bw, bh), x = o.x, puffs = [], n = Math.max(10, Math.round(w / (h * .28)));
+    for (let i = 0; i < n; i++) {
+      const t = (i + .5) / n, env = Math.pow(Math.sin(Math.PI * t), .75), r = h * (.15 + .30 * env) * (.7 + .6 * rnd());
+      puffs.push([bw / 2 - w / 2 + t * w + (rnd() - .5) * r * .6, base - r * (.2 + .55 * rnd()) - h * .24 * env * rnd(), r]);
+    }
+    puffs.slice().sort((a, b) => a[1] - b[1]).slice(0, 5).forEach(p => puffs.push([p[0] + (rnd() - .5) * p[2] * .9, p[1] - p[2] * .55, p[2] * (.5 + .3 * rnd())]));
+    let topY = base; puffs.forEach(p => { if (p[1] - p[2] < topY) topY = p[1] - p[2]; });
+    x.save(); x.beginPath(); x.rect(0, 0, bw, base); x.clip();                                  // 1. the silhouette: soft puffs in one flat tone, cut off flat at the base
+    puffs.forEach(p => { const g = x.createRadialGradient(p[0], p[1], 0, p[0], p[1], p[2] * 1.08); g.addColorStop(0, rgba(col.mid, 1)); g.addColorStop(.7, rgba(col.mid, 1)); g.addColorStop(1, rgba(col.mid, 0)); x.fillStyle = g; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.08, 0, 6.2832); x.fill(); });
+    x.restore();
+    x.globalCompositeOperation = 'source-atop';                                                  // 2. the light: bright on top, shaded toward the flat underside
+    let lg = x.createLinearGradient(0, topY, 0, base);
+    lg.addColorStop(0, rgba(col.lit, 1)); lg.addColorStop(.35, rgba(col.lit, .65)); lg.addColorStop(.7, rgba(col.shade, .5)); lg.addColorStop(1, rgba(col.shade, .85));
+    x.fillStyle = lg; x.fillRect(0, 0, bw, bh);
+    puffs.forEach(p => {                                                                         // 3. each puff catches the light on its sunny side and is darker underneath
+      const hg = x.createRadialGradient(p[0] + lx * p[2] * .4, p[1] + ly * p[2] * .5, 0, p[0] + lx * p[2] * .4, p[1] + ly * p[2] * .5, p[2] * .95);
+      hg.addColorStop(0, rgba(col.lit, .5)); hg.addColorStop(1, rgba(col.lit, 0)); x.fillStyle = hg; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.05, 0, 6.2832); x.fill();
+      const sg = x.createLinearGradient(0, p[1], 0, p[1] + p[2]); sg.addColorStop(0, rgba(col.shade, 0)); sg.addColorStop(1, rgba(col.shade, .3));
+      x.fillStyle = sg; x.beginPath(); x.arc(p[0], p[1], p[2] * 1.05, 0, 6.2832); x.fill();
+    });
+    const bg = x.createLinearGradient(0, base - h * .7, 0, base);                                // 4. the flat, dark underside
+    bg.addColorStop(0, rgba(col.base, 0)); bg.addColorStop(1, rgba(col.base, .6)); x.fillStyle = bg; x.fillRect(0, 0, bw, base);
+    x.globalCompositeOperation = 'source-over';
+    return { c: o.c, w: bw, h: bh, base };
+  }
+  function artCloud(i, P, ls) { // the sprite for the game's cloud number i, built once per colour of the sky (and cached)
+    let sp = ART.sprites[i]; if (sp) return sp;
+    const e = V.e, twf = clamp(1 - Math.abs(e - 1) / 8, 0, 1), night = e < -8, lx = night ? .25 : lerp(.55, .9, twf), ly = lerp(-.9, -.35, twf);
+    const r = mulberry(100 + i * 7), near = CLOUDS[i].y, far = 1 - near;
+    const w = ls * (36 + near * 78) * (.8 + .5 * r()), h = ls * (7 + near * 15) * (.8 + .4 * r());
+    const lit = mix(P.cloud, P.haze, .4 * far), shade = mix(P.shade, P.haze, .3 * far);
+    sp = ART.sprites[i] = artCloudImg(w, h, r, { lit, mid: mix(lit, shade, .4), shade, base: mix(mix(P.shade, P.sk[1], .25), A_BLACK, .12) }, lx, ly);
+    return sp;
+  }
+
+  // the land: the game's own coastline (its bearings and distances), in the picture's colours: one fill, shaded on the side away from the light, one outline, fading into haze with distance
+  function artLand(g, W, y0, m, ppd, vb, P, haze, pxMax) {
+    const Ld = LAND; if (!Ld || !Ld.any || haze < .02) return;
+    const P2 = a => pxMax * (1 - Math.exp(-a * 10 / pxMax)), step = 2, n = Math.ceil((W + 2 * m) / step), visKm = V.visKm, SINK = visKm * .74, col = [];
+    for (let q = 0; q <= n; q++) {
+      const x = -m + q * step, bq = (vb + (x - W / 2) / ppd) * 2, i0 = Math.floor(bq), f = bq - i0, a0 = ((i0 % 720) + 720) % 720, a1 = (a0 + 1) % 720, t0 = Ld.top[a0], t1 = Ld.top[a1];
+      if (t0 <= 0 && t1 <= 0) { col.push(null); continue; }
+      const d = Math.min(Ld.dst[a0], Ld.dst[a1]);
+      if (d >= visKm) { col.push(null); continue; }
+      const sink = 1 - Math.pow(clamp((d - SINK) / (visKm - SINK), 0, 1), 2);
+      col.push({ x, d, h: Math.max(1.4, P2(lerp(Math.max(t0, 0), Math.max(t1, 0), f)) * sink) });
+    }
+    const fogMix = clamp((1 - haze) * .9, 0, 1), greyK = P.hazeOp > .6 ? .5 : 1, lightX = ART.glowX;
+    g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
+    for (let q = 0; q <= n;) {
+      if (!col[q]) { q++; continue; }
+      let e = q; while (e + 1 <= n && col[e + 1]) e++;
+      if (e > q) {
+        const hh = k => (k === q || k === e) ? 0 : col[k].h; // each run starts and ends at the sea, so an island's ends slope down with no lip
+        let dsum = 0, hmax = 4; for (let k = q; k <= e; k++) { dsum += col[k].d; if (col[k].h > hmax) hmax = col[k].h; }
+        const hz2 = clamp(.06 + .5 * (dsum / (e - q + 1)) / visKm, 0, .6) + fogMix * .5, topY = y0 - hmax, hzc = P.haze;
+        const poly = new Path2D(); poly.moveTo(col[q].x, y0 + 2); for (let k = q; k <= e; k++) poly.lineTo(col[k].x, y0 - hh(k)); poly.lineTo(col[e].x, y0 + 2); poly.closePath();
+        const gr = g.createLinearGradient(0, topY, 0, y0);
+        const nd2 = clamp((-V.e - 3) / 9, 0, 1), body = mix(mix(P.rock, P.forest, .4), A_BLACK, .5 * nd2);   // one tone, darker at night so it stands against the sky; a little paler at the top and hazier at the waterline
+        gr.addColorStop(0, rgb(mix(mix(body, P.rim, .14), hzc, hz2 * (1 - .6 * nd2)))); gr.addColorStop(.55, rgb(mix(body, hzc, hz2 * (1 - .6 * nd2)))); gr.addColorStop(1, rgb(mix(body, hzc, Math.min(1, hz2 * (1 - .6 * nd2) + .2))));
+        g.fillStyle = gr; g.fill(poly);
+        { const sky = new Path2D(), nn = clamp((-V.e - 3) / 9, 0, 1); sky.moveTo(col[q].x, y0 - hh(q)); for (let k = q + 1; k <= e; k++) sky.lineTo(col[k].x, y0 - hh(k));
+          const gk = (1 - fogMix * .6) * greyK * (.8 + .5 * nn);                                       // a soft highlight along the top of the land itself: inside its edge, nothing outside it
+          g.save(); g.clip(poly); g.lineJoin = 'round'; g.lineCap = 'round';
+          [[8, .05], [4.5, .08], [2.2, .10]].forEach(function (w) { g.lineWidth = w[0]; g.strokeStyle = rgba(P.rim, w[1] * gk); g.stroke(sky); });
+          g.restore(); }
+        g.save(); g.clip(poly);                                                                  // a little light and shade on the slopes: broad and smooth, strongest near the ridge, never stripes
+        const lg = g.createLinearGradient(0, topY, 0, y0), dg = g.createLinearGradient(0, topY, 0, y0), dk = mix(P.forest, A_BLACK, .5), sl = [];
+        lg.addColorStop(0, rgba(P.rim, 1)); lg.addColorStop(.4, rgba(P.rim, .4)); lg.addColorStop(.8, rgba(P.rim, 0));
+        dg.addColorStop(0, rgba(dk, 1)); dg.addColorStop(.45, rgba(dk, .45)); dg.addColorStop(.85, rgba(dk, 0));
+        for (let k = q; k < e; k++) sl.push((hh(k) - hh(k + 1)) / step);                         // each column's slope, then averaged over its neighbours (about 30 px) so it changes gently
+        for (let k = q; k < e; k++) {
+          let sum = 0, cnt = 0; for (let j = Math.max(q, k - 8); j <= Math.min(e - 1, k + 8); j++) { sum += sl[j - q]; cnt++; }
+          const s = (sum / cnt) * (lightX > col[k].x ? 1 : -1), a = clamp(Math.abs(s) * .5, 0, .24) * greyK * (1 - fogMix);
+          if (a < .02) continue;
+          g.globalAlpha = a; g.fillStyle = s > 0 ? lg : dg; g.fillRect(col[k].x, topY, step + .3, y0 - topY + 3);
+        }
+        g.globalAlpha = 1; g.restore();
+      }
+      q = e + 1;
+    }
+    g.restore();
+  }
+
+  // the sea: six swells from the horizon to the bow, each with three wave trains. Sun and moon glitter sits on the faces of the waves, so it breaks up and moves with them.
+  function artSurf(ly, x, t) {
+    const wob = .55 * Math.sin(6.2832 * x / 380 + t * .23 + ly.k) + .3 * Math.sin(6.2832 * x / 170 - t * .31 + ly.k * 2);
+    const th = 6.2832 * x / ly.L - ly.A1 + ly.ph + wob, th2 = 6.2832 * x / ly.L2 - ly.A2 + ly.ph2 + .4 * Math.sin(6.2832 * x / 260 + t * .4), th3 = 6.2832 * x / ly.L3 - ly.A3 + ly.ph3;
+    const env = 1 + .2 * Math.sin(6.2832 * x / 460 - t * .31 + ly.k * 1.7) + .12 * Math.sin(6.2832 * x / 210 + t * .5 + ly.k);
+    const th4 = 6.2832 * x / (ly.L * .37) - ly.A2 * 1.7 + ly.ph3 * 2.3;                              // a short chop riding on the swells
+    return ly.y0 + ly.bob * Math.sin(6.2832 * t / ly.bobT + ly.bobPh) - ly.amp * env * (Math.cos(th) + .40 * Math.cos(2 * th) + .4 * Math.cos(th2) + .35 * Math.cos(th3) + .26 * Math.cos(th4));
+  }
+  function artSea(g, W, H, y0, S, port, dir, m, yawPx, P, fogF, glintOp, glowX) {
+    const t = ART.t, dt = ART.dt, sea = cur.sea, grey = P.hazeOp > .6;
+    const amp0 = lerpTable(A_SEA.amp, sea) * 1.18, nd = clamp((-V.e - 3) / 9, 0, 1), L0 = lerpTable(A_SEA.L, sea), c0 = lerpTable(A_SEA.c, sea), bob0 = lerpTable(A_SEA.bobA, sea), bobT0 = lerpTable(A_SEA.bobT, sea);
+    const xs = -m, xe = W + m, nPts = Math.floor((xe - xs) / 5) + 1;
+    const hazeCol = mix(P.se[1], mix(P.sk[3], [205, 218, 210], .5), .5 * fogF);
+    for (let k = 0; k < A_NL; k++) {
+      const ly = ART.lay[k], f = ly.f;
+      ly.L = Math.round(L0 * (.45 + .95 * f)); ly.L2 = ly.L * .61; ly.L3 = ly.L * 1.8;
+      ly.amp = amp0 * (.22 + Math.pow(f, 1.2)) * (port ? 1.35 : 1);
+      const sp = c0 * (.45 + f) * (port ? 2.4 : 1);
+      ly.y0 = y0 + S * A_YS[k] + 1; ly.bandH = S * ((k + 1 < A_NL ? A_YS[k + 1] : A_YS[k] + .4) - A_YS[k]);
+      ly.bob = bob0 * (.3 + .14 * k) * (port ? 1.4 : 1); ly.bobT = bobT0 + k * .9;
+      if (dt > 0) { ly.A1 += 6.2832 * dir * sp / ly.L * dt; ly.A2 += 6.2832 * dir * sp * .8 / ly.L2 * dt; ly.A3 += 6.2832 * dir * sp * .5 / ly.L3 * dt; }
+      const vis = 1 - fogF * (1 - clamp((f - .45) / .4, 0, 1)), fillC = mix(mix(atStops(P.se, Math.min(1, A_YS[k] + .1)), A_BLACK, .1 * f), hazeCol, 1 - vis);
+      const reflect = (.34 * (1 - f) + .08 + .16 * nd * f) * (grey ? .6 : 1);                      // (at night the near swells catch more of the sky, so their tops read against their dark faces)
+      const gr = g.createLinearGradient(0, ly.y0 - ly.amp * 1.8, 0, ly.y0 + ly.bandH + ly.amp * 1.6);
+      gr.addColorStop(0, rgb(mix(fillC, P.sk[3], reflect * vis))); gr.addColorStop(.35, rgb(fillC)); gr.addColorStop(1, rgb(mix(fillC, A_BLACK, .2 + .03 * sea)));
+      const ys = ly.buf && ly.buf.length === nPts ? ly.buf : (ly.buf = new Float32Array(nPts));
+      for (let i = 0; i < nPts; i++) ys[i] = artSurf(ly, xs + i * 5 + yawPx, t);
+      g.beginPath(); g.moveTo(xs, H + 200); for (let i = 0; i < nPts; i++) g.lineTo(xs + i * 5, ys[i]); g.lineTo(xe, H + 200); g.closePath();
+      g.fillStyle = gr; g.fill();
+      {                                                                                          // a soft highlight along the top of each swell
+        const skyL = mix(P.sk[3], P.glint, .45), hA = (.10 + .34 * f) * (.4 + .6 * nd) * (grey ? .8 : 1) * vis, hb = [new Path2D(), new Path2D(), new Path2D()];
+        for (let i = 3; i < nPts - 3; i++) {
+          const cv = (ys[i - 3] + ys[i + 3]) / 2 - ys[i] - .05, bk = cv > .9 + 1.4 * f ? 2 : (cv > .3 + .5 * f ? 1 : 0);   // brighter on the taller crests, fainter along the slopes
+          hb[bk].moveTo(xs + i * 5, ys[i] + .3); hb[bk].lineTo(xs + (i + 1) * 5, ys[i + 1] + .3);
+        }
+        if (hA > .02) {
+          g.save(); g.clip(); g.lineCap = 'round'; g.lineJoin = 'round';                                // (clipped to the swell itself, so the light sits just inside its top edge)
+          for (let bk = 0; bk < 3; bk++) {
+            const a = hA * (.35 + .35 * bk);
+            g.lineWidth = 4.6 + 3 * f; g.strokeStyle = rgba(skyL, a * .35); g.stroke(hb[bk]);
+            g.lineWidth = 2 + 1.6 * f; g.strokeStyle = rgba(skyL, a * .6); g.stroke(hb[bk]);
+          }
+          g.restore();
+        }
+      }
+      if (glintOp > .02) {                                                                       // sun or moon glitter on the faces of the waves
+        const hw = (5 + 34 * f) * (.9 + .12 * sea), rows = Math.max(2, Math.min(6, Math.round(ly.bandH / 2.3))), gp = [new Path2D(), new Path2D(), new Path2D(), new Path2D()], sparkle = new Path2D();
+        let gany = false; const gap = sea >= 5 ? .6 : (sea >= 3 ? .45 : .35);
+        for (let x = glowX - hw * 1.7; x <= glowX + hw * 1.7; x += 1.7) {
+          const xi = Math.round(x * 3), hj = hash(xi, k + 40), xx2 = x + (hj - .5) * 1.6, w = Math.exp(-Math.pow((xx2 - glowX) / hw, 2));
+          if (w < .08) continue;
+          const y = artSurf(ly, xx2 + yawPx, t), sl3 = (artSurf(ly, xx2 + yawPx + 1.5, t) - y) / 1.5, lit = .4 + .6 * clamp(Math.abs(sl3) * 2.2, 0, 1);
+          for (let r = 0; r < rows; r++) {
+            const hr = hash(xi + r * 977, k + 90);
+            if (hr < gap) continue;
+            const tw = .4 + .6 * Math.sin(t * (2.2 + hr * 3) + hr * 40), ga = glintOp * w * lit * tw * (1 - r / rows * .55) * vis;
+            if (ga < .08) continue;
+            const gb = Math.min(3, Math.floor(ga * 4.2)), yy = y + .8 + r * 2.3 + (hr - .5) * 1.8, len2 = (.2 + .9 * f) * (sea <= 3 ? 1.4 : 1) * (.4 + hr * 1.2);
+            gp[gb].moveTo(xx2 - len2 / 2, yy - sl3 * len2 / 2); gp[gb].lineTo(xx2 + len2 / 2, yy + sl3 * len2 / 2);
+            if (ga > .5 && hr > .7) { sparkle.moveTo(xx2, yy); sparkle.lineTo(xx2 + .01, yy); }
+            gany = true;
+          }
+        }
+        if (gany) {
+          g.lineCap = 'round'; g.lineWidth = .9 + .3 * f;
+          for (let i = 0; i < 4; i++) { g.strokeStyle = rgba(P.glint, .22 + i * .26); g.stroke(gp[i]); }
+          g.lineWidth = 1.3 + .5 * f; g.strokeStyle = rgba(P.glint, .95); g.stroke(sparkle);
+        }
+      }
+    }
+  }
+
+  /* the whole outside world, in colour. Same inputs and the same job as drawSceneLines. */
+  function drawSceneArt(g, W, H, ts, lw) {
+    const cl = cur.cloud / 100, fog = cur.fog, rain = cur.rain, sq = cur.sq, sea = cur.sea, e = V.e, below = V.loc === 'below', P = artPal();
+    const y0 = H * .5, m = W * .18 + 30, ppd = W / FOV, vb = viewBearing(), yawPx = vb * ppd;
+    const frameH = below ? H - 2 * A_PILL_MY - 2 * A_PILL_FW : H, halfW = below ? (W * .8 - 2 * A_PILL_FW) / 2 : W / 2;
+    const S = below ? frameH / 2 - 2 : H - y0, ls = below ? .64 : .93, dir = below ? (V.side === 'starboard' ? 1 : -1) : -1, pxMax = y0 - (below ? 15 : 5);
+    const key = [Math.round(e * 2), Math.round((.5 + .5 * Math.sin(V.sun.az * RAD)) * 8), Math.round(GREYK * 10), Math.round(clamp(cur.rain / .6, 0, 1) * 10), below ? 1 : 0, hz.d, W | 0].join('|');
+    if (key !== ART.key) { ART.key = key; ART.sprites = []; }
+    const fogF = clamp(fog / .85, 0, 1), haze = clamp(1 - fogF * 1.15, 0, 1), ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1);
+    const cam = artCam(frameH, halfW, sea);
+    g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'medium';
+    g.translate(W / 2, y0); g.rotate(cam.rot); g.translate(-W / 2, -y0 + cam.bob);              // the whole picture heaves and rolls about the middle of the frame
+    // the sky
+    let gr = g.createLinearGradient(0, -40, 0, y0);
+    gr.addColorStop(0, rgb(P.sk[0])); gr.addColorStop(.38, rgb(P.sk[1])); gr.addColorStop(.72, rgb(P.sk[2])); gr.addColorStop(1, rgb(P.sk[3]));
+    g.fillStyle = gr; g.fillRect(-m, -400, W + 2 * m, y0 + 402);
+    // where the sun and moon are, at their real bearing and height (the same scale up as across)
+    const bodyY = el => y0 - el * ppd, bodyX = az => W / 2 + wrap180(az - vb) * ppd, sunP = V.sun, mnow = V.mn;
+    const sunX = bodyX(sunP.az), moonX = bodyX(mnow.az);
+    ART.glowX = e > -2 ? sunX : moonX;
+    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
+    if (starA > .02) {
+      g.fillStyle = '#f4f7ff';
+      STARS.forEach(s => { const x = W / 2 + wrap180(s.x * 360 - vb) * ppd; if (x < -4 || x > W + 4) return; g.globalAlpha = starA * (.55 + .45 * Math.sin(ART.t * (1.5 + (s.p % 1) * .9) + s.p)); const z = s.r > 1 ? 1.8 : 1.2; g.fillRect(x, s.y * y0, z, z); });
+      g.globalAlpha = 1;
+    }
+    let glintOp = 0, glowX = ART.glowX;
+    g.save(); g.beginPath(); g.rect(-m, -400, W + 2 * m, y0 + 400); g.clip();
+    if (sunP.el > -7 && bodyY(sunP.el) > -40 && Math.abs(wrap180(sunP.az - vb)) < FOV / 2 + 30) {
+      const px = sunX, py = bodyY(sunP.el), twf = clamp(1 - Math.abs(e - 1) / 8, 0, 1), a = clamp((e + 4) / 8, 0, 1) * (1 - cl * .72) * haze * (1 - ceilA), gl = 44 + 20 * twf;
+      if (a > .01) {
+        const sg = g.createRadialGradient(px, py, 0, px, py, gl); sg.addColorStop(0, rgba(P.sun, .95 * a)); sg.addColorStop(.3, rgba(P.sun, .5 * a)); sg.addColorStop(1, rgba(P.sun, 0));
+        g.fillStyle = sg; g.beginPath(); g.arc(px, py, gl, 0, 6.2832); g.fill();
+        const dg = g.createRadialGradient(px, py, 0, px, py, 7); dg.addColorStop(0, rgba(A_WHITE, a)); dg.addColorStop(.6, rgba(P.sun, a)); dg.addColorStop(1, rgba(mix(P.sun, P.sk[2], .35), a));
+        g.fillStyle = dg; g.beginPath(); g.arc(px, py, 6.6, 0, 6.2832); g.fill();
+        glintOp = a * clamp(e / 6, 0, 1) * (cl < .75 ? 1 : 0) * (.75 + .2 * twf);
+      }
+    }
+    if (mnow.alt > -3 && bodyY(mnow.alt) > -30 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 30) {
+      const px = moonX, py = bodyY(mnow.alt), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+      if (a > .02) {
+        const p = mnow.p, c2 = Math.cos(p * 6.2832), waxing = p < .5, R = 7, lit = moonLit(p);
+        g.save(); g.globalAlpha = a;
+        const hg = g.createRadialGradient(px, py, 0, px, py, 24); hg.addColorStop(0, 'rgba(207,220,255,' + (.1 + .16 * lit).toFixed(3) + ')'); hg.addColorStop(1, 'rgba(207,220,255,0)');
+        g.fillStyle = hg; g.beginPath(); g.arc(px, py, 24, 0, 6.2832); g.fill();
+        g.fillStyle = 'rgba(120,140,180,.16)'; g.beginPath(); g.arc(px, py, R, 0, 6.2832); g.fill();             // the dark side, faintly
+        g.translate(px, py); if (!waxing) g.scale(-1, 1);
+        g.beginPath(); g.moveTo(0, -R); g.arc(0, 0, R, -Math.PI / 2, Math.PI / 2, false); g.ellipse(0, 0, Math.max(.01, Math.abs(c2) * R), R, 0, Math.PI / 2, -Math.PI / 2, c2 > 0); g.closePath();
+        const mg = g.createRadialGradient(-2, -2, .5, 0, 0, R); mg.addColorStop(0, '#ffffff'); mg.addColorStop(.65, '#e8efff'); mg.addColorStop(1, '#b3c3e6');
+        g.fillStyle = mg; g.fill(); g.clip();
+        g.fillStyle = 'rgba(120,140,180,.35)'; g.beginPath(); g.ellipse(-2, -1.4, 1.6, 1.2, 0, 0, 6.2832); g.fill(); g.beginPath(); g.ellipse(2, 2, 1.2, 1, 0, 0, 6.2832); g.fill();
+        g.restore();
+        if (glintOp < .02) glintOp = a * (.25 + .6 * lit) * .9;
+      }
+    }
+    g.restore();
+    // clouds: flat-based cumulus, hidden by fog and by a full overcast (an overcast sky is blank)
+    const nCl = Math.round(cl * 14.4), drift = ART.t * .0022, szc = (1 + cl * .2) * (.65 + .35 * clamp(cl / .4, 0, 1));
+    if (haze * cloudK > .03) {
+      g.globalAlpha = haze * cloudK;
+      CLOUDS.forEach((c, i) => {
+        if (i >= nCl) return;
+        const x = W / 2 + wrap180(((((c.x - drift * c.v) % 1) + 1) % 1) * 360 - vb) * ppd;
+        if (x < -170 || x > W + 170) return;
+        const sp = artCloud(i, P, ls), side = ART.glowX > x ? 1 : -1;
+        g.save(); g.translate(x, y0 - ls * (7 + c.y * 28)); if (side < 0) g.scale(-1, 1); g.scale(szc, szc); g.drawImage(sp.c, -sp.w / 2, -sp.base, sp.w, sp.h); g.restore();
+      });
+      g.globalAlpha = 1;
+    }
+    if (sq > .02) {                                                                              // a squall: a black shelf of cloud, scalloped underneath
+      g.beginPath(); g.moveTo(-m, -400); g.lineTo(W + m, -400); g.lineTo(W + m, 18);
+      for (let x = W + m; x > -m; x -= 16) g.quadraticCurveTo(x - 8, 18 + 9 * Math.sin(x * .13 + ART.t * .6), x - 16, 18);
+      g.closePath(); g.fillStyle = 'rgba(8,12,16,' + (.92 * sq).toFixed(3) + ')'; g.fill(); g.strokeStyle = rgba(P.haze, .35 * sq); g.lineWidth = 1; g.stroke();
+    }
+    // the land, then the haze along the horizon, then the water
+    artLand(g, W, y0, m, ppd, vb, P, haze, pxMax);
+    const hzTop = y0 - 20 * ls, hg2 = g.createLinearGradient(0, hzTop, 0, y0);
+    hg2.addColorStop(0, rgba(P.haze, 0)); hg2.addColorStop(1, rgba(P.haze, P.hazeOp * (1 - clamp((-e - 3) / 9, 0, 1))));   // (the haze band above the horizon fades out as it gets dark) g.fillStyle = hg2; g.fillRect(-m, hzTop, W + 2 * m, 20 * ls + 1);
+    const sgr = g.createLinearGradient(0, y0, 0, H + 40);
+    sgr.addColorStop(0, rgb(P.se[0])); sgr.addColorStop(.33, rgb(P.se[1])); sgr.addColorStop(.66, rgb(P.se[2])); sgr.addColorStop(1, rgb(P.se[3]));
+    g.fillStyle = sgr; g.fillRect(-m, y0, W + 2 * m, H + 400 - y0);
+    if (glintOp > .02) {                                                                         // the light lying on the water under the sun or moon
+      g.save(); g.translate(glowX, y0 + 7); g.scale(1, 16 / 70);
+      const eg = g.createRadialGradient(0, 0, 0, 0, 0, 70); eg.addColorStop(0, rgba(P.sun, .9)); eg.addColorStop(.3, rgba(P.sun, .5)); eg.addColorStop(1, rgba(P.sun, 0));
+      g.globalAlpha = Math.min(1, glintOp) * .7; g.fillStyle = eg; g.beginPath(); g.arc(0, 0, 70, 0, 6.2832); g.fill(); g.restore();
+    }
+    { const hn = clamp((-e - 3) / 9, 0, 1) * haze;                                                 // a thin, faint line of light where the sky meets the sea, at night (a line, not a halo)
+      if (hn > .02) { const lg2 = g.createLinearGradient(0, y0 - 3, 0, y0 + 3), lc = mix(P.sk[3], P.glint, .55); lg2.addColorStop(0, rgba(lc, 0)); lg2.addColorStop(.5, rgba(lc, .12 * hn)); lg2.addColorStop(1, rgba(lc, 0)); g.fillStyle = lg2; g.fillRect(-m, y0 - 3, W + 2 * m, 6); }
+    }
+    artSea(g, W, H, y0, S, below, dir, m, yawPx, P, fogF, Math.min(1, glintOp), glowX);
+    // rain in the air
+    const want = Math.round(clamp(rain, 0, 1) * 260), R = ART.rain;
+    while (R.length < want) { const i = R.length; R.push({ x: -30 + Math.random() * (W + 60), y: -30 + Math.random() * (H + 60), v: i % 2 ? 360 : 470, n: i % 2 }); }
+    if (R.length > want) R.length = want;
+    if (R.length) {
+      const p0 = new Path2D(), p1 = new Path2D(), dt = ART.dt;
+      for (let i = 0; i < R.length; i++) {
+        const r = R[i]; r.y += r.v * dt; r.x -= r.v * .25 * dt;
+        if (r.y > H + 30) { r.y -= H + 60; r.x = -30 + Math.random() * (W + 60); }
+        if (r.x < -30) r.x += W + 60;
+        const pth = r.n ? p1 : p0; pth.moveTo(r.x, r.y); pth.lineTo(r.x - 3, r.y + 12);
+      }
+      const rc = e < -4 ? '#8fa0b8' : '#d7e4ee'; g.lineCap = 'round';
+      g.strokeStyle = rgba(hex(rc), .4); g.lineWidth = .8; g.stroke(p0); g.strokeStyle = rgba(hex(rc), .32); g.lineWidth = .7; g.stroke(p1);
+    }
+    if (fogF > .01) {                                                                            // fog: everything beyond a few boat lengths is the same pale grey
+      const ft = mix(P.sk[3], [205, 218, 210], .5);
+      g.fillStyle = rgba(ft, .17 * fogF); g.fillRect(-m, -400, W + 2 * m, H + 800);
+      const fgr = g.createLinearGradient(0, y0 - 30, 0, y0 + 28); fgr.addColorStop(0, rgba(ft, 0)); fgr.addColorStop(.5, rgba(ft, fog * .3)); fgr.addColorStop(1, rgba(ft, 0)); g.fillStyle = fgr; g.fillRect(-m, y0 - 30, W + 2 * m, 58);
+    }
+    const age = performance.now() - boltT0;
+    if (bolt && boltDist < 2.3 && age < 260) {
+      g.strokeStyle = rgba([220, 235, 255], (1 - age / 260)); g.lineWidth = 1.6 * lw; g.shadowColor = 'rgba(190,215,255,.9)'; g.shadowBlur = 8;
+      g.beginPath(); bolt.forEach((p, i) => i ? g.lineTo(p[0] * W, p[1] * y0) : g.moveTo(p[0] * W, p[1] * y0)); g.stroke(); g.shadowBlur = 0;
+    }
+    g.restore();
+  }
+
+  // the picture, or -- if the new drawing ever fails -- the line drawing it replaced, for the rest of the session
+  function drawScene(g, W, H, ts, lw) {
+    if (!ART.broken) {
+      try { return drawSceneArt(g, W, H, ts, lw); }
+      catch (err) {
+        ART.broken = true; console.warn('[Landfall horizon] the colour picture switched itself off:', err && err.message ? err.message : err);
+        try { hz.cv.width = hz.cv.width; g.setTransform(hz.d, 0, 0, hz.d, 0, 0); if (V.loc === 'below') { winPath(g); g.clip(); } } catch (e2) { /* the next frame starts clean */ }
+      }
+    }
+    return drawSceneLines(g, W, H, ts, lw);
+  }
+
+  // the glass: an inset shadow round the edges (the deck window) and a bronze ring, a shadowed edge and a gleam (the porthole). Built once for a size, then just laid over the picture.
+  function artOverlays(W, H) {
+    const d = hz.d || 1, key = W + 'x' + H + '@' + d;
+    if (ART.ovl && ART.ovl.key === key) return ART.ovl;
+    const o = { key };
+    o.hero = artMk(W, H);
+    { const x = o.hero.x; x.save(); x.beginPath(); x.rect(0, 0, W, H); x.clip(); x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 20 * d; x.fillStyle = '#000';
+      x.beginPath(); x.rect(-80, -80, W + 160, H + 160); x.rect(0, 0, W, H); x.fill('evenodd'); x.restore(); }
+    const pw = W * .8, hh = (H - 2 * A_PILL_MY) / 2, cx = W / 2, cy = H / 2, win = pillOutline(cx, cy, pw / 2 - A_PILL_FW, hh - A_PILL_FW, 20);
+    const wpath = (x, dy) => { x.moveTo(win[0][0], win[0][1] + dy); for (let i = 1; i < win.length; i++) x.lineTo(win[i][0], win[i][1] + dy); x.closePath(); };
+    o.port = artMk(W, H);
+    { const x = o.port.x; x.save(); x.beginPath(); wpath(x, 0); x.clip();
+      x.save(); x.shadowColor = 'rgba(0,0,0,.7)'; x.shadowBlur = 18 * d; x.fillStyle = '#000'; x.beginPath(); x.rect(-80, -80, W + 160, H + 160); wpath(x, 0); x.fill('evenodd'); x.restore();
+      x.fillStyle = 'rgba(255,255,255,.08)'; x.beginPath(); wpath(x, 0); wpath(x, 3); x.fill('evenodd');                      // a thin gleam along the top edge of the glass
+      const L = Math.abs(pw * Math.sin(112 * RAD)) + Math.abs(2 * hh * Math.cos(112 * RAD)), dx = Math.sin(112 * RAD), dy = -Math.cos(112 * RAD);
+      const sg = x.createLinearGradient(cx - dx * L / 2, cy - dy * L / 2, cx + dx * L / 2, cy + dy * L / 2);
+      sg.addColorStop(0, 'rgba(255,255,255,.13)'); sg.addColorStop(.22, 'rgba(255,255,255,.04)'); sg.addColorStop(.34, 'rgba(255,255,255,0)'); x.fillStyle = sg; x.fillRect(0, 0, W, H);
+      x.restore(); }
+    ART.ovl = o; return o;
+  }
+  function artRim(g, W, H) { // the bronze ring round the porthole
+    const o = artOverlays(W, H), top = A_PILL_MY, bot = H - A_PILL_MY;
+    g.lineJoin = 'round'; rimPath(g); g.strokeStyle = '#1c1710'; g.lineWidth = 2; g.stroke();
+    const rg = g.createLinearGradient(0, top, 0, bot); rg.addColorStop(0, '#a99262'); rg.addColorStop(.38, '#5c4d30'); rg.addColorStop(.7, '#3a301d'); rg.addColorStop(1, '#6f5d38');
+    g.beginPath(); RIM.concat(WIN).forEach(P => { g.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) g.lineTo(P[i][0], P[i][1]); g.closePath(); }); g.fillStyle = rg; g.fill('evenodd');
+    winPath(g); g.strokeStyle = 'rgba(0,0,0,.7)'; g.lineWidth = 1; g.stroke();
+    g.drawImage(o.port.c, 0, 0, W, H);
+  }
+  // a drop of water on the inside of the glass: a bead with a darker underside and a bright spot, and a thin wet trail where it has run
+  function artBead(g, b) {
+    if (b.tr.length > 1) {
+      g.lineCap = 'round'; g.lineJoin = 'round';
+      g.strokeStyle = 'rgba(255,255,255,.08)'; g.lineWidth = Math.max(1, b.r * .95); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke();
+      const off = Math.max(.5, b.r * .45); g.strokeStyle = 'rgba(255,255,255,.22)'; g.lineWidth = .5; g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0] - off, p[1]) : g.moveTo(p[0] - off, p[1])); g.lineTo(b.x - off, b.y); g.stroke();
+    }
+    const rx = b.r, ry = b.vy > 4 ? b.r * 1.3 : b.r;
+    g.beginPath(); g.ellipse(b.x, b.y, rx, ry, 0, 0, 6.2832); g.fillStyle = 'rgba(255,255,255,.11)'; g.fill();
+    g.beginPath(); g.ellipse(b.x, b.y + ry * .28, rx * .8, ry * .62, 0, 0, Math.PI); g.fillStyle = 'rgba(0,12,28,.2)'; g.fill();
+    g.beginPath(); g.ellipse(b.x, b.y, rx, ry, 0, 0, 6.2832); g.strokeStyle = 'rgba(255,255,255,.36)'; g.lineWidth = .5; g.stroke();
+    g.beginPath(); g.arc(b.x - rx * .32, b.y - ry * .34, Math.max(.4, rx * .26), 0, 6.2832); g.fillStyle = 'rgba(255,255,255,.62)'; g.fill();
+  }
+
+
   /* ---------- the band under the top bar: the horizon above deck, the porthole below ---------- */
   const pb = [], pspray = [];
   let pAcc = 0, nextPSpray = 3, WIN = [], RIM = [];
@@ -24838,16 +25432,18 @@
   function drawStrip(ts, dt) {
     const { g } = hz; if (!g) return;
     const W = hz.W, H = hz.H;
+    if (!ART.broken) artStep(dt);
     g.clearRect(0, 0, W, H);
     if (V.loc === 'above') {
       g.fillStyle = rgb(SCN.bg); g.fillRect(0, 0, W, H); // the sky has its own dark background: the lit screen behind it never shows through
       drawScene(g, W, H, ts, 1);
+      if (!ART.broken) { try { g.drawImage(artOverlays(W, H).hero.c, 0, 0, W, H); } catch (e3) { ART.broken = true; } }
       drawCompass(g, W, 9);
       return;
     }
     const ph = OUT.ph, br = OUT.br; // what is seen through the glass is lit by the outdoors
     // ONE porthole, as wide as the two windows and the gap between them were: 10% edge, 80% window, 10% edge. The rim is the footprint; the glass is a few pixels inside it.
-    const my = 12, top = my, bot = H - my, fw = 3.5; // (the rim is the footprint; the glass is a few pixels inside it)
+    const my = 12, top = my, bot = H - my, fw = ART.broken ? 3.5 : A_PILL_FW; // (the rim is the footprint; the glass is a few pixels inside it)
     const pw = W * .80, hh = (bot - top) / 2, cy0 = H / 2, cx0 = W / 2;
     RIM = [pillOutline(cx0, cy0, pw / 2, hh, 20)];
     WIN = [pillOutline(cx0, cy0, pw / 2 - fw, hh - fw, 20)];
@@ -24877,8 +25473,8 @@
         }
       }
       if (b.y > bot + 3 || b.r < .7 || !inWin(b.x, Math.min(b.y, bot - 1))) { pb.splice(i, 1); continue; }
-      if (b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
-      if (true) streakDrop(g, b, ph, br, .55, .85);
+      if (ART.broken && b.tr.length > 1) { g.strokeStyle = rgba(ph, .22); g.lineWidth = Math.max(.8, b.r * .6); g.beginPath(); b.tr.forEach((p, j) => j ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.lineTo(b.x, b.y); g.stroke(); }
+      if (!ART.broken) artBead(g, b); else if (true) streakDrop(g, b, ph, br, .55, .85);
       else {
         g.fillStyle = rgba(ph, .1); g.beginPath(); g.arc(b.x, b.y, b.r, 0, 6.2832); g.fill();
         g.strokeStyle = rgba(ph, .6); g.lineWidth = 1; g.stroke();
@@ -24901,8 +25497,10 @@
     g.restore();
     // the rim and the glass edge: two thin strokes round each window, in the game's own text colour
     g.lineJoin = 'round';
-    rimPath(g); g.strokeStyle = rgba(COL.ph, .85); g.lineWidth = 1.2; g.stroke();
-    winPath(g); g.strokeStyle = rgba(COL.ph, .5); g.lineWidth = 1; g.stroke();
+    if (ART.broken) {
+      rimPath(g); g.strokeStyle = rgba(COL.ph, .85); g.lineWidth = 1.2; g.stroke();
+      winPath(g); g.strokeStyle = rgba(COL.ph, .5); g.lineWidth = 1; g.stroke();
+    } else artRim(g, W, H);
     drawSide(g, W, 9);
   }
 
@@ -25158,7 +25756,7 @@
         fitAll();
       }
       if (!show) return;
-      if (ts - lastDraw < 30) return; // about thirty frames a second: plenty for water, and kinder to a phone's battery
+      if (ts - lastDraw < 14) return; // as many frames as the screen gives, up to about sixty a second: the rocking and the water need it to look smooth
       const dt = Math.min(.1, (ts - lastDraw) / 1000); lastDraw = ts;
       if (ts - sampledAt > 1000) { sampledAt = ts; sample(); fitAll(); }
       if (forced && forced.hdg != null) V.hdg = forced.hdg; else if (GAME.nav && isFinite(GAME.nav.heading)) V.hdg = GAME.nav.heading; // (every frame: when she turns, the view turns smoothly)
@@ -25211,6 +25809,369 @@
     });
     apply();
   })(); } catch (viewErr) { console.warn('[Landfall outside view] could not start:', viewErr && viewErr.message ? viewErr.message : viewErr); }
+  /* ======================================================================
+     CALIFORNIA -- THE CAREER (beta)
+     ----------------------------------------------------------------------
+     The game now begins on the California coast. SOLACE carries supplies between five ports; each run is a JOB with a pay; the money buys UPGRADES. The ports, the offshore
+     route between them and the arrival are all data (CA_PORTS / CA_SPINE below, every point checked against the world's land). Nothing here touches the Alaska / Hawaii
+     voyage or its saves: this build keeps its own (landfallCA_v1) and its own career record (CA_CAREER_KEY). A LEG is one run from a port to a port: caSetLeg points the
+     game's old "start" and "destination" (START_POINT / FINAL_DEST), the harbor capture ring, the arrival and the route at the two ports of that leg.
+       THE PORT SCREEN (no time passes there): JOB BOARD -> take a job; SHOP -> buy an upgrade; SET SAIL -> the departure scene -> the voyage.
+       THE ARRIVAL: entering the bay / nearing the marina begins the arrival sequence (the same one as ever); the pay is added the moment she is captured (caOnArrival, once).
+       The ending's button returns to the port; abandoning a run returns to the port it left, with no pay.
+     ====================================================================== */
+  var CA_CAREER_KEY = (SCENARIO_NAME ? 'landfallCA_TEST_' + SCENARIO_NAME : 'landfallCA') + '_career_v1';
+  var CA_PORT_ORDER = ['sf', 'mry', 'sb', 'la', 'sd'];
+  var CA_PORTS = {
+    sf: { id: 'sf', name: 'San Francisco', full: 'San Francisco, California', arrival: 'SAN FRANCISCO BAY', arrivalTitle: 'San Francisco Bay',
+      dock: [37.8086, -122.4432], mouth: [37.8175, -122.4780], radius: 0.6,
+      leave: [[37.8160, -122.4620], [37.8165, -122.4850], [37.8050, -122.5500], [37.7800, -122.6300]],
+      depart: { view: ['The Golden Gate Bridge stands in the haze at the mouth of the bay.', 'Hills of pale houses climb up from the water.'],
+        air: 'The air is cool. It smells of salt, diesel and cold fog.', sound: 'Halyards tick against the masts all along the docks.', beyond: 'Beyond the Golden Gate lies the Pacific.',
+        night: { lights: 'The lights of the city climb the hills above the marina, and the bridge glows in the dark.', shore: 'Beyond the lights the water is black, and the far shore is a low dark line.', sound: 'Halyards tick against the masts.', beyond: 'Beyond the Golden Gate lies the Pacific.' } },
+      arrive: { day: ['The Golden Gate opens ahead, the bridge high across the water.', 'Headlands rise on either side, brown and green.', 'Beyond the bridge the bay lies wide and open.'],
+        night: ['The lights of the Golden Gate Bridge hang ahead in the dark.', 'The headlands are black shapes on either side.', 'Beyond the bridge the city lights spread across the water.'], feature: 'the bridge' } },
+    mry: { id: 'mry', name: 'Monterey', full: 'Monterey, California', arrival: 'MONTEREY HARBOR', arrivalTitle: 'Monterey Harbor',
+      dock: [36.6045, -121.8900], mouth: [36.6100, -121.8850], radius: 0.5,
+      leave: [[36.6100, -121.8850], [36.6500, -121.8800], [36.6800, -121.9550], [36.7200, -122.1200]],
+      depart: { view: ['Fishing boats and kayaks lie along the wharf.', 'Pines and low hills rise behind the waterfront.'],
+        air: 'The air is cool. It smells of salt, kelp and fish.', sound: 'Sea lions bark somewhere out along the breakwater.', beyond: 'Beyond the breakwater lies Monterey Bay.',
+        night: { lights: 'The lights of the wharf lie in long lines on the black water.', shore: 'Beyond the lights the hills are a dark shape against the sky.', sound: 'Sea lions bark out along the breakwater.', beyond: 'Beyond the breakwater lies Monterey Bay.' } },
+      arrive: { day: ['Monterey Harbor lies ahead, behind a long breakwater.', 'Pines and low hills rise behind the wharf.', 'The shore curves away on either side, pale sand and dark rock.'],
+        night: ['The lights of Monterey Harbor lie ahead.', 'The breakwater is a long dark line beside them.', 'Beyond the lights the hills are a dark shape.'], feature: 'the breakwater' } },
+    sb: { id: 'sb', name: 'Santa Barbara', full: 'Santa Barbara, California', arrival: 'SANTA BARBARA HARBOR', arrivalTitle: 'Santa Barbara Harbor',
+      dock: [34.4056, -119.6868], mouth: [34.4045, -119.6850], radius: 0.4,
+      leave: [[34.4000, -119.6835], [34.3700, -119.6850]],
+      depart: { view: ['Red-tiled roofs show above the palms along the waterfront.', 'The mountains stand behind the town, brown and dry.'],
+        air: 'The air is warm and dry. It smells of salt and sun-warmed wood.', sound: 'Gulls call from the breakwater.', beyond: 'Beyond the breakwater the channel opens, with the islands low on the far side.',
+        night: { lights: 'The lights of the waterfront lie along the shore, their reflections stretched across the black water.', shore: 'Behind the town the mountains are a dark wall against the stars.', sound: 'Water laps at the pilings.', beyond: 'Beyond the breakwater the channel is dark and open.' } },
+      arrive: { day: ['Santa Barbara Harbor opens ahead, behind a long breakwater.', 'The mountains stand behind the town, dry and brown, with red roofs below them.', 'The beach runs away on either side.'],
+        night: ['The lights of Santa Barbara Harbor lie ahead.', 'The breakwater is a long dark line beside them.', 'Behind the town the mountains are a dark shape.'], feature: 'the breakwater' } },
+    la: { id: 'la', name: 'Los Angeles', full: 'Marina del Rey, Los Angeles, California', arrival: 'MARINA DEL REY', arrivalTitle: 'Marina del Rey',
+      dock: [33.9700, -118.4450], mouth: [33.9625, -118.4600], radius: 0.4,
+      leave: [[33.9630, -118.4500], [33.9625, -118.4600], [33.9560, -118.4900], [33.9300, -118.5300]],
+      depart: { view: ['Masts stand in close rows along the channels of the marina.', 'Low buildings and palms line the basin.'],
+        air: 'The air is mild and hazy. It smells of salt and exhaust.', sound: 'A jet passes high overhead, then another.', beyond: 'Beyond the jetties lies the open bay.',
+        night: { lights: 'The lights of the marina lie in rows along the black channels.', shore: 'Beyond them the city is an orange glow under the haze.', sound: 'A jet passes high overhead.', beyond: 'Beyond the jetties lies the open bay.' } },
+      arrive: { day: ['The entrance to Marina del Rey opens ahead between two long jetties.', 'Masts crowd the basin beyond them.', 'The beach runs away on either side, low and pale.'],
+        night: ['The lights of Marina del Rey lie ahead.', 'The jetties are two dark lines on either side of the entrance.', 'Beyond the lights the city glows under the haze.'], feature: 'the jetties' } },
+    sd: { id: 'sd', name: 'San Diego', full: 'San Diego, California', arrival: 'SAN DIEGO BAY', arrivalTitle: 'San Diego Bay',
+      dock: [32.7040, -117.2310], mouth: [32.6760, -117.2280], radius: 0.5,
+      leave: [[32.6950, -117.2290], [32.6760, -117.2280], [32.6500, -117.2250], [32.6200, -117.2700], [32.6100, -117.3300]],
+      depart: { view: ['Masts and white hulls fill the marina along the shore.', 'Palm trees stand along the water, and Point Loma lies low across the bay.'],
+        air: 'The air is warm and dry. It smells of salt and sun on the docks.', sound: 'Halyards tick against the masts, and an aircraft passes low over the bay.', beyond: 'Beyond Point Loma lies the open Pacific.',
+        night: { lights: 'The lights of the marina lie along the shore, and more climb the hills across the bay.', shore: 'Beyond the lights the water is dark and calm.', sound: 'Halyards tick against the masts.', beyond: 'Beyond Point Loma lies the open Pacific.' } },
+      arrive: { day: ['The entrance to San Diego Bay opens ahead, with Point Loma on one side.', 'A lighthouse stands on the headland above the cliffs.', 'The bay lies wide and calm beyond.'],
+        night: ['The lights of San Diego Bay lie ahead.', 'The headland of Point Loma is a black shape beside them.', 'Beyond the entrance the lights of the city spread along the water.'], feature: 'the headland' } },
+  };
+  // The offshore spine: ports and open-water waypoints in order, north to south. A leg's route is its two ports' own way out / in, and whatever lies between.
+  var CA_SPINE = [['sf'], [37.15, -122.65], ['mry'], [36.20, -122.20], [35.45, -121.55], [34.30, -120.85], ['sb'], [34.18, -119.40], [33.95, -118.95], ['la'], [33.70, -118.60], [33.45, -118.10], [33.00, -117.45], ['sd']];
+  function caPortPass(id) { var L = CA_PORTS[id].leave; return L[L.length - 1]; } // where a port's way out meets the spine
+  // The route from port a to port b: a's way out, the spine between, b's way in (the points that are inside b's own capture ring are left out: the ring ends the run).
+  function caRoute(a, b) {
+    var ia = -1, ib = -1;
+    CA_SPINE.forEach(function (e, i) { if (e.length === 1 && e[0] === a) ia = i; if (e.length === 1 && e[0] === b) ib = i; });
+    var pts = CA_PORTS[a].leave.slice(), mid = [];
+    if (ia < ib) for (var i = ia + 1; i < ib; i++) mid.push(CA_SPINE[i]);
+    else for (var j = ia - 1; j > ib; j--) mid.push(CA_SPINE[j]);
+    mid = mid.map(function (e) { return e.length === 1 ? caPortPass(e[0]) : e; });
+    var B = CA_PORTS[b], inbound = B.leave.slice().reverse();
+    while (inbound.length && distanceBetween(inbound[inbound.length - 1][0], inbound[inbound.length - 1][1], B.mouth[0], B.mouth[1]) < B.radius + 0.12) inbound.pop();
+    var all = pts.concat(mid, inbound), out = [];
+    all.forEach(function (p) { var q = out[out.length - 1]; if (!q || Math.abs(q[0] - p[0]) > 1e-6 || Math.abs(q[1] - p[1]) > 1e-6) out.push(p); }); // (a pass point that is also the last way-out point is not listed twice)
+    return out;
+  }
+  function caRouteNm(a, b) {
+    var A = CA_PORTS[a], B = CA_PORTS[b], r = caRoute(a, b), here = A.dock, nm = 0;
+    r.forEach(function (p) { nm += distanceBetween(here[0], here[1], p[0], p[1]); here = p; });
+    return nm + distanceBetween(here[0], here[1], B.mouth[0], B.mouth[1]);
+  }
+  var CA_CARGO = ['canned food and flour', 'medical supplies', 'tools and spare parts', 'school books and paper', 'lamp oil and batteries', 'seed and garden supplies', 'fresh bread and dry goods'];
+  var CA_PAY_PER_NM = 4;
+  var CA_SHORT_JOB_FIRST_NM = 320; // until a first delivery is made the board lists only the shorter runs
+  function caPay(nm) { return Math.round(nm * CA_PAY_PER_NM / 10) * 10; }
+  function caMakeJob(from, to) {
+    var nm = Math.round(caRouteNm(from, to)), k = CA_PORT_ORDER.indexOf(from) * 3 + CA_PORT_ORDER.indexOf(to);
+    return { id: from + '>' + to, from: from, to: to, nm: nm, pay: caPay(nm), cargo: CA_CARGO[k % CA_CARGO.length] };
+  }
+  function caJobsFrom(from, completed) {
+    var jobs = [];
+    CA_PORT_ORDER.forEach(function (id) { if (id !== from) jobs.push(caMakeJob(from, id)); });
+    jobs.sort(function (x, y) { return x.nm - y.nm; });
+    if (!(completed > 0)) jobs = jobs.filter(function (j) { return j.nm <= CA_SHORT_JOB_FIRST_NM; });
+    return jobs.slice(0, 4);
+  }
+  function caDaysText(nm) { var d = nm / 5 / 24; return d < 0.75 ? 'under a day' : d < 1.5 ? 'about a day' : 'about ' + Math.round(d) + ' days'; } // (at about 5 knots)
+  // ---- upgrades
+  var CA_UPGRADES = [
+    { id: 'sails', name: 'SAILS', what: 'Faster under sail.', lv: [{ price: 700, note: '+8% SPEED UNDER SAIL' }, { price: 1600, note: '+16% SPEED UNDER SAIL' }, { price: 3400, note: '+25% SPEED UNDER SAIL' }] },
+    { id: 'tank', name: 'DIESEL TANK', what: 'More diesel: more range under engine.', lv: [{ price: 450, note: '+15 GAL OF DIESEL' }, { price: 1000, note: '+30 GAL OF DIESEL' }, { price: 2000, note: '+50 GAL OF DIESEL' }] },
+    { id: 'locker', name: 'PROVISIONS LOCKER', what: 'More food and water: go further between ports.', lv: [{ price: 350, note: '+25% FOOD, +15 GAL OF WATER' }, { price: 800, note: '+50% FOOD, +30 GAL OF WATER' }, { price: 1700, note: '+100% FOOD, +60 GAL OF WATER' }] },
+  ];
+  var CA_SAIL_BONUS = [0, 0.08, 0.16, 0.25], CA_TANK_GAL = [0, 15, 30, 50], CA_LOCKER_WATER = [0, 15, 30, 60], CA_LOCKER_FOOD = [1, 1.25, 1.5, 2];
+  function caLv(upg, id) { var v = upg && upg[id]; return (v === 1 || v === 2 || v === 3) ? v : 0; }
+  function caSailFactor(state) { var u = state && state.leg && state.leg.upg; return 1 + CA_SAIL_BONUS[caLv(u, 'sails')]; }
+  // ---- the career record (money, port, upgrades, the job taken): its own key, small and tolerant
+  function caCareerDefault() { return { v: 1, money: 0, port: 'sf', completed: 0, upg: { sails: 0, tank: 0, locker: 0 }, mission: null, lastPaid: null }; }
+  function caCareerLoad() {
+    var c = caCareerDefault();
+    try {
+      var raw = localStorage.getItem(CA_CAREER_KEY), o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === 'object') {
+        if (Number.isFinite(o.money) && o.money >= 0) c.money = Math.round(o.money);
+        if (CA_PORTS[o.port]) c.port = o.port;
+        if (Number.isFinite(o.completed) && o.completed >= 0) c.completed = Math.floor(o.completed);
+        if (o.upg) ['sails', 'tank', 'locker'].forEach(function (k) { c.upg[k] = caLv(o.upg, k); });
+        if (o.mission && CA_PORTS[o.mission.from] && CA_PORTS[o.mission.to] && o.mission.from !== o.mission.to && Number.isFinite(o.mission.pay)) c.mission = o.mission;
+        if (o.lastPaid != null) c.lastPaid = o.lastPaid;
+      }
+    } catch (e) { console.warn('Career record unreadable, starting it fresh:', describeError(e)); }
+    if (c.mission && c.mission.from !== c.port) c.mission = null;
+    return c;
+  }
+  function caCareerSave() { try { localStorage.setItem(CA_CAREER_KEY, JSON.stringify(CAREER)); } catch (e) { console.warn('Could not save the career record:', describeError(e)); } }
+  var CAREER = caCareerLoad();
+  var CA = { from: 'sf', to: 'mry' }; // the leg the game is currently set up for
+  function caMoney(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
+  function caDestName() { return CA_PORTS[CA.to].name; }
+  function caArrivalName() { return CA_PORTS[CA.to].arrival; }
+  function caArrivalTitle() { return CA_PORTS[CA.to].arrivalTitle; }
+  // ---- pointing the game at a leg
+  function caCircle(lat0, lon0, rNm, n) {
+    var ring = [], c = Math.cos(lat0 * Math.PI / 180);
+    for (var i = 0; i < n; i++) { var th = 2 * Math.PI * i / n; ring.push([+(lon0 + rNm / 60 / c * Math.cos(th)).toFixed(6), +(lat0 + rNm / 60 * Math.sin(th)).toFixed(6)]); }
+    return ring;
+  }
+  function caSetLeg(fromId, toId, upg) {
+    var A = CA_PORTS[fromId] || CA_PORTS.sf, B = CA_PORTS[toId];
+    if (!B || B.id === A.id) B = CA_PORTS[CA_PORT_ORDER[(CA_PORT_ORDER.indexOf(A.id) + 1) % CA_PORT_ORDER.length]];
+    CA.from = A.id; CA.to = B.id;
+    START_POINT.name = A.name; START_POINT.lat = A.dock[0]; START_POINT.lon = A.dock[1];
+    FINAL_DEST.name = B.name; FINAL_DEST.lat = B.mouth[0]; FINAL_DEST.lon = B.mouth[1];
+    DEPARTURE_PORT = A.full; DESTINATION_PORT = B.full;
+    DEFAULT_ROUTE = caRoute(A.id, B.id).map(function (p) { return [p[0], p[1]]; });
+    NAV_GEO.capture = { dropLast: false, ring: caCircle(B.mouth[0], B.mouth[1], B.radius, 14) };
+    NAV_GEO.approach = { ring: caCircle(B.mouth[0], B.mouth[1], 4, 20) };
+    NAV_GEO.funnel = [B.mouth[1], B.mouth[0]];
+    NAV_GEO.dock = [B.dock[1], B.dock[0]];
+    NAV = null; // (rebuilt from the above on next use)
+    TOTAL_ROUTE_NM = distanceBetween(START_POINT.lat, START_POINT.lon, FINAL_DEST.lat, FINAL_DEST.lon);
+    ROUTE_DISTANCE_NM = Math.round(TOTAL_ROUTE_NM);
+    MOMENT_TOTAL_NM = TOTAL_ROUTE_NM;
+    var u = upg || CAREER.upg;
+    FUEL_STARTING_GALLONS = 30 + CA_TANK_GAL[caLv(u, 'tank')];
+    WATER_STARTING_GALLONS = 60 + CA_LOCKER_WATER[caLv(u, 'locker')];
+    try { // the chart's destination marker, if the chart is already up
+      if (chartDestMarker) {
+        chartDestMarker.setLngLat([FINAL_DEST.lon, FINAL_DEST.lat]);
+        var lab = chartDestMarker.getElement().querySelector('.chart-dest-label'); if (lab) lab.textContent = 'DESTINATION: ' + B.name.toUpperCase();
+      }
+    } catch (e) { /* the chart is cosmetic */ }
+  }
+  // A new voyage's state: which leg it is, the upgrades it carries (fixed for the run), and what they do to what she starts with.
+  function caStampState(state) {
+    var m = CAREER.mission && CAREER.mission.from === CA.from && CAREER.mission.to === CA.to ? CAREER.mission : null, U = CAREER.upg;
+    state.leg = { from: CA.from, to: CA.to, jobId: m ? m.id : null, cargo: m ? m.cargo : null, nm: m ? m.nm : Math.round(caRouteNm(CA.from, CA.to)), pay: m ? m.pay : 0, paid: false,
+      upg: { sails: caLv(U, 'sails'), tank: caLv(U, 'tank'), locker: caLv(U, 'locker') } };
+    state.boat.fuelGallons = 30 + CA_TANK_GAL[state.leg.upg.tank];
+    state.water.gallons = 60 + CA_LOCKER_WATER[state.leg.upg.locker];
+    var fm = CA_LOCKER_FOOD[state.leg.upg.locker];
+    if (fm !== 1) Object.keys(state.food).forEach(function (k) { state.food[k] = Math.round(state.food[k] * fm); });
+  }
+  function caBootInit(saved) {
+    if (saved && saved.leg && CA_PORTS[saved.leg.from] && CA_PORTS[saved.leg.to]) caSetLeg(saved.leg.from, saved.leg.to, saved.leg.upg);
+    else caSetLeg(CAREER.port, CAREER.mission ? CAREER.mission.to : null);
+  }
+  // THE PAY: the moment she is captured by the harbor's ring, once per voyage.
+  function caOnArrival(state) {
+    if (!state.leg || state.leg.paid) return;
+    state.leg.paid = true;
+    if (CAREER.lastPaid !== state.meta.departedAt) {
+      CAREER.lastPaid = state.meta.departedAt;
+      CAREER.money += state.leg.pay; CAREER.completed++; CAREER.port = state.leg.to; CAREER.mission = null;
+      caCareerSave();
+    }
+  }
+  function caAbandonUnpaid() { // a finished, rescued or abandoned voyage is being left: a job not delivered earns nothing
+    if (CAREER.mission && !(GAME && GAME.leg && GAME.leg.paid)) CAREER.mission = null;
+    caCareerSave();
+  }
+  // ---- the words
+  function caDepartStanzas(f) { // the departure scene: the port she leaves, by day or night and in the weather it really is
+    var P = CA_PORTS[CA.from], D = P.depart, c = sceneClass(f), ph = f.phase, rainy = sceneRainy(c), out = [];
+    if (!f.night) {
+      out.push({ open: D.view, capped: D.view, rainL: ['Light rain is falling on the harbor.', D.view[0]], rain: ['Rain falls steadily on the harbor.', 'The nearest boats and docks show dark and wet; the rest is cloud.'],
+        rainH: ['Heavy rain is falling on the harbor.', 'The nearest docks show dark through it.'], fog: ['Fog lies on the harbor.', 'The nearest boats show, and nothing beyond them.'], unknown: [D.view[0]] }[c]);
+      out.push({ open: [D.air, D.sound], capped: [D.air, D.sound], rainL: [D.air, 'Rain ticks softly on the water.'], rain: [D.air, 'Rain ticks on the water and on the docks.'], rainH: [D.air, 'Rain drums on the water and on the docks.'],
+        fog: [D.air, 'A horn sounds somewhere out in the fog.'], unknown: [D.air, D.sound] }[c]);
+      var light, morning = f.hour < 12;
+      if (ph === 'sunrise') light = c === 'open' ? ['The sun is coming up behind the hills.', 'The water below them is still in shadow.'] : rainy ? ['Daylight comes up slowly behind the rain.'] : c === 'fog' ? ['Daylight comes up pale and shadowless in the fog.'] : ['Daylight is coming up gray behind the cloud.'];
+      else if (ph === 'day') light = c === 'open' ? [morning ? 'Morning light lies on the water.' : 'Afternoon light lies on the water.'] : c === 'capped' ? ['The light is flat and gray.'] : rainy ? ['The light is gray and low under the rain.'] : c === 'fog' ? ['The light is white and even.'] : [morning ? 'It is morning.' : 'It is afternoon.'];
+      else if (ph === 'lateAfternoon') light = c === 'open' ? ['The afternoon light is low, slanting across the water.'] : rainy ? ['The afternoon light is dim under the rain.'] : c === 'fog' ? ['The afternoon light is thin and gray.'] : ['The afternoon light is gray and even.'];
+      else light = c === 'open' ? ['The sun is going down toward the water.', 'The hills hold the last of the light.'] : rainy ? ['The light is fading under the rain.'] : c === 'fog' ? ['The fog is darkening with the light.'] : ['The gray light is beginning to fade.'];
+      out.push(light);
+      out.push(c === 'rain' || c === 'rainH' || c === 'fog' ? ['Beyond the harbor, out of sight, lies open water.'] : [D.beyond]);
+      return out;
+    }
+    var N = D.night;
+    out.push({ open: [N.lights], capped: [N.lights], rainL: ['Light rain falls through the harbor lights.', 'Their reflections shiver on the black water.'], rain: ['Rain falls through the harbor lights, and their reflections break on the water.'],
+      rainH: ['Heavy rain streaks through the harbor lights.'], fog: ['The harbor lights are soft halos in the fog.'], unknown: [N.lights] }[c]);
+    out.push({ open: [N.shore], capped: [N.shore], rainL: ['Beyond the lights the shore is dark.'], rain: ['Beyond the lights the shore is dark, and the rain hides what the lights do not reach.'], rainH: ['Beyond the lights the shore is dark.'],
+      fog: ['Beyond the halos of the lights there is only the dark.'], unknown: [N.shore] }[c]);
+    if (ph === 'dusk') out.push(['The last of the light is going.']);
+    if (ph === 'dawn') out.push(['The first gray light is beginning to show.']);
+    var sky = [];
+    if (f.stars) sky.push('The sky is clear.', 'Stars show above the dark line of the shore.');
+    else if (c === 'open' && f.wx === 'partly') sky.push('Cloud covers part of the sky.');
+    else if (c === 'capped') sky.push('Cloud covers the sky.');
+    if (f.moon) sky.push('The moon is up.');
+    if (sky.length) out.push(sky);
+    out.push(c === 'fog' ? ['The air is cool and wet. It smells of salt.', 'Water drips from the rigging.'] : rainy ? [D.air, 'Rain ticks on the water and on the docks.'] : [D.air, N.sound]);
+    out.push(c === 'fog' ? ['Past the harbor there is only dark water and fog.'] : [N.beyond]);
+    return out;
+  }
+  function scenePortArrival(f) { // the harbor on arrival (the arrival pause): the same weather classes as the departure scene
+    var P = CA_PORTS[CA.to], A = P.arrive, c = sceneClass(f), nm = P.arrivalTitle, ft = A.feature, cap = ft.charAt(0).toUpperCase() + ft.slice(1);
+    if (!f.night) return {
+      open: A.day, capped: [A.day[0], A.day[1], 'Cloud lies low over the hills.'],
+      rainL: ['Light rain falls over ' + nm + '.', cap + ' is a dark line, and the shore behind it is soft and veiled.', 'The coastline runs away on either side, indistinct.'],
+      rain: ['Rain falls over ' + nm + '.', cap + ' is a dark line ahead, and the shore beside it is blurred.', 'The hills behind are lost in cloud.'],
+      rainH: ['Heavy rain hangs over ' + nm + '.', cap + ' and the nearest shore show through it, dark and indistinct.', 'Nothing beyond them can be seen.'],
+      fog: ['Fog lies over ' + nm + '.', cap + ' and the shore are hidden; only the water close around SOLACE can be seen.'],
+      unknown: [A.day[0], 'The coastline runs away on either side.'],
+    }[c];
+    return {
+      open: A.night, capped: A.night,
+      rainL: ['The lights of ' + nm + ' are blurred by the rain.', cap + ' is a dark line beside them.', 'Beyond the lights the land is only a darker shape.'],
+      rain: ['The lights of ' + nm + ' are blurred by the rain.', cap + ' is a dark line beside them.', 'Beyond the lights the land is only a darker shape.'],
+      rainH: ['The lights of ' + nm + ' show through heavy rain, smeared and uncertain.', cap + ' is a dark line beside them.', 'Of the land beyond, nothing can be made out.'],
+      fog: ['The lights of ' + nm + ' are a faint glow in the fog.', cap + ' and the land beyond are hidden.'],
+      unknown: [A.night[0], cap + ' and the land beyond are dark.'],
+    }[c];
+  }
+  // ---- the port screen
+  var caBusy = false;
+  function caRow(label, value, gap) {
+    var el = document.createElement('div'); el.className = 'data-row data-row-lg';
+    var a = document.createElement('span'); a.textContent = label; var b = document.createElement('span'); b.textContent = value; el.appendChild(a); el.appendChild(b);
+    if (gap) el.style.marginBottom = '1.2rem';
+    outputEl.insertBefore(el, tempViewEl);
+  }
+  function caBtn(label, fn) {
+    var b = document.createElement('button'); b.type = 'button'; b.className = 'option'; b.textContent = '> ' + label;
+    b.addEventListener('click', function () { if (caBusy) return; unlockAudio(); fn(); });
+    optionsEl.appendChild(b); return b;
+  }
+  function caPortFrame(heading) {
+    resetOutputEl(); optionsEl.innerHTML = '';
+    document.body.classList.remove('title-mode');
+    printPersistentLine(heading, 'heading-label'); printPersistentBlank();
+  }
+  function caUpgradeSummary() { return ['sails', 'tank', 'locker'].map(function (k) { return caLv(CAREER.upg, k); }).join(' · '); }
+  function caPortMain() {
+    var P = CA_PORTS[CAREER.port], M = CAREER.mission;
+    caPortFrame(P.name.toUpperCase());
+    printPersistentLine('SOLACE is tied up at the dock, ready for her next job.'); printPersistentBlank();
+    caRow('MONEY', caMoney(CAREER.money)); caRow('RUNS DELIVERED', String(CAREER.completed));
+    caRow('UPGRADES', 'SAILS ' + caLv(CAREER.upg, 'sails') + ' · TANK ' + caLv(CAREER.upg, 'tank') + ' · LOCKER ' + caLv(CAREER.upg, 'locker'), true);
+    if (M) {
+      printPersistentLine('THE JOB', 'heading-label');
+      printPersistentLine('Supply run to ' + CA_PORTS[M.to].name + '. ' + M.cargo.charAt(0).toUpperCase() + M.cargo.slice(1) + '.');
+      printPersistentLine('About ' + M.nm + ' NM, ' + caDaysText(M.nm) + ' at sea. Pays ' + caMoney(M.pay) + ' on delivery.');
+    } else printPersistentLine('No job taken yet. The JOB BOARD lists what is waiting at this dock.', 'dim');
+    caBtn('JOB BOARD', caPortJobs);
+    caBtn('SHOP', caPortShop);
+    if (M) caBtn('SET SAIL', caSetSail);
+    scrollToBottom();
+  }
+  function caPortJobs() {
+    var P = CA_PORTS[CAREER.port], jobs = caJobsFrom(CAREER.port, CAREER.completed);
+    caPortFrame('JOB BOARD — ' + P.name.toUpperCase());
+    printPersistentLine('Supplies waiting to be carried by sea. You are paid when they are delivered.'); printPersistentBlank();
+    jobs.forEach(function (j) {
+      printPersistentLine('SUPPLY RUN TO ' + CA_PORTS[j.to].name.toUpperCase(), 'heading-label');
+      printPersistentLine(j.cargo.charAt(0).toUpperCase() + j.cargo.slice(1) + '. About ' + j.nm + ' NM, ' + caDaysText(j.nm) + ' at sea. Pays ' + caMoney(j.pay) + '.');
+      printPersistentBlank();
+    });
+    if (!(CAREER.completed > 0)) printPersistentLine('Longer runs open up after your first delivery.', 'dim');
+    jobs.forEach(function (j) {
+      caBtn('TAKE THE ' + CA_PORTS[j.to].name.toUpperCase() + ' RUN — ' + caMoney(j.pay), function () { CAREER.mission = j; caCareerSave(); caPortMain(); });
+    });
+    caBtn('BACK', caPortMain);
+    scrollToBottom();
+  }
+  function caPortShop() {
+    caPortFrame('SHOP — ' + CA_PORTS[CAREER.port].name.toUpperCase());
+    printPersistentLine('Upgrades stay with SOLACE for every run after you buy them.'); printPersistentBlank();
+    caRow('MONEY', caMoney(CAREER.money), true);
+    var buys = [];
+    CA_UPGRADES.forEach(function (u) {
+      var lv = caLv(CAREER.upg, u.id);
+      printPersistentLine(u.name + ' — LEVEL ' + lv + ' OF 3', 'heading-label');
+      printPersistentLine(u.what);
+      if (lv >= 3) printPersistentLine('Fully upgraded.', 'dim');
+      else {
+        var nx = u.lv[lv];
+        printPersistentLine('Next: ' + nx.note + '. ' + caMoney(nx.price) + '.' + (CAREER.money < nx.price ? ' (Need ' + caMoney(nx.price - CAREER.money) + ' more.)' : ''), CAREER.money < nx.price ? 'dim' : '');
+        if (CAREER.money >= nx.price) buys.push({ u: u, lv: lv, nx: nx });
+      }
+      printPersistentBlank();
+    });
+    printPersistentLine('An upgrade takes effect on the next run you set sail on.', 'dim');
+    buys.forEach(function (b) {
+      caBtn('BUY ' + b.u.name + ' ' + ['I', 'II', 'III'][b.lv] + ' — ' + caMoney(b.nx.price), function () {
+        if (CAREER.money < b.nx.price || caLv(CAREER.upg, b.u.id) !== b.lv) { caPortShop(); return; }
+        CAREER.money -= b.nx.price; CAREER.upg[b.u.id] = b.lv + 1; caCareerSave(); caPortShop();
+      });
+    });
+    caBtn('BACK', caPortMain);
+    scrollToBottom();
+  }
+  function caSetSail() {
+    var M = CAREER.mission; if (!M) return;
+    caSetLeg(M.from, M.to);
+    resetOutputEl(); optionsEl.innerHTML = '';
+    renderIntroScene(); // the departure scene, then CONTINUE (the voyage itself begins there, exactly as ever)
+  }
+  // Back to the port after a run (delivered, rescued or given up): the career record is kept; a fresh placeholder game stands behind the port screen (nothing is simulated or saved).
+  function caShowPort() {
+    caSetLeg(CAREER.port, null);
+    GAME = newGameState();
+    marinaNightStart = GAME.boat.navLightsOn;
+    introPending = true;
+    openingWxRequest();
+    restartBtn.hidden = true;
+    setVesselLine('S/V ' + VESSEL_NAME + ' — AT DOCK');
+    caPortMain();
+    updateClock();
+  }
+  // The port screen as the title page's BEGIN brings it up (the placeholder game already exists).
+  function caShowPortFromTitle() { caSetLeg(CAREER.port, null); caPortMain(); updateClock(); }
+  // The brief on the dock screen: the job in hand.
+  function caStartScreenLines(state) {
+    var L = state.leg || {}, to = CA_PORTS[L.to] || CA_PORTS[CA.to], cargo = L.cargo || 'supplies';
+    return ['Supply run: ' + cargo + ' for ' + to.name + '.', 'About ' + (L.nm || 0) + ' NM by sea, paid ' + caMoney(L.pay || 0) + ' on delivery.'];
+  }
+  function caLegOf(state) { return (state && state.leg) || { from: CA.from, to: CA.to, cargo: null, nm: 0, pay: 0, paid: false, upg: {} }; }
+  var caCoastCache = { k: '', v: 99999 }; // the distance to the nearest shore, worked out again only when she has moved about a mile
+  function caCoastNm(state) {
+    var n = state.nav, k = Math.round(n.lat * 50) + ',' + Math.round(n.lon * 50);
+    if (caCoastCache.k !== k) { caCoastCache.k = k; caCoastCache.v = obsCoastNm(state); }
+    return caCoastCache.v;
+  }
+  // TEST SCENARIOS for the California build: a few minutes outside the Santa Barbara harbor mouth, on the run from San Francisco.
+  function caScenarioArrival(engineOn, noDiesel, below) {
+    caSetLeg('sf', 'sb');
+    CAREER.port = 'sf'; CAREER.mission = caMakeJob('sf', 'sb');
+    var s = scenarioBase(3.4), B = CA_PORTS.sb, q = destinationPoint(B.mouth[0], B.mouth[1], 180, B.radius + 0.06);
+    scenarioRoute(s, []);
+    scenarioOpenWater(s, q.lat, q.lon, B.mouth[0], B.mouth[1], 340);
+    s.boat.sailConfig = engineOn ? 'furled' : 'full'; s.boat.engineOn = !!engineOn; s.boat.engineRunningMinutes = engineOn ? 40 : 0;
+    s.boat.fuelGallons = noDiesel ? 0 : 12;
+    if (below) s.crew.location = 'below';
+    return s;
+  }
+
   function boot() {
     var saved = loadGameState();
     var scenarioFresh = false; // a test scenario that was just built (not resumed): see its `arrive`
@@ -25219,6 +26180,7 @@
       var resume = new URLSearchParams(window.location.search).get('resume') === '1';
       if (!(resume && saved)) { saved = SCENARIOS[SCENARIO_NAME].build(); saveGameState(saved); scenarioFresh = true; }
     }
+    caBootInit(saved); // California: point the game at the leg of the saved voyage (or of the career's job / port)
     if (!saved) {
       renderIntroStory();
       updateClock();
@@ -25240,7 +26202,7 @@
     migrateChartTrackIfNeeded(GAME);
     migrateStalePendingChoiceIfNeeded(GAME);
     realWeatherBootSync(GAME); // REAL WEATHER -- usable cached real data drives the ENVIRONMENT right now, before the catch-up ticks run
-    applyActiveWind(GAME, Date.now()); // PHASE 5.1 -- a save at or past Pacific control (including one saved inside the retired learning window) starts / resumes the real-wind handoff AT LOAD, not on the first tick; a corridor save is untouched
+    applyActiveWind(GAME, bootWeatherInstant(GAME).ms, bootWeatherInstant(GAME).saved); // PHASE 5.1 -- a save at or past Pacific control (including one saved inside the retired learning window) starts / resumes the real-wind handoff AT LOAD, not on the first tick; a corridor save is untouched
     syncWindHandoffTimer();    // PHASE 3 -- a blend that was mid-way when the page closed carries straight on
     enforceFavorableDepartureIfNeeded(GAME); // PHASE 7 -- the opening (departure-corridor) WIND, only while still in the corridor. After every migration above, before the catch-up tick simulation below ever runs
     restartBtn.hidden = false;
@@ -25435,6 +26397,7 @@
       if (audioCtx && isAppleTouchDevice()) audioWasInterrupted(); // an iPhone / iPad app was left or the screen locked: iOS stops the page's audio, so SOUND goes back to OFF
     } else if (document.visibilityState === 'visible') {
       var ticks = introPending ? 0 : briefingCatchUp(GAME);
+      if (maintSession && !introPending) maintPoll(); // (beta 22) the maintenance went on while the app was away: count it now
       if (!introPending) { gpsPowerWatch(GAME); marineForecastPowerWatch(GAME); lanternMenuWatch(GAME); aftCabinWatch(GAME); } // (power may have been lost, and night may have fallen, while the page was away)
       if (ticks > 0) {
         flushNewLogEntries(GAME);
