@@ -1131,7 +1131,7 @@
   'use strict';
 
   /* =====================================================================
-     LANDFALL — a real-time solo sailing voyage (Seattle -> Kauaʻi) -- the SEATTLE BETA 3
+     LANDFALL — a real-time solo sailing voyage (Seattle -> Kauaʻi) -- the SEATTLE BETA 4
      ---------------------------------------------------------------------
      Built as a single self-contained file (matches how you usually ship
      these — no build step, drop straight into Neocities). The sections
@@ -1172,8 +1172,8 @@
     } catch (e) { return null; }
   })();
   // This build has its OWN save. The saves of the other builds of the game ('kauaiVoyage_v1' and 'landfallSim_v1') are different shapes and are never read, written or cleared here.
-  var STORAGE_KEY = SCENARIO_NAME ? 'landfallSEA3_TEST_' + SCENARIO_NAME : 'landfallSEA_v3'; // the Seattle beta 3 has its OWN save: nothing here reads, writes or clears the Sitka or California saves
-  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1', 'landfallCA_v2', 'landfallCA_career_v2', 'landfallSEA_v1', 'landfallSEA_v2'];
+  var STORAGE_KEY = SCENARIO_NAME ? 'landfallSEA4_TEST_' + SCENARIO_NAME : 'landfallSEA_v4'; // the Seattle beta 4 has its OWN save: nothing here reads, writes or clears the Sitka or California saves
+  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1', 'landfallCA_v2', 'landfallCA_career_v2', 'landfallSEA_v1', 'landfallSEA_v2', 'landfallSEA_v3'];
   var TICK_MINUTES = 1;               // simulation resolution, in simulated minutes -- was 10; every per-tick rate/probability elsewhere is expressed as an hourly rate times (TICK_MINUTES/60), or converted via tickProbability() below, so it scales correctly with this value. A few things (driftWeather's random-walk magnitudes, computeHeading's wobble/drift-wander) are scaled by TICK_MINUTES/10 directly since they were tuned by feel for the old 10-minute step, not derived from a stated hourly rate.
   var MAX_CATCHUP_TICKS = 200000;     // safety cap (~139 days) for offline catch-up -- scaled 10x alongside TICK_MINUTES to preserve the same real-world catch-up window per advanceSimulation call
   var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
@@ -1191,7 +1191,7 @@
   function newGameState() {
     var now = Date.now();
     var start = START_POINT, route = newRoute();
-    var startBearing = 350; // she starts underway on heading 350, up the Sound, the autopilot off
+    var startBearing = Math.round(bearingBetween(start.lat, start.lon, route.points[0].lat, route.points[0].lon)); // she starts underway, pointed at the first plotted waypoint, the autopilot off
     var state = {
       version: 1,
       meta: {
@@ -7755,39 +7755,64 @@
      OBSERVE could refer to it); last/lastW/lastV = cooldown clocks; day = today's counts; birdsNear = recent seabird sightings inside 400 nm of
      Kaua\u02BBi; vesselElig = minutes spent genuinely able to see a ship since the last one; lastVesselT.
      ---------------------------------------------------------------- */
-  var ENC_MAX_PER_DAY = 2;               // wildlife + traffic together, per voyage day
-  var ENC_WILDLIFE_GAP_MINUTES = 300;    // between any two wildlife sightings
-  var ENC_VESSEL_GAP_MINUTES = 360;      // between any two vessel sightings (240 in the Sound and its passes, where small-boat traffic is ordinary)
-  var ENC_SECOND_OF_KIND_CHANCE = 0.15;  // a second wildlife (or vessel) sighting inside one day is allowed this often
+  var ENC_MAX_PER_DAY = 3;               // (ocean) wildlife + traffic together, per voyage day -- the Sound, the Strait and the coast use encMaxDay() below
+  var ENC_WILDLIFE_GAP_MINUTES = 240;    // (ocean) between any two wildlife sightings
+  var ENC_VESSEL_GAP_MINUTES = 300;      // (ocean) between any two vessel sightings
+  var ENC_SECOND_OF_KIND_CHANCE = 0.3;   // (ocean) a second wildlife (or vessel) sighting inside one day is allowed this often
 
   // Chance per HOUR of eligible time, by region. Missing = impossible there.
   var ENC_RATE = {
-    seabird:     { sound: 0.28, passes: 0.26, offCoast: 0.11, pacific: 0.035, mid: 0.02, hawaiiFar: 0.07, hawaiiNear: 0.20 },
-    dolphin:     { sound: 0.01, passes: 0.02, offCoast: 0.02, pacific: 0.007, mid: 0.005, hawaiiFar: 0.012, hawaiiNear: 0.025 },
-    whaleFar:    { sound: 0.03, passes: 0.04, offCoast: 0.03, pacific: 0.006, mid: 0.003, hawaiiFar: 0.005, hawaiiNear: 0.010 },
-    whaleNear:   { sound: 0.008, passes: 0.011, offCoast: 0.008, pacific: 0.0015, mid: 0.0009, hawaiiFar: 0.0013, hawaiiNear: 0.0026 }, // ~25-30% of the distant-whale rate everywhere: a close whale is the rarest sighting there is
+    seabird:     { sound: 0.45, passes: 0.40, offCoast: 0.16, pacific: 0.035, mid: 0.02, hawaiiFar: 0.07, hawaiiNear: 0.20 },
+    diver:       { sound: 0.16, passes: 0.16, offCoast: 0.08 },   // loons, scoters, guillemots, auklets, murres
+    cormorant:   { sound: 0.18, passes: 0.12 },
+    heron:       { sound: 0.12 },
+    dolphin:     { passes: 0.01, offCoast: 0.02, pacific: 0.007, mid: 0.005, hawaiiFar: 0.012, hawaiiNear: 0.025 }, // (none in Puget Sound: the porpoises are its small cetaceans)
+    porpoise:    { sound: 0.07, passes: 0.14, offCoast: 0.05 },
+    orca:        { sound: 0.012, passes: 0.03, offCoast: 0.02 },
+    whaleFar:    { sound: 0.03, passes: 0.05, offCoast: 0.04, pacific: 0.006, mid: 0.003, hawaiiFar: 0.005, hawaiiNear: 0.010 },
+    whaleNear:   { sound: 0.006, passes: 0.012, offCoast: 0.010, pacific: 0.0015, mid: 0.0009, hawaiiFar: 0.0013, hawaiiNear: 0.0026 }, // a close whale is the rarest sighting there is
     turtle:      { hawaiiFar: 0.012, hawaiiNear: 0.03 },
     flyingFish:  { pacific: 0.04, mid: 0.05, hawaiiFar: 0.07, hawaiiNear: 0.07 },
     biolum:      { offCoast: 0.01, pacific: 0.02, mid: 0.025, hawaiiFar: 0.03, hawaiiNear: 0.02 },
     // shore and ocean animals that live in particular waters (each also needs its own local condition -- a shore close by, a wind to glide on -- see ENCOUNTERS)
-    eagle:       { sound: 0.40, passes: 0.20 },
+    eagle:       { sound: 0.35, passes: 0.25 },
     otter:       { passes: 0.06 }, // (the sea otters of the Washington coast; none in Puget Sound)
-    seal:        { sound: 0.14, passes: 0.10 },
-    sealion:     { sound: 0.05, passes: 0.12, offCoast: 0.04 },
-    albatross:   { offCoast: 0.04, pacific: 0.10, mid: 0.09, hawaiiFar: 0.05, hawaiiNear: 0.05 },
+    seal:        { sound: 0.22, passes: 0.14 },
+    sealion:     { sound: 0.08, passes: 0.16, offCoast: 0.05 },
+    jelly:       { sound: 0.10, passes: 0.05 },
+    salmon:      { sound: 0.08, passes: 0.04 },
+    albatross:   { offCoast: 0.05, pacific: 0.10, mid: 0.09, hawaiiFar: 0.05, hawaiiNear: 0.05 },
     tropicbird:  { hawaiiFar: 0.06, hawaiiNear: 0.18 },
-    local:       { sound: 0.35 },
-    freighter:   { sound: 0.01, passes: 0.03, offCoast: 0.06, pacific: 0.010, mid: 0.003, hawaiiFar: 0.020, hawaiiNear: 0.06 },
-    distantShip: { passes: 0.02, offCoast: 0.04, pacific: 0.010, mid: 0.004, hawaiiFar: 0.02, hawaiiNear: 0.05 },
-    fishing:     { sound: 0.10, passes: 0.10, offCoast: 0.06, pacific: 0.003, hawaiiFar: 0.008, hawaiiNear: 0.05 },
-    sailboat:    { sound: 0.02, passes: 0.015, offCoast: 0.003, pacific: 0.002, mid: 0.0015, hawaiiFar: 0.003, hawaiiNear: 0.012 },
+    // other boats
+    ferry:       { sound: 0.35 },
+    tugBarge:    { sound: 0.14, passes: 0.06 },
+    local:       { sound: 0.18 },
+    paddler:     { sound: 0.08 },
+    freighter:   { sound: 0.12, passes: 0.12, offCoast: 0.10, pacific: 0.012, mid: 0.003, hawaiiFar: 0.020, hawaiiNear: 0.06 },
+    distantShip: { passes: 0.04, offCoast: 0.06, pacific: 0.012, mid: 0.004, hawaiiFar: 0.02, hawaiiNear: 0.05 },
+    fishing:     { sound: 0.10, passes: 0.12, offCoast: 0.10, pacific: 0.004, hawaiiFar: 0.008, hawaiiNear: 0.05 },
+    sailboat:    { sound: 0.12, passes: 0.04, offCoast: 0.006, pacific: 0.003, mid: 0.0015, hawaiiFar: 0.003, hawaiiNear: 0.012 },
+    patrol:      { sound: 0.04, passes: 0.04 },
+    navy:        { sound: 0.015, passes: 0.008 },
+    pilot:       { sound: 0.02, passes: 0.06 },
   };
   var ENC_WARM_F = 72;                   // flying fish and turtles are warm-water animals
 
   function encBase(c) { return c.awake && c.above && c.w.condition !== 'squall' && c.sea <= 4 && c.wind < 28; } // on deck, awake, no severe weather
   function encSeen(c) { return c.daytime && !c.fog && !c.heavyRain; }   // anything spotted at a distance needs daylight and some visibility
   function encOffHarbor(c) { return c.distDest > 12; }                  // never in the way of the scripted arrival
-  function encRateOf(key, c) { var r = ENC_RATE[key][c.encRegion]; return r > 0 ? r : 0; }
+  function encRateOf(key, c) { var t = ENC_RATE[key], r = t ? t[c.encRegion] : 0; return r > 0 ? r : 0; }
+  // How busy the water is: 2 = the Sound and its passes, 1 = just off the coast, 0 = the open ocean (which stays as quiet as it was).
+  function encKind(c) { return (c.encRegion === 'sound' || c.encRegion === 'passes') ? 2 : c.encRegion === 'offCoast' ? 1 : 0; }
+  function encNear(c) { return encKind(c) === 2; }
+  function encAny(c) { return !c.fog && !c.heavyRain; }                  // a light or a sound can be taken in, by day or by night
+  function encDark(c) { return !c.daytime && encAny(c); }                // after dark: lights and sounds only
+  function encMaxDay(c) { return [3, 6, 10][encKind(c)]; }               // wildlife + boats per voyage day
+  function encGapW(c) { return [240, 120, 45][encKind(c)]; }             // minutes between two wildlife sightings
+  function encGapV(c) { return [300, 100, 40][encKind(c)]; }             // minutes between two boat sightings
+  function encSecond(c) { return [0.3, 0.7, 1][encKind(c)]; }            // chance a second of a kind is allowed in one day
+  function encDurScale(c) { return [1, 0.7, 0.45][encKind(c)]; }         // the Sound's sightings are shorter than the ocean's
+  function encCdBy(c, near, coast, ocean) { var k = encKind(c); return k === 2 ? near : k === 1 ? coast : ocean; } // per-kind cooldown by region
   function pickEncText(m, id, opts) {
     if (!opts.length) return null;
     var last = m.enc.lastText[id], pool = opts.filter(function (t) { return t !== last; });
@@ -7838,28 +7863,133 @@
                  'A tropicbird passed high over the boat, white against the blue, its tail streamer trailing.'],
   };
 
-  // `rate(c)` doubles as the eligibility test (0 = cannot happen here and now). `still(c)` is what must STAY true for it to continue.
-  // `text(c, a, m)` runs when it ends: c = the context NOW (time words are judged against this), a = the sighting (a.dur minutes, a.natural =
-  // it ran its course rather than being cut short, a.flock).
+  // ---- SEATTLE BETA 4: the Sound, the Strait and the coast are busy waters. More wildlife, many more boats, by day AND by night (a ferry or a ship is just as seen by its lights; seals,
+  // sea lions and porpoises are heard in the dark), and sightings can also happen while the game is being caught up after the phone was put down with her on deck. ----
+  Object.assign(ENC_LINES, {
+    // seabirds
+    gullsSound: ['Gulls worked the water ahead, dropping and rising over a line of current.',
+                 'A gull stood on a drifting log and rode it past the boat, perfectly calm about it.',
+                 'A flock of gulls followed Solace for a while, hoping, I think, that I was fishing.',
+                 'A raft of ducks lifted off ahead of the bow and settled again further on.',
+                 'Crows along the shore, gulls out on the water. Nothing else moving but us.'],
+    birdsCoast: ['Shearwaters skimmed the swell off the coast, dark wings, tipping from side to side.',
+                 'A few gulls kept pace with the boat, drifting on the wind without a wingbeat.'],
+    diverSound: ['A loon surfaced ahead, black head and white necklace, took one look at the boat and dived.',
+                 'A raft of scoters sat low on the water, then rose together and flew off in a line.',
+                 'A pigeon guillemot bobbed near the boat, black with a white wing patch and bright red feet, then dived.',
+                 'A grebe floated near the shore, neck straight up, watching me go by.'],
+    diverCoast: ['Small dark birds with orange bills popped up and dived again around the boat. Auklets, I think.',
+                 'Murres sat in a loose group on the swell and rode up each wave without any fuss.',
+                 'A loon surfaced ahead, took one look at the boat and dived.'],
+    cormorant: ['Cormorants lined an old piling with their wings held open to dry, and watched Solace go by.',
+                'A cormorant flew low over the water, fast and straight, and disappeared around the point.',
+                'A cormorant surfaced, swallowed something, and went under again.'],
+    heron: ['A great blue heron stood in the shallows by the shore, one leg tucked, not moving at all.',
+            'A heron lifted off the beach, slow and heavy, and flapped out of sight along the shore.'],
+    // marine mammals and fish
+    sealNight: ['A seal breathed close by in the dark. I never saw it, only heard the sharp puff and then nothing.',
+                'Something blew a short breath beside the boat in the dark. A seal, I think.'],
+    sealionNight: ['Sea lions were barking somewhere out in the dark, a hoarse chorus that carried across the water for a long time.',
+                   'I could hear sea lions on a buoy or the rocks, a long way off, loud even from here.'],
+    porpoise: ['Small dark fins rolled through the water ahead of the bow, quick and shy, then nothing.',
+               'A few porpoises surfaced beside the boat, small and dark, quick breaths and no splash.'],
+    porpoiseNight: ['I heard a quick sharp breath near the hull in the dark, then another. Porpoises, I think.'],
+    orca: ['Tall black fins cut the water off the beam, several together, rising and falling in a slow rhythm. Orcas. I stopped what I was doing.',
+           'A pod of orcas passed a quarter mile off, one tall fin among several smaller ones. I counted five, then lost count.'],
+    jelly: ['Moon jellies drifted just under the surface, dozens of pale discs pulsing in the green water.',
+            'The water was full of jellyfish for a while, pale and drifting, each one smaller than my hand.'],
+    salmon: ['A salmon jumped clear of the water, silver in the light, and fell back with a slap. Then another.',
+             'Something silver leapt beside the boat and landed with a smack. Salmon, running.'],
+    // boats
+    ferryDay: ['A state ferry crossed ahead, white decks stacked above a dark green hull, cars lined up inside. Her wake spread long and pale behind her.',
+               'A ferry passed across the bow a half mile off, big and unhurried, gulls trailing her stern.',
+               'I held my course and let a ferry cross ahead of Solace. She was gone behind the point before her wake reached us.'],
+    ferryNight: ['A ferry crossed in the dark, every window lit, her reflection stretched long across the water.',
+                 'The lights of a ferry slid across the water ahead, steady and bright, and were gone behind the point.'],
+    tugDay: ['A tug pushed a barge along the shore, gulls working in its wake.',
+             'A tug towed a long chip barge down the channel, low in the water and slow. I stayed well clear.',
+             'A tug and a loaded barge crawled up the Sound, a white bow wave and not much speed.'],
+    tugNight: ['Two white lights stacked on a mast ahead: a tug with a tow. I kept well clear of the line behind her.',
+               'A tug went by in the dark, her wheelhouse glowing, a barge a long way behind her, low and black.'],
+    shipSound: ['A container ship came up the channel stacked high with boxes in red, blue and grey. She seemed to move without effort.',
+                'A car carrier, tall and blocky, headed down toward the Strait.',
+                'A tanker rode low in the water, a tug at her stern, headed for the refineries up the Sound.'],
+    shipNight: ['A big ship passed in the dark, lit from stem to stern, with red and green sidelights and a row of deck lights strung along the boxes.',
+                'The lights of a ship moved down the channel, far bigger than anything else out here. I could hear her engines over the water.'],
+    shipOffNight: ['The lights of a ship showed on the horizon for a while, then dropped away.',
+                   'A ship passed far off in the dark, a line of white lights and one red. We never got close.'],
+    smallDay: ['A runabout crossed behind us, bouncing over its own wake, and was gone.',
+               'Two small fishing boats sat close together off the point, rods bent over the sides.',
+               'A sailboat tacked along the shore under full sail, the crew in bright jackets.',
+               'A skiff with an outboard went by close to shore, one person and one dog.'],
+    smallStart: 'Small boats all around off Shilshole: sailboats tacking, a runabout headed for the marina, a kayak close to the beach.',
+    sailDay: ['Another sailboat, heeled over, crossed our stern under full sail.',
+              'A sailboat beat to windward, white sails sharp against the dark shore. I wondered where it was going.'],
+    sailNight: ['Another sailboat showed its red and green lights well off, moving slowly across the dark water.'],
+    fishSound: ['A fishing boat lay off the next point, lines out, gulls following.',
+                'A sport fishing boat drifted off the point, rods out, a couple of figures in the cockpit.',
+                'A small boat hauled a crab pot over the rail, gulls wheeling around it.'],
+    fishCoast: ['A crab boat worked a long line of pot buoys off the coast, bright floats scattered over the swell.',
+                'A troller ran out toward open water with her poles raised, a flock of gulls behind her.',
+                'A fishing boat rolled in the swell a mile off, her deck lights already on.'],
+    fishNight: ['A fishing boat worked under bright deck lights somewhere ahead, a hard white glow on the water.',
+                'A fishing boat sat at anchor with her deck lights burning, bright against the dark shore.'],
+    paddler: ['A kayaker paddled along the shore, a small yellow shape against the dark water.',
+              'Someone on a paddleboard stood near the beach, steady, not looking at us.'],
+    patrolDay: ['A Coast Guard boat crossed behind us, orange stripe bright, headed somewhere with a purpose.'],
+    patrolNight: ['A Coast Guard boat ran past in the dark with a light flashing, and then she was gone.'],
+    navy: ['A grey warship, low and wide, came up the channel with a Coast Guard boat on either side of her.',
+           'A submarine, a long black hull barely above the water, moved up the channel between two escort boats.'],
+    pilot: ['A pilot boat ran out from shore to meet a ship, throwing white spray.'],
+  });
+
+  // `rate(c)` doubles as the eligibility test (0 = cannot happen here and now). `still(c)` is what must STAY true for it to continue. `text(c, a, m)` runs when it ends:
+  // c = the context NOW, a = the sighting (a.dur minutes, a.natural, a.flock, a.day = it began in daylight, a.scale = how much shorter than the ocean's sightings it was allowed to run).
   var ENCOUNTERS = [
     { id: 'seabird', cat: 'wildlife', topic: 'bird', dur: [20, 150], minLog: 15,
       rate: function (c) { return encBase(c) && c.daytime && !c.heavyRain ? encRateOf('seabird', c) : 0; },
-      cd: function (c) { return c.encRegion === 'hawaiiNear' ? 360 : c.encRegion === 'hawaiiFar' ? 540 : 720; },
+      cd: function (c) { return c.encRegion === 'hawaiiNear' ? 360 : c.encRegion === 'hawaiiFar' ? 540 : encCdBy(c, 60, 240, 720); },
       still: function (c) { return c.daytime && !c.heavyRain; },
       text: function (c, a, m) {
         var o = [];
-        if (!a.flock && a.dur >= 20 && c.daytime) o.push(ENC_LINES.birdFollow);
+        if (encNear(c)) o = ENC_LINES.gullsSound.slice(); else if (c.encRegion === 'offCoast') o = ENC_LINES.birdsCoast.slice();
+        if (!a.flock && a.dur >= 12 && c.daytime) o.push(ENC_LINES.birdFollow);
         if (!a.flock && c.tod.afternoon) o.push(ENC_LINES.birdOne);
         if (a.flock && c.daytime && c.distDest > 150 && c.landNm != null && c.landNm >= 60) o.push(ENC_LINES.birdsAround);
         return pickEncText(m, 'seabird', o);
       } },
+    { id: 'diver', cat: 'wildlife', topic: 'bird', dur: [4, 20], minLog: 3,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 && c.shoreNm != null && c.shoreNm <= 4 && (encNear(c) || c.encRegion === 'offCoast') ? encRateOf('diver', c) * (c.snowSeason ? 1 : 0.5) : 0; },
+      cd: function (c) { return encCdBy(c, 75, 240, 720); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'diver', encNear(c) && c.encRegion === 'sound' ? ENC_LINES.diverSound : ENC_LINES.diverCoast); } },
+    { id: 'cormorant', cat: 'wildlife', topic: 'bird', dur: [3, 15], minLog: 3,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.shoreNm != null && c.shoreNm <= 2.5 ? encRateOf('cormorant', c) : 0; },
+      cd: function (c) { return encCdBy(c, 120, 360, 720); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'cormorant', ENC_LINES.cormorant); } },
+    { id: 'heron', cat: 'wildlife', topic: 'bird', dur: [2, 8], minLog: 2,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.shoreNm != null && c.shoreNm <= 1.2 ? encRateOf('heron', c) : 0; },
+      cd: function (c) { return encCdBy(c, 180, 360, 720); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'heron', ENC_LINES.heron); } },
     { id: 'dolphin', cat: 'wildlife', topic: 'dolphin', dur: [8, 35], minLog: 8,
       rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 ? encRateOf('dolphin', c) : 0; },
-      cd: function () { return 4320; }, still: function (c) { return encSeen(c); },
+      cd: function (c) { return encCdBy(c, 720, 1440, 4320); }, still: function (c) { return encSeen(c); },
       text: function (c, a) { return a.natural ? ENC_LINES.dolphins : null; } },
-    { id: 'whaleFar', cat: 'wildlife', topic: 'whale', dur: [2, 6], minLog: 2, // (in Alaskan waters the sighting is a humpback's blow; elsewhere it is the plain line)
+    { id: 'porpoise', cat: 'wildlife', topic: 'dolphin', dur: [3, 12], minLog: 2,
+      // the small porpoises of the Sound and the Strait: shy, easy to miss in chop, and heard at night by their sharp breath
+      rate: function (c) {
+        if (!encBase(c) || c.sea > 2) return 0;
+        if (encSeen(c)) return encRateOf('porpoise', c);
+        return encDark(c) && c.wind <= 12 ? encRateOf('porpoise', c) * 0.4 : 0;
+      },
+      cd: function (c) { return encCdBy(c, 120, 360, 1440); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'porpoise', a.day ? ENC_LINES.porpoise : ENC_LINES.porpoiseNight); } },
+    { id: 'orca', cat: 'wildlife', topic: 'whale', dur: [8, 40], minLog: 6,
+      rate: function (c) { return encBase(c) && encSeen(c) && !c.raining && c.sea <= 3 ? encRateOf('orca', c) : 0; },
+      cd: function (c) { return encCdBy(c, 360, 720, 2880); }, still: function (c) { return encSeen(c) && !c.raining; },
+      text: function (c, a, m) { return pickEncText(m, 'orca', ENC_LINES.orca); } },
+    { id: 'whaleFar', cat: 'wildlife', topic: 'whale', dur: [2, 6], minLog: 2, // (in northern waters the sighting is a humpback's blow; elsewhere it is the plain line)
       rate: function (c) { return encBase(c) && encSeen(c) && !c.raining && c.sea <= 3 ? encRateOf('whaleFar', c) : 0; },
-      cd: function () { return 4320; }, still: function (c) { return encSeen(c) && !c.raining; },
+      cd: function (c) { return encCdBy(c, 480, 960, 4320); }, still: function (c) { return encSeen(c) && !c.raining; },
       text: function (c, a, m) {
         if (!a.natural) return null;
         var north = c.encRegion === 'sound' || c.encRegion === 'passes' || c.encRegion === 'offCoast';
@@ -7867,7 +7997,7 @@
       } },
     { id: 'whaleNear', cat: 'wildlife', topic: 'whale', dur: [4, 20], minLog: 4,
       rate: function (c) { return encBase(c) && encSeen(c) && !c.raining ? encRateOf('whaleNear', c) : 0; },
-      cd: function () { return 8640; }, still: function (c) { return encSeen(c); },
+      cd: function (c) { return encCdBy(c, 1440, 2880, 8640); }, still: function (c) { return encSeen(c); },
       text: function () { return ENC_LINES.whaleNear; } },
     { id: 'turtle', cat: 'wildlife', topic: 'turtle', dur: [2, 5], minLog: 2,
       rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 && c.tempF >= ENC_WARM_F && c.distDest <= 500 ? encRateOf('turtle', c) : 0; },
@@ -7886,22 +8016,41 @@
     { id: 'eagle', cat: 'wildlife', topic: 'eagle', dur: [6, 30], minLog: 5,
       // by day, with a shore close by: the Sound and its passes only
       rate: function (c) { return encBase(c) && encSeen(c) && c.shoreNm != null && c.shoreNm <= 2.5 ? encRateOf('eagle', c) : 0; },
-      cd: function () { return 1080; }, still: function (c) { return encSeen(c); },
+      cd: function (c) { return encCdBy(c, 150, 600, 1080); }, still: function (c) { return encSeen(c); },
       text: function (c, a, m) { return pickEncText(m, 'eagle', ENC_LINES.eagle); } },
     { id: 'otter', cat: 'wildlife', topic: 'otter', dur: [4, 15], minLog: 4,
       // kelp beds close to shore, in calm water
       rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 2 && c.wind <= 16 && c.shoreNm != null && c.shoreNm <= 1.5 ? encRateOf('otter', c) : 0; },
-      cd: function () { return 1440; }, still: function (c) { return encSeen(c); },
+      cd: function (c) { return encCdBy(c, 360, 720, 1440); }, still: function (c) { return encSeen(c); },
       text: function (c, a, m) { return pickEncText(m, 'otter', ENC_LINES.otter); } },
     { id: 'seal', cat: 'wildlife', topic: 'seal', dur: [1, 4], minLog: 1,
-      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 3 && c.shoreNm != null && c.shoreNm <= 3 ? encRateOf('seal', c) : 0; },
-      cd: function () { return 1080; }, still: function (c) { return encSeen(c); },
-      text: function (c, a, m) { return pickEncText(m, 'seal', ENC_LINES.seal); } },
+      // seen by day; at night only heard, a breath close to the hull
+      rate: function (c) {
+        if (!encBase(c) || c.sea > 3 || c.shoreNm == null || c.shoreNm > 3) return 0;
+        if (encSeen(c)) return encRateOf('seal', c);
+        return encDark(c) ? encRateOf('seal', c) * 0.4 : 0;
+      },
+      cd: function (c) { return encCdBy(c, 100, 360, 1080); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'seal', a.day ? ENC_LINES.seal : ENC_LINES.sealNight); } },
     { id: 'sealion', cat: 'wildlife', topic: 'sealion', dur: [8, 40], minLog: 8,
-      // hauled out on the outer rocks, so they are only met where an outer shore is close
-      rate: function (c) { return encBase(c) && encSeen(c) && c.shoreNm != null && c.shoreNm <= 3 ? encRateOf('sealion', c) : 0; },
-      cd: function () { return 1440; }, still: function (c) { return encSeen(c); },
-      text: function (c, a, m) { return pickEncText(m, 'sealion', ENC_LINES.sealion); } },
+      // hauled out on the buoys and the outer rocks, so they are only met where a shore is close; by night they are heard
+      rate: function (c) {
+        if (!encBase(c) || c.shoreNm == null || c.shoreNm > 3) return 0;
+        if (c.encRegion === 'sound' && !(c.month >= 8 || c.month <= 4)) return 0; // in the Sound they are fall-to-spring visitors
+        if (encSeen(c)) return encRateOf('sealion', c);
+        return encDark(c) ? encRateOf('sealion', c) * 0.6 : 0;
+      },
+      cd: function (c) { return encCdBy(c, 240, 480, 1440); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'sealion', a.day ? ENC_LINES.sealion : ENC_LINES.sealionNight); } },
+    { id: 'jelly', cat: 'wildlife', topic: 'dolphin', dur: [3, 10], minLog: 2,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 2 && !c.raining ? encRateOf('jelly', c) : 0; },
+      cd: function (c) { return encCdBy(c, 240, 480, 1440); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'jelly', ENC_LINES.jelly); } },
+    { id: 'salmon', cat: 'wildlife', topic: 'dolphin', dur: [1, 3], minLog: 1,
+      // the fall runs: August to November
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 2 && c.month >= 7 && c.month <= 10 ? encRateOf('salmon', c) : 0; },
+      cd: function (c) { return encCdBy(c, 360, 720, 1440); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'salmon', ENC_LINES.salmon); } },
     { id: 'albatross', cat: 'wildlife', topic: 'albatross', dur: [10, 60], minLog: 8,
       // an ocean glider: it needs a wind to ride
       rate: function (c) { return encBase(c) && encSeen(c) && c.wind >= 6 ? encRateOf('albatross', c) : 0; },
@@ -7911,17 +8060,36 @@
       rate: function (c) { return encBase(c) && encSeen(c) && c.tempF >= 60 ? encRateOf('tropicbird', c) : 0; },
       cd: function () { return 540; }, still: function (c) { return encSeen(c); },
       text: function (c, a, m) { return pickEncText(m, 'tropicbird', ENC_LINES.tropicbird); } },
-    { id: 'local', cat: 'vessel', topic: 'ship', dur: [60, 240], minLog: 30,
+    // ---- other boats. Ships, ferries and tows are seen by their lights after dark; the small stuff is a daytime sighting ----
+    { id: 'ferry', cat: 'vessel', topic: 'ship', dur: [8, 25], minLog: 5,
+      rate: function (c) { return encBase(c) && encAny(c) ? encRateOf('ferry', c) * (c.daytime ? 1 : 0.7) : 0; },
+      cd: function (c) { return encCdBy(c, 45, 99999, 99999); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'ferry', a.day ? ENC_LINES.ferryDay : ENC_LINES.ferryNight); } },
+    { id: 'tugBarge', cat: 'vessel', topic: 'ship', dur: [20, 70], minLog: 10,
+      rate: function (c) { return encBase(c) && encAny(c) ? encRateOf('tugBarge', c) * (c.daytime ? 1 : 0.8) : 0; },
+      cd: function (c) { return encCdBy(c, 90, 99999, 99999); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'tugBarge', a.day ? ENC_LINES.tugDay : ENC_LINES.tugNight); } },
+    { id: 'local', cat: 'vessel', topic: 'ship', dur: [15, 60], minLog: 8,
       rate: function (c) { return encBase(c) && encSeen(c) ? encRateOf('local', c) : 0; },
-      cd: function () { return 99999999; }, still: function (c) { return encSeen(c); },
-      text: function (c) { return c.daytime ? ENC_LINES.local : null; } },
+      cd: function (c) { return encCdBy(c, 120, 99999, 99999); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return c.distStart <= 6 && c.encRegion === 'sound' ? ENC_LINES.smallStart : pickEncText(m, 'local', ENC_LINES.smallDay); } },
+    { id: 'paddler', cat: 'vessel', topic: 'ship', dur: [3, 10], minLog: 2,
+      rate: function (c) { return encBase(c) && encSeen(c) && c.sea <= 2 && c.wind <= 14 && c.shoreNm != null && c.shoreNm <= 0.9 ? encRateOf('paddler', c) : 0; },
+      cd: function (c) { return encCdBy(c, 240, 99999, 99999); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'paddler', ENC_LINES.paddler); } },
     { id: 'freighter', cat: 'vessel', topic: 'ship', dur: [40, 180], minLog: 20,
-      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('freighter', c) : 0; },
-      cd: function () { return 720; }, still: function (c) { return encSeen(c); },
-      text: function (c, a, m) { var o = []; if (a.natural) { o.push(ENC_LINES.freighterA); if (a.dur >= 40) o.push(ENC_LINES.freighterB); } return pickEncText(m, 'freighter', o); } },
+      rate: function (c) { return encBase(c) && encOffHarbor(c) && (encSeen(c) || encDark(c)) ? encRateOf('freighter', c) : 0; },
+      cd: function (c) { return encCdBy(c, 90, 240, 720); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) {
+        var o = [];
+        if (encNear(c)) o = (a.day ? ENC_LINES.shipSound : ENC_LINES.shipNight).slice();
+        else if (!a.day) o = ENC_LINES.shipOffNight.slice();
+        else if (a.natural) { o.push(ENC_LINES.freighterA); if (a.dur >= 40) o.push(ENC_LINES.freighterB); }
+        return pickEncText(m, 'freighter', o);
+      } },
     { id: 'distantShip', cat: 'vessel', topic: 'ship', dur: [90, 300], minLog: 30,
       rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('distantShip', c) : 0; },
-      cd: function () { return 1440; }, still: function (c) { return encSeen(c); },
+      cd: function (c) { return encCdBy(c, 180, 480, 1440); }, still: function (c) { return encSeen(c); },
       text: function (c, a, m) {
         var o = [];
         if (c.encRegion === 'mid') { // the genuinely rare mid-ocean sighting
@@ -7929,23 +8097,40 @@
           if (c.tod.afternoon && a.natural && a.dur >= 30) o.push(ENC_LINES.shipMidAfternoon);
           if (a.natural && a.dur <= 90) o.push(ENC_LINES.shipMidFar);
         } else {
-          if (c.daytime && a.natural && a.dur >= 120) o.push(ENC_LINES.shipGone);
+          if (c.daytime && a.natural && a.dur >= 120 * (a.scale || 1)) o.push(ENC_LINES.shipGone);
           if ((a.prevVesselT == null || a.startT - a.prevVesselT >= 2880) && (c.encRegion !== 'passes' && c.encRegion !== 'sound')) o.push(ENC_LINES.shipFirst);
           if (c.daytime && a.natural) o.push(ENC_LINES.shipFar);
         }
         return pickEncText(m, 'distantShip', o);
       } },
     { id: 'fishing', cat: 'vessel', topic: 'ship', dur: [30, 150], minLog: 20,
-      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('fishing', c) : 0; },
-      cd: function () { return 2160; }, still: function (c) { return encSeen(c); },
+      rate: function (c) { return encBase(c) && encOffHarbor(c) && (encSeen(c) || encDark(c)) ? encRateOf('fishing', c) * (c.daytime ? 1 : 0.5) : 0; },
+      cd: function (c) { return encCdBy(c, 120, 360, 2160); }, still: function (c) { return encAny(c); },
       text: function (c, a, m) {
-        if (!c.daytime) return null;
-        return (c.encRegion === 'sound' || c.encRegion === 'passes' || c.encRegion === 'offCoast') ? pickEncText(m, 'fishing', ENC_LINES.fishingNorth.concat([ENC_LINES.fishing])) : ENC_LINES.fishing;
+        if (!a.day) return encKind(c) >= 1 ? pickEncText(m, 'fishing', ENC_LINES.fishNight) : null;
+        if (c.encRegion === 'sound') return pickEncText(m, 'fishing', ENC_LINES.fishSound);
+        if (c.encRegion === 'passes' || c.encRegion === 'offCoast') return pickEncText(m, 'fishing', ENC_LINES.fishCoast.concat(ENC_LINES.fishSound));
+        return ENC_LINES.fishing;
       } },
     { id: 'sailboat', cat: 'vessel', topic: 'ship', dur: [30, 120], minLog: 20,
-      rate: function (c) { return encBase(c) && encSeen(c) && encOffHarbor(c) ? encRateOf('sailboat', c) : 0; },
-      cd: function () { return 4320; }, still: function (c) { return encSeen(c); },
-      text: function (c) { return c.daytime ? ENC_LINES.sailboat : null; } },
+      rate: function (c) { return encBase(c) && encOffHarbor(c) && (encSeen(c) || encDark(c)) ? encRateOf('sailboat', c) * (c.daytime ? 1 : 0.4) : 0; },
+      cd: function (c) { return encCdBy(c, 120, 720, 4320); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) {
+        if (!a.day) return encKind(c) >= 1 ? pickEncText(m, 'sailboat', ENC_LINES.sailNight) : null;
+        return encKind(c) >= 1 ? pickEncText(m, 'sailboat', ENC_LINES.sailDay) : ENC_LINES.sailboat;
+      } },
+    { id: 'patrol', cat: 'vessel', topic: 'ship', dur: [4, 15], minLog: 3,
+      rate: function (c) { return encBase(c) && encAny(c) ? encRateOf('patrol', c) : 0; },
+      cd: function (c) { return encCdBy(c, 240, 99999, 99999); }, still: function (c) { return encAny(c); },
+      text: function (c, a, m) { return pickEncText(m, 'patrol', a.day ? ENC_LINES.patrolDay : ENC_LINES.patrolNight); } },
+    { id: 'navy', cat: 'vessel', topic: 'ship', dur: [10, 40], minLog: 6,
+      rate: function (c) { return encBase(c) && encSeen(c) ? encRateOf('navy', c) : 0; },
+      cd: function (c) { return encCdBy(c, 720, 99999, 99999); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'navy', ENC_LINES.navy); } },
+    { id: 'pilot', cat: 'vessel', topic: 'ship', dur: [4, 12], minLog: 3,
+      rate: function (c) { return encBase(c) && encSeen(c) ? encRateOf('pilot', c) : 0; },
+      cd: function (c) { return encCdBy(c, 480, 99999, 99999); }, still: function (c) { return encSeen(c); },
+      text: function (c, a, m) { return pickEncText(m, 'pilot', ENC_LINES.pilot); } },
   ];
   var ENC_BY_ID = {}; ENCOUNTERS.forEach(function (e) { ENC_BY_ID[e.id] = e; });
 
@@ -7968,11 +8153,12 @@
   function startEncounter(state, c, m, def, opts) {
     opts = opts || {};
     var E = m.enc;
-    var d = opts.dur != null ? opts.dur : def.dur[0] + Math.floor(Math.random() * (def.dur[1] - def.dur[0] + 1));
+    var sc = def.dur[1] > 12 ? encDurScale(c) : 1, raw = def.dur[0] + Math.floor(Math.random() * (def.dur[1] - def.dur[0] + 1));
+    var d = opts.dur != null ? opts.dur : (sc < 1 ? Math.max(Math.ceil(def.minLog * sc), Math.round(raw * sc)) : raw);
     if (E.day.n !== c.day) E.day = { n: c.day, w: 0, v: 0 };
     // a flock only where "land is still nowhere close" can honestly be said
     var flock = def.id === 'seabird' && c.landNm != null && c.landNm >= 60 && c.distDest > 150 && Math.random() < 0.3;
-    E.act = { id: def.id, startT: c.t, endT: c.t + d, flock: flock, prevVesselT: E.lastVesselT, forced: !!opts.forced };
+    E.act = { id: def.id, startT: c.t, endT: c.t + d, flock: flock, prevVesselT: E.lastVesselT, forced: !!opts.forced, day: !!c.daytime, scale: sc };
     if (def.cat === 'wildlife') E.day.w++; else { E.day.v++; E.lastVesselT = c.t; E.vesselElig = 0; }
     if (d <= 0) { var a = E.act; E.act = null; finishEncounter(state, c, m, a, def); }
   }
@@ -7983,7 +8169,7 @@
     a.natural = c.t >= a.endT;
     E.last[def.id] = c.t;
     if (def.cat === 'wildlife') E.lastW = c.t; else E.lastV = c.t;
-    if (silent || a.dur < def.minLog) return; // asleep (nothing is written while asleep) or too brief to have been noticed properly
+    if (silent || a.dur < def.minLog * (a.scale || 1)) return; // asleep (nothing is written while asleep) or too brief to have been noticed properly
     var text = def.text(c, a, m);
     if (def.id === 'seabird' && text && c.distDest <= 400) {
       // approaching Hawai\u02BBi: the second qualifying sighting inside two days is "more birds" -- ONE entry, in place of the ordinary bird line
@@ -7995,7 +8181,7 @@
     log(state, text);
     E.recent = { id: def.id, cat: def.cat, topic: def.topic, startT: a.startT, endT: c.t, dur: a.dur, text: text };
     m.topicAt[def.topic] = c.t;
-    m.day.count++; // counts toward the day's budget, so an ordinary moment yields to it -- but is never blocked by that budget
+    if (E.day.w + E.day.v <= 2) m.day.count++; // the first two of a day use the diary's budget (an ordinary moment yields to them); a busy day on the water must not crowd the ordinary moments out
   }
 
   function tickEncounters(state, c, m) {
@@ -8009,19 +8195,18 @@
       if (t >= a.endT || !c.awake || !c.above || !def.still(c)) { E.act = null; finishEncounter(state, c, m, a, def, !c.awake); }
       return;
     }
-    if (inCatchUpPass) return;                 // she was not on deck for the time that went by offline
     if (!c.awake || !c.above) return;
-    if (E.day.w + E.day.v >= ENC_MAX_PER_DAY) return;
+    if (E.day.w + E.day.v >= encMaxDay(c)) return;
     var order = ENCOUNTERS.slice().sort(function () { return Math.random() - 0.5; });
     for (var i = 0; i < order.length; i++) {
       var d = order[i], r = d.rate(c, m);
       if (!(r > 0)) continue;
       if (d.cat === 'wildlife') {
-        if (E.lastW != null && t - E.lastW < ENC_WILDLIFE_GAP_MINUTES) continue;
-        if (E.day.w >= 1 && Math.random() >= ENC_SECOND_OF_KIND_CHANCE) continue;
+        if (E.lastW != null && t - E.lastW < encGapW(c)) continue;
+        if (E.day.w >= 1 && Math.random() >= encSecond(c)) continue;
       } else {
-        if (E.lastV != null && t - E.lastV < ((c.encRegion === 'sound' || c.encRegion === 'passes') ? 240 : ENC_VESSEL_GAP_MINUTES)) continue;
-        if (E.day.v >= 1 && Math.random() >= ENC_SECOND_OF_KIND_CHANCE) continue;
+        if (E.lastV != null && t - E.lastV < encGapV(c)) continue;
+        if (E.day.v >= 1 && Math.random() >= encSecond(c)) continue;
       }
       if (E.last[d.id] != null && t - E.last[d.id] < d.cd(c)) continue;
       if (Math.random() < r / 60) { startEncounter(state, c, m, d); return; }
@@ -24751,9 +24936,9 @@
       g.font = `700 ${isN ? 10 : 9}px ${FONT}`; g.fillStyle = rgba(isN ? TINTB : TINT, isN ? .95 : .8); if (!ART.broken) { g.lineWidth = 2.4; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText(L, x, yb); } g.fillText(L, x, yb);
     });
     { const x = W / 2 + wrap180(hd - vb) * ppd; // the bow, fainter
-      if (x > 14 && x < W - 14 && !xs.some(c => Math.abs(c - x) < 22)) {
-        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(TINT, .5); if (!ART.broken) { g.lineWidth = 2.2; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText('BOW', x, yb); } g.fillText('BOW', x, yb);
-        g.strokeStyle = rgba(TINT, .3); g.lineWidth = 1; g.beginPath(); g.moveTo(x, yb + 3); g.lineTo(x, yb + 6); g.stroke();
+      if (x > 14 && x < W - 14) { const near = xs.find(c => Math.abs(c - x) < 15), bx = near == null ? x : near + (x >= near ? 15 : -15); // a compass letter beside the bow never hides it: the bow stands just left or right of the letter, on the same row
+        g.font = `600 7px ${FONT}`; g.fillStyle = rgba(TINT, .5); if (!ART.broken) { g.lineWidth = 2.2; g.strokeStyle = 'rgba(0,0,0,.45)'; g.strokeText('BOW', bx, yb); } g.fillText('BOW', bx, yb);
+        g.strokeStyle = rgba(TINT, .3); g.lineWidth = 1; g.beginPath(); g.moveTo(bx, yb + 3); g.lineTo(bx, yb + 6); g.stroke();
       } }
     g.restore();
   }
