@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#05080a" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Landfall" />
+<link rel="apple-touch-icon" href="images/icon-180.png" />
 <title>LANDFALL — STORY TESTS</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -597,6 +599,17 @@
   .gps-widget.gps-full { display: flex; flex-direction: column; max-width: 640px; min-height: 0; }
   .gps-full .gps-map-wrap { flex: 1 1 auto; height: auto; min-height: 150px; }
   .gps-full .gps-readout, .gps-full .chart-hint, .gps-full .chart-tools { flex: 0 0 auto; }
+  /* THE RADIO'S PUBLIC CHANNEL -- plain text on the usual background (no boxes): the calls, one thin line, the readout, then the > rows. */
+  #radio-screen { display: flex; justify-content: center; align-items: stretch; overflow-y: auto; box-sizing: border-box; padding: 0.6rem 1.2rem 0; }
+  .radio-full { display: flex; flex-direction: column; width: 100%; max-width: 640px; min-height: 0; }
+  .radio-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.5rem 0; }
+  .radio-main.radio-tight { flex: 0 0 auto; }
+  .radio-main .heading-label { margin: 0 0 0.6rem; }
+  .radio-main p.line { margin: 0.4rem 0; }
+  .radio-main p.radio-note { margin-bottom: 0.9rem; }
+  .radio-readout { flex: 0 0 auto; margin: 0.5rem 0; padding-top: 0.6rem; border-top: 1px solid var(--rule); }
+  .radio-menu { flex: 0 0 auto; display: flex; flex-direction: column; gap: 0.15rem; margin: 0.4rem 0; }
+  .radio-menu .option { text-align: left; }
   /* MapLibre's two-finger hint, in the game's own look (an ID selector, so it wins over the library's own stylesheet whatever the load order) */
   #chart-map .maplibregl-cooperative-gesture-screen { background: rgba(5, 8, 6, 0.78); color: var(--phosphor); font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.03em; }
   /* #chart-map (an ID selector) rather than .chart-map here is
@@ -1073,21 +1086,27 @@
       <div class="ships-computer-screen">
         <img class="ships-computer-screen-bg" src="images/ships_computer_screen.png" alt="">
 
-        <!-- The apps: PONG (top left) and VESSEL LOG (under it) are here; WINDY is added in the top-right slot, where GPS used to be (see syncWindyIcon). The GPS is not on the computer:
+        <!-- The apps, a 2 x 2: MARINE FORECAST (top left), WIND MAP (top right: added once the one-time update has run, see syncWindyIcon), VESSEL LOG (bottom left), PONG (bottom right). The GPS is not on the computer:
              it is opened from the HELM screen and from the NAV STATION.
              The folders are drawn 20% smaller than they were (15.5% x 7.531% of the screen, from 19.375% x 9.414%), each around its old centre; the labels keep their size and sit the same
              small distance under their folder; the (invisible) tap areas are unchanged. -->
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:21.313%; top:15.160%; width:15.5%; height:7.531%;">
-        <span class="computer-icon-label" style="left:29.063%; top:25.620%;">PONG</span>
-        <button type="button" class="computer-icon-hit" data-app="pong" aria-label="PONG"
-                style="left:16.875%; top:12.812%; width:24.375%; height:16.797%;"></button>
+        <span class="computer-icon-label" style="left:29.063%; top:25.620%;">MARINE FORECAST</span>
+        <button type="button" class="computer-icon-hit" data-app="marineForecast" aria-label="MARINE FORECAST"
+                style="left:8.563%; top:12.812%; width:41%; height:16.797%;"></button>
 
         <img class="computer-icon-img" src="images/folder.png" alt=""
              style="left:21.313%; top:38.832%; width:15.5%; height:7.531%;">
         <span class="computer-icon-label" style="left:29.063%; top:49.292%;">VESSEL LOG</span>
         <button type="button" class="computer-icon-hit" data-app="vesselLog" aria-label="VESSEL LOG"
                 style="left:14.653%; top:36.484%; width:28.889%; height:16.797%;"></button>
+
+        <img class="computer-icon-img" src="images/folder.png" alt=""
+             style="left:63.396%; top:38.832%; width:15.5%; height:7.531%;">
+        <span class="computer-icon-label" style="left:71.146%; top:49.292%;">PONG</span>
+        <button type="button" class="computer-icon-hit" data-app="pong" aria-label="PONG"
+                style="left:58.958%; top:36.484%; width:24.375%; height:16.797%;"></button>
       </div>
     </div>
     <div class="ships-computer-shutdown-area">
@@ -1122,6 +1141,16 @@
     </div>
     <div class="ships-computer-shutdown-area">
       <button id="chart-return-btn" type="button" class="option">← RETURN</button>
+    </div>
+  </div>
+
+  <!-- THE RADIO'S PUBLIC CHANNEL -- the same full-screen shell as the GPS just above; the screen's own contents are built by the JS (radioRender). -->
+  <div id="radio-overlay" class="ships-computer-overlay" hidden>
+    <div class="ships-computer-screen-area" id="radio-screen-area">
+      <div class="ships-computer-screen" id="radio-screen"></div>
+    </div>
+    <div class="ships-computer-shutdown-area">
+      <button id="radio-return-btn" type="button" class="option">← BACK</button>
     </div>
   </div>
 
@@ -1541,10 +1570,137 @@
 
   function saveGameState(state) {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      ensureVoyageId(state);
+      var json = JSON.stringify(state);
+      localStorage.setItem(STORAGE_KEY, json);
+      voyageBackupNote(state, json);
     } catch (e) {
       console.warn('Could not save game:', describeError(e));
     }
+  }
+
+  /* ============================================================
+     THE VOYAGE ID and its online backup
+     ------------------------------------------------------------
+     Each voyage has an 8-character ID (state.meta.voyageId), made once, on its first save (an older save gets one the next time it is saved). With a database address in
+     BACKUP_DB_URL every save is also sent, as one string, to /saves/<ID>.json: at most once a minute while the page is open, once when it is left, and a failed send simply waits for the next save.
+     Nothing is sent from a test scenario. With BACKUP_DB_URL empty none of this is visible (no NAV STATION row, no title button) and nothing leaves the device.
+     RESTORE (title page): the ID is typed, the latest copy fetched and stored as this device's save, and the page reloads into it. The time since the copy was made is NOT replayed:
+     the copy resumes as it was, the game clock is realigned once (alignGameClockIfNeeded), and no CAPTAIN'S BRIEFING is owed.
+     ============================================================ */
+  var BACKUP_DB_URL = 'https://landfall-a5942-default-rtdb.firebaseio.com'; // the Firebase Realtime Database address, e.g. https://landfall-1234-default-rtdb.firebaseio.com (empty: the whole feature is off)
+  var VOYAGE_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I, O, 0 or 1: nothing to mistake when it is written down
+  var BACKUP_MIN_GAP_MS = 60 * 1000, BACKUP_FIRST_DELAY_MS = 5000, BACKUP_TIMEOUT_MS = 12000;
+  var voyageBackup = { pending: null, id: null, last: '', lastAt: 0, busy: false, timer: null, fails: 0, nextOkAt: 0 };
+  function voyageBackupConfigured() { return !!BACKUP_DB_URL && !SCENARIO_NAME; }
+  function voyageIdUiOn() { return !!BACKUP_DB_URL || !!window.__lf; } // (a test build always shows it, so it can be looked at)
+  function makeVoyageId() {
+    var out = '', n = VOYAGE_ID_ALPHABET.length, i;
+    try {
+      var a = new Uint8Array(8); (window.crypto || window.msCrypto).getRandomValues(a);
+      for (i = 0; i < 8; i++) out += VOYAGE_ID_ALPHABET.charAt(a[i] % n);
+      return out;
+    } catch (e) { /* no crypto: Math.random is enough for an ID */ }
+    out = '';
+    for (i = 0; i < 8; i++) out += VOYAGE_ID_ALPHABET.charAt(Math.floor(Math.random() * n));
+    return out;
+  }
+  function ensureVoyageId(state) { if (state && state.meta && !state.meta.voyageId) state.meta.voyageId = makeVoyageId(); }
+  function voyageIdDisplay(id) { return id ? id.slice(0, 4) + '-' + id.slice(4) : ''; }
+  function voyageIdFromInput(text) { var t = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return /^[A-HJ-NP-Z2-9]{8}$/.test(t) ? t : null; }
+  function voyageBackupUrl(id) { return BACKUP_DB_URL.replace(/\/+$/, '') + '/saves/' + id + '.json'; }
+  function voyageBackupNote(state, json) { // called by every save: cheap, it only remembers the latest and makes sure a send is scheduled
+    if (!voyageBackupConfigured() || !state || !state.meta || !state.meta.voyageId) return;
+    voyageBackup.pending = json; voyageBackup.id = state.meta.voyageId;
+    if (voyageBackup.timer) return;
+    var now = Date.now(), wait = Math.max(BACKUP_FIRST_DELAY_MS, voyageBackup.lastAt + BACKUP_MIN_GAP_MS - now, voyageBackup.nextOkAt - now);
+    voyageBackup.timer = setTimeout(function () { voyageBackup.timer = null; voyageBackupSend(false); }, wait);
+  }
+  function voyageBackupFailed() { voyageBackup.fails++; voyageBackup.nextOkAt = Date.now() + Math.min(15 * 60000, 30000 * Math.pow(2, voyageBackup.fails - 1)); }
+  function voyageBackupSend(leaving) {
+    var json = voyageBackup.pending, id = voyageBackup.id;
+    if (!json || !id || voyageBackup.busy || !voyageBackupConfigured()) return;
+    if (json === voyageBackup.last) { voyageBackup.pending = null; return; }
+    voyageBackup.busy = true; voyageBackup.pending = null;
+    var ctrl = null, timer = null;
+    try { if (typeof AbortController === 'function') ctrl = new AbortController(); } catch (e) { ctrl = null; }
+    timer = setTimeout(function () { try { if (ctrl) ctrl.abort(); } catch (e) {} }, BACKUP_TIMEOUT_MS);
+    try {
+      fetch(voyageBackupUrl(id) + '?print=silent', { method: 'PUT', body: JSON.stringify(json), cache: 'no-store', credentials: 'omit', keepalive: !!leaving && json.length < 60000, signal: ctrl ? ctrl.signal : undefined })
+        .then(function (r) {
+          clearTimeout(timer); voyageBackup.busy = false;
+          if (r.ok) { voyageBackup.last = json; voyageBackup.lastAt = Date.now(); voyageBackup.fails = 0; voyageBackup.nextOkAt = 0; } else voyageBackupFailed();
+        })
+        .catch(function () { clearTimeout(timer); voyageBackup.busy = false; voyageBackupFailed(); });
+    } catch (e) { clearTimeout(timer); voyageBackup.busy = false; voyageBackupFailed(); }
+  }
+  function voyageBackupLeaving() { if (voyageBackup.pending && voyageBackupConfigured() && Date.now() >= voyageBackup.nextOkAt) voyageBackupSend(true); } // the page is being left: send the latest now
+  document.addEventListener('visibilitychange', function () { if (document.hidden) voyageBackupLeaving(); });
+  window.addEventListener('pagehide', voyageBackupLeaving);
+
+  function cmdVoyageId(state) { // NAV STATION > VOYAGE ID
+    ensureVoyageId(state);
+    printBlank();
+    printLine(voyageIdDisplay(state.meta.voyageId), 'heading-label');
+    printBlank();
+    printLine('Write this ID down somewhere safe. You’ll need it to recover your voyage.');
+    state.pendingChoice = { id: 'voyage-id', options: [{ label: 'BACK', action: 'cmd:nav-station' }] };
+  }
+
+  // A copy fetched for RESTORE, made ready to be this device's save: it resumes as it was (lastTick = now: no catch-up), the clock realigns once, and no briefing is owed.
+  function prepareRestoredSave(json) {
+    var s = JSON.parse(json);
+    if (!s || typeof s !== 'object' || !s.meta || !s.boat || !s.nav || !s.crew || !s.log) return null;
+    s.meta.lastTick = Date.now();
+    s.meta.clockAlignedV1 = false;
+    if (s.meta.departureDateAnchor == null) s.meta.departureDateAnchor = s.meta.departedAt;
+    briefingStamp(s);
+    return JSON.stringify(s);
+  }
+  function renderRestoreScreen() { // title page > RESTORE A SAVED VOYAGE
+    resetOutputEl();
+    optionsEl.innerHTML = '';
+    printPersistentLine('RESTORE A SAVED VOYAGE', 'heading-label');
+    printPersistentBlank();
+    printPersistentLine('Enter your voyage ID.');
+    var input = document.createElement('input');
+    input.type = 'text'; input.id = 'restore-id-input'; input.maxLength = 12; input.placeholder = 'XXXX-XXXX';
+    input.setAttribute('autocapitalize', 'characters'); input.setAttribute('autocomplete', 'off'); input.setAttribute('autocorrect', 'off'); input.setAttribute('spellcheck', 'false'); input.setAttribute('enterkeyhint', 'go');
+    input.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin:0.9rem 0 0.9rem;padding:0.6rem 0.7rem;background:transparent;color:var(--phosphor-bright);border:1px solid var(--phosphor-dim);border-radius:0;font:inherit;font-size:16px;letter-spacing:0.14em;text-transform:uppercase;outline:none;';
+    outputEl.insertBefore(input, tempViewEl);
+    var status = document.createElement('p');
+    status.className = 'line persist'; status.id = 'restore-status';
+    outputEl.insertBefore(status, tempViewEl);
+    var busy = false;
+    function say(text, dim) { status.textContent = text; status.className = 'line persist' + (dim ? ' dim' : ''); }
+    function go() {
+      if (busy) return;
+      var id = voyageIdFromInput(input.value);
+      if (!id) { say('That is not a valid voyage ID.'); return; }
+      if (!BACKUP_DB_URL) { say('The backup is not available.'); return; }
+      busy = true; say('Looking for your voyage...', true);
+      var failed = function () { busy = false; say('Cannot reach the backup. Check your connection and try again.'); };
+      fetch(voyageBackupUrl(id), { cache: 'no-store', credentials: 'omit' }).then(function (r) {
+        if (!r.ok) { failed(); return; }
+        return r.text().then(function (text) {
+          var json = null;
+          try { json = JSON.parse(text); } catch (e) { json = null; }
+          if (typeof json !== 'string') { busy = false; say('No voyage found for that ID.'); return; }
+          var ready = null;
+          try { ready = prepareRestoredSave(json); } catch (e) { ready = null; }
+          if (!ready) { busy = false; say('That voyage could not be restored.'); return; }
+          try { localStorage.setItem(STORAGE_KEY, ready); } catch (e) { busy = false; say('That voyage could not be saved on this device.'); return; }
+          say('Voyage found. Restoring...', true);
+          setTimeout(function () { window.location.reload(); }, 700);
+        });
+      }).catch(failed);
+    }
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); input.blur(); go(); } });
+    var restoreBtn = document.createElement('button'); restoreBtn.type = 'button'; restoreBtn.className = 'option'; restoreBtn.textContent = '> RESTORE';
+    restoreBtn.addEventListener('click', go);
+    var backBtn = document.createElement('button'); backBtn.type = 'button'; backBtn.className = 'option'; backBtn.textContent = '> BACK';
+    backBtn.addEventListener('click', function () { if (busy) return; resetOutputEl(); renderTitlePage(marinaNightStart); });
+    optionsEl.appendChild(restoreBtn); optionsEl.appendChild(backBtn);
   }
 
   /* ============================================================
@@ -12490,6 +12646,7 @@
     // There is no running loop or attached listener of CHART's own
     // that would otherwise keep going behind the hidden overlay.
     chartOverlayEl.hidden = true;
+    radioOverlayEl.hidden = true; // the RADIO's full-screen PUBLIC CHANNEL -- same reasoning
   }
 
   function printPersistentLine(text, cls) {
@@ -13418,7 +13575,7 @@
     weatherFaxVoice.set(null, 0, WEATHER_FAX_FADE_SECONDS);
   }
 
-  var marineForecastBackOptions = function () { return [{ label: 'BACK', action: 'cmd:nav-station' }]; };
+  var marineForecastBackOptions = function () { return [{ label: 'BACK', action: 'cmd:ships-computer' }]; }; // (the forecast is an app on the SHIP'S COMPUTER)
   function printMarineForecastInstant(lines) {
     lines.forEach(function (ln) {
       if (ln.gap) { printBlank(); return; }
@@ -13509,7 +13666,7 @@
     if (!marineForecastAvailable(state)) { // listed from the start but locked until Pacific control: the same shape as blockedByCoastalLock (a message, then straight back to the screen it came from)
       printBlank();
       printLine("I still have cell service. I'll check the marine forecast once I'm offshore."); // an observation, in the ordinary text (not amber, not caps), and not logged
-      cmdNavStation(state);
+      state.pendingChoice = { id: 'marine-forecast-blocked', options: marineForecastBackOptions() }; // BACK: the computer
       return;
     }
     var nowMs = Date.now();
@@ -16073,22 +16230,408 @@
   function navStationToolRows(state) {
     var rows = [];
     rows.push({ label: 'GPS', action: 'cmd:gps-nav' });
-    rows.push({ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' });
     rows.push({ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' });
     rows.push({ label: 'SOLACE HANDBOOK', action: 'cmd:handbook' });
     return rows;
   }
 
   // HANDHELD RADIO (beta 13) -- see patches_beta/13_handheld_radio.py. Its own batteries, always works. CALL FOR HELP asks once more (it ends the voyage), then it is the rescue ending.
-  function cmdHandheldRadio(state) {
+
+  /* ============================================================
+     THE RADIO'S SWITCH SOUNDS
+     ------------------------------------------------------------
+     NAV STATION > RADIO is the radio being switched ON: switch_on.mp3 (the same click as the NAV STATION switches), and when that click ends static.mp3 plays at its
+     own level for RADIO_STATIC_FULL_SECONDS, then fades to silence over RADIO_STATIC_FADE_SECONDS. Leaving the RADIO (any other screen) is switching it OFF:
+     switch_off.mp3, and any static still running is cut off with a very short fade. The RADIO's own screens (the CALL FOR HELP question and back) keep it on.
+     radioAudioWatch runs at the top of renderOptions, so every way off the RADIO screen is caught in the one place. If the call for help itself goes out
+     (the voyage is ending) the static stops quietly and there is no switch-off click: the rescue call has its own sound. Transient only: never saved.
+     ============================================================ */
+  var RADIO_STATIC_FULL_SECONDS = 4;
+  var RADIO_STATIC_FADE_SECONDS = 3;
+  var radioPowered = false, radioSwitchToken = 0, radioStaticTimer = null, radioStaticStartTimer = null;
+  function radioStaticBegin(token) {
+    if (!radioPowered || token !== radioSwitchToken) return;
+    var el = playNavStationOneShot('radioOnStatic');
+    if (!el) return;
+    radioStaticTimer = setTimeout(function () {
+      radioStaticTimer = null;
+      if (!radioPowered || token !== radioSwitchToken) return;
+      fadeNavStationVolume(el, 0, RADIO_STATIC_FADE_SECONDS, function () { try { el.pause(); } catch (e) {} });
+    }, RADIO_STATIC_FULL_SECONDS * 1000);
+  }
+  function radioPowerOn() {
+    if (radioPowered) return;
+    radioPowered = true;
+    var token = ++radioSwitchToken, begun = false;
+    function go() {
+      if (begun) return;
+      begun = true;
+      if (radioStaticStartTimer) { clearTimeout(radioStaticStartTimer); radioStaticStartTimer = null; }
+      radioStaticBegin(token);
+    }
+    playElectricalSwitchSound(true);
+    var sw = cabinSwitchAudioEls.on;
+    if (sw && !sw.paused) sw.addEventListener('ended', function once() { sw.removeEventListener('ended', once); go(); });
+    radioStaticStartTimer = setTimeout(go, 450); // (if the click's end is never reported -- sound off, no audio -- the static still follows it)
+  }
+  function radioPowerOff(silent) {
+    if (!radioPowered) return;
+    radioPowered = false;
+    radioSwitchToken++;
+    if (radioStaticStartTimer) { clearTimeout(radioStaticStartTimer); radioStaticStartTimer = null; }
+    if (radioStaticTimer) { clearTimeout(radioStaticTimer); radioStaticTimer = null; }
+    var el = navStationAudioEls.radioOnStatic;
+    if (el && !el.paused) fadeNavStationVolume(el, 0, 0.2, function () { try { el.pause(); } catch (e) {} });
+    if (!silent) playElectricalSwitchSound(false);
+  }
+  function radioAudioWatch(state) {
+    if (!radioPowered) return;
+    var id = state && state.pendingChoice && state.pendingChoice.id;
+    if (typeof id === 'string' && id.indexOf('handheld-radio') === 0) return; // the radio's own screens (menu, public channel, emergency channel and its questions) keep it on
+    radioPowerOff(!!(state && state.voyageEnd && state.voyageEnd.phase && state.voyageEnd.phase !== 'none'));
+  }
+
+
+  /* ============================================================
+     THE RADIO -- PUBLIC CHANNEL and EMERGENCY CHANNEL
+     ------------------------------------------------------------
+     NAV STATION > RADIO is a short menu: PUBLIC CHANNEL and EMERGENCY CHANNEL (with no database address the radio opens straight onto the EMERGENCY CHANNEL).
+     PUBLIC CHANNEL -- a full-screen page. It shows the boats calling within RADIO_RANGE_MI miles (three at most; the rest are "too faint to make out"), a line,
+     RANGE / BOATS IN RANGE / LAST CALL OUT, and the two actions: CALL OUT (once every RADIO_CALL_GAP_MS) and RESPOND. Only fixed messages exist (RADIO_MSG, sent as a number):
+     nothing is typed, so nothing needs moderating. A message is kept in the fleet's database at /radio/<cell>/<push id> as { f: sender's fleet code, t, lat, lon, m: message,
+     to: the boat answered }, where <cell> is a RADIO_CELL_DEG-degree square; the radio reads the nine squares around the boat and keeps what is within range and under
+     RADIO_LISTEN_MS old. Replies addressed to this boat come first, then the nearest calls (one per boat: its newest). Nothing is held open: the channel is read when it
+     is opened, and a request is time-limited like every fleet request (fleetRequest). state.meta.radioChat = { lastCallAt, done: { <message key>: time } } is made when first needed.
+     In a test scenario nothing is sent or read: the PUBLIC CHANNEL shows made-up boats (radioDemoList) so the screens can be looked at.
+     EMERGENCY CHANNEL -- CALL FOR HELP, then the existing "Once I call for help, the voyage is over.", then "Am I sure I want to end the voyage?".
+     ============================================================ */
+  var RADIO_RANGE_MI = 100, RADIO_MI_PER_NM = 1.15078, RADIO_RANGE_NM = RADIO_RANGE_MI / RADIO_MI_PER_NM;
+  var RADIO_LISTEN_MS = 6 * 3600 * 1000;
+  var RADIO_CALL_GAP_MS = 15 * 60 * 1000;
+  var RADIO_CELL_DEG = 3;
+  var RADIO_SHOWN_MAX = 3;
+  var RADIO_CODE_RE = /^[A-Z][2-9][2-9]$/;
+  var RADIO_KEY_RE = /^[-A-Za-z0-9_]{8,40}$/;
+  var RADIO_MSG = {};
+  (function () {
+    function add(kind, rows) { rows.forEach(function (r) { RADIO_MSG[r[0]] = { kind: kind, text: r[1] }; }); }
+    add('hello', [[1, 'Anyone out there?'], [2, 'I’m out here too. It’s good to know someone else is.'], [3, 'You’re not alone out here. I’m listening.'], [7, 'It’s good to share the water with someone.']]);
+    add('wish', [[4, 'Thinking of you. Safe passage.'], [6, 'Fair winds to you.'], [8, 'Wherever you’re headed, I hope you get there safe.']]);
+    add('care', [[5, 'Remember to eat and drink something. It helps.']]);
+    add('morning', [[11, 'Good morning. I hope you got some rest.'], [12, 'A new day out here. I hope it’s a gentle one.']]);
+    add('afternoon', [[13, 'Good afternoon. I hope the day has been kind so far.'], [14, 'I hope you’ve had a chance to rest and eat.']]);
+    add('evening', [[15, 'Good evening. I hope the light is good where you are.'], [16, 'I hope you have a quiet night ahead.']]);
+    add('night', [[17, 'Good night. I hope you can get some rest.'], [18, 'It’s a long night. Good to know someone else is awake.']]);
+    add('pleasant', [[21, 'Clear skies here. I hope yours are, too.'], [22, 'Calm water here. I hope it’s easy going for you.'], [23, 'Steady wind here. I hope it’s carrying you well.']]);
+    add('gloomy', [[24, 'Grey skies here. I hope there’s some light where you are.'], [25, 'Rain here. I hope you’re staying dry and warm.'], [26, 'Cold out here. I hope you’re warm enough.']]);
+    add('rough', [[27, 'Rough here. Take care and stay safe. It will pass.']]);
+    add('reply', [[101, 'I’m here. Glad to hear you.'], [102, 'I hear you. How are you holding up?'], [103, 'I’m doing all right. And you?'], [104, 'Good to hear another voice. Take care out there.'],
+      [111, 'Thank you. Safe passage to you, too.'], [112, 'Thank you. That means a lot out here.'], [113, 'Fair winds to you as well.'], [114, 'Thank you. I’ll keep listening for you.'],
+      [121, 'Thank you. I’ll do that now.'], [122, 'You’re right. I’ll eat something soon.'], [123, 'Thank you. You do the same.'], [124, 'Good reminder. Take care of yourself, too.'],
+      [131, 'Good morning. I slept all right, thank you. And you?'], [132, 'Good morning. It was a rough night, but I’m okay.'], [133, 'Good morning. Thank you for calling.'],
+      [141, 'Good afternoon. It’s been quiet so far. And yours?'], [142, 'Good afternoon. I’m managing, thank you.'], [143, 'Thank you. I’ll rest when I can. You do the same.'],
+      [151, 'Good evening. I hope your night is quiet.'], [152, 'Good evening. I’m settling in. And you?'], [153, 'Thank you. Take care out there tonight.'],
+      [161, 'Good night. I’ll try to rest.'], [162, 'I’m awake, too. Good to hear you.'], [163, 'Thank you. Keep a good watch.'],
+      [171, 'Glad to hear it. I hope it holds for you.'], [172, 'Good to know. Thank you for telling me.'], [173, 'Thank you. I’ll watch for it here.'],
+      [181, 'Thank you. I hope it clears for you soon.'], [182, 'Stay warm out there.'], [183, 'Thank you. I’ll be ready for it.'],
+      [191, 'Thank you for the warning. I’ll be careful.'], [192, 'Stay safe. I’m listening if you need anything.'], [193, 'Thinking of you. Hold on.']]);
+    add('closing', [[201, 'Thank you. Take care.'], [202, 'Glad to hear it. Fair winds.'], [203, 'Understood. Safe passage.'], [204, 'Thank you for answering. It helped.']]);
+  })();
+  var RADIO_REPLY_IDS = { hello: [101, 102, 103, 104], wish: [111, 112, 113, 114], care: [121, 122, 123, 124], morning: [131, 132, 133], afternoon: [141, 142, 143], evening: [151, 152, 153], night: [161, 162, 163], pleasant: [171, 172, 173], gloomy: [181, 182, 183], rough: [191, 192, 193], reply: [201, 202, 203, 204] };
+  var RADIO_THOUGHTFUL = [1, 2, 3, 4, 5, 6, 7, 8];
+  var RADIO_TIME_IDS = { morning: [11, 12], afternoon: [13, 14], evening: [15, 16], night: [17, 18] };
+  var RADIO_WEATHER_ID = { clear: 21, calm: 22, wind: 23, overcast: 24, rain: 25, cold: 26, rough: 27 };
+
+  function radioPublicAvailable() { return !!fleetBaseUrl() || !!SCENARIO_NAME; }
+  function radioMeta(state) {
+    var m = state.meta;
+    if (!m.radioChat || typeof m.radioChat !== 'object') m.radioChat = {};
+    var r = m.radioChat;
+    if (typeof r.lastCallAt !== 'number' || !isFinite(r.lastCallAt)) r.lastCallAt = 0;
+    if (!r.done || typeof r.done !== 'object') r.done = {};
+    var keys = Object.keys(r.done);
+    if (keys.length > 300) { var cut = Date.now() - 24 * 3600 * 1000; keys.forEach(function (k) { if (!(r.done[k] > cut)) delete r.done[k]; }); }
+    return r;
+  }
+  function radioOwnPos() { var n = GAME && GAME.nav; return (n && isFinite(n.lat) && isFinite(n.lon)) ? { lat: n.lat, lon: n.lon } : null; }
+  function radioOwnCode() { var id = fleetOwnId(); return id ? fleetCode(id) : null; }
+  function radioCellsAround(lat, lon) {
+    var i = Math.floor(lat / RADIO_CELL_DEG), j = Math.floor(lon / RADIO_CELL_DEG), out = [], a, b;
+    for (a = -1; a <= 1; a++) for (b = -1; b <= 1; b++) out.push('c' + (i + a) + '_' + (j + b));
+    return out;
+  }
+  function radioDirWord(brg) { return ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'][Math.round(((brg % 360) + 360) % 360 / 45) % 8]; }
+  function radioAgo(ms) {
+    var m = Math.floor(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + 'm ago';
+    return Math.floor(m / 60) + 'h ago';
+  }
+  function radioWeatherKeys(state) {
+    var w = state.weather || {}, keys = [], sea = Number(w.seaState) || 0, wind = Number(w.windSpeed) || 0, temp = Number(w.temperatureF), wet = isRaining(state);
+    if (sea >= 5 || w.condition === 'squall') keys.push('rough');
+    if (wet) keys.push('rain');
+    if (isFinite(temp) && temp < 50) keys.push('cold');
+    if (!wet && (w.condition === 'overcast' || Number(w.cloudPct) >= 80)) keys.push('overcast');
+    if (!wet && w.condition === 'clear') keys.push('clear');
+    if (sea <= 1 && wind < 6) keys.push('calm');
+    if (!wet && sea <= 4 && wind >= 10 && wind < 22) keys.push('wind');
+    return keys.slice(0, 3);
+  }
+  // The CALL OUT list: two for the time of day, up to three for the weather, then the thoughtful ones (rotating by the hour) up to ten.
+  function radioCallOutIds(state) {
+    var h = new Date().getHours(), tod = (h >= 5 && h < 12) ? 'morning' : (h >= 12 && h < 17) ? 'afternoon' : (h >= 17 && h < 21) ? 'evening' : 'night';
+    var ids = RADIO_TIME_IDS[tod].slice();
+    radioWeatherKeys(state).forEach(function (k) { ids.push(RADIO_WEATHER_ID[k]); });
+    for (var i = 0; ids.length < 10 && i < RADIO_THOUGHTFUL.length; i++) ids.push(RADIO_THOUGHTFUL[(h + i) % RADIO_THOUGHTFUL.length]);
+    return ids;
+  }
+  // What the database sent, checked: a valid sender that is not this boat, a known message, numbers in range, in range of this boat, under six hours old.
+  function radioClean(data, now, pos, me) {
+    var out = [];
+    if (!data || typeof data !== 'object') return out;
+    Object.keys(data).forEach(function (k) {
+      var v = data[k];
+      if (!RADIO_KEY_RE.test(k) || !v || typeof v !== 'object') return;
+      var f = v.f, t = v.t, lat = v.lat, lon = v.lon, m = v.m, to = v.to;
+      if (typeof f !== 'string' || !RADIO_CODE_RE.test(f) || f === me) return;
+      if (typeof t !== 'number' || typeof lat !== 'number' || typeof lon !== 'number' || typeof m !== 'number') return;
+      if (!isFinite(t) || !isFinite(lat) || !isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+      var def = RADIO_MSG[m];
+      if (!def) return;
+      if (to != null && (typeof to !== 'string' || !RADIO_CODE_RE.test(to))) return;
+      if (now - t > RADIO_LISTEN_MS) return;
+      if (t > now) t = now;
+      var nm = distanceBetween(pos.lat, pos.lon, lat, lon);
+      if (!isFinite(nm) || nm > RADIO_RANGE_NM) return;
+      out.push({ key: k, f: f, t: t, m: m, kind: def.kind, text: def.text, to: to || '', mi: nm * RADIO_MI_PER_NM, dir: radioDirWord(bearingBetween(pos.lat, pos.lon, lat, lon)) });
+    });
+    return out;
+  }
+  function radioFetch(cb) { // cb(ok, messages)
+    var base = fleetBaseUrl(), pos = radioOwnPos(), me = radioOwnCode(), now = Date.now();
+    if (!base || !pos || !me) { cb(false, []); return; }
+    var cells = radioCellsAround(pos.lat, pos.lon), pending = cells.length, anyOk = false, all = [];
+    cells.forEach(function (c) {
+      fleetRequest('GET', base + '/radio/' + c + '.json?orderBy=%22t%22&startAt=' + (now - RADIO_LISTEN_MS), null, function (ok, status, text) {
+        if (ok) {
+          anyOk = true;
+          var data = null;
+          try { data = (text && text.length < 300000) ? JSON.parse(text) : null; } catch (e) { data = null; }
+          radioClean(data, now, pos, me).forEach(function (m) { all.push(m); });
+        }
+        if (--pending === 0) cb(anyOk, all);
+      });
+    });
+  }
+  function radioDemoList(now) { // made-up boats, for a test scenario only
+    function d(key, f, ago, m, mi, dir, to) { return { key: key, f: f, t: now - ago * 60000, m: m, kind: RADIO_MSG[m].kind, text: RADIO_MSG[m].text, to: to || '', mi: mi, dir: dir }; }
+    return [d('demo1', 'K47', 20, 103, 58, 'west', '*'), d('demo2', 'M32', 40, 24, 12, 'north'), d('demo3', 'T92', 60, 1, 31, 'northwest'), d('demo4', 'R54', 180, 17, 77, 'east'), d('demo5', 'W26', 230, 6, 84, 'south')];
+  }
+  // Who can be heard: replies to this boat first (newest first), then the nearest calls, one per boat (its newest); at most RADIO_SHOWN_MAX; the rest are only counted.
+  function radioBuildHeard(msgs, me, meta) {
+    var mine = [], byBoat = {};
+    msgs.forEach(function (m) {
+      if (meta.done[m.key]) return;
+      if (m.to) { if (m.to === me || m.to === '*') mine.push(m); return; }
+      if (m.kind === 'reply' || m.kind === 'closing') return;
+      if (!byBoat[m.f] || byBoat[m.f].t < m.t) byBoat[m.f] = m;
+    });
+    var calls = Object.keys(byBoat).map(function (k) { return byBoat[k]; });
+    mine.sort(function (a, b) { return b.t - a.t; });
+    calls.sort(function (a, b) { return (a.mi - b.mi) || (b.t - a.t); });
+    var all = mine.concat(calls), shown = all.slice(0, RADIO_SHOWN_MAX);
+    return { shown: shown, faint: all.length - shown.length };
+  }
+  function radioSend(msgId, to, cb) { // cb(ok)
+    if (SCENARIO_NAME) { setTimeout(function () { cb(true); }, 150); return; } // a test scenario sends nothing
+    var base = fleetBaseUrl(), pos = radioOwnPos(), me = radioOwnCode();
+    if (!base || !pos || !me || !RADIO_MSG[msgId]) { cb(false); return; }
+    var body = { f: me, t: Date.now(), lat: Math.round(pos.lat * 10000) / 10000, lon: Math.round(pos.lon * 10000) / 10000, m: msgId };
+    if (to) body.to = to;
+    fleetRequest('POST', base + '/radio/' + radioCellsAround(pos.lat, pos.lon)[4] + '.json', JSON.stringify(body), function (ok) { cb(ok); });
+  }
+
+  // ---- the full-screen PUBLIC CHANNEL ----
+  var radioOverlayEl = document.getElementById('radio-overlay');
+  var radioScreenAreaEl = document.getElementById('radio-screen-area');
+  var radioScreenEl = document.getElementById('radio-screen');
+  var radioReturnBtn = document.getElementById('radio-return-btn');
+  var radioUi = { view: 'public', heard: { shown: [], faint: 0 }, senders: {}, status: 'idle', note: '', target: null, fromList: false, sending: false, token: 0 };
+  function fitRadioScreen() {
+    var w = radioScreenAreaEl.clientWidth, h = radioScreenAreaEl.clientHeight;
+    if (w <= 0 || h <= 0) return;
+    radioScreenEl.style.width = w + 'px';
+    radioScreenEl.style.height = h + 'px';
+  }
+  window.addEventListener('resize', function () { if (!radioOverlayEl.hidden) fitRadioScreen(); });
+  function radioEl(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function radioEntry(m, now) {
+    var d = radioEl('div', 'entry');
+    d.appendChild(radioEl('div', 'entry-ts', m.f + ' · ' + Math.max(1, Math.round(m.mi)) + ' mi ' + m.dir + ' · ' + radioAgo(now - m.t) + (m.to ? ' · answering you' : '')));
+    d.appendChild(radioEl('div', 'entry-text', '“' + m.text + '”'));
+    return d;
+  }
+  function radioLastCallText(meta, now) {
+    if (!meta.lastCallAt) return 'NEVER';
+    var m = Math.floor((now - meta.lastCallAt) / 60000);
+    return m < 1 ? 'JUST NOW' : m < 60 ? m + ' MIN AGO' : Math.floor(m / 60) + ' H AGO';
+  }
+  function radioBoatsInRange() { // the boats that have reported a position within range, plus anyone heard on the channel
+    if (SCENARIO_NAME) return '6';
+    var seen = {}, any = false, pos = radioOwnPos(), now = Date.now();
+    if (fleet.gotList && pos) {
+      any = true;
+      fleetShown(now).forEach(function (b) { if (distanceBetween(pos.lat, pos.lon, b.lat, b.lon) <= RADIO_RANGE_NM) seen[fleetCode(b.id)] = true; });
+    }
+    if (radioUi.status === 'ok') { any = true; Object.keys(radioUi.senders).forEach(function (k) { seen[k] = true; }); }
+    return any ? String(Object.keys(seen).length) : '\u2014';
+  }
+  function radioRespondable() { return radioUi.heard.shown.filter(function (m) { return m.kind !== 'closing'; }); }
+  function radioRender() {
+    var st = GAME;
+    if (!st || radioOverlayEl.hidden) return;
+    var now = Date.now(), meta = radioMeta(st), ui = radioUi, view = ui.view;
+    var wrap = radioEl('div', 'radio-full'), main = radioEl('div', 'radio-main' + (view === 'public' ? '' : ' radio-tight')), menu = radioEl('div', 'radio-menu');
+    function row(label, fn) { var b = radioEl('button', 'option', '> ' + label); b.type = 'button'; b.addEventListener('click', fn); menu.appendChild(b); }
+    function note() { if (ui.note) main.appendChild(radioEl('p', 'line radio-note', ui.note)); }
+    if (view === 'public') {
+      main.appendChild(radioEl('p', 'line heading-label', 'PUBLIC CHANNEL'));
+      note();
+      if (ui.status === 'loading' && !ui.heard.shown.length) main.appendChild(radioEl('p', 'line dim', 'Listening.'));
+      else if (ui.status === 'error' && !ui.heard.shown.length) main.appendChild(radioEl('p', 'line', 'I can’t pick anything up right now.'));
+      else if (!ui.heard.shown.length) main.appendChild(radioEl('p', 'line', 'The channel is quiet. No one is within range.'));
+      ui.heard.shown.forEach(function (m) { main.appendChild(radioEntry(m, now)); if (m.kind === 'closing') meta.done[m.key] = now; }); // a closing word is heard once
+      if (ui.heard.faint > 0) main.appendChild(radioEl('p', 'line', 'Other boats are calling, too faint to make out.'));
+      wrap.appendChild(main);
+      var ro = radioEl('div', 'radio-readout');
+      [['RANGE', RADIO_RANGE_MI + ' MI'], ['BOATS IN RANGE', radioBoatsInRange()], ['LAST CALL OUT', radioLastCallText(meta, now)]].forEach(function (r) {
+        var d = radioEl('div', 'gps-row'); d.appendChild(radioEl('span', '', r[0])); d.appendChild(radioEl('span', '', r[1])); ro.appendChild(d);
+      });
+      wrap.appendChild(ro);
+      row('CALL OUT', radioActCallOut);
+      row('RESPOND', radioActRespond);
+    } else if (view === 'callout') {
+      main.appendChild(radioEl('p', 'line heading-label', 'CALL OUT'));
+      wrap.appendChild(main);
+      radioCallOutIds(st).forEach(function (id) { row(RADIO_MSG[id].text, function () { radioDoCallOut(id); }); });
+    } else if (view === 'respond') {
+      main.appendChild(radioEl('p', 'line heading-label', 'RESPOND'));
+      radioRespondable().forEach(function (m) { main.appendChild(radioEntry(m, now)); });
+      wrap.appendChild(main);
+      radioRespondable().forEach(function (m) { row(m.f + (m.to ? ' · ANSWERING YOU' : ''), function () { ui.target = m; ui.view = 'reply'; ui.fromList = true; radioRender(); }); });
+    } else {
+      var tg = ui.target;
+      main.appendChild(radioEl('p', 'line heading-label', 'REPLY TO ' + tg.f));
+      main.appendChild(radioEntry(tg, now));
+      wrap.appendChild(main);
+      (RADIO_REPLY_IDS[tg.kind] || []).forEach(function (id) { row(RADIO_MSG[id].text, function () { radioDoReply(id); }); });
+    }
+    wrap.appendChild(menu);
+    radioScreenEl.innerHTML = '';
+    radioScreenEl.appendChild(wrap);
+    radioScreenEl.scrollTop = 0;
+  }
+  function radioLoad() {
+    var st = GAME;
+    if (!st) return;
+    var tk = ++radioUi.token, meta = radioMeta(st);
+    if (SCENARIO_NAME) { radioUi.heard = radioBuildHeard(radioDemoList(Date.now()), null, meta); radioUi.status = 'ok'; radioRender(); return; }
+    radioUi.senders = {};
+    radioUi.status = 'loading';
+    if (fleetBaseUrl() && !fleet.fetchBusy && Date.now() - fleet.lastFetchAt > 30000) { fleetFetch(); setTimeout(function () { if (tk === radioUi.token) radioRender(); }, 2500); } // BOATS IN RANGE reads the fleet list
+    radioFetch(function (ok, msgs) {
+      if (tk !== radioUi.token || radioOverlayEl.hidden) return;
+      radioUi.status = ok ? 'ok' : 'error';
+      radioUi.senders = {};
+      if (ok) msgs.forEach(function (m) { radioUi.senders[m.f] = true; });
+      radioUi.heard = ok ? radioBuildHeard(msgs, radioOwnCode(), radioMeta(GAME)) : { shown: [], faint: 0 };
+      if (radioUi.view === 'public') radioRender();
+    });
+  }
+  function radioActCallOut() {
+    var meta = radioMeta(GAME), now = Date.now();
+    if (now - meta.lastCallAt < RADIO_CALL_GAP_MS) { radioUi.note = 'I called out a few minutes ago. I’ll give it a little while before I try again.'; radioRender(); return; }
+    radioUi.note = ''; radioUi.view = 'callout'; radioRender();
+  }
+  function radioActRespond() {
+    var list = radioRespondable();
+    if (!list.length) { radioUi.note = 'There’s no one to answer right now.'; radioRender(); return; }
+    radioUi.note = '';
+    if (list.length === 1) { radioUi.target = list[0]; radioUi.view = 'reply'; radioUi.fromList = false; } else { radioUi.view = 'respond'; }
+    radioRender();
+  }
+  function radioDoCallOut(id) {
+    if (radioUi.sending) return;
+    radioUi.sending = true;
+    radioSend(id, '', function (ok) {
+      radioUi.sending = false;
+      if (radioOverlayEl.hidden || !GAME) return;
+      if (ok) { radioMeta(GAME).lastCallAt = Date.now(); saveGameState(GAME); }
+      radioUi.note = ok ? 'I called out.' : 'It didn’t go through. I’ll try again in a moment.';
+      radioUi.view = 'public';
+      radioRender();
+    });
+  }
+  function radioDoReply(id) {
+    if (radioUi.sending || !radioUi.target) return;
+    var tg = radioUi.target;
+    radioUi.sending = true;
+    radioSend(id, tg.f, function (ok) {
+      radioUi.sending = false;
+      if (radioOverlayEl.hidden || !GAME) return;
+      if (ok) {
+        radioMeta(GAME).done[tg.key] = Date.now();
+        radioUi.heard.shown = radioUi.heard.shown.filter(function (m) { return m.key !== tg.key; });
+        saveGameState(GAME);
+      }
+      radioUi.note = ok ? 'I answered ' + tg.f + '.' : 'It didn’t go through. I’ll try again in a moment.';
+      radioUi.view = 'public';
+      radioRender();
+    });
+  }
+  radioReturnBtn.addEventListener('click', function () {
+    if (!GAME || radioOverlayEl.hidden) return;
+    var ui = radioUi;
+    if (ui.view === 'callout' || ui.view === 'respond') { ui.view = 'public'; ui.note = ''; radioRender(); return; }
+    if (ui.view === 'reply') { ui.view = ui.fromList ? 'respond' : 'public'; ui.note = ''; radioRender(); return; }
+    ui.token++; // (anything still on its way is ignored)
+    clearTempView(); // closes the full-screen channel
+    printEcho('radio'); runCommand(GAME, 'radio'); // back at the RADIO menu
+  });
+  function cmdPublicChannel(state) {
+    radioPowerOn(); // (it is already on: this only matters if the screen was restored)
+    state.pendingChoice = { id: 'handheld-radio', options: pushBack([], 'cmd:radio') }; // (if something wipes the screen while the channel is open, BACK is what is left)
+    radioUi.view = 'public'; radioUi.note = ''; radioUi.target = null; radioUi.sending = false; radioUi.heard = { shown: [], faint: 0 }; radioUi.status = 'loading';
+    radioReturnBtn.textContent = '← BACK';
+    radioOverlayEl.hidden = false;
+    fitRadioScreen();
+    radioRender();
+    radioLoad();
+  }
+  function cmdEmergencyChannel(state) {
     printBlank();
-    state.pendingChoice = { id: 'handheld-radio', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-ask' }], 'cmd:nav-station') };
+    printLine('If I need help, this is where I call.');
+    state.pendingChoice = { id: 'handheld-radio-emergency', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-ask' }], radioPublicAvailable() ? 'cmd:radio' : 'cmd:nav-station') };
+  }
+  function radioCallSure(state) {
+    printEcho('call for help');
+    printBlank();
+    printLine('Am I sure I want to end the voyage?');
+    state.pendingChoice = { id: 'handheld-radio-sure', options: [{ label: 'YES, CALL FOR HELP', action: 'radio-call-go' }, { label: 'NO', action: 'cmd:emergency-channel' }] };
+  }
+
+  function cmdHandheldRadio(state) {
+    radioPowerOn(); // opening the RADIO is switching it on (a no-op while it is already on: back from one of its own screens)
+    if (!radioPublicAvailable()) { cmdEmergencyChannel(state); return; } // no database: only the emergency channel exists
+    printBlank();
+    state.pendingChoice = { id: 'handheld-radio', options: pushBack([{ label: 'PUBLIC CHANNEL', action: 'cmd:public-channel' }, { label: 'EMERGENCY CHANNEL', action: 'cmd:emergency-channel' }], 'cmd:nav-station') };
   }
   function radioCallAsk(state) {
-    printEcho('radio');
+    printEcho('call for help');
     printBlank();
     printLine('Once I call for help, the voyage is over.');
-    state.pendingChoice = { id: 'handheld-radio-confirm', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-go' }], 'cmd:radio') };
+    state.pendingChoice = { id: 'handheld-radio-confirm', options: pushBack([{ label: 'CALL FOR HELP', action: 'radio-call-sure' }], 'cmd:emergency-channel') };
   }
   function radioCallGo(state) {
     var ve = state.voyageEnd;
@@ -16165,7 +16708,7 @@
     var options = groupedOptions([
       electricalRows,
       [{ label: 'GPS', action: 'cmd:gps-nav' }, { label: 'RADIO', action: 'cmd:radio' }],
-      [{ label: 'MARINE FORECAST', action: 'cmd:marine-forecast' }, { label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }, { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }],
+      [{ label: 'SHIP\u2019S COMPUTER', action: 'cmd:ships-computer' }, { label: 'SOLACE HANDBOOK', action: 'cmd:handbook' }].concat(voyageIdUiOn() ? [{ label: 'VOYAGE ID', action: 'cmd:voyage-id' }] : []),
       [{ label: 'BACK', action: 'cancel' }],
     ]);
     printScent(state, 'nav'); // (beta 16)
@@ -16239,12 +16782,13 @@
     {"id": "handbook-point-of-sail", "heading": "POINT OF SAIL", "blocks": [{"list": ["LUFFING: too close to the wind. The sails cannot fill.", "CLOSE HAULED: near the wind. Best upwind.", "CLOSE REACH and BROAD REACH: good speed.", "BEAM REACH: usually the fastest.", "RUNNING: usually slower than reaching.", "She cannot sail directly into the wind. To go upwind, sail at an angle and tack.", "TACKING: turning through the wind so it comes from the other side. To make progress upwind, zigzag: sail close hauled on one side, tack, then sail close hauled on the other."]}]},
     {"id": "handbook-helm", "heading": "HELM", "blocks": [{"list": ["BEARING: the direction to your next waypoint or destination.", "VELOCITY MADE GOOD: how fast you are closing on your destination. Negative means you are moving away.", "SET COURSE FOR WAYPOINT: turn toward the active waypoint.", "SET COURSE FOR NĀWILIWILI: aim at the harbor from where you are now, then hold that heading."]}, {"term": "AUTOPILOT", "body": "Steers for the active waypoint and turns for the next when you reach it. After the last waypoint it holds its heading. It does not avoid land, tack, or adjust for wind shifts. It needs power and a working rudder. Switch it on before leaving the helm."}, {"p": "ON · WAYPOINT follows the route. ON · HEADING holds a heading. CHANGE COURSE or SET COURSE FOR NĀWILIWILI takes SOLACE off the route. SET COURSE FOR WAYPOINT puts her back on it."}]},
     {"id": "handbook-navigation", "heading": "NAVIGATION", "blocks": [{"list": ["The GPS is on deck, at the helm, and at the NAV STATION. It always works. The solid line is your track and the dashed line is your route through the numbered waypoints.", "ADD: choose the waypoint the new one follows, then tap the water. Select ADD again to finish. DELETE works the same way.", "Drag a waypoint to move it. UNDO reverses the last change.", "A leg between waypoints can still cross land. Check every leg.", "Reaching a waypoint turns the autopilot to the next. After the last, it holds its heading, so add more to continue.", "The autopilot never tacks. If a waypoint is too close to the wind she will luff. Plot a waypoint off to one side to make a tack, then another toward your goal."]}, {"h3": "LAND AND GROUNDING"}, {"p": "If SOLACE meets land she runs aground and stops. Select FREE SOLACE, then check your heading and route."}, {"h3": "ARRIVAL"}, {"p": "At the Nāwiliwili harbor approach the arrival sequence begins. Select ENTER NĀWILIWILI HARBOR when ready."}, {"h3": "CALLING FOR HELP"}, {"p": "The RADIO is at the NAV STATION and always works. If you cannot go on, select CALL FOR HELP, then CALL FOR HELP again. Help comes and the voyage ends there."}]},
-    {"id": "handbook-forecast-and-computer", "heading": "FORECAST AND COMPUTER", "blocks": [{"p": "The MARINE FORECAST and the SHIP’S COMPUTER need ACCESSORY power, switched on at the NAV STATION. The forecast also needs battery charge. Check it before choosing a route, changing course, or turning in. The computer holds the WEATHER MAP and the VESSEL LOG."}]},
+    {"id": "handbook-forecast-and-computer", "heading": "FORECAST AND COMPUTER", "blocks": [{"p": "The SHIP’S COMPUTER needs ACCESSORY power, switched on at the NAV STATION. It holds the MARINE FORECAST, the WIND MAP, and the VESSEL LOG. The forecast also needs battery charge. Check it before choosing a route, changing course, or turning in."}]},
     {"id": "handbook-engine-and-electrical", "heading": "ENGINE AND ELECTRICAL", "blocks": [{"list": ["The engine drives SOLACE and charges the battery. It burns diesel. Solar panels charge in daylight.", "At the NAV STATION, control AUTOPILOT, CABIN LIGHTS, NAV LIGHTS, and ACCESSORY. They use battery power, so switch off what you do not need.", "At night use CABIN LIGHTS below deck and NAV LIGHTS above. The kerosene lantern works when electric light does not.", "At zero battery, powered systems stop. Let the solar panels recover some charge before starting the engine, then switch back on what you need."]}]},
     {"id": "handbook-kerosene", "heading": "KEROSENE", "blocks": [{"p": "20 gallons, shared by the heater, stove, and lantern. Heating uses far more than cooking. Check the supply in STORAGE."}, {"term": "HEATER", "body": "Controlled from the SALOON. Holds the cabin at 65°F when it is colder outside. Uses no battery."}, {"term": "STOVE", "body": "Hot meals, coffee, and tea."}, {"term": "LANTERN", "body": "Light above and below deck. Put it out when done."}]},
-    {"id": "handbook-life-aboard", "heading": "LIFE ABOARD", "blocks": [{"list": ["EXHAUSTED: you cannot repair, cook, or do maintenance. You can still sleep, drink water, eat cold snacks, and have coffee, tea, or Cup Noodles. A STARVING sailor can always cook. A 30-minute nap lifts you out of EXHAUSTED, and you have about 2 hours of energy before it returns.", "STARVING or VERY THIRSTY: you cannot sleep or repair, and a sleeper wakes when STARVING or PARCHED. Eat or drink first.", "COLD: you tire faster, sleep badly, and wake early, and wet clothes make it worse. HOT: you get thirsty faster. Dress for the temperature.", "MORALE: reading, music, a wash, chores, a good meal, and time at the bow lift it. A dirty galley or bunk, wet gear, and living on snacks wear it down. At DEPLETED you cannot repair or do maintenance until it recovers."]}, {"term": "GALLEY", "body": "Meals, snacks, coffee and other drinks, and dishes. Food and fresh water are limited, and coffee and tea use water. Fresh fish keeps 12 hours: cook it with half a cup of rice, or eat it as sashimi with no kerosene or rice."}, {"term": "COFFEE", "body": "A burst of energy to get repairs, cooking, and maintenance done while EXHAUSTED, for 2 hours. You cannot sleep for the first hour."}, {"term": "TEA", "body": "A small boost to morale, like coffee."}, {"term": "FORWARD CABIN", "body": "Sleep, change clothes, and hang wet clothing to dry."}, {"term": "SALOON", "body": "Read, stretch, or RELAX, and control the heater and hatch. RELAX rests your body but does nothing if you are cold. Open the hatch to cool the cabin. Closed, it holds warmth."}, {"term": "STORAGE", "body": "Status, inventory, repairs, and the day’s maintenance."}, {"term": "HEAD", "body": "Wash to maintain hygiene."}]},
+    {"id": "handbook-below-deck", "heading": "BELOW DECK", "blocks": [{"term": "GALLEY", "body": "Meals, snacks, coffee and other drinks, and dishes. Food and fresh water are limited, and coffee and tea use water. Fresh fish keeps 12 hours: cook it with half a cup of rice, or eat it as sashimi with no kerosene or rice."}, {"term": "COFFEE", "body": "A burst of energy to get repairs, cooking, and maintenance done while EXHAUSTED, for 2 hours. You cannot sleep for the first hour."}, {"term": "TEA", "body": "A small boost to morale, like coffee."}, {"term": "FORWARD CABIN", "body": "Sleep, change clothes, and hang wet clothing to dry."}, {"term": "SALOON", "body": "Read, stretch, or RELAX, and control the heater and hatch. RELAX rests your body but does nothing if you are cold. Open the hatch to cool the cabin. Closed, it holds warmth."}, {"term": "STORAGE", "body": "Status, inventory, repairs, and the day’s maintenance."}, {"term": "HEAD", "body": "Wash to maintain hygiene."}]},
     {"id": "handbook-repairs", "heading": "REPAIRS AND MAINTENANCE", "blocks": [{"list": ["In STORAGE, STATUS shows what is damaged and why (WEATHER STRESS or MISSED MAINTENANCE). INVENTORY shows your supplies and spare parts.", "REPAIRS appears when a system is damaged. Each repair uses one spare part and always works, but not while you are EXHAUSTED, STARVING, VERY THIRSTY, or DEPLETED.", "SOLACE carries three of each spare: sail repair kits, rudder parts, engine spares, and fuses. They are not replenished on this passage.", "Repairs and maintenance leave the tools out. PUT AWAY TOOLS appears in STORAGE until you do."]}, {"h3": "DAILY MAINTENANCE"}, {"list": ["Select PERFORM MAINTENANCE once each day. It takes twenty minutes and carries on if you switch apps or lock your phone. STOP keeps what has been done, and RESUME MAINTENANCE continues.", "If a whole day passes without it, one working system fails in the early hours of the next day. It does not protect against weather."]}]},
     {"id": "handbook-when-something-stops-working", "heading": "WHEN SOMETHING STOPS WORKING", "blocks": [{"term": "NO SAILING SPEED", "body": "Check the wind, point of sail, sail area, trim, and sail condition."}, {"term": "DAMAGED SAILS", "body": "Half speed. Repair them, or use the engine."}, {"term": "DAMAGED RUDDER", "body": "Turns take twice as long and the autopilot will not run. Repair it."}, {"term": "ELECTRICAL FAILURE", "body": "No power until you replace the fuse. The GPS still works."}, {"term": "OUT OF KEROSENE", "body": "The heater, stove, and lantern stop. Cold food, water, and sashimi remain."}, {"term": "OUT OF FOOD OR WATER", "body": "After three days without a drink or seven days without food, the passage ends in rescue."}]},
+    {"id": "handbook-your-voyage", "heading": "YOUR VOYAGE", "blocks": [{"p": "Your voyage is saved on this device. Clearing your browser history or website data erases it. To keep it safe, add Landfall to your Home Screen: in Safari, tap Share, then Add to Home Screen. Your VOYAGE ID, at the NAV STATION, can recover it if you ever start over."}]},
   ];
 
   // The one centralized block-appender every section's own content
@@ -16460,10 +17004,10 @@
       img.className = 'computer-icon-img'; img.src = 'images/folder.png'; img.alt = '';
       img.style.cssText = 'left:63.396%; top:15.160%; width:15.5%; height:7.531%;'; // top right, at the same 20%-smaller size as the others
       var label = document.createElement('span');
-      label.className = 'computer-icon-label'; label.textContent = 'WEATHER MAP';
+      label.className = 'computer-icon-label'; label.textContent = 'WIND MAP';
       label.style.cssText = 'left:71.146%; top:25.620%;';
       var hit = document.createElement('button');
-      hit.type = 'button'; hit.className = 'computer-icon-hit'; hit.setAttribute('data-app', 'windy'); hit.setAttribute('aria-label', 'WEATHER MAP');
+      hit.type = 'button'; hit.className = 'computer-icon-hit'; hit.setAttribute('data-app', 'windy'); hit.setAttribute('aria-label', 'WIND MAP');
       hit.style.cssText = 'left:58.958%; top:12.812%; width:24.375%; height:16.797%;';
       hit.addEventListener('click', function () { if (!GAME || uiBusy) return; openWindyAtPosition(GAME); });
       shipsComputerScreenEl.appendChild(img); shipsComputerScreenEl.appendChild(label); shipsComputerScreenEl.appendChild(hit); // added after the others, so it is last in the DOM; on the screen it sits top right
@@ -17304,7 +17848,7 @@
      (POST 401 = the database's rules refuse it).
      NEVER IN THE WAY: asynchronous, time-limited (FLEET_TIMEOUT_MS), every error swallowed, a growing pause after failures, nothing written to GAME or the save, no screen, no sound.
      ====================================================================== */
-  var FLEET_DB_URL = '';          // the database's address -- empty: the whole feature is off
+  var FLEET_DB_URL = BACKUP_DB_URL; // the database's address (the same one the voyage backup uses) -- empty: the whole feature is off
   var FLEET_POST_EVERY_MS = 3 * 60 * 1000;      // how often this boat reports its position
   var FLEET_POLL_EVERY_MS = 60 * 1000;          // how often the fleet is read while the GPS is open
   var FLEET_HIDE_AFTER_MS = 24 * 3600 * 1000;     // a boat that has not reported for a day is not drawn (and not counted): the GPS shows who is out there now
@@ -21135,6 +21679,7 @@
   }
 
   var COMMANDS = {
+    'voyage-id': cmdVoyageId,
     journal: cmdJournal,
     status: cmdStatus,
     position: cmdPosition,
@@ -21157,6 +21702,8 @@
     'storage': cmdStorage,
     'nav-station': cmdNavStation,
     radio: cmdHandheldRadio,
+    'public-channel': cmdPublicChannel,
+    'emergency-channel': cmdEmergencyChannel,
     handbook: cmdHandbook,
     sleep: cmdSleep,
     eat: cmdEat,
@@ -22423,6 +22970,7 @@
     computerShutdown: 'audio/finals/computer_shutdown.mp3',
     mouse: 'audio/finals/mouse.mp3',
     radioStatic: 'audio/nav_station/radio_static.mp3', // MARINE FORECAST: static under TUNING (silent if the file is absent)
+    radioOnStatic: 'audio/finals/static.mp3', // the RADIO: starts when the switch-on click ends, 4 s at the file's own level, then a 3 s fade -- see radioPowerOn
     radioTick: 'audio/nav_station/radio_tick.mp3',     // MARINE FORECAST: the subtle tick as characters appear (silent if absent)
     weatherFax: 'audio/finals/weather_fax.mp3',   // MARINE FORECAST: starts the moment a new forecast is selected, ends with the last typed character -- see cmdMarineForecast / runMarineForecastTransmission
     sailRepair: 'audio/finals/sail_repair.mp3',
@@ -22446,6 +22994,7 @@
     computerShutdown: 1,
     mouse: 1,
     radioStatic: 1,
+    radioOnStatic: 1,
     radioTick: 1,
     weatherFax: 1, // a device sound at the same level as the other nav-station equipment (startup, shutdown, repairs)
     sailRepair: 1,
@@ -23876,6 +24425,7 @@
   function sleepWakeBegins(state) { sleepWaking = true; syncSleepDark(state); } // GET UP pressed: the screen starts coming back now, while the wake-up sound plays
 
   function renderOptions(state) {
+    radioAudioWatch(state); // the RADIO's switch-off click, whenever the screen is left
     syncSleepDark(state);
     applyCabinLighting(state);
     applyNaturalLightDimming(state);
@@ -24576,6 +25126,9 @@
         case 'radio-call-ask': // the HANDHELD RADIO's CALL FOR HELP: once more, to be sure
           radioCallAsk(state);
           break;
+        case 'radio-call-sure': // ... and a second question
+          radioCallSure(state);
+          break;
         case 'radio-call-go': // ... and the call itself
           radioCallGo(state);
           break;
@@ -24902,6 +25455,13 @@
   // THE TITLE PAGE -- what someone sees on a first visit (no save exists) and again after a restart: the title and a few plain lines in the game's own type,
   // a SOUND button (SOUND OFF until it is pressed; pressing it is the tap that unlocks audio, turns the sound on and starts the opening environment -- the marina
   // and the Pacific Northwest birds -- right then), and BEGIN. Nothing is saved until CONTINUE (after the intro), so a reload on any of this shows the title page again.
+  function homeScreenTipWanted() { // a touch device in an ordinary browser tab: not a desktop, and not the game already running from the Home Screen
+    try {
+      var standalone = (window.navigator && window.navigator.standalone === true) || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+      var touch = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+      return !!touch && !standalone;
+    } catch (e) { return false; }
+  }
   function renderTitlePage(nightStart) {
     document.body.classList.add('title-mode');
     printPersistentLine('LANDFALL', 'heading-label');
@@ -24914,6 +25474,7 @@
     printPersistentBlank();
     printPersistentLine('The voyage continues while you’re away.');
     printPersistentBlank();
+    if (homeScreenTipWanted()) { printPersistentLine('To keep your voyage safe, add Landfall to your Home Screen.'); printPersistentBlank(); }
     printPersistentLine('Sound on for the best experience.');
 
     optionsEl.innerHTML = '';
@@ -24938,6 +25499,16 @@
     beginOpt.textContent = '> BEGIN';
     beginOpt.addEventListener('click', function () { beginIntro(); });
     optionsEl.appendChild(beginOpt);
+    if (voyageIdUiOn()) { // RESTORE A SAVED VOYAGE: dimmed, under BEGIN (only once the backup exists)
+      var restoreOpt = document.createElement('button');
+      restoreOpt.type = 'button';
+      restoreOpt.className = 'option';
+      restoreOpt.id = 'title-restore-btn';
+      restoreOpt.style.opacity = '0.6';
+      restoreOpt.textContent = '> RESTORE A SAVED VOYAGE';
+      restoreOpt.addEventListener('click', function () { renderRestoreScreen(); });
+      optionsEl.appendChild(restoreOpt);
+    }
     if (!muted) playMarinaAmbience(nightStart); // (a restart with the sound already on: the marina is there again straight away)
   }
 
@@ -27684,6 +28255,14 @@ const A_GREY_RAW = {
     btn.addEventListener('click', function () {
       if (!GAME || uiBusy) return;
       var app = btn.dataset.app;
+      if (app === 'marineForecast') {
+        playNavStationOneShot('mouse');
+        clearTempView(); // closes THIS overlay; the forecast is a full-screen text screen, exactly as it was at the NAV STATION (BACK returns here)
+        openInfoPanel = null;
+        printEcho('marine-forecast');
+        runCommand(GAME, 'marine-forecast');
+        return;
+      }
       if (app === 'vesselLog') {
         clearTempView(); // closes THIS overlay; cmdVesselLog (which plays its own mouse click) opens its own right after
         cmdVesselLog(GAME);
