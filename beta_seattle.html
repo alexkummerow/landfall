@@ -734,6 +734,8 @@
   .echo { color: var(--phosphor); }
 
   .entry { margin-bottom: 0.9rem; }
+  .entry.fleeting { transition: opacity 1.6s ease; }
+  .entry.fleeting.fading { opacity: 0; }
   .entry-ts {
     color: var(--phosphor-dim);
     font-size: 0.7rem;
@@ -1189,7 +1191,7 @@
   'use strict';
 
   /* =====================================================================
-     LANDFALL — a real-time solo sailing voyage (Seattle -> Kauaʻi) -- the SEATTLE STORY BETA 16 (the Seattle sailing build, with the story)
+     LANDFALL — a real-time solo sailing voyage (Seattle -> Kauaʻi) -- the SEATTLE STORY BETA 17 (the Seattle sailing build, with the story)
      ---------------------------------------------------------------------
      Built as a single self-contained file (matches how you usually ship
      these — no build step, drop straight into Neocities). The sections
@@ -1230,8 +1232,8 @@
     } catch (e) { return null; }
   })();
   // This build has its OWN save. The saves of the other builds of the game ('kauaiVoyage_v1' and 'landfallSim_v1') are different shapes and are never read, written or cleared here.
-  var STORAGE_KEY = SCENARIO_NAME ? 'landfallSEAstory16_TEST_' + SCENARIO_NAME : 'landfallSEA_story_v16'; // the Seattle STORY beta has its OWN save: nothing here reads, writes or clears the Sitka or California saves
-  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1', 'landfallCA_v2', 'landfallCA_career_v2', 'landfallSEA_v1', 'landfallSEA_v2', 'landfallSEA_v3', 'landfallSEA_v4', 'landfallSEA_v5', 'landfallSEA_v6', 'landfallSEA_story_v1', 'landfallSEA_story_v2', 'landfallSEA_story_v3', 'landfallSEA_story_v4', 'landfallSEA_story_v5', 'landfallSEA_story_v6', 'landfallSEA_story_v7', 'landfallSEA_story_v8', 'landfallSEA_story_v9', 'landfallSEA_story_v10', 'landfallSEA_story_v11', 'landfallSEA_story_v12', 'landfallSEA_story_v13', 'landfallSEA_story_v14', 'landfallSEA_story_v15'];
+  var STORAGE_KEY = SCENARIO_NAME ? 'landfallSEAstory17_TEST_' + SCENARIO_NAME : 'landfallSEA_story_v17'; // the Seattle STORY beta has its OWN save: nothing here reads, writes or clears the Sitka or California saves
+  var OTHER_BUILD_SAVE_KEYS = ['kauaiVoyage_v1', 'landfallSim_v1', 'landfallSitka_v1', 'landfallCA_v2', 'landfallCA_career_v2', 'landfallSEA_v1', 'landfallSEA_v2', 'landfallSEA_v3', 'landfallSEA_v4', 'landfallSEA_v5', 'landfallSEA_v6', 'landfallSEA_story_v1', 'landfallSEA_story_v2', 'landfallSEA_story_v3', 'landfallSEA_story_v4', 'landfallSEA_story_v5', 'landfallSEA_story_v6', 'landfallSEA_story_v7', 'landfallSEA_story_v8', 'landfallSEA_story_v9', 'landfallSEA_story_v10', 'landfallSEA_story_v11', 'landfallSEA_story_v12', 'landfallSEA_story_v13', 'landfallSEA_story_v14', 'landfallSEA_story_v15', 'landfallSEA_story_v16'];
   var TICK_MINUTES = 1;               // simulation resolution, in simulated minutes -- was 10; every per-tick rate/probability elsewhere is expressed as an hourly rate times (TICK_MINUTES/60), or converted via tickProbability() below, so it scales correctly with this value. A few things (driftWeather's random-walk magnitudes, computeHeading's wobble/drift-wander) are scaled by TICK_MINUTES/10 directly since they were tuned by feel for the old 10-minute step, not derived from a stated hourly rate.
   var MAX_CATCHUP_TICKS = 200000;     // safety cap (~139 days) for offline catch-up -- scaled 10x alongside TICK_MINUTES to preserve the same real-world catch-up window per advanceSimulation call
   var LIVE_TICK_SECONDS = 20;         // how often we advance sim while the tab is open
@@ -5734,7 +5736,7 @@
         var dry = ALL_GARMENT_KEYS.filter(function (k) { return k !== 'rainShell' && c.clothing[k] && !isGarmentWet(state, k); });
         if (dry.length) {
           dry.forEach(function (k) { var cond = resolveGarmentCondition(state, k); if (cond) cond.wet = true; });
-          if (!c.rainWetWarned) { c.rainWetWarned = true; log(state, RAIN_WET_LINE); }
+          if (!c.rainWetWarned) { c.rainWetWarned = true; log(state, RAIN_WET_LINE, FLEET_NEED_MS); }
           syncClothesWetSinceMinutes(state);
         }
       }
@@ -5758,7 +5760,7 @@
     if (kind) {
       var gateAt = c.comfortExposureSinceMin + COMFORT_EXPOSURE_GATE_MIN;
       if (now >= gateAt) {
-        if (!c.comfortWarned) { c.comfortWarned = true; log(state, COMFORT_LINES[kind]); }
+        if (!c.comfortWarned) { c.comfortWarned = true; log(state, COMFORT_LINES[kind], FLEET_NEED_MS); }
         var mins = now - Math.max(last, gateAt);
         if (mins > 0) c.morale = clamp(c.morale - mins * COMFORT_MORALE_DRAIN_PER_MIN, 0, 100); // small, steady, stops with the exposure; never refunded
       }
@@ -6768,13 +6770,16 @@
   /* ============================================================
      5. NARRATIVE / EVENT CHECKS
      ============================================================ */
-  function log(state, text) {
+  var FLEET_NEED_MS = 12000, FLEET_REACT_MS = 8000; // how long a fleeting line stays on the screen before it fades (a need, a reaction to food or drink)
+  function log(state, text, fleetingMs) {
     var ts = state.meta.departedAt + state.meta.voyageMinutes * 60000;
     if (state.finale && state.finale.phase !== 'none') { // the arrival: the world has stopped (voyageMinutes no longer moves), so each entry takes the moment it really happens -- never earlier than the entry before it
       var prevT = state.log.length ? state.log[state.log.length - 1].t : 0;
       ts = Math.max(Date.now(), Number.isFinite(prevT) ? prevT : 0);
     }
-    state.log.push({ t: ts, text: text });
+    var entry = { t: ts, text: text };
+    if (fleetingMs > 0) entry.fl = fleetingMs; // a FLEETING line: shown for a few seconds, never part of the saved log (dropRetiredLogEntries)
+    state.log.push(entry);
   }
 
   function checkFuel(state) {
@@ -7635,7 +7640,7 @@
     var f = state.flags;
     if (state.crew.fatigue > 75 && !f.fatigueNarrated) {
       f.fatigueNarrated = true;
-      log(state, "Hands feel slow. Everything simple takes an extra beat.");
+      log(state, "Hands feel slow. Everything simple takes an extra beat.", FLEET_NEED_MS);
     }
     if (state.crew.fatigue < 50) f.fatigueNarrated = false;
   }
@@ -7681,18 +7686,18 @@
     var f = state.flags;
     if (state.crew.hoursSinceWater >= THIRST_FIRST_COMPLAINT_HOURS && !f.thirstNarrated) {
       f.thirstNarrated = true;
-      log(state, pickVariant(THIRST_NARRATION_LINES, 'thirstNote'));
+      log(state, pickVariant(THIRST_NARRATION_LINES, 'thirstNote'), FLEET_NEED_MS);
     }
     if (thirstLevel(state.crew.hoursSinceWater) < THIRST_THIRSTY) f.thirstNarrated = false;
     // A PROLONGED stretch without a drink: the body is giving out ("hollow and weak"). Once, when it is reached; again only after drinking and going without again.
     if (state.crew.hoursSinceWater >= THIRST_WEAK_HOURS && !f.thirstWeakNarrated) {
       f.thirstWeakNarrated = true;
-      log(state, pickVariant(THIRST_WEAK_LINES, 'thirstWeakNote', { alsoNoMeal: hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY }));
+      log(state, pickVariant(THIRST_WEAK_LINES, 'thirstWeakNote', { alsoNoMeal: hungerLevel(state.crew.hoursSinceMeal) >= HUNGER_VERY_HUNGRY }), FLEET_NEED_MS);
     }
     if (state.crew.hoursSinceWater < THIRST_WEAK_HOURS) f.thirstWeakNarrated = false;
     if (state.crew.hoursSinceWater >= THIRST_FINAL_HOURS && !f.thirstFinalNarrated) { // the final warning
       f.thirstFinalNarrated = true;
-      log(state, THIRST_FINAL_LINE);
+      log(state, THIRST_FINAL_LINE, FLEET_NEED_MS);
     }
     if (state.crew.hoursSinceWater < THIRST_FINAL_HOURS) f.thirstFinalNarrated = false;
   }
@@ -7702,18 +7707,18 @@
     var f = state.flags;
     if (state.crew.hoursSinceMeal >= HUNGER_FIRST_COMPLAINT_HOURS && !f.hungerNarrated) {
       f.hungerNarrated = true;
-      log(state, pickVariant(HUNGER_NARRATION_LINES, 'hungerNote'));
+      log(state, pickVariant(HUNGER_NARRATION_LINES, 'hungerNote'), FLEET_NEED_MS);
     }
     if (hungerLevel(state.crew.hoursSinceMeal) < HUNGER_HUNGRY) f.hungerNarrated = false;
     // A PROLONGED stretch without a meal: the same, once per spell (see checkThirstNarration).
     if (state.crew.hoursSinceMeal >= HUNGER_WEAK_HOURS && !f.hungerWeakNarrated) {
       f.hungerWeakNarrated = true;
-      log(state, pickVariant(HUNGER_WEAK_LINES, 'hungerWeakNote'));
+      log(state, pickVariant(HUNGER_WEAK_LINES, 'hungerWeakNote'), FLEET_NEED_MS);
     }
     if (state.crew.hoursSinceMeal < HUNGER_WEAK_HOURS) f.hungerWeakNarrated = false;
     if (state.crew.hoursSinceMeal >= HUNGER_FINAL_HOURS && !f.hungerFinalNarrated) { // the final warning
       f.hungerFinalNarrated = true;
-      log(state, HUNGER_FINAL_LINE);
+      log(state, HUNGER_FINAL_LINE, FLEET_NEED_MS);
     }
     if (state.crew.hoursSinceMeal < HUNGER_FINAL_HOURS) f.hungerFinalNarrated = false;
   }
@@ -7723,7 +7728,7 @@
     var hours = hoursSinceWash(state);
     if (hours > 24 && !f.cleanlinessNarrated) {
       f.cleanlinessNarrated = true;
-      log(state, 'I could use a wash.');
+      log(state, 'I could use a wash.', FLEET_NEED_MS);
     }
     if (hours < 14) f.cleanlinessNarrated = false;
   }
@@ -7733,7 +7738,7 @@
     var hours = dishesDirtyHours(state);
     if (hours > 36 && !f.galleyNarrated) {
       f.galleyNarrated = true;
-      log(state, 'The galley could use some attention.');
+      log(state, 'The galley could use some attention.', FLEET_NEED_MS);
     }
     if (hours < 12) f.galleyNarrated = false;
   }
@@ -12519,6 +12524,17 @@
   function printLogEntry(entry) {
     var wrap = document.createElement('div');
     wrap.className = 'entry';
+    if (entry.fl > 0) { // a fleeting line: just the words, no time stamp; it fades and is taken off the page
+      wrap.className = 'entry fleeting';
+      var fbody = document.createElement('div');
+      fbody.className = 'entry-text';
+      fbody.textContent = entry.text;
+      wrap.appendChild(fbody);
+      outputEl.insertBefore(wrap, tempViewEl);
+      setTimeout(function () { wrap.classList.add('fading'); }, entry.fl);
+      setTimeout(function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }, entry.fl + 1800);
+      return;
+    }
     var ts = document.createElement('div');
     ts.className = 'entry-ts';
     ts.textContent = formatShipTime(entry.t);
@@ -13023,7 +13039,7 @@
     if (now - c.cabinDiscomfortSinceMin < CABIN_COMPLAINT_DELAY_MIN) return;
     if (c.cabinComplaintAtMin != null && now - c.cabinComplaintAtMin < CABIN_COMPLAINT_GAP_MIN) return;
     c.cabinComplaintAtMin = now;
-    log(state, pickFromPool(CABIN_COMPLAINTS[kind]));
+    log(state, pickFromPool(CABIN_COMPLAINTS[kind]), FLEET_NEED_MS);
     flushNewLogEntries(state);
   }
 
@@ -15941,13 +15957,13 @@
     if (m.progressMs >= MAINT_TOTAL_MS) { maintFinish(st); return; }
     if (needsCabinLight(st)) { // the lights went out in the dark: the work stops where it is
       maintEnd();
-      log(st, "Too dark to see what I'm doing."); flushNewLogEntries(st);
+      log(st, "Too dark to see what I'm doing.", FLEET_NEED_MS); flushNewLogEntries(st);
       st.pendingChoice = null; clearTempView(); cmdStorage(st); renderOptions(st); saveGameState(st);
       return;
     }
     if (isExhausted(st)) { // (beta 23) EXHAUSTED: the work stops where it is, and what was done is kept
       maintEnd();
-      log(st, "I'm too tired to keep working."); flushNewLogEntries(st);
+      log(st, "I'm too tired to keep working.", FLEET_NEED_MS); flushNewLogEntries(st);
       st.pendingChoice = null; clearTempView(); cmdStorage(st); renderOptions(st); saveGameState(st);
       return;
     }
@@ -18913,7 +18929,7 @@
       stopActivityDots(); // same reasoning as the completion branch above
       beginBookCloseSequenceOrSkip(state, function (s) {
         s.pendingChoice = null;
-        log(s, "It's too dark to see. I need some light.");
+        log(s, "It's too dark to see. I need some light.", FLEET_NEED_MS);
         flushNewLogEntries(s);
       });
       return;
@@ -19435,7 +19451,7 @@
       if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
       c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
       c.morale = clamp(c.morale + moraleGain, 0, 100);
-      log(s, cookAfterLine(r) || eatFlavorLine(s, item, life)); thoughtAfterFood(s, item, r.held); // (beta 16) the sailor's own line for this dish
+      log(s, cookAfterLine(r) || eatFlavorLine(s, item, life), FLEET_REACT_MS); thoughtAfterFood(s, item, r.held); // (beta 16) the sailor's own line for this dish
       momentNoteMeal(s, item);
       if (item.type === 'snack') snackNoteEaten(s); // (beta 16) the shared snack cooldown starts now
       flushNewLogEntries(s);
@@ -19454,7 +19470,7 @@
       statAdd(s, 'teas', 1);
       s.crew.morale = clamp(s.crew.morale + 1, 0, 100); // small and quiet, as it always was
     }
-    log(s, cookAfterLine(r) || pickVariant(DAILY_COPY[r.drink === 'coffee' ? 'coffee' : 'tea'], r.drink, life)); thoughtSay(s, r.drink === 'coffee' ? 'coffee' : 'tea');
+    log(s, cookAfterLine(r) || pickVariant(DAILY_COPY[r.drink === 'coffee' ? 'coffee' : 'tea'], r.drink, life), FLEET_REACT_MS); thoughtSay(s, r.drink === 'coffee' ? 'coffee' : 'tea');
     flushNewLogEntries(s);
     cmdGalley(s);
   }
@@ -19608,7 +19624,7 @@
         s.crew.morale = clamp(s.crew.morale + gain, 0, 100);
         s.crew.lastChocolateAt = s.meta.voyageMinutes;
         snackNoteEaten(s); // (beta 16)
-        log(s, eatChocolateLine(s)); thoughtSay(s, 'chocolate');
+        log(s, eatChocolateLine(s), FLEET_REACT_MS); thoughtSay(s, 'chocolate');
         flushNewLogEntries(s);
         cmdGalley(s);
       };
@@ -19736,7 +19752,7 @@
       if (item.cooked && c.snackMealRatio > 0.5) moraleGain += 2;
       c.fatigue = clamp(c.fatigue - fatigueGain, 0, 100);
       c.morale = clamp(c.morale + moraleGain, 0, 100);
-      log(s, eatFlavorLine(s, item, life)); thoughtAfterFood(s, item, isHeldFish);
+      log(s, eatFlavorLine(s, item, life), FLEET_REACT_MS); thoughtAfterFood(s, item, isHeldFish);
       momentNoteMeal(s, item);
       if (item.type === 'snack') snackNoteEaten(s); // (beta 16)
       if (usesStove) stoveDraw(s, isHeldFish ? KEROSENE_STOVE_FISH_GAL : item.type === 'meal' ? KEROSENE_STOVE_MEAL_GAL : KEROSENE_STOVE_DRINK_GAL); // the stove burned for this (and, if it was the last, says so after the meal)
@@ -19820,7 +19836,7 @@
         s.crew.lastDrankAt = s.meta.voyageMinutes; // RESCUE -- a successful drink restarts only the water clock
         s.crew.fatigue = clamp(s.crew.fatigue - 2, 0, 100);
         s.crew.morale = clamp(s.crew.morale + 1, 0, 100);
-        log(s, pickVariant(DAILY_COPY.water, 'water', life)); thoughtSay(s, 'water');
+        log(s, pickVariant(DAILY_COPY.water, 'water', life), FLEET_REACT_MS); thoughtSay(s, 'water');
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -19973,7 +19989,7 @@
         c.fatigue = clamp(c.fatigue - 1, 0, 100); // a snack's smaller lift
         c.morale = clamp(c.morale + 1, 0, 100);
         snackNoteEaten(s); // (beta 16)
-        log(s, pickVariant(SASHIMI_ENTRIES, 'sashimi', life).replace('[FISH]', fishNameForProse(fish.name)));
+        log(s, pickVariant(SASHIMI_ENTRIES, 'sashimi', life).replace('[FISH]', fishNameForProse(fish.name)), FLEET_REACT_MS);
         flushNewLogEntries(s);
         cmdGalley(s);
       },
@@ -20171,7 +20187,7 @@
     c.bunkUnmadeRoom = 'cabin';
     momentNoteWake(state, minutesAsleep);
     log(state, (!hungry && !parched) ? 'Woke up cold.' : hungry && parched ? 'Woke up starving and parched. I need food and water.'
-      : (hungry ? 'Woke up starving. I need to eat something.' : 'Woke up parched. I need water.'));
+      : (hungry ? 'Woke up starving. I need to eat something.' : 'Woke up parched. I need water.'), FLEET_NEED_MS);
     flushNewLogEntries(state);
   }
 
@@ -25414,7 +25430,7 @@
   function dropRetiredLogEntries(state) {
     if (!Array.isArray(state.log)) return;
     var before = state.log.length;
-    state.log = state.log.filter(function (entry) { return !entry || entry.text !== 'BATTERY CHARGING'; });
+    state.log = state.log.filter(function (entry) { return !entry || (entry.text !== 'BATTERY CHARGING' && !entry.fl); }); // (and the fleeting lines: they are never kept)
     if (state.log.length !== before) saveGameState(state); // write the cleaned log back now, not only at the next autosave
   }
 
