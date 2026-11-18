@@ -610,6 +610,11 @@
   .radio-readout { flex: 0 0 auto; margin: 0.5rem 0; padding-top: 0.6rem; border-top: 1px solid var(--rule); }
   .radio-menu { flex: 0 0 auto; display: flex; flex-direction: column; gap: 0.15rem; margin: 0.4rem 0; }
   .radio-menu .option { text-align: left; }
+  /* MARINE FORECAST full screen -- plain text, one line under another, tight enough that the whole forecast fits a phone. */
+  #forecast-screen { display: flex; justify-content: center; align-items: stretch; overflow-y: auto; box-sizing: border-box; padding: 0.6rem 1.2rem 0; }
+  .radio-main.fc-main { flex: 1 1 auto; }
+  .radio-main.fc-main p.line { margin: 0; white-space: pre-wrap; }
+  .radio-main.fc-main .heading-label { margin: 0; }
   /* MapLibre's two-finger hint, in the game's own look (an ID selector, so it wins over the library's own stylesheet whatever the load order) */
   #chart-map .maplibregl-cooperative-gesture-screen { background: rgba(5, 8, 6, 0.78); color: var(--phosphor); font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.03em; }
   /* #chart-map (an ID selector) rather than .chart-map here is
@@ -1141,6 +1146,16 @@
     </div>
     <div class="ships-computer-shutdown-area">
       <button id="chart-return-btn" type="button" class="option">← RETURN</button>
+    </div>
+  </div>
+
+  <!-- MARINE FORECAST -- its own full-screen page, the same shell as the GPS and the radio; the contents are built by the JS (forecastOpen). -->
+  <div id="forecast-overlay" class="ships-computer-overlay" hidden>
+    <div class="ships-computer-screen-area" id="forecast-screen-area">
+      <div class="ships-computer-screen" id="forecast-screen"></div>
+    </div>
+    <div class="ships-computer-shutdown-area">
+      <button id="forecast-return-btn" type="button" class="option">← BACK</button>
     </div>
   </div>
 
@@ -12647,6 +12662,7 @@
     // that would otherwise keep going behind the hidden overlay.
     chartOverlayEl.hidden = true;
     radioOverlayEl.hidden = true; // the RADIO's full-screen PUBLIC CHANNEL -- same reasoning
+    if (forecastOverlayEl) forecastOverlayEl.hidden = true; // the MARINE FORECAST's full-screen page -- same reasoning
   }
 
   function printPersistentLine(text, cls) {
@@ -13576,7 +13592,7 @@
   }
 
   var marineForecastBackOptions = function () { return [{ label: 'BACK', action: 'cmd:ships-computer' }]; }; // (the forecast is an app on the SHIP'S COMPUTER)
-  function printMarineForecastInstant(lines) {
+  function printMarineForecastInstantOld(lines) {
     lines.forEach(function (ln) {
       if (ln.gap) { printBlank(); return; }
       var p = printLine(ln.text, ln.cls);
@@ -13585,7 +13601,7 @@
   }
   // The transmission itself: TUNING (the existing label + cycling dots, static underneath), then the lines typed out.
   // uiBusy holds the options panel until END TRANSMISSION; nothing here depends on audio succeeding.
-  function runMarineForecastTransmission(state, lines, issuanceId) {
+  function runMarineForecastTransmissionOld(state, lines, issuanceId) {
     uiBusy = true;
     optionsEl.innerHTML = '';
     var choice = state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() }; // a sane screen if the page is reloaded mid-way
@@ -13639,6 +13655,113 @@
     }, MARINE_FORECAST_TUNING_SECONDS * 1000);
   }
 
+
+  /* ============================================================
+     MARINE FORECAST -- THE FULL-SCREEN PAGE
+     ------------------------------------------------------------
+     Opened by cmdMarineForecast once the forecast is going to be shown (not for the "no power" / "cell service" messages, which stay where they were). The page is built
+     here: MARINE FORECAST at the top; while a NEW issuance is received, TUNING and the dots under it (static underneath, the weather fax); then the forecast types in
+     line by line from the top, the page never scrolling up; BACK appears after END TRANSMISSION. An issuance already received is simply put on the page at once.
+     BACK goes where it always went: the SHIP'S COMPUTER.
+     ============================================================ */
+  var forecastOverlayEl = document.getElementById('forecast-overlay');
+  var forecastScreenAreaEl = document.getElementById('forecast-screen-area');
+  var forecastScreenEl = document.getElementById('forecast-screen');
+  var forecastReturnBtn = document.getElementById('forecast-return-btn');
+  var forecastMainEl = null;
+  function fitForecastScreen() {
+    var w = forecastScreenAreaEl.clientWidth, h = forecastScreenAreaEl.clientHeight;
+    if (w <= 0 || h <= 0) return;
+    forecastScreenEl.style.width = w + 'px';
+    forecastScreenEl.style.height = h + 'px';
+  }
+  window.addEventListener('resize', function () { if (!forecastOverlayEl.hidden) fitForecastScreen(); });
+  function forecastLine(text, cls) {
+    var p = document.createElement('p');
+    p.className = 'line' + (cls ? ' ' + cls : '');
+    p.textContent = text;
+    if (forecastMainEl) { forecastMainEl.appendChild(p); forecastMainEl.scrollTop = forecastMainEl.scrollHeight; } // (it only scrolls on a screen too short for the whole forecast)
+    return p;
+  }
+  function forecastBlank() { var p = forecastLine('', ''); p.innerHTML = '&nbsp;'; return p; }
+  function forecastOpen() {
+    forecastScreenEl.innerHTML = '';
+    var wrap = document.createElement('div'); wrap.className = 'radio-full';
+    forecastMainEl = document.createElement('div'); forecastMainEl.className = 'radio-main fc-main';
+    wrap.appendChild(forecastMainEl);
+    forecastScreenEl.appendChild(wrap);
+    forecastReturnBtn.textContent = '← BACK';
+    forecastReturnBtn.style.visibility = 'hidden'; // until the transmission is over
+    forecastOverlayEl.hidden = false;
+    fitForecastScreen();
+    forecastLine('MARINE FORECAST', 'heading-label');
+    forecastBlank();
+  }
+  function forecastShowBack() { forecastReturnBtn.style.visibility = 'visible'; }
+  forecastReturnBtn.addEventListener('click', function () {
+    if (!GAME || forecastOverlayEl.hidden || uiBusy) return;
+    clearTempView(); // closes the full-screen page
+    printEcho('ships-computer'); runCommand(GAME, 'ships-computer');
+  });
+  // an issuance already received: all of it at once
+  function printMarineForecastInstant(lines) {
+    forecastOpen();
+    lines.forEach(function (ln) { if (ln.gap) forecastBlank(); else forecastLine(ln.text, ln.cls); });
+    forecastShowBack();
+  }
+  // the transmission: TUNING (the label and cycling dots, static underneath), then the lines typed out from the top. uiBusy holds the options until END TRANSMISSION.
+  function runMarineForecastTransmission(state, lines, issuanceId) {
+    uiBusy = true;
+    optionsEl.innerHTML = '';
+    var choice = state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() }; // a sane screen if the page is reloaded mid-way
+    var tx = activeMarineTransmission = { left: false, cut: false, dotTimer: null }; // clearTempView() sets .left if the screen is left before the typing ends
+    forecastOpen();
+    var labelEl = forecastLine('TUNING', 'heading-label');
+    var dotsEl = forecastLine(ACTIVITY_DOT_FRAMES[0], 'dim');
+    var frame = 0;
+    var dotTimer = setInterval(function () { frame = (frame + 1) % ACTIVITY_DOT_FRAMES.length; dotsEl.textContent = ACTIVITY_DOT_FRAMES[frame]; }, DOT_FRAME_MS);
+    tx.dotTimer = dotTimer;
+    playNavStationOneShot('radioStatic');
+
+    function finish() {
+      var rw = state.realWeather;
+      if (rw) { if (!rw.forecastView || typeof rw.forecastView !== 'object') rw.forecastView = { viewedId: null }; rw.forecastView.viewedId = issuanceId; } // received: it is never transmitted again
+      if (state.pendingChoice === choice) state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() };
+      stopWeatherFax(); // already stopped by the last character; this only matters if the lines ever end some other way
+      if (activeMarineTransmission === tx) activeMarineTransmission = null;
+      uiBusy = false;
+      forecastShowBack();
+      renderOptions(state);
+      saveGameState(state);
+    }
+    function typeLines() {
+      var li = 0, ci = 0, p = null;
+      (function step() {
+        if (tx.cut || tx.left) return; // the power went (marineForecastPowerWatch has already put everything away), or the page was left
+        if (li >= lines.length) { finish(); return; }
+        var ln = lines[li];
+        if (ln.gap) { forecastBlank(); li++; setTimeout(step, MARINE_FORECAST_CHAR_MS * 3); return; }
+        if (!p) p = forecastLine('', ln.cls);
+        ci++;
+        p.textContent = ln.text.slice(0, ci);
+        if (ci % MARINE_FORECAST_TICK_EVERY === 1 && ln.text.charAt(ci - 1) !== ' ') playRadioTick();
+        if (ci >= ln.text.length) {
+          p = null; li++; ci = 0;
+          if (li >= lines.length) stopWeatherFax(); // the LAST character of the forecast has just appeared: the typing itself ends the sound
+          setTimeout(step, MARINE_FORECAST_CHAR_MS * 6);
+        }
+        else setTimeout(step, MARINE_FORECAST_CHAR_MS);
+      })();
+    }
+    setTimeout(function () {
+      clearInterval(dotTimer);
+      if (tx.cut || tx.left) return; // the power went during TUNING, or the page was left
+      [dotsEl, labelEl].forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+      stopRadioStatic();
+      typeLines();
+    }, MARINE_FORECAST_TUNING_SECONDS * 1000);
+  }
+
   // ---- the radio runs on the accessory circuit, like the GPS ----
   function marineForecastNoPower(state) {
     printBlank();
@@ -13676,9 +13799,9 @@
     if (rw && (!rw.forecastView || typeof rw.forecastView !== 'object')) rw.forecastView = { viewedId: null };
     printBlank();
     if (!rows || !id) {
-      printLine('MARINE FORECAST', 'heading-label');
-      printBlank();
-      printLine('NO TRANSMISSION RECEIVED.', 'amber');
+      forecastOpen();
+      forecastLine('NO TRANSMISSION RECEIVED.');
+      forecastShowBack();
       state.pendingChoice = { id: 'marine-forecast', options: marineForecastBackOptions() };
       return;
     }
@@ -14181,6 +14304,7 @@
   // restriction by trying the thing rather than never seeing it offered.
   function cmdGalley(state) {
     cookRoom('galley', state);
+    if (storyTryTrigger(state, 'galley')) return; // STORY -- Event 4
     printBlank();
     var c = state.crew;
     printStatLine('hunger', state);
@@ -16310,6 +16434,7 @@
   var RADIO_CALL_GAP_MS = 15 * 60 * 1000;
   var RADIO_CELL_DEG = 3;
   var RADIO_SHOWN_MAX = 3;
+  var RADIO_MINE_SHOWN = 3; // how many of the player's own messages the chat keeps showing
   var RADIO_CODE_RE = /^[A-Z][2-9][2-9]$/;
   var RADIO_KEY_RE = /^[-A-Za-z0-9_]{8,40}$/;
   var RADIO_MSG = {};
@@ -16349,6 +16474,9 @@
     var r = m.radioChat;
     if (typeof r.lastCallAt !== 'number' || !isFinite(r.lastCallAt)) r.lastCallAt = 0;
     if (!r.done || typeof r.done !== 'object') r.done = {};
+    if (!Array.isArray(r.mine)) r.mine = [];
+    var cutMine = Date.now() - RADIO_LISTEN_MS;
+    r.mine = r.mine.filter(function (x) { return x && typeof x.t === 'number' && isFinite(x.t) && x.t > cutMine && RADIO_MSG[x.m]; }).slice(-10);
     var keys = Object.keys(r.done);
     if (keys.length > 300) { var cut = Date.now() - 24 * 3600 * 1000; keys.forEach(function (k) { if (!(r.done[k] > cut)) delete r.done[k]; }); }
     return r;
@@ -16472,6 +16600,14 @@
     d.appendChild(radioEl('div', 'entry-text', '“' + m.text + '”'));
     return d;
   }
+
+  // ---- the player's own call outs and answers, shown in the chat as ME (kept six hours, like everything on the channel) ----
+  function radioMineEntry(x, now) {
+    var d = radioEl('div', 'entry'), me = radioOwnCode();
+    d.appendChild(radioEl('div', 'entry-ts', 'ME' + (me ? ' · ' + me : '') + (x.to ? ' · answering ' + x.to : '') + ' · ' + radioAgo(now - x.t)));
+    d.appendChild(radioEl('div', 'entry-text', '“' + RADIO_MSG[x.m].text + '”'));
+    return d;
+  }
   function radioLastCallText(meta, now) {
     if (!meta.lastCallAt) return 'NEVER';
     var m = Math.floor((now - meta.lastCallAt) / 60000);
@@ -16500,8 +16636,9 @@
       note();
       if (ui.status === 'loading' && !ui.heard.shown.length) main.appendChild(radioEl('p', 'line dim', 'Listening.'));
       else if (ui.status === 'error' && !ui.heard.shown.length) main.appendChild(radioEl('p', 'line', 'I can’t pick anything up right now.'));
-      else if (!ui.heard.shown.length) main.appendChild(radioEl('p', 'line', 'The channel is quiet. No one is within range.'));
+      else if (!ui.heard.shown.length && !meta.mine.length) main.appendChild(radioEl('p', 'line', 'The channel is quiet. No one is within range.'));
       ui.heard.shown.forEach(function (m) { main.appendChild(radioEntry(m, now)); if (m.kind === 'closing') meta.done[m.key] = now; }); // a closing word is heard once
+      meta.mine.slice(-RADIO_MINE_SHOWN).forEach(function (x) { main.appendChild(radioMineEntry(x, now)); }); // my own call outs and answers, as they went out
       if (ui.heard.faint > 0) main.appendChild(radioEl('p', 'line', 'Other boats are calling, too faint to make out.'));
       wrap.appendChild(main);
       var ro = radioEl('div', 'radio-readout');
@@ -16567,8 +16704,8 @@
     radioSend(id, '', function (ok) {
       radioUi.sending = false;
       if (radioOverlayEl.hidden || !GAME) return;
-      if (ok) { radioMeta(GAME).lastCallAt = Date.now(); saveGameState(GAME); }
-      radioUi.note = ok ? 'I called out.' : 'It didn’t go through. I’ll try again in a moment.';
+      if (ok) { var mt = radioMeta(GAME), sentAt = Date.now(); mt.lastCallAt = sentAt; mt.mine.push({ t: sentAt, m: id, to: '' }); saveGameState(GAME); }
+      radioUi.note = ok ? '' : 'It didn’t go through. I’ll try again in a moment.';
       radioUi.view = 'public';
       radioRender();
     });
@@ -16582,10 +16719,11 @@
       if (radioOverlayEl.hidden || !GAME) return;
       if (ok) {
         radioMeta(GAME).done[tg.key] = Date.now();
+        radioMeta(GAME).mine.push({ t: Date.now(), m: id, to: tg.f });
         radioUi.heard.shown = radioUi.heard.shown.filter(function (m) { return m.key !== tg.key; });
         saveGameState(GAME);
       }
-      radioUi.note = ok ? 'I answered ' + tg.f + '.' : 'It didn’t go through. I’ll try again in a moment.';
+      radioUi.note = ok ? '' : 'It didn’t go through. I’ll try again in a moment.';
       radioUi.view = 'public';
       radioRender();
     });
@@ -16645,6 +16783,7 @@
   function cmdNavStation(state) {
     cookRoom('nav', state);
     if (storyTryTrigger(state, 'nav')) return; // STORY -- Events 5, 6, 10, 13
+    if (storyNoteDue) { storyNoteDue = false; printLine('Journal entry available.'); }
     var b = state.boat;
     printBlank();
     // No NAV STATION heading here -- the "> NAV STATION" echo the click
@@ -20740,6 +20879,7 @@
      ============================================================ */
   var CODA_TAPE_TITLE = '3/5/93 — Coda';
   var storySuppress = false; // true only while an event hands the player back to a room, so that room's own entry cannot start the NEXT event on top of it
+  var storyNoteDue = false; // Event 15's "Journal entry available." line, shown the next time the NAV STATION comes up (session only)
 
   // Where a step's button leads is described by `action`:
   //   { label, busy, audio, sync, effect, recover } -- label: the button; busy: the working label shown with the dots; audio: a STORY sound played over the dots; sync: the dots last exactly as long as that sound;
@@ -20766,7 +20906,7 @@
         "Dad had this ready long before I knew I’d be coming."],
       found: "Found a note from Dad." },
 
-    { n: 2, id: 'marks', title: "Marks on the Wall", ctx: ['cabin'], miles: 50, back: 'cabin',
+    { n: 2, id: 'marks', title: "Marks on the Wall", ctx: ['cabin'], miles: 10, back: 'cabin',
       steps: [
         { lead: 3, text: ["A few pencil marks on the cabin door frame. Dates written beside them."], action: { label: 'LOOK CLOSER', busy: 'LOOKING CLOSER', audio: 'creak' } },
         { text: [
@@ -20779,7 +20919,7 @@
         "or this boat has more of a history with us than Dad ever told me."],
       found: "Found old height marks on the cabin door frame." },
 
-    { n: 3, id: 'bunny', title: "The Runaway Bunny", ctx: ['bookshelf'], miles: 150, back: 'bookshelf',
+    { n: 3, id: 'bunny', title: "The Runaway Bunny", ctx: ['saloon'], miles: 50, back: 'saloon',
       steps: [
         { lead: 3, text: ["A thin book is tucked behind the others. The Runaway Bunny. I know this one."], action: { label: 'OPEN BOOK', busy: 'OPENING THE BOOK', audio: 'openBook' } },
         { text: [
@@ -20795,7 +20935,7 @@
         "Dad kept it aboard all these years. I wonder why it was here."],
       found: "Found my childhood copy of The Runaway Bunny, with a note from Mom." },
 
-    { n: 4, id: 'receipt', title: "The Old Receipt", ctx: ['cook'], miles: 250, back: 'galley',
+    { n: 4, id: 'receipt', title: "The Old Receipt", ctx: ['galley'], miles: 100, back: 'galley',
       steps: [
         { lead: 3, text: ["An old grocery receipt is tucked beneath the silverware."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'unfold' } },
         { text: [
@@ -20809,7 +20949,7 @@
         "I wonder how much of our life happened here."],
       found: "Found an old receipt in the silverware drawer." },
 
-    { n: 5, id: 'photoOfMom', title: "The Photo of Mom", ctx: ['nav'], miles: 350, back: 'nav',
+    { n: 5, id: 'photoOfMom', title: "The Photo of Mom", ctx: ['nav'], miles: 200, back: 'nav',
       steps: [
         { lead: 3, text: ["A corner of a photograph sticks out beneath a stack of charts."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
         { text: [
@@ -20833,7 +20973,7 @@
         "“Still my favorite.”"],
       found: "Found a picture of Mom." },
 
-    { n: 6, id: 'slip', title: "The Slip We Called Home", ctx: ['nav'], miles: 450, back: 'nav',
+    { n: 6, id: 'slip', title: "The Slip We Called Home", ctx: ['nav'], miles: 350, back: 'nav',
       steps: [
         { lead: 3, text: ["A stack of old marina invoices sits in a drawer at the nav station."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
         { text: [
@@ -20846,7 +20986,7 @@
         "Somewhere in those dates, I was learning to walk."],
       found: "Found old marina invoices." },
 
-    { n: 7, id: 'aftCabin', title: "The Photo Album", ctx: ['below'], miles: 600, back: 'aftcabin',
+    { n: 7, id: 'aftCabin', title: "The Photo Album", ctx: ['below'], miles: 500, back: 'aftcabin',
       eligible: function (state) { return !state.story.aftCabinUnlocked; }, // the aft cabin must still be locked
       steps: [
         { lead: 3, text: [
@@ -20866,7 +21006,7 @@
         "I’d wondered about so much, but never pictured an ordinary day."],
       found: "Unlocked the aft cabin." },
 
-    { n: 8, id: 'toyCar', title: "My Red Toy Car", ctx: ['below'], miles: 700, requires: 'aftCabin', back: 'below',
+    { n: 8, id: 'toyCar', title: "My Red Toy Car", ctx: ['below'], miles: 650, requires: 'aftCabin', back: 'below',
       steps: [
         { loop: 'toyCar', lead: 5, text: ["A rolling sound inside a drawer as the boat rocks."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
         { text: ["A red toy car. The same one Dad was holding in the photo with me asleep on his chest."], action: 'end' },
@@ -20877,7 +21017,7 @@
         "Maybe being here was enough."],
       found: "Found my red toy car." },
 
-    { n: 9, id: 'danced', title: "Mom Danced", ctx: ['cabin', 'aftcabin'], miles: 850, back: 'cabin',
+    { n: 9, id: 'danced', title: "Mom Danced", ctx: ['cabin', 'aftcabin'], miles: 800, back: 'cabin',
       steps: [
         { lead: 3, text: ["A pink satin ribbon peeks out of the bottom drawer."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'drawer' } },
         { text: ["Pointe shoes, her name written inside in faded ink."], action: 'end' },
@@ -20887,7 +21027,7 @@
         "I wonder if she used to practice to them."],
       found: "Found Mom's pointe shoes." },
 
-    { n: 10, id: 'piano', title: "Dad Played Piano", ctx: ['nav'], miles: 1000, back: 'nav',
+    { n: 10, id: 'piano', title: "Dad Played Piano", ctx: ['nav'], miles: 950, back: 'nav',
       steps: [
         { lead: 3, text: ["A piece of sheet music amongst the paperwork."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper' } },
         { text: [
@@ -20900,7 +21040,7 @@
         "Even listening to the music, I can’t quite picture him at the piano."],
       found: "Found sheet music for STUDIO II." },
 
-    { n: 11, id: 'recital', title: "They Performed Together", ctx: ['tape'], miles: 1100, requires: 'piano', back: 'tape',
+    { n: 11, id: 'recital', title: "They Performed Together", ctx: ['saloon'], miles: 1100, requires: 'piano', back: 'saloon',
       steps: [
         { lead: 3, text: ["A folded performance program is tucked behind the tapes. I've seen it back there but now I'm curious."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'unfold', sync: true } },
         { text: [
@@ -20921,7 +21061,7 @@
         "I still can’t picture Dad at the piano."],
       found: "Found Mom and Dad's recital program." },
 
-    { n: 12, id: 'momJournal', title: "Mom's Journal", ctx: ['saloon'], miles: 1400, back: 'saloon',
+    { n: 12, id: 'momJournal', title: "Mom's Journal", ctx: ['saloon'], miles: 1300, back: 'saloon',
       // The opening: only the "…" for 2 seconds while journal_fall.mp3 begins (it is not played again), then the dull knock.
       steps: [
         { lead: 2, leadAudio: 'journalFall', text: ["A dull knock from the aft cabin."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'doorOpen' } },
@@ -20935,7 +21075,7 @@
         "I keep looking at those words: “when we’re back.”"],
       found: "Found Mom's journal." },
 
-    { n: 13, id: 'medical', title: "Medical Papers", ctx: ['nav'], miles: 1700, back: 'nav',
+    { n: 13, id: 'medical', title: "Medical Papers", ctx: ['nav'], miles: 1500, back: 'nav',
       steps: [
         { lead: 3, leadAudio: 'drawer', text: ["A bundle of papers lies folded in the back of a drawer.", "", "Medical Records."], action: { label: 'INSPECT', busy: 'INSPECTING', audio: 'paper', sync: true } },
         { text: [
@@ -20948,7 +21088,7 @@
         "He was paying attention to everything. I wonder who was looking after him."],
       found: "Found Mom’s medical records and Dad’s care notes." },
 
-    { n: 14, id: 'coda', title: "CODA", ctx: ['saloon'], miles: 2050, requires: 'medical', back: 'tape',
+    { n: 14, id: 'coda', title: "CODA", ctx: ['saloon'], miles: 1700, requires: 'medical', back: 'tape',
       // Needs a tape player that can actually play right now (accessory power on, battery up): LISTEN uses the real tape system.
       eligible: function (state) { return storyTapePlayable(state); },
       steps: [
@@ -20965,7 +21105,7 @@
         "I’ve never heard him say this much."],
       found: "Found Dad’s cassette tape, CODA." },
 
-    { n: 15, id: 'dadReturn', title: "Dad Tried to Return", ctx: ['computer'], miles: 2150, back: 'computer',
+    { n: 15, id: 'dadReturn', title: "Dad Tried to Return", ctx: ['computer'], miles: 1900, back: 'computer',
       steps: [
         { lead: 3, heading: 'ARCHIVED FILES FOUND', text: [], action: { label: 'RECOVER', recover: true }, extra: [{ label: 'SHUT DOWN', action: 'shut-down-computer' }] },
       ],
@@ -20976,7 +21116,7 @@
         "And to find the things he couldn’t bring himself to tell me."],
       found: "Found Dad's plans to return." },
 
-    { n: 16, id: 'ashes', title: "Mom's Ashes", ctx: ['cabin'], miles: 2300, back: 'cabin',
+    { n: 16, id: 'ashes', title: "Mom's Ashes", ctx: ['cabin'], miles: 2100, back: 'cabin',
       steps: [
         { lead: 3, text: [
           "That wooden box has been here the whole voyage.",
@@ -21277,6 +21417,7 @@
       var foundAt = pc.foundAt != null ? pc.foundAt : storyNowTs(state);
       state.log.push({ t: foundAt, text: ev.found });
       if (state.vesselLog && state.vesselLog.currentDay) state.vesselLog.currentDay.events.push({ time: vesselLogTimeLabel(foundAt), text: ev.found }); // VESSEL LOG > EVENTS
+      if (ev.id === 'dadsNote') state.log.push({ t: foundAt, text: 'I brought a journal. I wasn’t sure what to write down, but this gives me a feeling, so it’s a good place to start.' }); // the first prompt, as a log line (the log only: not the vessel log)
     }
     state.pendingChoice = null;
     syncStoryMode(state);
@@ -21295,7 +21436,7 @@
   function storyReturnTo(state, ev, room) {
     storySuppress = true;
     try {
-      printLine(storyPickThought()); // not logged, not stamped, not saved
+      if (state.story && state.story.pending.indexOf(ev.id) !== -1) { if (ev.back === 'computer') storyNoteDue = true; else printLine('Journal entry available.'); } // plain, not logged, not stamped, not saved (Event 15 ends on the computer's home screen, which covers the page: its line waits for the NAV STATION)
       switch (ev.back) {
         case 'nav': cmdNavStation(state); break;
         case 'cabin': if (room === 'aftcabin') cmdAftCabin(state); else cmdCabin(state); break;
@@ -26740,7 +26881,7 @@
      written for you: after BACK, go SALOON > JOURNAL > WRITE IN JOURNAL yourself.
      `arrive` (optional) puts the screen the test starts from on display, using the game's own room functions (never the story).
      -------------------------------------------------------------- */
-  var STORY_SCENARIO_MILES = [12, 55, 155, 255, 355, 455, 605, 705, 855, 1005, 1105, 1405, 1705, 2055, 2155, 2305];
+  var STORY_SCENARIO_MILES = [12, 15, 55, 105, 205, 355, 505, 655, 805, 955, 1105, 1305, 1505, 1705, 1905, 2105];
   // Where on the passage a given odometer reading puts the boat: Shilshole, the pre-plotted points (Puget Sound, Admiralty Inlet, the Strait), then the straight way to Nāwiliwili.
   function scenarioRoutePosition(miles) {
     var pts = [[START_POINT.lat, START_POINT.lon]].concat(DEFAULT_ROUTE).concat([[FINAL_DEST.lat, FINAL_DEST.lon]]);
@@ -26788,26 +26929,23 @@
   }
   var STORY_SCENARIO_ABOUT = [
     "On deck, Dad's Note not yet found. Tap GO BELOW: the first time below deck triggers it.",
-    "Below deck, 55 nm out. Tap FORWARD CABIN.",
-    "In the SALOON, 155 nm out. Tap READ to open the BOOKSHELF.",
-    "In the GALLEY, 255 nm out. Tap MEALS, cook a meal, and eat it when it is ready.",
+    "Below deck, 15 nm out. Tap FORWARD CABIN.",
+    "Below deck, 55 nm out. Tap SALOON.",
+    "Below deck, 105 nm out. Tap GALLEY.",
+    "Below deck, 205 nm out. Tap NAV STATION.",
     "Below deck, 355 nm out. Tap NAV STATION.",
-    "Below deck, 455 nm out. Tap NAV STATION.",
-    "On deck, 605 nm out, the aft cabin still locked. Tap GO BELOW.",
-    "On deck, 705 nm out, the aft cabin unlocked. Tap GO BELOW.",
-    "Below deck, 855 nm out. Tap FORWARD CABIN (or AFT CABIN).",
-    "Below deck, 1005 nm out. Tap NAV STATION.",
-    "At the TAPE PLAYER, 1105 nm out, the sheet music found. Play any tape.",
-    "Below deck, 1405 nm out. Tap SALOON.",
-    "Below deck, 1705 nm out. Tap NAV STATION.",
-    "Below deck, 2055 nm out, the medical papers found, accessory power on. Tap SALOON.",
-    "At the NAV STATION, 2155 nm out. Tap SHIP'S COMPUTER.",
-    "Below deck, 2305 nm out. Tap FORWARD CABIN.",
+    "On deck, 505 nm out, the aft cabin still locked. Tap GO BELOW.",
+    "On deck, 655 nm out, the aft cabin unlocked. Tap GO BELOW.",
+    "Below deck, 805 nm out. Tap FORWARD CABIN (or AFT CABIN).",
+    "Below deck, 955 nm out. Tap NAV STATION.",
+    "Below deck, 1105 nm out, the sheet music found. Tap SALOON.",
+    "Below deck, 1305 nm out. Tap SALOON.",
+    "Below deck, 1505 nm out. Tap NAV STATION.",
+    "Below deck, 1705 nm out, the medical papers found, accessory power on. Tap SALOON.",
+    "At the NAV STATION, 1905 nm out. Tap SHIP'S COMPUTER.",
+    "Below deck, 2105 nm out. Tap FORWARD CABIN.",
   ];
   var STORY_SCENARIO_ARRIVE = {
-    3: function (s) { cmdSaloon(s); },
-    4: function (s) { cmdGalley(s); },
-    11: function (s) { cmdTapePlayer(s); },
     15: function (s) { cmdNavStation(s); },
   };
   STORY_EVENTS.forEach(function (ev) {
