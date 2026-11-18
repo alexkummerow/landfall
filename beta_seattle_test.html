@@ -837,6 +837,13 @@
   }
   /* (beta 21) ...and on that screen the window strip and the voyage line are put away, so the room heading, COMFORT ABOVE / COMFORT BELOW and the menu have the whole pane. */
   body.clothing-full #horizon, body.clothing-full #navstrip { display: none; }
+  /* FULL-SCREEN MENUS (round 57): the BOOKSHELF, and the STORAGE while STATUS or INVENTORY is open. The window strip, the voyage line and the log's earlier lines are put away; the heading line stays; the menu
+     fills the rest of the screen and, only if it is longer than that, scrolls inside it. */
+  body.menu-full #horizon, body.menu-full #navstrip { display: none; }
+  body.menu-full #output > .entry, body.menu-full #output > .persist { display: none; }
+  body.menu-full #output { flex: 0 0 auto; overflow: visible; padding-bottom: 0.2rem; }
+  body.menu-full #controls { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  body.menu-full #options { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
 
   .option {
     background: none;
@@ -25382,6 +25389,11 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       document.body.classList.toggle('clothing-full', clothingFull);
       setTimeout(scrollToBottom, 120); // the pane has just grown or shrunk by the strip's height: keep the newest lines (the comfort read-outs) in view
     }
+    var menuFullPc = state.pendingChoice, menuFull = !!(menuFullPc && (menuFullPc.id === 'bookshelf-menu' || (menuFullPc.id === 'storage-menu' && (storageRoomOpen.status || storageRoomOpen.inventory)))); // FULL-SCREEN MENUS (round 57)
+    if (document.body.classList.contains('menu-full') !== menuFull) {
+      document.body.classList.toggle('menu-full', menuFull);
+      setTimeout(scrollToBottom, 120); // the log has just been put away or brought back: keep its newest lines in view
+    }
     syncHelmTrim(state);
     var opts = getContextualOptions(state);
     opts.forEach(function (opt) {
@@ -28140,8 +28152,8 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     const fogTint = mix(ph, [205, 218, 210], .5), hazeCol = mix(bg, fogTint, .17 * fogF);
     if (fogF > .01) { g.fillStyle = rgba(fogTint, .17 * fogF); g.fillRect(-m, -60, W + 2 * m, H + 200); }
 
-    const ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1); // how much of an overcast ceiling there is; under a full ceiling there is no sun, moon or star to see
-    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
+    const ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1), ceilN = clamp((cl - .50) / .20, 0, 1); // ceilN: how closed the sky is to stars and the moon (complete at the 70% where the game says OVERCAST) // how much of an overcast ceiling there is; under a full ceiling there is no sun, moon or star to see
+    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilN);
     if (starA > .02) STARS.forEach(s => {
       const tw = .6 + .4 * Math.sin(tt * .0016 + s.p);
       g.fillStyle = rgba(br0, starA * tw); g.beginPath(); g.arc(W / 2 + wrap180(s.x * 360 - vb) * ppd, s.y * y0, s.r, 0, 6.2832); g.fill();
@@ -28164,7 +28176,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     }
     const mnow = V.mn;
     if (mnow.alt > -3 && bodyY(mnow.alt) > -20 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 20) {
-      const p = { x: bodyX(mnow.az), y: bodyY(mnow.alt) }, a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+      const p = { x: bodyX(mnow.az), y: bodyY(mnow.alt) }, a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilN);
       if (a > .02) {
         const mp = mnow.p, lit = moonLit(mp), rg = g.createRadialGradient(p.x, p.y, 2, p.x, p.y, 24); rg.addColorStop(0, rgba(br0, (.05 + .2 * lit) * a)); rg.addColorStop(1, rgba(br0, 0));
         g.fillStyle = rg; g.fillRect(p.x - 30, p.y - 30, 60, 60);
@@ -28538,7 +28550,7 @@ const A_GREY_RAW = {
     const S = below ? frameH / 2 - 2 : H - y0, ls = below ? .64 : .93, dir = below ? (V.side === 'starboard' ? 1 : -1) : -1, pxMax = y0 - (below ? 15 : 5);
     const key = [Math.round(e * 2), Math.round((.5 + .5 * Math.sin(V.sun.az * RAD)) * 8), Math.round(GREYK * 10), Math.round(clamp(cur.rain / .6, 0, 1) * 10), below ? 1 : 0, hz.d, W | 0].join('|');
     if (key !== ART.key) { ART.key = key; ART.sprites = []; }
-    const fogF = clamp(fog / .85, 0, 1), haze = clamp(1 - fogF * 1.15, 0, 1), ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1);
+    const fogF = clamp(fog / .85, 0, 1), haze = clamp(1 - fogF * 1.15, 0, 1), ceilA = clamp((cl - .58) / .22, 0, 1), cloudK = 1 - clamp((cl - .50) / .10, 0, 1), ceilN = clamp((cl - .50) / .20, 0, 1); // ceilN: how closed the sky is to stars and the moon (complete at the 70% where the game says OVERCAST)
     const cam = artCam(frameH, halfW, sea);
     g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
     g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'medium';
@@ -28551,7 +28563,7 @@ const A_GREY_RAW = {
     const bodyY = el => y0 - el * ppd, bodyX = az => W / 2 + wrap180(az - vb) * ppd, sunP = V.sun, mnow = V.mn;
     const sunX = bodyX(sunP.az), moonX = bodyX(mnow.az);
     ART.glowX = e > -2 ? sunX : moonX;
-    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilA);
+    const starA = clamp((-e - 3) / 9, 0, 1) * (1 - cl * .85) * haze * (1 - ceilN);
     if (starA > .02) {
       g.fillStyle = '#f4f7ff';
       STARS.forEach(s => { const x = W / 2 + wrap180(s.x * 360 - vb) * ppd; if (x < -4 || x > W + 4) return; g.globalAlpha = starA * (.55 + .45 * Math.sin(ART.t * (1.5 + (s.p % 1) * .9) + s.p)); const z = s.r > 1 ? 1.8 : 1.2; g.fillRect(x, s.y * y0, z, z); });
@@ -28570,7 +28582,7 @@ const A_GREY_RAW = {
       }
     }
     if (mnow.alt > -3 && bodyY(mnow.alt) > -30 && Math.abs(wrap180(mnow.az - vb)) < FOV / 2 + 30) {
-      const px = moonX, py = bodyY(mnow.alt), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilA);
+      const px = moonX, py = bodyY(mnow.alt), a = clamp((6 - e) / 10, 0, 1) * (1 - cl * .75) * haze * (1 - ceilN);
       if (a > .02) {
         const p = mnow.p, c2 = Math.cos(p * 6.2832), waxing = p < .5, R = 7, lit = moonLit(p);
         g.save(); g.globalAlpha = a;
@@ -29024,7 +29036,7 @@ const A_GREY_RAW = {
   /* ---------- the loop ---------- */
   let visibleNow = false, lastDraw = 0, sampledAt = -1e9, snapNext = true, viewOn = true; // viewOn: the OUTSIDE VIEW button (beta 12); off, the band is simply not shown and nothing is drawn
   function wanted() {
-    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && !document.body.classList.contains('clothing-full') && document.visibilityState !== 'hidden';
+    return viewOn && !!GAME && !!GAME.weather && !!GAME.nav && !navStripEl.hidden && !document.body.classList.contains('title-mode') && !document.body.classList.contains('clothing-full') && !document.body.classList.contains('menu-full') && document.visibilityState !== 'hidden';
   }
   function frame(ts) {
     requestAnimationFrame(frame);
