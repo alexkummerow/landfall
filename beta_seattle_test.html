@@ -844,6 +844,10 @@
   body.menu-full #output { flex: 0 0 auto; overflow: visible; padding-bottom: 0.2rem; }
   body.menu-full #controls { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   body.menu-full #options { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+  /* the INVENTORY page: the readings a little closer together (the same type, the same columns) so the whole list, BACK included, fits one phone screen */
+  #options.inventory-fit { gap: 0; }
+  #options.inventory-fit .data-row { margin: 0; line-height: 1.3; font-size: 0.9rem; }
+  #options.inventory-fit .option-divider { margin: 0.38rem 0; }
 
   .option {
     background: none;
@@ -14600,8 +14604,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
 
   // The old INVENTORY screens are gone (the STORAGE's INVENTORY dropdown shows all of it); a stale button for one lands there, with the list open.
   function showInventoryCategory(state, cat) {
-    storageRoomOpen.inventory = true;
-    cmdStorage(state);
+    cmdInventoryPage(state); // (round 58) the inventory is a page of its own now
   }
 
   function cmdInventory(state) { showInventoryCategory(state, null); }
@@ -16759,13 +16762,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       readings(model.systems, 'data-row-lg', 1); // (the same column as the inventory's counts)
       model.causes.forEach(function (t) { menu.push({ status: true, text: t, indent: 1 }); });
     }
-    if (drop('inventory', 'INVENTORY', 0)) {
-      model.stores.forEach(function (g, i) {
-        if (i > 0) menu.push({ divider: true }); // a gap between the groups: the supplies, the meals, the snacks, the drinks, the spares
-        if (g.note) menu.push({ status: true, text: g.note, indent: 1 });
-        else readings(g.rows, 'data-row-lg', 1);
-      });
-    }
+    menu.push({ label: 'INVENTORY', action: 'aft-toggle:inventory' }); // (round 58) a page of its own, not a dropdown: see cmdInventoryPage
     var work = [];
     if (model.repairs) work.push({ label: 'REPAIRS', action: 'cmd:repair' });
     if (!model.maintenanceDone) work.push({ label: maintPercent(state) > 0 ? 'RESUME MAINTENANCE' : 'PERFORM MAINTENANCE', action: 'perform-maintenance' });
@@ -16776,20 +16773,36 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
 
   function storageRoomToggle(state, key) {
     if (!Object.prototype.hasOwnProperty.call(storageRoomOpen, key)) return;
+    if (key === 'inventory') { cmdInventoryPage(state); return; } // (round 58) the inventory is a full-screen page now
     // The status can be read in the dark; looking through the stores (the inventory) takes light, as it always has.
     if (key === 'inventory' && !storageRoomOpen[key] && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:storage'); return; }
     storageRoomOpen[key] = !storageRoomOpen[key];
     cmdStorage(state);
   }
 
+  // THE INVENTORY PAGE (round 58): everything aboard, in its groups, on a full-screen page of its own. BACK is the STORAGE. `redraw` is true for the live watch and a reload (no darkness check then:
+  // the page was already open).
+  function cmdInventoryPage(state, redraw) {
+    if (!redraw && state.crew.location === 'below' && needsCabinLight(state)) { blockedByDarkness(state, 'cmd:storage'); return; } // (looking through the stores takes light, as it always has)
+    printRoomHeader('INVENTORY');
+    var model = storageRoomStatusModel(state), list = [];
+    model.stores.forEach(function (g, i) {
+      if (i > 0) list.push({ divider: true }); // a gap between the groups: the supplies, the meals, the staples, the snacks, the drinks, the spares
+      if (g.note) list.push({ status: true, text: g.note });
+      else g.rows.forEach(function (r) { list.push({ dataRow: true, label: r.label, value: r.value, widthCls: 'data-row-lg' }); });
+    });
+    storageRoomSig = JSON.stringify(model);
+    state.pendingChoice = { id: 'inventory-page', options: pushBack(list, 'cmd:storage') };
+  }
+
   // The live loop: the open room is drawn again the moment anything it shows has changed.
   function storageRoomWatch(state) {
     if (!state || introPending || uiBusy) return;
     var pc = state.pendingChoice;
-    if (!pc || pc.id !== 'storage-menu') return;
+    if (!pc || (pc.id !== 'storage-menu' && pc.id !== 'inventory-page')) return;
     if (JSON.stringify(storageRoomStatusModel(state)) === storageRoomSig) return;
     clearTempView();
-    cmdStorage(state);
+    if (pc.id === 'inventory-page') cmdInventoryPage(state, true); else cmdStorage(state);
     renderOptions(state);
   }
 
@@ -25389,7 +25402,8 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       document.body.classList.toggle('clothing-full', clothingFull);
       setTimeout(scrollToBottom, 120); // the pane has just grown or shrunk by the strip's height: keep the newest lines (the comfort read-outs) in view
     }
-    var menuFullPc = state.pendingChoice, menuFull = !!(menuFullPc && (menuFullPc.id === 'bookshelf-menu' || (menuFullPc.id === 'storage-menu' && (storageRoomOpen.status || storageRoomOpen.inventory)))); // FULL-SCREEN MENUS (round 57)
+    var menuFullPc = state.pendingChoice, menuFull = !!(menuFullPc && (menuFullPc.id === 'bookshelf-menu' || menuFullPc.id === 'inventory-page')); // FULL-SCREEN MENUS (round 57 bookshelf, round 58 inventory)
+    optionsEl.classList.toggle('inventory-fit', !!(menuFullPc && menuFullPc.id === 'inventory-page')); // the INVENTORY page: its rows set closer together so the whole list fits
     if (document.body.classList.contains('menu-full') !== menuFull) {
       document.body.classList.toggle('menu-full', menuFull);
       setTimeout(scrollToBottom, 120); // the log has just been put away or brought back: keep its newest lines in view
@@ -27453,6 +27467,10 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     }
     if (state.pendingChoice && state.pendingChoice.id === 'meals-menu') state.pendingChoice.options = buildMealsOptions(state); // drawn afresh: a fish aboard is in it now
     if (state.pendingChoice && state.pendingChoice.id === 'snacks-menu') state.pendingChoice.options = buildSnacksOptions(state);
+    if (state.pendingChoice && state.pendingChoice.id === 'inventory-page') { // (round 58) the inventory page, as it is now
+      cmdInventoryPage(state, true);
+      return;
+    }
     if (state.pendingChoice && state.pendingChoice.id === 'storage-menu') { // the STORAGE as it is now (its readings are not saved with the menu)
       cmdStorage(state);
       return;
