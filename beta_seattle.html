@@ -758,7 +758,8 @@
   .stat-bar { flex: none; display: inline-block; width: 9ch; height: 0.4em; background: rgba(77, 122, 94, 0.35); overflow: hidden; }
   .stat-bar-fill { display: block; height: 100%; width: 0; background: var(--phosphor); }
   .stat-line .stat-text { min-width: 24ch; } /* the bars start in one column; on a very narrow screen the bar wraps beneath the words instead */
-  .stat-value > span:first-child { min-width: 10ch; }
+  .stat-value { flex-wrap: nowrap; min-width: 0; } /* (round 65) a status row is its label and a bar, with no words beside it */
+  .stat-value > .stat-bar { flex: 0 1 15ch; min-width: 4ch; }
 
   .heading-label {
     color: var(--phosphor);
@@ -2194,6 +2195,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
         hoursSinceMeal: 2,
         hoursSinceWater: 2,
         lastDrankAt: -120,           // RESCUE -- voyageMinutes of the last successful drink (water / coffee / tea: exactly the actions that reset hoursSinceWater). -120 = the 2 h before departure that hoursSinceWater already assumes.
+        lastMealAt: -120,            // (round 65) voyageMinutes of the last real meal (not a snack): the 'just had a proper meal' situations
         lastAteAt: -120,             // RESCUE -- voyageMinutes of the last successful meal or snack (exactly where hoursSinceMeal is reset). Chocolate is comfort only and never counts.
         morale: 72,
         watchState: 'awake',        // 'awake' | 'sleeping' — see the SLEEP note above wakeUp. Entered the moment SLEEP finishes, left only by the player's own WAKE UP.
@@ -13303,9 +13305,13 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     bar.appendChild(fill);
     return bar;
   }
-  function statBarSet(barEl, frac) {
+  function statBarSet(barEl, frac, label, words) {
     var w = Math.round(statClamp01(isFinite(frac) ? frac : 0) * 100) + '%', fill = barEl.firstChild;
     if (fill.style.width !== w) fill.style.width = w;
+    if (label) { // (round 65) with no words beside it, the bar carries them for a screen reader
+      var aria = String(label).toLowerCase() + ': ' + String(words).toLowerCase();
+      if (barEl.getAttribute('aria-label') !== aria) { barEl.setAttribute('aria-label', aria); barEl.setAttribute('role', 'img'); barEl.removeAttribute('aria-hidden'); }
+    }
   }
   // A whole readout line: the words, then the bar, on one row.  Returns the line.
   function printStatLine(kind, state) {
@@ -13313,8 +13319,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     p.className = 'data-row data-row-md'; // (round 60) the same spaced row as the FORWARD CABIN's ENERGY: the label, then the words and the bar
     var l = document.createElement('span');
     var v = document.createElement('span'); v.className = 'stat-value';
-    var t = document.createElement('span');
-    v.appendChild(t); v.appendChild(statBarMake());
+    v.appendChild(statBarMake()); // (round 65) the bar only: no words beside it
     p.appendChild(l); p.appendChild(v);
     tempViewEl.appendChild(p);
     statLiveRows.push({ el: p, kind: kind });
@@ -13323,10 +13328,9 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
   }
   // `el` is a readout row (label span first, then the value span holding the words and the bar); keeps all of it current.
   function statApply(el, kind, state) {
-    var spec = STAT_SPECS[kind](state), l = el.firstChild, v = el.lastChild, t = v.firstChild;
+    var spec = STAT_SPECS[kind](state), l = el.firstChild, bar = el.lastChild.lastChild;
     if (l.textContent !== spec.label) l.textContent = spec.label;
-    if (t.textContent !== spec.value) t.textContent = spec.value;
-    statBarSet(v.lastChild, spec.frac);
+    statBarSet(bar, spec.frac, spec.label, spec.value);
   }
   function refreshStatLines(state) {
     if (!state || !statLiveRows.length) return;
@@ -15650,7 +15654,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       cabinF: b.cabinTemperatureF == null ? null : Math.round(b.cabinTemperatureF), // the whole degree she sees as CABIN TEMP
       wet: sitRecentlyWet(state),
       coffee: c.lastCoffeeAt != null && now - c.lastCoffeeAt >= 0 && now - c.lastCoffeeAt <= SIT_COFFEE_RECENT_MIN,
-      food: c.hoursSinceMeal <= 1 && Number.isFinite(c.lastAteAt) && now - c.lastAteAt >= 0 && now - c.lastAteAt <= SIT_MEAL_RECENT_MIN, // a snack can only set hoursSinceMeal to 3, so <= 1 is a real meal
+      food: c.hoursSinceMeal <= 1 && Number.isFinite(c.lastMealAt) && now - c.lastMealAt >= 0 && now - c.lastMealAt <= SIT_MEAL_RECENT_MIN, // (round 65) a snack can now take hoursSinceMeal to 0 as well, so a real meal is told by lastMealAt
       day: voyageDayNumber(state),
       lateDusk: phase === 'dusk' && daylightSnapshot(state).minutesSinceSunset >= SIT_LATE_DUSK_MINUTES,
     };
@@ -19666,9 +19670,8 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       var v = document.createElement('span');
       if (r[2]) { // a status-bar row (ENERGY): the words, then the bar
         v.className = 'stat-value';
-        var vt = document.createElement('span'); vt.textContent = r[1];
-        var vb = statBarMake(); statBarSet(vb, STAT_SPECS[r[2]](state).frac);
-        v.appendChild(vt); v.appendChild(vb);
+        var vb = statBarMake(); var sp = STAT_SPECS[r[2]](state); statBarSet(vb, sp.frac, sp.label, sp.value); // (round 65) the bar only
+        v.appendChild(vb);
       } else v.textContent = r[1];
       row.appendChild(l); row.appendChild(v); wrap.appendChild(row);
     });
@@ -20446,7 +20449,9 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     changePlain: ['Changed clothes.'],
   };
 
-  var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 };
+  var HUNGER_RESET_HOURS_BY_TYPE = { meal: 0, snack: 3 }; // (the meal's 0 still stands; the snack's 3 is no longer used: see hungerAfterSnack)
+  // (round 65) A snack adds half the hunger bar (7 of its 14 hours), up to full. A starving sailor (past 14 hours, bar empty) goes to half a bar, not to 'half of nothing'.
+  function hungerAfterSnack(hours) { return Math.max(0, Math.min(hours, 14) - 7); }
 
   // Comfort, not sustenance — no prep, no seastate/water gates,
   // no hunger/thirst/energy effect at all. A small, temporary morale
@@ -20516,8 +20521,10 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
      -------------------------------------------------------------- */
   var SNACK_COOLDOWN_MIN = 30;
   var SNACK_BLOCK_LINES = ["I'm good on snacks for now.", "I don't need another snack just yet.", "That's enough snacking for a while.", "I'm not really hungry for another snack."];
-  function snackCooldownLine(state) { // null when a snack may be eaten, else the one thing the sailor says
+  var SNACK_FULL_HOURS = 0.7; // (round 65) hungrier than this (the bar below about 95%) and a snack is welcome; fuller and it is not
+  function snackCooldownLine(state, chocolate) { // null when a snack may be eaten, else the one thing the sailor says. A snack is allowed until the bar is full (round 65); chocolate keeps the 30-minute cooldown.
     var t = state.crew.lastSnackAt, now = state.meta.voyageMinutes;
+    if (!chocolate) { if (state.crew.hoursSinceMeal >= SNACK_FULL_HOURS) return null; return SNACK_BLOCK_LINES[Math.floor(now / 7) % SNACK_BLOCK_LINES.length]; }
     if (t == null || now < t || now - t >= SNACK_COOLDOWN_MIN) return null;
     return SNACK_BLOCK_LINES[Math.floor(now / 7) % SNACK_BLOCK_LINES.length]; // (the same line for a few minutes, so tapping again does not flicker through them)
   }
@@ -20781,8 +20788,9 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     if (r.held || item.type === 'meal') statAdd(s, 'meals', 1); // VOYAGE STATS -- a meal (the fish is one); snacks are not meals
       // Hunger: a full meal resets to FULL; a snack is a smaller reset
       // (see HUNGER_RESET_HOURS_BY_TYPE).
-      c.hoursSinceMeal = item.type === 'snack' ? Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack) : HUNGER_RESET_HOURS_BY_TYPE.meal;
+      c.hoursSinceMeal = item.type === 'snack' ? hungerAfterSnack(c.hoursSinceMeal) : HUNGER_RESET_HOURS_BY_TYPE.meal;
       c.lastAteAt = s.meta.voyageMinutes; // RESCUE -- a successful meal or snack restarts only the food clock
+      if (item.type !== 'snack') c.lastMealAt = s.meta.voyageMinutes; // (round 65) a real meal only
 
       // Meal-history monotony (hidden, never shown): an exponential
       // moving average nudged toward 1 by a snack, toward 0 by a real
@@ -20971,7 +20979,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
       return;
     }
 
-    var cdLine = (item.type === 'snack' || item.type === 'chocolate') ? snackCooldownLine(state) : null; // (beta 16) the shared snack cooldown: nothing is used, nothing is awarded
+    var cdLine = (item.type === 'snack' || item.type === 'chocolate') ? snackCooldownLine(state, item.type === 'chocolate') : null; // (beta 16) the shared snack cooldown: nothing is used, nothing is awarded
     if (cdLine) { printBlank(); printLine(cdLine); state.pendingChoice = eatSubmenuPendingChoice(state, item); return; }
     if (item.type === 'chocolate') {
       var doEatChocolate = function (s) {
@@ -21082,8 +21090,9 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
 
       // Hunger: a full meal resets to FULL; a snack is a smaller reset
       // (see HUNGER_RESET_HOURS_BY_TYPE).
-      c.hoursSinceMeal = item.type === 'snack' ? Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack) : HUNGER_RESET_HOURS_BY_TYPE.meal;
+      c.hoursSinceMeal = item.type === 'snack' ? hungerAfterSnack(c.hoursSinceMeal) : HUNGER_RESET_HOURS_BY_TYPE.meal;
       c.lastAteAt = s.meta.voyageMinutes; // RESCUE -- a successful meal or snack restarts only the food clock
+      if (item.type !== 'snack') c.lastMealAt = s.meta.voyageMinutes; // (round 65) a real meal only
 
       // Meal-history monotony (hidden, never shown): an exponential
       // moving average nudged toward 1 by a snack, toward 0 by a real
@@ -21338,7 +21347,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
         if (!s.fishing.heldFish || s.fishing.heldFish.sashimiEaten) { printBlank(); printLine("That's already gone.", 'dim'); return; } // spoiled while it was being prepared
         var life = lifeCtx(s), c = s.crew;
         fishPortionEaten(s, 'sashimi'); // the sashimi is marked eaten (patch 69); the cooked meal is still aboard until it is eaten too (it is a snack, not a meal: no 'meals' count)
-        c.hoursSinceMeal = Math.min(c.hoursSinceMeal, HUNGER_RESET_HOURS_BY_TYPE.snack); // hunger like a snack
+        c.hoursSinceMeal = hungerAfterSnack(c.hoursSinceMeal); // hunger like a snack
         c.lastAteAt = s.meta.voyageMinutes;
         c.snackMealRatio = c.snackMealRatio * 0.7 + 1 * 0.3; // a snack's weight in the hidden meal-history monotony
         bumpClutter(s, 1);
