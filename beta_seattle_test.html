@@ -16373,15 +16373,23 @@
   var RADIO_STATIC_FULL_SECONDS = 4;
   var RADIO_STATIC_FADE_SECONDS = 3;
   var radioPowered = false, radioSwitchToken = 0, radioStaticTimer = null, radioStaticStartTimer = null;
+  var radioStaticVoice = makeLoopVoice('RADIO STATIC'); // the loop engine: its fades run on the audio clock (an audio element's volume is ignored on an iPhone, so a fade of it is a cut)
   function radioStaticBegin(token) {
     if (!radioPowered || token !== radioSwitchToken) return;
-    var el = playNavStationOneShot('radioOnStatic');
-    if (!el) return;
-    radioStaticTimer = setTimeout(function () {
-      radioStaticTimer = null;
-      if (!radioPowered || token !== radioSwitchToken) return;
-      fadeNavStationVolume(el, 0, RADIO_STATIC_FADE_SECONDS, function () { try { el.pause(); } catch (e) {} });
-    }, RADIO_STATIC_FULL_SECONDS * 1000);
+    radioStaticVoice.set(NAV_STATION_AUDIO_FILES.radioOnStatic, NAV_STATION_AUDIO_VOLUME.radioOnStatic, 0.05); // the file's own level
+    var waited = 0;
+    radioStaticTimer = setInterval(function () { // the four seconds at full start when the static is really playing (the first time it has to be loaded)
+      if (!radioPowered || token !== radioSwitchToken) { clearInterval(radioStaticTimer); radioStaticTimer = null; return; }
+      waited += 50;
+      if (radioStaticVoice.playing() || waited >= 3000) {
+        clearInterval(radioStaticTimer);
+        radioStaticTimer = setTimeout(function () {
+          radioStaticTimer = null;
+          if (!radioPowered || token !== radioSwitchToken) return;
+          radioStaticVoice.stop(RADIO_STATIC_FADE_SECONDS); // the long, smooth fade to silence
+        }, RADIO_STATIC_FULL_SECONDS * 1000);
+      }
+    }, 50);
   }
   function radioPowerOn() {
     if (radioPowered) return;
@@ -16404,8 +16412,7 @@
     radioSwitchToken++;
     if (radioStaticStartTimer) { clearTimeout(radioStaticStartTimer); radioStaticStartTimer = null; }
     if (radioStaticTimer) { clearTimeout(radioStaticTimer); radioStaticTimer = null; }
-    var el = navStationAudioEls.radioOnStatic;
-    if (el && !el.paused) fadeNavStationVolume(el, 0, 0.2, function () { try { el.pause(); } catch (e) {} });
+    radioStaticVoice.stop(0.2); // (static still at full level is taken out quickly; one already fading finishes its fade)
     if (!silent) playElectricalSwitchSound(false);
   }
   function radioAudioWatch(state) {
