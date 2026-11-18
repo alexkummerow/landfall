@@ -847,6 +847,9 @@
     letter-spacing: 0.02em;
   }
   .option:focus-visible { outline: 1px dashed var(--phosphor); outline-offset: 2px; }
+  /* An option with a small second line under it (the BOOKSHELF: the author under the title). Still one button. */
+  .option-with-sub { display: block; }
+  .option-sub { display: block; font-size: 0.72rem; letter-spacing: 0.1em; line-height: 1.25; color: #6a8273; padding-top: 0.08rem; }
 
   /* Plain status rows inside #options (e.g. BELOW DECK's own HUNGER/
      THIRST/ENERGY/MORALE snapshot) -- ordinary, non-interactive
@@ -5183,7 +5186,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
   var REAL_WEATHER_SEA_STEP_MINUTES = 10;                  // seaState (an integer tier) moves at most one step per this many game minutes
   // wave height (ft) -> the game's existing 0-6 seaState tier. Upper edges 1.5 / 2.5 / 3.5 / 7.5 / 9.5 / 11.5 ft: the tiers 0-2 are CALM (up to 3.5 ft), 3 is MODERATE (to 7.5), 4 and 5 are ROUGH
   // (to 11.5, split at 9.5) and 6 is the top tier. These integer tiers are the boat's own scale; the NAME beside a wave height and the sea audio tier it produces use
-  // SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT (CALM to 3.5, MODERATE to 7.5, ROUGH to 17.5, HEAVY above), and always agree with each other. (Patch 67; the edges were 1.5 / 3 / 4.5 / 6 / 8 / 10.)
+  // SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT (CALM to 4.5, MODERATE to 8.5, ROUGH to 13.5, HEAVY above), and always agree with each other. (Patch 67; the edges were 1.5 / 3 / 4.5 / 6 / 8 / 10.)
   var RW_SEA_TIER_UPPER_FT = [1.5, 2.5, 3.5, 7.5, 9.5, 11.5];
 
   // The only non-persisted weather bookkeeping, kept in ONE place.
@@ -11147,10 +11150,10 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
   var HATCH_BLEED_VOLUME_FRACTION = 0.3; // the one shared bleed-volume constant for marine ambience (sea + wind) and rain exterior bleed below deck -- see section 9/10 of the hatch spec
 
   // Centralized, tunable thresholds (section 20 of the task this implements) -- wave height in feet, reusing the EXISTING seaStateWaveHeightFt(seaState) the WEATHER screen's
-  // SEAS line already computes, never a second wave-height source. The bands, in the whole feet the player reads: CALM 1-3 ft, MODERATE 4-7, ROUGH 8-17, HEAVY 18 and over (the heavy
-  // recordings are kept for the worst seas only), so the edges on the real number are 3.5 / 7.5 / 17.5 ft (what rounds to 4, 8 and 18). The integer sea-state tiers (RW_SEA_TIER_UPPER_FT,
-  // and seaStateWaveHeightFt's own [1,2,3,4,8,10,12] table) are the boat's own scale and are separate from these names.
-  var SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT = { calmMax: 3.5, moderateMax: 7.5, roughMax: 17.5 };
+  // SEAS line already computes, never a second wave-height source. The bands, in the whole feet the player reads: CALM 0-4 ft, MODERATE 5-8, ROUGH 9-13, HEAVY 14 and over,
+  // so the edges on the real number are 4.5 / 8.5 / 13.5 ft (what rounds to 5, 9 and 14). The integer sea-state tiers (RW_SEA_TIER_UPPER_FT, and seaStateWaveHeightFt's own
+  // [1,2,3,4,8,10,12] table) are the boat's own scale and are separate from these names.
+  var SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT = { calmMax: 4.5, moderateMax: 8.5, roughMax: 13.5 };
   // Hysteresis margin (section 11): once a tier is committed, the
   // wave height must move this far PAST the next threshold -- not
   // just past it -- before the tier actually changes, so a value
@@ -11163,7 +11166,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     var t = SEA_AUDIO_WAVE_HEIGHT_THRESHOLDS_FT;
     if (ft < t.calmMax) return 'calm';
     if (ft < t.moderateMax) return 'moderate';
-    // each edge is exclusive: 3.5 ft is MODERATE (it reads 4), 7.5 is ROUGH (8), 17.5 is HEAVY (18)
+    // each edge is exclusive: 4.5 ft is MODERATE (it reads 5), 8.5 is ROUGH (9), 13.5 is HEAVY (14)
     if (ft < t.roughMax) return 'rough';
     return 'heavy';
   }
@@ -19812,7 +19815,7 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
   function buildBookshelfOptions(state) {
     var opts = BOOKS.filter(function (b) { return bookOnShelf(state, b); }).map(function (b) {
       var bs = state.books[b.id];
-      return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), action: 'start-reading:' + b.id };
+      return { label: b.title.toUpperCase() + ' \u2014 ' + formatBookProgress(b, bs), sub: String(b.author || '').toUpperCase(), action: 'start-reading:' + b.id };
     });
     opts.push({ label: 'TAROT CARDS', action: 'cmd:tarot-cards' }); // the last thing on the shelf: a deck, not a book (see cmdTarotCards)
     return pushBack(opts, 'cmd:saloon');
@@ -25442,6 +25445,15 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
         var valueSpan = document.createElement('span');
         valueSpan.textContent = opt.value;
         btn.appendChild(valueSpan);
+      } else if (opt.sub) { // a second, smaller line under the label (the bookshelf's author line)
+        btn.className = 'option option-with-sub';
+        var mainSpan = document.createElement('span');
+        mainSpan.textContent = '> ' + opt.label;
+        btn.appendChild(mainSpan);
+        var subSpan = document.createElement('span');
+        subSpan.className = 'option-sub';
+        subSpan.textContent = opt.sub;
+        btn.appendChild(subSpan);
       } else {
         btn.textContent = '> ' + opt.label;
       }
@@ -27788,8 +27800,8 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
   SCENARIOS['stargaze-cloudy'] = { about: 'The same night under an OVERCAST sky: there is no STARGAZE on the deck menu.', build: scenarioStargaze };
 
   // SEA-STATE SCENARIOS (round 46) -- see the module note. One sea held in place per scenario; sea-cycle steps through them every SEA_CYCLE_STEP_MS of real time.
-  var SEA_SCENARIO_FT = { 'sea-calm': 2, 'sea-moderate': 5, 'sea-rough': 9, 'sea-rough-high': 15, 'sea-heavy': 20 };
-  var SEA_CYCLE_FT = [2, 5, 9, 15, 20, 15, 9, 5]; // calm, moderate, rough, high rough, heavy, and back down
+  var SEA_SCENARIO_FT = { 'sea-calm': 2, 'sea-moderate': 6, 'sea-rough': 11, 'sea-heavy': 16 };
+  var SEA_CYCLE_FT = [2, 6, 11, 16, 11, 6]; // calm, moderate, rough, heavy, and back down
   var SEA_CYCLE_STEP_MS = 75000;
   var seaScenarioStartMs = Date.now();
   function seaScenarioFtNow() {
@@ -27815,11 +27827,10 @@ const CON_LABELS = [["And","Andromeda",0.75,43],["Ant","Air Pump",156.0,-36],[
     return s;
   }
   SCENARIOS['sea-calm'] = { about: 'Below deck in the open Pacific, wind 14 kt, the sea held at CALM 2 FT. The calm sea loop only, nothing layered over it. WEATHER shows the sea. GO ABOVE / GO BELOW to hear the exterior against the interior.', build: scenarioSea };
-  SCENARIOS['sea-moderate'] = { about: 'The same, with the sea held at MODERATE 5 FT.', build: scenarioSea };
-  SCENARIOS['sea-rough'] = { about: 'The same, with the sea held at ROUGH 9 FT.', build: scenarioSea };
-  SCENARIOS['sea-rough-high'] = { about: 'The same, with the sea held at ROUGH 15 FT: the top of the rough band, where the rough recording now plays (it used to be HEAVY from 12 ft).', build: scenarioSea };
-  SCENARIOS['sea-heavy'] = { about: 'The same, with the sea held at HEAVY 20 FT: the only sea (18 ft and over) that plays the heavy recording.', build: scenarioSea };
-  SCENARIOS['sea-cycle'] = { about: 'The same, but the sea moves by itself every 75 seconds: CALM 2 FT, MODERATE 5, ROUGH 9, ROUGH 15, HEAVY 20, then back down through ROUGH 15, ROUGH 9 and MODERATE 5 and round again. Listen below deck for each change; WEATHER shows the sea it is at.', build: scenarioSea };
+  SCENARIOS['sea-moderate'] = { about: 'The same, with the sea held at MODERATE 6 FT.', build: scenarioSea };
+  SCENARIOS['sea-rough'] = { about: 'The same, with the sea held at ROUGH 11 FT.', build: scenarioSea };
+  SCENARIOS['sea-heavy'] = { about: 'The same, with the sea held at HEAVY 16 FT.', build: scenarioSea };
+  SCENARIOS['sea-cycle'] = { about: 'The same, but the sea moves by itself every 75 seconds: CALM 2 FT, MODERATE 6, ROUGH 11, HEAVY 16, then back down through ROUGH 11 and MODERATE 6 and round again. Listen below deck for each change; WEATHER shows the sea it is at.', build: scenarioSea };
 
   /*SCENARIO_HELPERS*/
   function scenarioShowMenu(requested) {
